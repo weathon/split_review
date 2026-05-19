@@ -1,0 +1,361 @@
+\title{Masked Diffusion Models are Secretly Time-Agnostic Masked Models and Exploit Inaccurate Categorical Sampling}
+
+\begin{abstract}
+Masked diffusion models (MDMs) have emerged as a popular research topic for generative modeling of discrete data, thanks to their superior performance over other discrete diffusion models, and are rivaling the auto-regressive models (ARMs) for language modeling tasks. The recent effort in simplifying the masked diffusion framework further leads to alignment with continuous-space diffusion models and more principled training and sampling recipes. 
+In this paper, however, we reveal that both training and sampling of MDMs are theoretically free from the time variable, arguably the key signature of diffusion models, and are instead equivalent to masked models. The connection on the sampling aspect is drawn by our proposed first-hitting sampler (FHS). Specifically, we show that the FHS is theoretically equivalent to MDMs' original generation process while significantly alleviating the time-consuming categorical sampling and achieving a 20$\times$ speedup. In addition, our investigation raises doubts about whether MDMs can truly beat ARMs in text generation. We identify, for the first time, an underlying numerical issue, even with the commonly used 32-bit floating-point precision, which results in inaccurate categorical sampling. 
+We show that it lowers the effective temperature both theoretically and empirically, and the resulting decrease in token diversity makes previous evaluations, which assess the generation quality solely through the incomplete generative perplexity metric, somewhat unfair.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\input{figure_texts/mdm-masked-arm}
+There are three primary paradigms of generative models. \textbf{Diffusion models}~\citep{ho2020denoising,song2020score} have been the prevalent way for generative modeling of \textit{continuous data} with both theoretical and empirical success. They are SOTA in image, speech, video synthesis~\citep{dhariwal2021diffusion,karras2022elucidating,chen2020wavegrad,ho2022imagen} and serve as the cornerstone of large-scale text-to-image~\citep{rombach2022high,balaji2022ediff,esser2024scaling} and text-to-video~\citep{gupta2023photorealistic,bao2024vidu} generation systems. \textbf{Auto-regressive models} (ARMs) have dominated the generation of \textit{discrete data} especially languages~\citep{radford2018improving,radford2019language,brown2020language,achiam2023gpt,touvron2023llama}, due to the scalability and generalizability of the straightforward next-token-prediction mechanism based on transformer architectures~\citep{vaswani2017attention}. \textbf{Masked models}, such as BERT~\citep{devlin2019bert} for masked language modeling and MaskGIT~\citep{chang2022maskgit} for masked image generation, are trained to reconstruct randomly masked tokens and sampled by order-agnostic decoding. They are an alternative approach to model \textit{discrete data} while suffering from insufficient theoretical foundations. 
+
+Diffusion models have been extended to discrete data spaces with principled training and sampling~\citep{austin2021structured,campbell2022continuous,meng2022concrete,lou2023discrete}. 
+Compared to ARMs, they predict all the tokens simultaneously and offer a favorable trade-off between generation quality and sampling efficiency. 
+Recently, \textbf{masked diffusion models} (MDMs), the leading variant among discrete diffusion formulations, are emerging as a promising contender of ARMs~\citep{lou2023discrete}. Recent works~\citep{shi2024simplified,sahoo2024simple} have simplified MDMs to align with the design space of the diffusion models via continuous-time forward processes, training objectives, and sampling procedures, resulting in a unified view and empirical improvements. 
+
+However, we argue that the current understanding of MDMs is still quite limited. Positioned at the intersection of diffusion models and masked models, MDMs inherit both the theoretical principles from diffusion models and the simple mechanism from masked models. It remains to be explored how the diffusion theory supports masked models and whether well-established training and sampling recipes of diffusion models can be adapted to enhance MDMs.
+
+In this paper, we dive deeper into the theoretical essence of MDMs. We \textbf{\textit{highlight}} our key findings: (1) MDMs, in both training and sampling, are essentially time-agnostic masked models (or order-agnostic auto-regressive models), enjoying \textbf{20}$\times$ faster sampling and diverging from the design choices of diffusion models. This also justifies the theoretical foundation of masked models as they are equivalent and simpler formulations of the more principled MDMs. (2) We challenge previous claims that MDMs can surpass ARMs in text generation by identifying a hidden but critical numerical issue that reduces the token diversity and renders previous evaluations unfair. After fixing it, we find MDMs significantly lagging behind ARMs in generative perplexity.
+
+For training, we prove that the continuous-time evidence lower bound (ELBO) objective of MDMs can be expressed by the number of masked tokens with an implicitly defined mixture-of-experts model. It provides a discrete ELBO for masked models and coincides with the ELBO previously derived for order-agnostic auto-regressive models~\citep{uria2014deep,hoogeboom2021autoregressive}.
+
+For sampling, by analytically sampling the time when any mask token is first unmasked, we propose a theoretically equivalent first-hitting sampler (FHS) to avoid most of the time-consuming categorical sampling and perform decoding token by token with no approximation errors. It is further extended to enable parallel decoding and incorporate high-order approximations, achieving a 20$\times$ speedup compared to previous MDM sampling procedures. When the parameterized model is independent of the time variable, we recover the sampling of masked models.
+
+For evaluation, we discover that while MDMs exhibit extremely low generative perplexity with numerous sampling steps, the generation quality is compromised by reduced token diversity. By examining the numerical precision during sampling, we identify a previously unrecognized issue with Gumbel-based categorical sampling. 
+Specifically, reducing the floating-point precision from 64-bit to 32-bit significantly truncates the Gumbel variables, which theoretically lowers the temperature and empirically improves the generative perplexity of pretrained models~\citep{lou2023discrete,sahoo2024simple} from 126.11 to 31.24, but with a decreased sentence entropy from 5.66 to 5.17.
+
+
+\section{Background: Masked Diffusion Models (MDMs)}
+
+Let $\Xc=\{0,1,\dots,m-1\}$ be the discrete data space, with an extra mask token $m$ added to $\Xc$. Denote $\Delta^m=\{\piv\in\R^{m+1}|\sum_{i=0}^m\pi_i=1,\piv\geq 0\}$ as the standard $m$-simplex. For any data token or mask token $x\in\Xc$, denote $\ev_x\in\R^{m+1}$ as the corresponding one-hot vector. Continuous-time discrete-space masked diffusion models (MDMs)~\citep{shi2024simplified,sahoo2024simple} can be defined akin to diffusion models, with a continuous-time forward noising process
+\begin{equation}
+\label{eq:forward}
+    q_{t|0}(x_t|x_0)=\Cat(\alpha_t\ev_{x_0}+(1-\alpha_t)\ev_m)
+\end{equation}
+where $\alpha_t$ is the predefined \textit{noise schedule} function satisfying $\alpha_0\approx1,\alpha_1\approx0$, and $\Cat(\piv)$ denotes the \textit{categorical distribution} over the class probabilities $\piv\in\Delta^m$. The forward process has a time reversal for $s<t$ given $x_0$:
+\begin{equation}
+    q_{s|t,0}(x_s|x_t,x_0)=
+    \begin{cases}
+        \Cat(\ev_{x_t}),\quad &x_t\neq m\\
+        \Cat\left(\frac{(1-\alpha_s)\ev_{m}+(\alpha_s-\alpha_t)\ev_{x_0}}{1-\alpha_t}\right),\quad &x_t= m
+    \end{cases}
+\end{equation}
+Following DDPM~\citep{ho2020denoising}, the parameterized model is defined by replacing $\ev_{x_0}$ in the reversal with a data prediction model $\muv_\theta:\Xc\times\R\mapsto\Delta^m$:
+\begin{equation} 
+\label{eq:parameterization-single}
+p_\theta(x_s|x_t)\coloneqq q(x_s|x_t,\ev_{x_0}\leftarrow\muv_\theta(x_t,t))
+\end{equation}
+and $\muv_\theta$ is further parameterized by $\fv_\theta:\Xc\times\R\mapsto\R^m$ as
+\begin{equation}
+\label{eq:parameterization}
+    \muv_\theta(x_t,t)=\begin{cases}
+    [\softmax(\fv_\theta(x_t,t)),0],\quad &x_t=m\\
+    \ev_{x_t},\quad &x_t\neq m
+    \end{cases}
+\end{equation}
+so that it satisfies (1) the predicted vector contains valid class probabilities sum to 1;
+(2) the predicted $x_0$ has zero probability of being the mask token;
+(3) if a token is already unmasked, it no longer changes. 
+When $\alpha_0\rightarrow 1,\alpha_1\rightarrow 0$ and the number of timesteps tends to infinity, it is proven that the parameterized model $p_\theta$ has an \textit{evidence lower bound} (ELBO) $\log p_\theta(x_0)\geq -\Lc_\infty$, where
+\begin{equation}
+\label{eq:elbo-single}
+    \Lc_\infty=\int_{0}^1\frac{\alpha_t'}{1-\alpha_t}\E_{q_{t|0}(x_t|x_0)}\left[\delta_{x_t,m}\ev_{x_0}^\top\log \muv_\theta(x_t,t)\right]\dm t 
+\end{equation}
+is a time-weighted cross-entropy loss, $\alpha_t'=\frac{\dm\alpha_t}{\dm t}$, and $\delta_{x_t,m}$ is a indicator function. We refer to $\Lc_\infty$, the training objective, as the negative ELBO (NELBO).
+\paragraph{Multi-Dimensional Case} For a token sequence $\xv\in\Xc^L= \{0,1,\dots,m-1,m\}^L$ of length $L$, MDMs choose a factorized forward process $q_{t|0}(\x_t|\x_0)=\prod_{l=1}^L q_{t|0}(x_t^{(l)}|x_0^{(l)})$ over different dimensions, where $x^{(l)}$ denotes the $l$-th token of $\xv$. As a result, the reversal $q_{s|t,0}(\x_s|\x_t,\x_0)=\prod_{l=1}^Lq_{s|t,0}(x_s^{(l)}|x_t^{(l)},x_0^{(l)})$ and the parameterized model $p_\theta(\x_s|\x_t)=\prod_{l=1}^Lq(x_s^{(l)}|x_t^{(l)},\ev_{x_0^{(l)}}\leftarrow\muv_\theta^{(l)}(\x_t,t))$ also factorize. Here the network $\muv_\theta:\Xc^L\times\R\mapsto(\Delta^m)^L$ predicts the probabilities at all positions at a time, and we use $\muv_\theta^{(l)}$ to denote the $l$-th column of $\muv_\theta$. The ELBO loss in Eqn.~\eqref{eq:elbo-single} under multi-dimension can be written as
+\begin{equation}
+\label{eq:elbo-multi}
+    \Lc_\infty^{(L)}=\int_{0}^1\frac{\alpha_t'}{1-\alpha_t}\E_{q_{t|0}(\x_t|\x_0)}\left[\sum\nolimits_{l:x_t^{(l)}=m}\ev_{x_0^{(l)}}^\top\log \muv_\theta^{(l)}(\x_t,t)\right]\dm t 
+\end{equation}
+\paragraph{Context of Discrete Diffusion Models} MDMs described above are a simplified version of the 
+best-performing masked (or absorbing) case in discrete-space diffusion models. Discrete diffusion models, originated from D3PM~\citep{austin2021structured}, rely on discrete-time or continuous-time Markov chains to model transitions in discrete space. Notably, \textit{concrete score}~\citep{meng2022concrete} in discrete diffusion acts as an analog of the score function in continuous diffusion, and a recent work SEDD~\citep{lou2023discrete} proposes \textit{score entropy} for robust and scalable learning of the concrete score. The model definition (Markov chain, score parameterization), training objective (diffusion-weighted denoising score entropy) and sampling procedure (Tweedie $\tau$-leaping) of SEDD Absorb can be proven equivalent to the simplified expressions (Eqn.~\eqref{eq:forward}~\eqref{eq:parameterization-single}~\eqref{eq:parameterization}~\eqref{eq:elbo-single}) in MDMs.
+
+
+\section{Revisiting the Training of MDMs}
+
+MDMs are defined and trained by the continuous-time forward process (Eqn.~\eqref{eq:forward}), time-dependent network parameterization (Eqn.~\eqref{eq:parameterization}) and continuous-time ELBO (Eqn.~\eqref{eq:elbo-single}). However, different from continuous-time diffusion models~\citep{song2020score}, the evolution of $\x_t$ is discrete. In the forward process, any token remains the same until it is masked at some time, and then the masked token no longer changes. The evolution trajectories of $(\x_t,t)$ are like pairs of ``phenotype" and ``genotype", where the continuous changes in time $t$ may not be reflected on the observable traits of $\x_t$.
+
+In this section, we aim to disentangle the internal time variable $t$ and the external traits of the masked sequence $\x_t$ at time $t$ in the training of MDMs.
+\subsection{Reformulating the ELBO with the Number of Masked Tokens}
+Previous works~\citep{shi2024simplified,sahoo2024simple} show the invariance of the ELBO to the noise schedule $\alpha_t$ by performing the time change-of-variable $\gamma=\log(1-\alpha_t)$ or $\lambda=\log\frac{\alpha_t}{1-\alpha_t}$ following VDM~\citep{kingma2021variational}. 
+However, this does not get to the essence as they still rely on an internal continuous time. 
+In the following proposition, we show that the sequence NELBO of MDMs can be expressed as a partition by the number of masked tokens instead of the continuous time.
+\begin{proposition}[ELBO by the Number of Masked Tokens]
+\label{proposition:elbo}
+For $\x_0$ with sequence length $L$, denote $\x_n$ as a sequence with $n$ masked tokens, and $\tilde q(\x_n|\x_0)$ 
+as the discrete forward process which randomly and uniformly masks $n$ tokens of $\x_0$. Suppose the noise schedule $\alpha_t$ satisfies $\alpha_0=1,\alpha_1=0$. The sequence NELBO in Eqn.~\eqref{eq:elbo-multi} can be reformulated as
+\begin{equation}
+\label{eq:elbo-multi-discrete}
+    \Lc_\infty^{(L)}=-\sum_{n=1}^L\E_{\tilde q_{n|0}(\x_n|\x_0)}\left[\frac{1}{n}\sum\nolimits_{l:x_n^{(l)}=m }\ev_{x_0^{(l)}}^\top\log\bar\muv^{(l)}_\theta(\x_n)\right]
+\end{equation}
+where
+\begin{equation}
+\label{eq:moe}
+    \log\bar\muv_\theta(\x_n)=\E_{\alpha_n\sim\Bc(L-n+1,n)}\left[\log\muv_\theta(\x_n,\alpha^{-1}(\alpha_n))\right],
+\end{equation}
+$\alpha^{-1}$ is the inverse function of $\alpha_t$ satisfying $\alpha^{-1}(\alpha_t)=t$, and $\Bc(a,b)$
+denotes the Beta distribution with shape parameters $a,b>0$.
+\end{proposition}
+
+This expression offers two aspects of theoretical insights:
+
+\begin{wrapfigure}[9]{r}{0.3\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/beta-crop.pdf}
+\caption{\label{fig:beta}\small Probability density function (PDF) of $\Bc(L-n+1,n)$ with $L=1024$.}
+\end{wrapfigure}
+
+\paragraph{Mixture of Experts} From Eqn.~\eqref{eq:moe}, the time-dependent network $\muv_\theta(\x,t)$ implicitly parameterizes a time-independent network $\bar\muv_\theta(\x)$ by aggregating the logarithm at the same $\x$ but different $t$, which can be seen as \textit{mixture of experts}. The time $t$ is sampled unevenly so that $\alpha_t$ follows a Beta distribution $\Bc(L-n+1,n)$. This distribution has the mode (peak) $\frac{L-n}{L-1}$ and variance $\frac{n(L-n+1)}{(L+1)^2(L+2)}\leq \frac{1}{4(L+2)}$. With a large sequence length $L$, the variance is small and the distribution is concentrated around the mode, as illustrated in Figure~\ref{fig:beta}. Moreover,  under the best-performing linear schedule $\alpha_t=1-t$ in MDMs~\citep{lou2023discrete,shi2024simplified,sahoo2024simple}, we have $t=1-\alpha_t$ and the mode of $t$ is $\frac{n-1}{L-1}$, close to the \textit{masked ratio} $\frac{n}{L}$. Therefore, the time variable $t$ can be seen as a continuous relaxation and smoothing of the masked ratio.
+\paragraph{Discrete ELBO} From Eqn.~\eqref{eq:elbo-multi-discrete}, the sequence NELBO can be expressed discretely with the time-agnostic network $\bar\muv_\theta(\x)$. Therefore, Eqn.~\eqref{eq:elbo-multi-discrete} can serve as a NELBO of masked models in a straightforward approach: \textit{uniformly} choose the number of masked tokens $n$ from $\{1,\dots,L\}$, \textit{uniformly} mask $n$ random tokens in $\x_0$ to obtain $\x_n$, and compute the \textit{average} cross-entropy loss of $\bar\muv_\theta(\x)$ on these $n$ positions. The weighting $\frac{1}{n}$ in this NELBO resembles the \textit{likelihood weighting} in diffusion models~\citep{song2021maximum,kingma2021variational,lu2022maximum,zheng2023improved}, facilitating \textit{maximum likelihood training} of masked models. Note that early works on order-agnostic auto-regressive models~\citep{uria2014deep,hoogeboom2021autoregressive} already reveal this weighting from a different perspective\footnote{The relation between ELBOs of order-agnostic ARMs and MDMs was also mentioned in 
+a recent work~\citep{ou2024your}, while they only consider an originally time-agnostic network instead of mixture-of-experts.}. While in the context of masked models, there are few discussions on the ELBO.
+
+\subsection{Time-Independent Network Parameterization}
+\label{sec:time-independent-network}
+When the original network $\muv_\theta$ is parameterized without the time input, we have $\bar\muv_\theta=\muv_\theta$ in Eqn~\eqref{eq:elbo-multi-discrete}. In this case, the training of MDMs is completely free from the time variable and behaves like masked models. The rationality of time-independent network parameterization has been discussed in recent works~\citep{ou2024your,sahoo2024simple}. Here we restate this conclusion with our simplified notations from the perspective of the optimal model.
+\begin{proposition}[Optimal Masked Diffusion Model]
+\label{proposition:optimal}
+Given unlimited model capacity, the optimal network $\theta^*$ that minimizes the NELBO in Eqn.~\eqref{eq:elbo-multi} satisfies
+\begin{equation}
+\label{eq:optimal-solution}
+    \muv_{\theta^*}^{(l)}(\x,t)=\E_{\tilde q_{0|N(\x)}(\x_0|\x)}\left[\ev_{x_0^{(l)}}\right]
+\end{equation}
+where $N(\x)$ is a deterministic function that counts the number of masked tokens in $\x$, and $\tilde q_{0|n}(\x_0|\x_n)$ is the posterior distribution of the discrete forward process $\tilde q_{n|0}(\x_n|\x_0)$.
+\end{proposition}
+From the above expression, the optimal MDM is irrelevant to the time variable, justifying 
+the feasibility of removing the time input. Besides, it can be extended to a general weighted cross-entropy loss $\Lc_{\wv}^{(L)}=-\sum_{n=1}^Lw_n\E_{\tilde q_{n|0}(\x_n|\x_0)}\left[\sum\nolimits_{l:x_n^{(l)}=m }\ev_{x_0^{(l)}}^\top\log\muv^{(l)}_\theta(\x_n)\right]$ of masked models. $\Lc_{\wv}^{(L)}$ with arbitrary positive weights $\wv>0$ yields the same optimal solution as Eqn.~\eqref{eq:optimal-solution}, thus acting as a surrogate objective of the NELBO. This theoretically supports a wide range of objectives for training masked models, such as the loss in MaskGIT~\citep{chang2022maskgit}.
+\subsection{Practical Considerations}
+While there are theoretically equivalent variants for training MDMs (continuous-time/discrete ELBO, time-conditioned/time-independent network), these choices may have practical implications due to differences in network inputs and loss variances. We present some training comparisons and our attempts to improve training (e.g. Overall, all options yield similar performance, and the low-discrepancy sampler~\citep{kingma2021variational}, when applied to time or the number of masked tokens, can significantly reduce the loss variance.
+
+
+\section{Revisiting the Sampling of MDMs}
+
+In the previous section, we demonstrate how the training of MDMs, from both theoretical and empirical perspectives, can be disentangled with the continuous time variable and behave like masked models. In this section, we turn our attention to the sampling of MDMs, which is also performed in continuous time and seems distinct from masked models. We aim to address its current inefficiency problem as well as establish essential insights into its connection with masked models.
+\subsection{Inefficiency of Current Sampling}
+\label{sec:inefficiency}
+MDMs are sampled in an ancestral way following the parameterized reverse-time process in Eqn.~\eqref{eq:parameterization-single}. Specifically, the sampling step $\x_t\rightarrow\x_s$ from time $t$ to $s<t$ can be expressed as
+\begin{equation}
+\label{eq:sampling}
+x_s^{(l)}\begin{cases}
+    =x_t^{(l)},\quad &x_t^{(l)}\neq m\\
+    \sim\Cat\left(\frac{(1-\alpha_s)\ev_{m}+(\alpha_s-\alpha_t)\muv^{(l)}_\theta(\x_t,t)}{1-\alpha_t}\right),\quad &x_t^{(l)}=m
+\end{cases},\quad \text{for every }l
+\end{equation}
+Given the number of sampling steps $N$, the sampling process involves first discretizing the timesteps as $0=t_0<t_1<\dots<t_N=1$, and then performing reverse steps $t_N\rightarrow t_{N-1}\rightarrow\dots\rightarrow t_0$ according to Eqn.~\eqref{eq:sampling}.
+Notable characteristics of MDM's sampling include: (1) Any mask token can only be unmasked once with no further changes. (2) Each sampling step requires a forward pass through the network $\muv_\theta$ and conducting at most $L$ times of $|\Xc|$-dimensional categorical sampling, where $L$ is the sequence length and $|\Xc|$ is the vocabulary size. (3) The number of sampling steps $N$ can be significantly larger than $L$, and a single sampling step may result in no changes to any token in the sequence. (4) As MDMs are trained with the continuous-time ELBO which assumes an infinite number of reverse steps, sampling with finite $N$ theoretically introduces discretization errors. Sampling with a larger $N$ more faithfully reflects the true generation results of MDMs.
+
+Recent works propose a simple \textit{caching strategy}~\citep{ou2024your,sahoo2024simple} to speedup the sampling of MDMs: when the network $\muv_\theta$ is parameterized without time input\footnote{In our practice, the time-dependent network also exhibits no performance degradation with the caching strategy, so this assumption is unnecessary.}, and the sequence is not changed in a sampling step $t\rightarrow s$ (i.e., $\x_s=\x_t$), we can reuse the network output at the last step as $\muv_\theta(\x_s)=\muv_\theta(\x_t)$. As the sequence changes at most $L$ times during sampling, the number of function evaluations (NFE) can be reduced to no more than $L$. However, sampling with the caching strategy still suffers from two major inefficiency problems:
+\paragraph{Categorical Sampling is Time-Consuming} In diffusion models, NFE is an efficient indicator of the sampling speed, as the computation overhead beyond the network forward passes is negligible. However, in MDMs, the Gumbel-based\footnote{We will introduce Gumbel-based categorical sampling in the next section.} categorical sampling, which requires sampling a total number of $\Oc(NL|\mathcal X|)$ uniform variables and performing logarithmic operations on them, can be expensive compared to network evaluations. As illustrated in Figure~\ref{fig:inefficiency1}, when the number of sampling steps $N\gg L$, the sampling time scales with $N$ instead of the NFE. Categorical sampling steps that do not result in token changes are wasted, as they contribute no information gain.
+
+\begin{wrapfigure}[13]{r}{0.6\textwidth}  % 'r' for right, or 'l' for left
+    \centering
+    \subfloat[Sampling time per sequence (caching strategy, batch size=1)]{
+        \includegraphics[width=0.48\linewidth]{figures/NFE_time-crop.pdf}
+        \label{fig:inefficiency1}
+    }
+    \subfloat[NFE (caching strategy)]{
+        \includegraphics[width=0.5\linewidth]{figures/NFE_bs-crop.pdf}
+        \label{fig:inefficiency2}
+    }
+    \caption{\label{fig:inefficiency}Illustration of 
+ sampling ineffciency using pretrained models of MDLM~\citep{sahoo2024simple} ($L=1024$).}
+\end{wrapfigure}
+
+\paragraph{Caching Strategy Degrades in Batched Sampling} When using the caching strategy in batched sampling, the network output can only be reused directly when all the sequences in the batch remain unchanged after a sampling step\footnote{We can reuse only the unchanged part of a batch, but this potentially reduce parallel efficiency.}. Suppose the batch size is $B$, and the default linear noise schedule $\alpha_t=1-t$ as well as uniform timesteps $t_k=\frac{k}{N}$ is used
+, similar to the $B=1$ case in~\cite{ou2024your}. As $\lim_{N\rightarrow \infty}N(1-(1-\frac{1}{N})^{BL})=BL$, the NFE is no longer upper bounded by the sequence length but scales with the batch size (Figure~\ref{fig:inefficiency2}).
+\subsection{First-Hitting Sampler}
+\begin{wrapfigure}[10]{r}{0.5\textwidth}
+\begin{minipage}{0.5\textwidth}
+\begin{algorithm}[H]
+   \caption{First-Hitting Sampling of MDMs}
+   \label{alg:first-hitting}
+   \scriptsize
+   \textbf{Require:} the sequence length $L$, the vocabulary $\Xc=\{0,\dots,m-1,m\}$ where $m$ is the mask token, the noise schedule $\alpha_t$ and its inverse function $\alpha^{-1}$, the pretrained masked diffusion model $\muv_\theta$
+
+   \begin{algorithmic}[1]
+   \STATE $\x_L\leftarrow[m\ m\ \dots\ m]$
+   \STATE $\tau_L\leftarrow 1$
+    \FOR {$n \leftarrow L$ \TO $1$}
+    \STATE Sample $u_n\sim\Uc(0,1)$
+    \STATE $\tau_{n-1}\leftarrow\alpha^{-1}(1-u_n^{1/n}(1-\alpha_{\tau_{n}}))$
+    \STATE $\muv_n\leftarrow\muv_\theta(\x_n,\tau_{n-1})$
+    \STATE Randomly and uniformly select an index $l$ from $\{i:x_{n}^{(i)}=m\}$ (i.e., masked positions in $\x_n$)
+    \STATE $\x_{n-1}\leftarrow\x_n,x_{n-1}^{(l)}\leftarrow x\sim\Cat(\muv_n^{(l)})$
+    \ENDFOR
+   \end{algorithmic}
+   \textbf{Output:} $\x_0$
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+The current sampling methods of MDMs, including the caching strategy, are neither efficient nor insightful into the essence of MDMs. To address this, we reexamine the sampling step in Eqn.~\eqref{eq:sampling}. 
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/illustration_first_hitting-crop.pdf}
+    \caption{\label{fig:first-hitting}Illustration of the first-hitting sampler in comparison to the original sampling procedure.}
+\end{figure}
+
+When the number of sampling steps $N\rightarrow\infty$ and the maximum step size $\max_{1\leq i\leq N} |t_i-t_{i-1}|\rightarrow0$, Eqn.~\eqref{eq:sampling} tends to an infinitesimal jump. In this case, the reverse sampling process becomes a continuous-time Markov chain (or Markov process), where each mask token is unmasked at some moment according to the network prediction. Our \textit{key insight} involves three folds: (1) \textit{Whether a mask token will transit or not} during a time interval $[s,t]$ is independent of the network. The network output only determines \textit{which token is the transition target} given the condition that the transition happens. (2) The transition probability $\frac{\alpha_s-\alpha_t}{1-\alpha_t}$ is equal for masked tokens at different positions. Therefore, each mask token has the same probability of being first unmasked. (3) The \textit{first-hitting time}, which denotes the first moment any of the remaining masked tokens is unmasked, can be \textit{analytically sampled}:
+\begin{proposition}[Analytic Sampling of First-Hitting Time]
+\label{proposition:sampling}
+Denote $\tau_{L}=1$ as the initial time. Suppose there are $n$ masked tokens, and the last time a token is unmasked happens at $\tau_{n}$, then the next time a token is unmasked can be analytically sampled by
+\begin{equation}
+    \tau_{n-1}=\alpha^{-1}(1-u_n^{1/n}(1-\alpha_{\tau_{n}})),\quad u_n\sim\Uc(0,1)
+\end{equation}
+where $\Uc(0,1)$ is the uniform distribution on $[0,1]$.
+\end{proposition}
+As outlined in Algorithm~\ref{alg:first-hitting}, by recursively sampling the next time when any of the remaining mask tokens is first unmasked, then uniformly choosing a mask token and unmasking it according to the network output, we obtain a token-by-token sampling procedure of MDMs. Denote $\x_n$ as the sequence with $n$ remaining mask tokens. Since the transition $\x_n\rightarrow\x_{n-1}$ can be considered to happen in the infinitesimal step $\tau_{n-1}+\dm t\rightarrow \tau_{n-1}$, using the network output $\muv_\theta(\x_n,\tau_{n-1})$ at 
+time $\tau_{n-1}$ incurs no approximation errors. Therefore, the first-hitting sampler (FHS) is \textit{theoretically equivalent} as simulating the continuous-time reverse Markov sampling process. We illustrate the comparison between the FHS and the original sampling procedure in Figure~\ref{fig:first-hitting}.
+
+The FHS demonstrates appealing properties:
+\paragraph{Tackling the Sampling Inefficiency} The FHS can tackle the two inefficiency problems described in Section~\ref{sec:inefficiency}. Firstly, as the categorical sampling is only conducted for determining the transition target of the single chosen mask token at each step, the total computation cost is reduced to $\Oc(L|\Xc|)$. Secondly, the first-hitting time $\tau_n$ can be sampled independently and asynchronously across different samples in a batch, avoiding performance degradation in batched sampling.
+\paragraph{Connection to the Sampling of Masked Models} When the network parameterization is independent of the time, the FHS in Algorithm~\ref{alg:first-hitting} can be completely free from the time and become a token-by-token decoding process akin to masked models. This connection serves as supporting evidence for the typical sampling procedure of masked models, as it is theoretically equivalent to the more principled reverse Markov sampling process of MDMs.
+\subsection{Parallel Decoding and High-Order Variants}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures/illustration_high_order-crop.pdf}
+    \caption{\label{fig:high-order}Variants of the first-hitting sampler. $\x_l$ denotes the sequence with $l$ remaining mask tokens, and $\muv_l=\muv_\theta(\x_l,\tau_{l-1})$ denotes the network prediction at the step $l$.}
+\end{figure}
+The token-by-token decoding process of MDMs can be extended to parallel decoding by unmasking multiple tokens per step, as the network $\muv_\theta$ predicts tokens at all positions. This enables speed-quality trade-offs similar to diffusion models. As illustrated in Figure~\ref{fig:high-order}, parallel decoding essentially reuses the previous network output to reduce the NFE, thus functioning as an approximation method.
+
+To reduce the approximation error, we follow the recipes of 
+high-order diffusion solvers~\citep{karras2022elucidating,zhang2022fast,lu2022dpm,zheng2023dpm} to develop high-order samplers of MDMs. We propose two variants: one based on extrapolating previous network outputs, and the other utilizing a predictor-corrector method to refine the samples.
+
+
+\section{Are MDMs Better than ARMs? A Critical Fault in Low-Precision Gumbel-Based Categorical Sampling}
+
+Before we proceed to verify the effectiveness of our proposed first-hitting sampler, we have to point out a critical fault in MDMs' original sampling.}, as shown in Figure~\ref{fig:fp32_gen_ppl}. However, in this section, we identify for the first time a hidden implementation issue existing in previous codebases that makes this observation questionable.
+\subsection{Low Token Diversity under Numerous Sampling Steps}
+\begin{figure}
+    \centering
+    \resizebox{.8\textwidth}{!}{
+    \noindent\fbox{%
+    \parbox{\textwidth}{%
+There is the following definition:
+
+The “right lane” on the lane lane lane. From the lane lane lane from lane lane to lane lane on a lane in lane lane on a front lane.
+
+From lane lane lane the lane lane lane on the right lane from lane front lane lane to top lane.
+
+From the right lane from a lane lane lane with the lane on the lane lane lane. The “that lane lane” on the rear lane.
+    }%
+}
+}
+    \caption{\label{fig:sedd_sample} Segment of generated text by SEDD Absorb~\citep{lou2023discrete} at 50k sampling steps.}
+\end{figure}
+
+\begin{wrapfigure}[15]{r}{0.6\textwidth}  % 'r' for right, or 'l' for left
+    \centering
+    \subfloat[Generative Perplexity]{
+        \includegraphics[width=0.48\linewidth]{figures/fp32_gen_ppl-crop.pdf}
+        \label{fig:fp32_gen_ppl}
+    }
+    \subfloat[Entropy]{
+        \includegraphics[width=0.48\linewidth]{figures/fp32_gen_entro-crop.pdf}
+        \label{fig:fp32_entro}
+    }
+    \caption{\label{fig:fp32_results}\small Comparisons of different models (AR, SEDD Absorb~\citep{lou2023discrete}, MDLM~\citep{sahoo2024simple}) trained on OpenWebText~\citep{Gokaslan2019OpenWeb} with the same network architecture and configurations. We generate 64 samples using their original codebase on a single NVIDIA RTX A6000 GPU, and vary the sampling steps $N\in\{100,500,1000,5000,10000\}$.}
+\end{wrapfigure}
+Theoretically, the performance of MDMs is more faithfully reflected with an increased number of sampling steps. Empirically, we also observe a reduction in generative perplexity. Notably, an exceptionally low generative perplexity ($<15$) is achieved when the number of sampling steps approaches 50k.
+
+However, when we check the generated content, we discover that the quality is compromised by low token diversity (an extreme case is shown in Figure~\ref{fig:sedd_sample}). We further quantify this phenomenon by measuring the sentence entropy (Figure~\ref{fig:fp32_entro}). With the original sampler, the Gen PPL of MDMs surpasses ARMs at around 2k steps, but the entropy is always lower and keeps decreasing. 
+
+\subsection{Identifying the Numerical Precision Problem}
+\begin{table}[t]
+    \centering
+    \caption{\label{tab:fp}Maximum Gumbel under different floating-point precisions.}
+    \resizebox{\textwidth}{!}{% <------ Don't forget this %
+    \begin{tabular}{lcccccc}
+    \toprule
+    \multirow{ 2}{*}{Data Type}&\multicolumn{3}{|c|}{Structure (bits)}&\multirow{ 2}{*}{Maximum Value ($<1$) Representable}&\multicolumn{1}{|c|}{\multirow{ 2}{*}{Maximum Gumbel}}\\
+    &\multicolumn{1}{|c}{Sign}&Exponent&\multicolumn{1}{c|}{Fraction}&&\multicolumn{1}{|c|}{}\\
+    \midrule
+    float32&1&8&23&$1-2^{-24}\approx 0.9999999404$&$-\log(-\log(1-2^{-24}))\approx16.6355$\\
+    float64&1&11&52&$1-2^{-53}\approx 0.999999999999999889$&$-\log(-\log(1-2^{-53}))\approx36.7368$\\
+    \bottomrule
+    \end{tabular}% <------ Don't forget this %
+    }
+\end{table}
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1.0\linewidth]{figures/code_gumbel_2-crop.pdf}
+    \caption{\label{fig:code}Code for different versions of Gumbel-based categorical sampling. The operation $\argmax_i(\log\pi_i-\log(-\log u_i))$ is simplified to $\argmax_i(\pi_i/(-\log u_i))$ to save computation cost.}
+\end{figure}
+This low generation quality is unexpected, as theory suggests that the approximation error should decrease with more sampling steps. Consequently, samples generated over numerous steps should reflect the true performance of MDMs. We therefore consider this a hidden implementation issue and investigate further to identify the root cause.
+
+Our \textit{key observation} is that, when we alter the floating-point precision during sampling from 32-bit to 64-bit, the entropy returns to a normal level similar to ARMs, but with a generative perplexity $\approx100$. After careful ablations, we identify the root cause as the inaccuracy in previous Gumbel-based categorical sampling. The operation $g=-\log(-\log u)$ theoretically maps $u\in[0,1]$ to $g\in(-\infty,+\infty)$. But due to the limited representation ability of floating-point numbers in implementation, $u$ is constrained to $[0,1-\epsilon]$ and $g$ is constrained to $(-\infty,M]$, as shown in Table~\ref{tab:fp}. Therefore, the sample $g$ instead follows a \textit{truncated Gumbel distribution}, denoted $\Tc\Gc(0,1,M)$, which refers to the Gumbel distribution $\Gc(0,1)$ conditioned on $g\leq M$. This tricky difference theoretically makes the categorical sampling inaccurate, i.e., $\argmax_{i} (\log\pi_i+g_i)$ no longer follows the class probabilities $\{\pi_i\}_{i=1}^K$.
+
+\begin{wraptable}[6]{r}{0.3\textwidth}
+    \centering
+    \caption{\label{tab:ablate-precision}\small{Results with different versions of categorical sampling.}}
+    \resizebox{0.3\textwidth}{!}{ % Adjust the width here
+        \begin{tabular}{lcc}
+            \toprule
+            Version & Gen PPL & Entropy \\
+            \midrule
+            32-bit & 31.24 & 5.17 \\
+            64-bit & 126.11 & 5.66 \\
+            64-bit + trunc & 28.64 & 5.12 \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{wraptable}
+To verify that truncation is the fundamental issue, we conduct ablations by only modifying the categorical sampling code. As shown in Figure~\ref{fig:code}, we manually scale 64-bit uniform samples to match the truncation in the 32-bit case. We then randomly generate 8 samples with 2048 steps and compare the average generative perplexity and entropy in Table~\ref{tab:ablate-precision}. The similar results between the 32-bit and truncated 64-bit cases confirm the impact of truncation.
+\begin{remark}
+    Note that auto-regressive LLMs like Llama~\citep{touvron2023llama} and Mistral~\citep{jiang2023mistral} use \texttt{torch.multinomial} for categorical sampling, which is also implemented with the Gumbel-max trick in the low-level C++ code of PyTorch.
+\end{remark}
+\subsection{Categorical Sampling with Truncated Gumbel}
+In the previous section, we empirically observe that truncated Gumbel-based categorical sampling reduces token diversity. Surprisingly, such effects can be precisely depicted in \textit{closed-form}.
+\begin{proposition}[Closed-Form Categorical Sampling with Truncated Gumbel]
+\label{proposition:gumbel}
+Suppose the class probabilities are sorted as $\pi_1\leq\dots\leq\pi_K$, and $g_i\sim\Tc\Gc(0,1,M)$ are truncated Gumbel samples with maximum value $M$. Denote $\pi_0=0$. For $1\leq n\leq K$, we have $P(\argmax_i (\log\pi_i+g_i)=n)=\pi_n\sum_{i=1}^{n}\beta(i)$,
+where
+\begin{equation}
+    \beta(i)=\frac{e^{\left(K+1-i-\frac{\sum_{k=i}^K\pi_k}{\pi_i}\right) e^{-M}}-e^{\left(K+1-i-\frac{\sum_{k=i}^K\pi_k}{\pi_{i-1}}\right) e^{-M}}}{\sum_{k=i}^K\pi_k}\geq 0
+\end{equation}
+\end{proposition}
+\textit{To the best of our knowledge, this formulation has not been revealed in previous works}. Intuitively, with truncated Gumbel, the original class probabilities $\pi_n$ are shifted to $\pi_n'=\pi_n\sum_{i=1}^{n}\beta(i)$. This has two main implications: (1) As $\beta(i)\geq 0$ and $\pi_n$ are sorted, if $\pi_{n_1}>\pi_{n_2}$, then the adjusted class probabilities satisfy $\frac{\pi_{n_1}'}{\pi_{n_2}'}>\frac{\pi_{n_1}}{\pi_{n_2}}$. This indicates that relatively larger probabilities are further amplified, creating an effect similar to lowering the temperature. (2) In the sampling step, the probability of unmasking is adjusted based on the network output, resulting in unequal unmasking probabilities at different positions in a sequence. This means some tokens are prioritized to be unmasked, further reducing the randomness and overall entropy.
+
+In both aspects, the inaccurate categorical sampling deviates from theoretical correctness and reduces the generation diversity, leading to unfair evaluations of MDMs' generative performance.
+
+
+\section{A Fair Evaluation of MDMs' Generation}
+
+\label{sec:results}
+In this section, we will fairly evaluate the generation performance of MDMs and examine the impact of our proposed sampler and the temperature. Our experiments are based on the codebase of MDLM~\citep{sahoo2024simple} which is inherited from SEDD~\citep{lou2023discrete}. We fix the categorical sampling to 64-bit floating-point precision so that the numerical truncation is negligible. We directly use pretrained models (AR, SEDD Absorb, MDLM) provided by MDLM, which share the same network architecture and were trained with the same configuration.
+\subsection{Original Sampler v.s. First-Hitting Sampler}
+\begin{figure}[htbp]
+    \centering
+    \subfloat[Generative Perplexity]{
+        \includegraphics[width=0.4\linewidth]{figures/fp64_gen_ppl-crop.pdf}
+        \label{fig:fp64_gen_ppl}
+    }
+    \hspace{0.1in}
+    \subfloat[Entropy]{
+        \includegraphics[width=0.4\linewidth]{figures/fp64_gen_entro-crop.pdf}
+        \label{fig:fp64_entro}
+    }
+    
+    \caption{Comparisons of different models after fixing the categorical sampling to 64-bit. We additional compare our propose first-hitting sampler with steps $N\in\{64,128,256,512,1024\}$.}
+    \label{fig:fp64_results}
+\end{figure}
+Figure~\ref{fig:fp64_results} compares both the generative perplexity and the entropy of different models. For the baselines, SEDD is sampled by their analytic sampler (Tweedie $\tau$-leaping), and MDLM is sampled with and without the caching strategy. For our first-hitting sampler, the parallel decoding is performed by unmasking the same number of tokens per step. High-order variants employ the extrapolation strategy when the number of sampling steps $N \leq 128$, and the predictor-corrector strategy otherwise.
+
+After the numerical problem is fixed, the entropy returns to a normal level (5.60$\sim$5.70) for all models. Besides, our sampler can be up to 20$\times$ faster than previous sampling strategies of MDMs in terms of the wall-clock time. Despite the notable speedup, the true generative perplexity of MDMs is revealed to be around 100, significantly lagging behind that of counterpart ARMs ($<40$).
+\subsection{Trading Off Generative Perplexity and Entropy via Temperature}
+\begin{wrapfigure}[10]{r}{0.3\textwidth}
+\includegraphics[width=1.0\linewidth]{figures/temperature-crop.pdf}
+\caption{\label{fig:temperature} \small{Trade-off of generative perplexity and entropy.}}
+\end{wrapfigure}
+The truncation effect of 32-bit floating-point numbers creates a trade-off between generative perplexity and entropy by varying the number of sampling steps (Figure~\ref{fig:fp32_results}). This trade-off arises from a tricky interplay of inaccurate categorical sampling and the approximation error at limited discretization steps. In Figure~\ref{fig:temperature}, we demonstrate that this trade-off can be achieved at a lower time cost by using the correct sampling (our 1024-step high-order sampler) and manually adjusting the temperature within the range $[0.8,1.0]$. The trade-off curve of our method is slightly better than the original MDM sampling, while still significantly lagging behind ARMs.
+
+
+\section{Conclusion}
+
+In this work, we advance our understanding of masked diffusion models (MDMs) by revealing their theoretical equivalence to masked models and addressing a hidden implementation issue that compromised the fairness of previous evaluations of MDMs' generative performance. Our investigation challenges earlier claims that MDMs can surpass ARMs in text generation. Despite our negative findings, we acknowledge that our text-based experiments may inherently favor ARMs, as text naturally follows a left-to-right order that ARMs are better suited to model. We believe that MDMs are potentially well-suited for applications where the data’s order-agnostic nature is a key prior.
+
+
+

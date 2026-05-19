@@ -1,0 +1,360 @@
+\title{Make It Count: Text-to-Image Generation with an Accurate Number of Objects}
+
+\begin{abstract}
+Despite the unprecedented success of text-to-image diffusion models, controlling the number of depicted objects using text is surprisingly hard. This is important for various applications from technical documents, to children's books to illustrating cooking recipes. Generating object-correct counts is fundamentally challenging because the generative model needs to keep a sense of separate identity for every instance of the object, even if several objects look identical or overlap, and then carry out a global computation implicitly during generation. It is still unknown if such representations exist. To address count-correct generation, we first identify features within the diffusion model that can carry the object identity information. We then use them to separate and count instances of objects during the denoising process and detect over-generation and under-generation. We fix the latter by training a model that predicts both the shape and location of a missing object, based on the layout of existing ones, and show how it can be used to guide denoising with
+correct object count. Our approach, \textit{\ourmethod}, does not depend on external source to determine object layout, but rather uses the prior from the diffusion model itself, creating prompt-dependent and seed-dependent layouts. Evaluated on two benchmark datasets, we find that \ourmethod{} strongly outperforms the count-accuracy of existing baselines.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure*}[h!]
+    \centering
+    \includegraphics[width=0.98\textwidth, trim={0cm 0cm 0cm 0cm},clip]{figures/figure_1.pdf} %
+    \caption{\textbf{\ourmethod{}} generates the correct number of objects specified in the input prompt while maintaining a natural layout that aligns with the prompt.}
+    \label{fig:figure_1}
+\end{figure*}
+
+Text-to-image diffusion models provide an accessible way to control the generation of visual content. A major failure mode is their inability to count, that is, they often fail to generate the correct number of items in response to text prompts. For instance, when asked to generate an image of Goldilocks and the three bears, models may generate only two bears (Figure \ref{fig:figure_1}). Counting failures are particularly frustrating: The accuracy is surprisingly low, and mistakes are often obvious for people to detect. 
+
+To illustrate the difficulty of the problem, consider some naive attempts to work around it. %
+First, one can manually design layouts per count, to determine the spatial organization and the number of objects, then provide it as a conditioning signal to a generative model \cite{dahary2024yourself}. This approach would fail to generate prompt-dependent layouts, which is highly desirable.  
+One could also try asking large vision-language models to propose layouts (e.g., \cite{llm_layout, feng2023layoutgpt}), but these approaches do not use the visual prior information that text-to-image models already collected, and, as we show below, their performance is rather poor for the counting task.   
+
+Why is it so hard for diffusion models to count while they generate? First, counting objects requires that models capture "objectness" -- the high-level coherent representation of something being a separate entity, even if surrounded by other similar entities. Capturing objectness is by itself a hard task in image understanding \cite{alexe2012measuring,kuo2015deepbox}, and long studied in cognitive psychology \cite{spelke1990principles}. It is currently not known to what extent diffusion models represent objectness of entities they generate. 
+A second main challenge is that text-to-image diffusion models struggle with controlling spatial layout just from text. Producing a correct number of objects requires obeying a global and complex spatial relation between entities in an image \cite{attendandexcite, beyourself}. 
+
+To address the problem of accurate count generation we describe several new contributions, which together form our method \textit{\ourmethod{}}. First, we analyze the representations of the self-attention layers in SDXL \cite{sdxl}, and identify features that capture objectness and instance identity. We then use these features to develop ways to detect instances of objects during the denoising process, find their spatial layout and count them. Specifically, we localize the features that correspond to objects using the cross-attention maps and cluster them to form object instance segmentation. 
+Importantly, we do not have to wait for an image to be fully generated, and we can accurately count the number of objects already at an intermediate step of the denoising process.
+
+Given this new capability to count the number of objects being generated during the denoising process, we further develop methods to correct generation when the count does not match the prompt. First, we train a layout-modification network we call \remasker{}. %
+It takes a spatial layout of $k$ objects and generates a similar spatial layout with one more instance of an object added in a natural location for the input layout. For example, given a row of five kittens sitting on a branch, it learned to add a sixth kitten to the same row. This model is trained using image-pair samples generated by the diffusion model itself. Finally, we show how to use the new layouts in a new test-time-optimization procedure.
+
+We evaluate \ourmethod{} on text prompts from the T2I-CompBench \cite{compbench} which includes prompts with numbers. \ourmethod{} greatly improves accuracy, as evident by human evaluation experiments, from 29\% accuracy for SDXL to 48\% by our method. It also improves over all other baseline methods including large commercial models like the recent DALL-E 3 \cite{dalle3}. To support future work in this field, we design and release a dataset that can be evaluated automatically. Specifically, we release \ourdata{}, a set of prompts based on COCO classes\cite{mscoco}, which can easily be evaluated using COCO-trained object detectors, like YOLO \cite{yolo9}. \ourmethod{} also significantly improves over all baseline methods on \ourdata{}, importantly from 26\% accuracy for SDXL to  54\% by our method.
+
+In summary, this paper makes the following new contributions (1) We identify novel features that represent objectness and instance identity in SDXL \cite{sdxl}. (2) We design an inference-time optimization to guide SDXL to generate an accurate number of instances for an object. (3) We describe a learning approach to automatically modify layouts to add a new instance of an object while preserving the structure of the scene. (4) We achieve state-of-the-art results in count-accurate generation.
+
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+
+\noindent\textbf{Generating images with accurate object count.}
+Numerous papers noted that text-to-image diffusion models often fail to produce images that accurately match text prompts, especially when these prompts specify an exact number of objects \citep{kang2023counting_guidance, zhang2023zeroshot, teach_clip_count_to_ten, wen2024improving, battash2024obtaining, feng2023layoutgpt, lee2023aligning, fan2023reinforcement, dreamsync, rassin-etal-2022-dalle, beyourself, linguisticbinding, attendandexcite}. Various efforts were made to improve the accuracy of these models.
+Most relevant to our work, Kang et al. \cite{kang2023counting_guidance} proposed a classifier-guidance approach to improve object count accuracy. The method ``counts'' instances at each diffusion step using a pretrained counting network and adjusts the denoising process using gradient guidance. However, it requires using an additional U-Net in \emph{every} denoising step.
+
+An important line of work suggests breaking the generation process into two steps: (1) Text-to-layout - setting a spatial location for every object instance; and (2) Layout-to-image - generating an image with the correct object count using the given layout. 
+\textbf {Text-to-layout:} Several studies used large language models (LLMs) to propose spatial layouts \cite{llm_layout, phung2023grounded, feng2023layoutgpt, gani2024llm}. LayoutGPT \cite{feng2023layoutgpt} injects visual commonsense into the LLM prompt which enables it to generate desirable layouts. Gani et al. \cite{gani2024llm} suggest decomposing complex prompts into smaller prompts before injecting them into the LLM.
+\textbf{Layout-to-image:} %
+Providing a predefined layout with the exact number of subjects helps ensure that the generated images reflect the intended count \citep{llm_layout, yang2023reco}. Bounded Attention \cite{beyourself} addresses this challenge by channeling attention to bounding boxes corresponding to object instances. However, this approach requires users to manually provide the bounding boxes for all the instances of each object. In contrast to these separate-step approaches, \ourmethod{}, addresses the two steps of count-accurate generation. It first corrects the layout that emerges during generation so it contains the correct number of instances. It  then uses a novel test-time optimization method to generate a count-accurate image.
+
+\noindent\textbf{Controlling text-to-image models through attention-based loss.}
+To address the issue of object neglect—when objects mentioned in a text prompt fail to appear in the generated image—Chefer et al. \cite{attendandexcite} developed a novel loss function that ensures all objects in the prompt are reflected in the cross-attention maps used during image generation. Rassin et al. \cite{linguisticbinding} tackled the challenge of incorrect attribute association by designing a loss function that binds the cross-attention maps of subjects and their attributes more effectively. Inspired by these advancements, \ourmethod{} includes a novel cross-attention maps loss function designed to ensure the generation adheres closely to the input layout.
+
+
+\section{Our Approach: \ourmethod{}
+
+
+\begin{figure*}[!ht]
+    \setlength{\abovecaptionskip}{4pt}
+    \setlength{\belowcaptionskip}{0pt}
+\centering
+\includegraphics[width=0.96\textwidth, trim={0.cm 0cm 0cm 0.cm},clip]{figures/Architecture.pdf} %
+    \caption{
+    \textbf{Architecture outline.} Given a prompt that includes a quantity, we begin generating a corresponding image using pretrained SDXL until timestep $t=500$. We then perform \textbf{Instance Localization}, where we combine cross-attention maps corresponding with the object, and self-attention features extracted at timestep $t$ to generate object clusters for each generated object. Then we apply \textbf{\remasker{}}, which generates an object layout with the correct number of instances, while preserving the composition of the extracted layout. Finally, we perform \textbf{Layout Guided} generation, which applies an inference time optimization based on the layout through cross-attention loss $L_\text{cross}$ and self-attention masking.
+    }
+    \label{fig_architecture}
+\end{figure*}
+
+Our method, \ourmethod{}, aims to enhance text-conditioned image generators to accurately produce the intended number of objects for complex input prompts. %
+Our methodology involves a two-step process: initially, we generate a \textit{natural} layout that specifies where and how objects should appear in the image (\cref{sec:remasker}). That layout is based on a layout that emerges naturally from the text-conditioned generation (\cref{sec:layout_design}). At the second step (\cref{{sec:layout_guided_generation}}), we use this layout as a blueprint to generate the final image.
+\subsection{Discovering Object-Instance Layout during Early Generation}
+\label{sec:layout_design}
+To count object instances during generation, one must first find an internal representation that captures the separate identity of different object instances.  It is not known if this representation exists in diffusion models like SDXL. We now discuss this representation and then show how we can detect the layout of object instances during early generation. 
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth, trim={0cm 0cm 0cm 0cm},clip]{figures/pca_vis.pdf}
+        \caption{\textbf{PCA Visualization.} to explore the notion of objectness inside SDXL latent space, we visualize dimension-reduced self-attention feature maps from various layers across the network at timestep $t=500$. We notice that although most layers do not exhibit a clear separation between object instances, layer $l^{up}_{52}$ displays a robust separation indicated by different ones having distinct colors.}
+        \label{fig:pca_vis}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=\linewidth, trim={0cm 0cm 0cm 0cm},clip]{figures/remasker.pdf}
+        \caption{\textbf{Correcting under-generation.} we show examples for the \remasker{} correction of cases where SDXL generates less objects than specified in the prompt. It is evident that the generated layouts are natural and obey the same composition of the original generation, with the correct number of objects.}
+        \label{fig:qualitative_unet_remasker}
+    \end{minipage}
+\end{figure}
+\paragraph{An emerging instance-identity representation in SDXL.} 
+We begin by exploring the notion of `objectness' in SDXL. While previous work \cite{attendandexcite, hertz2023prompttoprompt, perfusion} utilized the cross-attention mechanism to localize \textit{objects of a given class }in generated images, little research has been conducted on whether the model encodes information about\textit{ object instances} and how to distinguish between different instances of an object. We tackle this problem by exploring a variety of features across different layers and timesteps of the diffusion process to determine if and where the model encodes instance-level information. While most layers do not exhibit separability at the instance level, we notice that layer $l^{up}_{52}$ tends to generate different features for different instances of the same object, with each instance having its distinct color. 
+Based on this finding, we select the self-attention features from layer $l^{up}_{52}$ at timestep $t = 500$ to serve as our instance-level features.
+
+\paragraph{Identifying object instances.} 
+Building on the findings of Hertz et al. \cite{hertz2023prompttoprompt}, which show that cross-attention maps can pinpoint a token's position in a generated image, we create a \textit{foreground mask} for each object described in the prompt. By contrasting these foreground masks, derived from the cross-attention, with the self-attention features, we effectively segregate pixels associated with objects from those belonging to the background. Subsequently, we cluster the object-associated pixels from the self-attention map into distinct masks for each object. This approach allows us to refine our object representations and enhance the accuracy of the generated layouts.
+
+Formally, let $A^{self}_{l,t}, A^{cross}_{l,t}$ represent the self-attention and cross-attention maps, respectively, for layer $l$ at timestep $t$ within our diffusion network.  We aggregate cross-attention maps associated with the tokens corresponding to the objects specified in the input prompt. We then use these cross-attention maps to extract a foreground mask $M$ based on dynamic thresholding $    M = \text{Otsu}(A^{cross}_{l,t})$, 
+where $\text{Otsu}$ applies the Otsu thresholding method \cite{otsu, tewel2024training} to determine foreground (object) pixels.
+We define ${p_k}\subseteq{A^{self}_{l,t}}$ as the set of features from the self-attention map that are identified as foreground by mask $M$. We then cluster these patches: $Clusters = DBSCAN({p_k}, \epsilon)$,
+where $DBSCAN(\cdot, \epsilon)$ is the DBSCAN \citep{martin1996dbscan} clustering algorithm with a dynamic parameter $\epsilon$. Finally, the initial layout $L$ is created by grouping the object clusters: $L=\bigcup_{C\in{Clusters}}C$.
+
+At the end of this process, we obtain a set of masks, one for each object being generated. 
+This is illustrated in \cref{fig_architecture}, left gray box. 
+
+\subsection{\remasker{}: Correcting the Number of Objects in the Mask}
+\label{sec:remasker}
+We now introduce our layout-correction component, \emph{\remasker{}}, which \textbf{preserves the overall scene composition} while correcting the number of objects. For example, \cref{fig_architecture} depicts an image generated using the prompt ``a photo of six cats'', but only four cats were generated. Our \remasker{} generates a new layout with the correct number of instances while keeping the overall composition of the kittens sitting in a row. More examples are shown in \cref{fig:qualitative_unet_remasker}.
+The input to the \remasker{} is an object-layout described in \cref{sec:layout_design}, from which we initially infer the number of generated instances. Next, our \remasker{} component takes one of two corrective actions based on the discrepancy between the generated and expected counts. In cases of \textbf{over-generation}, where more instances were generated than requested, \remasker{} deterministically removes the smallest instances to achieve the desired cluster count. We find that this simple strategy produces appealing results.
+In cases of \textbf{under-generation}, a more intricate challenge arises: 
+the \remasker{} must insert new instances to the scene in a way that preserves the original scene structure.
+This process involves a sophisticated understanding of different object layouts—like the stark contrast between linearly arrayed \emph{bottles} and the clustered arrangement of \emph{elephants}—to seamlessly augment the layout. 
+In \cref{sec:remasker_training}, we detail our approach for handling under-generation.
+In cases where the number of instances is correct, the \remasker{} maintains the initial layout.
+\subsubsection{Handling Under-generation}
+\label{sec:remasker_training}
+
+To address under-generation issues, we train a U-Net model to predict a new layout, represented as a multi-channel mask, from an existing layout. In practice, each forward pass of the U-Net generates a mask with an additional instance. This process is applied in iterations until the mask reflects the correct number of instances. In what follows we provide detailed information on the architecture and training of our U-Net model. 
+\paragraph{Creating a training dataset.} 
+To train our \remasker{} U-Net, we need a dataset of layout pairs with $k$ and $k+1$ objects, that maintain the same scene composition.
+We begin with the empirical observation that slight variations in the object count specified in the prompt—while keeping the starting noise and the rest of the prompt consistent—typically results in images with similar layouts, as shown in \cref{fig:layout_consistency_fig}. This consistency is crucial as it allows us to generate a training dataset of layout pairs where each pair has a similar object composition, differing by only one object, thereby preserving the overall scene structure. 
+
+Following this observation, we generate a set of \textasciitilde 10K pairs of images of $I_k$ and $I_{k+1}$, where each pair consists of images that differ by only one in the number of objects depicted.
+Each pair is generated with random fixed seeds and prompts that fit the same template, such as "a photo of two cats" versus "a photo of three cats”. 
+To confirm that each image pair accurately represents an $k$ and $k+1$ object scenario, we extract object masks $M_k$ and $M_{k+1}$ as described in \cref{sec:layout_design}, and verify the object count in one image is exactly one more than in its paired image. 
+Overall, the final dataset for training consists of pairs of binary masks $(M_k, M_{k+1})$, representing the U-Net task of learning to generate a mask with $k+1$ objects from a mask with $k$ objects.
+
+\begin{SCfigure}
+    \includegraphics[width=0.62\linewidth, trim={0cm 0cm 0cm 0cm}]
+    {figures/layout_concictency_1.pdf}
+    \caption{\textbf{A training set for a \remasker{}.} We created pairs of images using SDXL, using the same seed and prompts that only differ by object count. We filtered out images that did not conform to the prompt, using the techniques described in Section \ref{sec:layout_design}. The resulting image pairs preserve the scene and layout except adding one object. }
+    \label{fig:layout_consistency_fig}
+\end{SCfigure}
+
+\paragraph{Matching objects.}
+To train the U-Net, we need to establish a correspondence between each object $i$ in $M_k$ to its new position in $M_{k+1}$. We aim to find a matching that minimizes the shift in objects positions. We use the Hungarian algorithm \cite{hungarian1955} to find the optimal matching. More details in \cref{sec:matching_objects}.
+ 
+
+\paragraph{Training the U-Net module.}
+We trained the U-Net architecture by adapting it to handle 9 input channels -- corresponding to the source tensor $M_k \in \{0, 1\}^{W \times H \times k}$ with $k$ objects,  and output 10 channels -- for the target tensor with $k+1$ objects, to support counts up to 10. We optimized the U-Net parameters using two loss functions: (1) A Dice loss \cite{sudre2017generalised} between a  predicted masks $\hat{M}_{k+1}$ and the target masks $M_{k+1}$ of that object; and (2) Mask-to-mask overlap loss, designed to reduce the overlap between output masks of different instances.
+Specifically, this was computed as $1-L_{Dice}$ between all pairs of predicted masks $M^i_{k+1}$, $M^j_{k+1}$.
+\begin{equation}
+    \mathcal{L} = \mathcal{L_\text{DICE}} + \lambda \mathcal{L_\text{overlap}} 
+\end{equation}
+with $\lambda$ being a weighing hyperparameter.  Detailed definitions are provided in \cref{sec:losses_remasker}.
+
+
+\paragraph{Inference.}
+At inference time, as a pre-processing step, we first add padding to input masks. After each iteration, we gradually and consistently increase the padding size around the original masks. This operation is beneficial when we need to add a large number of objects, as it creates a ``zoom-out'' effect, making space for new objects.
+
+\subsection{\ourmethod{} Image: Layout-based Image Generation}
+\label{sec:layout_guided_generation}
+
+Provided with correct object mask layouts (\cref{sec:remasker}), our goal is to guide the image generation process to adhere to the input layout. Given a mask for each object in the desired layout, we apply an inference time optimization to match the layout in the generated image.
+To optimize object layouts at inference time, we propose a dual approach:
+object layout loss to encourage object creation in the foreground, i.e. pixels within the object masks, and self-attention masking to prevent object generation in the background.
+
+\paragraph{Object layout loss.}
+Consider the optimization of object placement within layouts using a weighted binary cross-entropy loss. Given $c$, the aggregated cross-attention scores, and $m$, a binary mask denoting object presence (foreground), the weighted binary cross-entropy loss is computed pixel-wise and is defined as follows:
+\begin{equation*}
+L(c, m) = -\sum_{i} w_i \left( m_i \log c_i + (1 - m_i) \log (1 - c_i) \right), 
+\end{equation*}
+where $c_i$ is the cross-attention score at pixel $i$, $m_i$ is the value of the binary mask at pixel $i$, and $w_i$ is the weight assigned to each pixel $i$ where $w_i = 10$ if $m_i = 1$, otherwise $w_i = 1$.
+
+\paragraph{Self-attention masking.}
+The object-layout loss encourages objects to be generated in the foreground, but when applied on itself, generated objects may appear outside the object masks (\cref{fig:ablation_qualitative}). To address this, we mask the self-attention connections between pixels in the background to pixels in the foreground. By disrupting these links, we stop the information flow from the objects to the rest of the image and prevent the model from forming objects in the background.
+Formally, at layer $l$ and timestep $t$, the masked self-attention $S^{*(l)}_t $ is defined as:
+\[
+S^{*(l)}_t[i, j] = 
+\begin{cases} 
+0 & \text{if } i \in \mathcal{B}^{(l)} \text{ and } j \in \mathcal{F}^{(l)}, \\
+S^{(l)}_t[i, j] & \text{otherwise}.
+\end{cases}
+\]
+
+where $i$ and $j$ are pixels indices, $\mathcal{B}^{(l)}$ and $\mathcal{F}^{(l)}$ represents the set of pixels belonging to the background and the foreground respectively, and $S^{(l)}_t$ is the self-attention map at layer $l$ and timestep $t$.
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\paragraph{Compared methods.}
+We compare \ourmethod{} against six baseline methods: \textbf{(1) SDXL }\cite{sdxl}; \textbf{(2) Repeated Object: } SDXL, with a modified prompt, where an object is repeated in the prompt the number of times it is required to generate, as in replacing ``three cats'' with ``a cat and a cat and a cat''. This is a naive approach that parallels prompts like ``A cat and a dog''.
+ \textbf{(3) Reason Out Your Layout: }\cite{llm_layout} uses GPT-3.5 \cite{gpt3} to generate layouts then trained an adapter to integrate it to SD-1.4 \cite{sd}; \textbf{(4) DALL-E 3} \cite{dalle3}; \textbf{(5) Random masks + BoundedAttn : } generate a layout with the correct amount of clusters placed randomly in the image and apply a layout-guidance generation method on top; \textbf{(6) Counting Guidance \cite{kang2023counting_guidance} :} boost generation of SD with a counting network; 
+
+ We also compared our layout-to-image phase, \ourmethod{}-Image, described in section \cref{sec:layout_guided_generation} with Bounded Attention \cite{beyourself}.
+\paragraph{Datasets.} We evaluate our method and the baselines using two datasets. \textbf{(1) T2I-Compbench-Count.} A subset of T2I-Compbench \cite{compbench}, which is a benchmark for open-world compositional text-to-image generation. This subset specifically includes 218 prompts that specify a single object and its number (between 2 to 10).
+\textbf{(2) \ourdata{} (ours).} We generate a dataset with automatic evaluation in mind. Specifically, we sample classes from COCO, which are more favorable to accurate and automatic detection by methods, like YOLOv9 \cite{yolo9}. We design simple prompts around these classes, with a number between 2 and 10.
+\paragraph{Count accuracy evaluation.}
+We evaluate the results of \ourmethod{} and the baselines using human and automatic evaluation method, which is standardized and reproducible. In both settings, we seek to identify if the number of instances generated by the object matches the request in the prompt.
+
+\textit{Human evaluation.} We quantified the count-accuracy of our method and baselines using human raters. Raters were asked for every image: (1) Is the object in the image?; (2) Are its instances well-formed?; (3) How many instances of the object are in the image? If the answer to question (1) or (2) is ``no'', then we do not ask question (3). 
+We provide details on the platform, rater selection and pay, and screenshots of the task in \cref{app:human_eval}.
+
+\textit{Automatic evaluation.} For automatic evaluation, we use the YOLOv9 model \citep{yolo9} with its default settings, as it represents the current state-of-the-art in the YOLO object detection benchmarks. To extract the number of objects in the image, we simply count the number of detected bounding-boxes corresponding to the target object.
+
+\paragraph{Image quality evaluation.}
+Forcing the diffusion model to obey the count in the text prompt is inevitably expected to reduce the naturalness and visual appeal of generated images, simply because more constraints are added. 
+This effect has been observed in other studies using test-time optimization\cite{linguisticbinding, attendandexcite}. 
+We evaluate the image quality of \ourmethod{} by presenting human raters with two images, by \ourmethod{} and SDXL, and asking them to select whether one image is more natural and well-formed than the other or to indicate that both images are equally good.
+
+
+\begin{SCtable}
+\caption{Generated count accuracy. Values are the percent of generated images that have the correct number of objects, for \ourdata{} and T2I-Compbench-Count.}
+\label{tab:accuracy}
+\centering
+\scalebox{0.81}{
+  \begin{tabular}{l|cc|c}
+    & \multicolumn{2}{c|}{\textbf{\ourdata{}}} & \multicolumn{1}{c}{\textbf{T2I-Compbench \cite{compbench}}}\\
+    \midrule
+   & YOLOv9  & Human &  Human \\
+  Model & Accuracy &   Accuracy &  Accuracy\\
+  \midrule
+  SDXL & 28 & 26 & 29\\
+  Repeated Object & 17 & 18 & 14\\
+  Reason Out Your Layout & 21 & 26 & 15\\
+  DALL-E 3 & 25 & 38 & 36\\ 
+  Random masks + BoundedAttn & 29 & 30 & 35\\
+  Counting Guidance & 21 & 22 & 22 \\
+  \hline
+  \ourmethod{} (ours) & \textbf{50} & \textbf{54} & \textbf{48}\\
+  \bottomrule
+    \end{tabular}
+    }
+\end{SCtable}
+
+
+\section{Results}
+
+\label{sec:results}
+
+\paragraph{Quantitative results.}
+\cref{tab:accuracy} compares \ourmethod{} with competing baselines, showing its significant improvement over baselines in both \ourdata{} and T2I-compbench-Count. \cref{fig:per_number}, 
+ and \cref{fig:per_number2} show \ourmethod{} outperforms all baselines for all values, except for two and three instances, where DALL-E 3 slightly outperforms. We hypothesize that DALL-E 3 is larger and was trained on higher-quality data than SDXL (our base model). In terms of image quality, out of 200 comparisons, in only 23 cases the majority of the raters preferred SDXL over our model. This indicates there is no significant loss of quality. We also include the confusion matrix figure of \ourmethod{} based on human evaluation in \cref{app:human_eval}.
+ 
+
+
+
+
+
+
+\begin{figure*}[ht]
+    \centering
+    \includegraphics[width=0.95\textwidth, trim={0.cm 0cm 0cm 0.cm},clip]{figures/qualitative_comparison.pdf} %
+    \caption{
+    \textbf{Qualitative comparisons.} We evaluated \ourmethod{} against DALLE 3, Reason Out Your Layout, SDXL, Repeated Object SDXL and Counten Layout + Bounded Attention. Our method successfully generates the correct number of objects, while other methods struggle in some or all of the examples. Additional results are shown in the supplemental material.} 
+    \label{fig:wins}
+\end{figure*}
+
+\paragraph{Qualitative results.}
+Figure \ref{fig:wins} shows examples of prompts and the images generated by various methods. In contrast to other methods, \ourmethod{} consistently generates the correct number of object instances.
+\begin{figure}[t]
+    \centering
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=0.95\columnwidth, trim={0cm 0cm 0cm 0cm},clip]{figures/ablation_qualitative.pdf} %
+        \caption{ \textbf{Component ablation.} We ablate over two components of the layout-guided generation model: the optimization loss and Self-Attention Masking. Disabling the loss causes the generated image to deviate from the required layout. Removing the Self-Attention masking typically causes objects to appear outside of the layout foreground.}
+    \label{fig:ablation_qualitative}
+    \end{minipage}\hfill
+    \begin{minipage}{0.48\textwidth}
+        \centering
+        \includegraphics[width=0.95\linewidth, trim={0cm 0cm 0cm 0cm}]{figures/Human_Eval.pdf}
+        \caption{\textbf{Accuracy, as a function of the number of generated objects.} Accuracy evaluated by human raters, over the set of 200 evaluation images. \ourmethod{} (blue) outperforms all methods for $n>3$, and is on par with DALL-E 3 for 2 and 3 objects.}
+        \label{fig:per_number}
+    \end{minipage}
+\end{figure}
+
+
+
+\section{Ablation Study}
+
+
+\paragraph{Contributions of \ourmethod{}-Layout and \ourmethod{}-Image.}
+Table \ref{tab:model_components_accuracy} quantifies the contribution of each of these components to the overall accuracy, by replacing it with a baseline alternative. Compared with a baseline (Random Masks + Bounded Attention) our first phase \ourmethod{}-Layout improves accuracy measured by people by 14\% (from 30 to 44), and our second phase \ourmethod{}-Image by 12\%. Together, the two components add up to improve accuracy by 21 points.
+\paragraph{Layout guided generation ablation study.}
+The second phase of our method, \ourmethod{}-Image, consists of two components: self-attention masking and object layout loss, as described at \cref{sec:layout_guided_generation}. To evaluate the contribution of each component, we deactivate it and compare the results.\\
+In \cref{fig:ablation_qualitative}, we qualitatively observe that removing the layout loss leads to the objects scattering in the image, not constrained by the required mask. When removing the self-attention masking the objects tend to obey the mask unwanted object instances occur in the background. 
+
+We confirm these observations quantitatively in \cref{tab:loss_ablation}, where we evaluate the adherence of the generated image to the input mask. We use YOLOv9 to detect the bounding boxes of generated objects and compare them to the input mask using three metrics: \textit{Precision} is the percentage of bounding boxes that highly overlap  (IOU>0.6)  the mask (union of all object masks), \textit{Recall} is the percentage of mask pixels that are covered by bounding boxes, and \textit{IOU} is measured between the boxes and the mask. Our findings align with the qualitative observation: removing the self-attention masking leads to a worse precision score, meaning objects are generated in the background. Removing the layout loss leads to low recall and IOU, meaning poor adherence to the mask. \ourmethod{}-Image, employing both components, achieves balanced results by generating objects in accordance with the mask. Overall, these results emphasize the critical roles that both components in ensuring accurate adherence to the input mask.
+
+
+
+\begin{table}[h]
+\centering
+\begin{minipage}[t]{0.48\textwidth} %
+    \caption{Model components Accuracy(\%)}
+    \label{tab:model_components_accuracy}
+    \centering
+    \resizebox{\textwidth}{!}{ %
+    \begin{tabular}{p{1.5cm} p{1.5cm} | p{1cm} p{1cm} | p{1cm}} %
+    \toprule
+    & & \multicolumn{2}{c|}{\textbf{\ourdata{}}} & \multicolumn{1}{c}{\textbf{Compbench \cite{compbench}}}\\
+    \midrule
+    Text $\rightarrow$ & Layout $\rightarrow$ & YOLOv9  & Human & Human\\
+    Layout & Image & Acc.  & Acc. & Acc. \\
+    \midrule
+    \ourmethod{} & \ourmethod{} & \textbf{50} & \textbf{54} & \textbf{48}\\
+    \ourmethod{} & B-Attn & 40 & 42 & 40\\
+    Random & \ourmethod{} & 37 & 44 & 42\\
+    Random & B-Attn & 29 & 30 & 35\\
+    \bottomrule
+    \end{tabular}
+    }
+\end{minipage}
+\hspace{0.02\linewidth} %
+\begin{minipage}[t]{0.48\textwidth} %
+    \caption{\ourmethod{}-Layout Components. Error bars correspond to standard error of the means over 200 images.}
+    \label{tab:loss_ablation}
+    \centering
+    \resizebox{\textwidth}{!}{ %
+    \begin{tabular}{p{2cm} | p{1.5cm} p{1.5cm} p{1.5cm}} %
+    \toprule
+    Method & Precision & Recall & IOU \\
+    \midrule
+    \ourmethod{} & \textbf{59} \small{$\pm$3.1} & \textbf{82} \small{$\pm$2.5} & \textbf{52}  \small{$\pm$1.2} \\
+    \small{- SA masking} & 48 \small{$\pm$3.1} & 81 \small{$\pm$2.7} & 51  \small{$\pm$1.5} \\
+    \small{- Layout loss} & 49 \small{$\pm$2.9} & 64 \small{$\pm$2.5} & 36 \small{$\pm$1.4} \\
+    \bottomrule
+    \end{tabular}
+    }
+\end{minipage}
+\end{table}
+
+
+
+
+
+\section{Limitations}
+
+Occasionally, our optimization (\cref{sec:layout_guided_generation}) results in multiple instances of an object in an area intended for just one by the layout. In other cases \ourmethod{} generates plain backgrounds compared to SDXL (\cref{fig:error_analysis}). 
+Finally, the scope of our experiments may seem narrow, since we focus on generating scenes with up to 10 instances and a single object per prompt. Nevertheless, we have shown in \cref{sec:results} that even this setup is highly challenging to contemporary models, especially as the number of instances required to generate grows, as evident by the massive drop in performance, even for DALL-E 3 (see \cref{fig:per_number}).
+
+
+
+\section{Conclusions}
+
+The task of generating images that depict the number of requested objects correctly is a hard task. It requires models to capture ``objectness", and obey global spatial constraints, at the same time they generate a well-formed natural image. Current text-to-image diffusion models perform poorly in this task (Table \ref{tab:accuracy}), especially when asked to generate more than three objects (Figure \ref{fig:per_number}). 
+
+Our \ourmethod{} approach took three steps to address this task. First, we identified a notion of objectness from the self-attention layers of the diffusion model. Then, we trained a U-Net model that learned to correct the number of instances of an object in a given layout, whether it is removing or adding instances of an object such that the structure of the layout is preserved. Third, we developed a layout-guidance optimization method method to generate images from the corrected layout. Together, this approach almost doubled the counting accuracy from 26\% in standard SDXL to 54\% using our method applied to SDXL. We expect the lessons learned from this method, specifically the features that represent objectness and the process of learning to automatically fix a layout, to become useful in other problems of structured generation like spatial constraints in text-to-image models or spatio-temporal constraints in video generation. 
+
+
+
+\begin{ack}
+We thank Yuval Atzmon for useful discussions and for providing feedback on an earlier version of this manuscript. This study was supported by an equipment grant from the Israel Science Foundation (ISF 2332/18), and by a grant from the National committee of budgeting (VATAT). 
+\end{ack}
+
+
+
+
+\clearpage
+
+{
+\small
+
+
+
+

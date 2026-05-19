@@ -1,0 +1,510 @@
+\title{Initializing Models with Larger Ones}
+
+\begin{abstract}
+Weight initialization plays an important role in neural network training. Widely used initialization methods are proposed and evaluated for networks that are trained from scratch. However, the growing number of pretrained models now offers new opportunities for tackling this classical problem of weight initialization. In this work, we introduce weight selection, a method for initializing smaller models by selecting a subset of weights from a pretrained larger model. This enables the transfer of knowledge from pretrained weights to smaller models. Our experiments demonstrate that weight selection can significantly enhance the performance of small models and reduce their training time.  Notably, it can also be used together with knowledge distillation. Weight selection offers a new approach to leverage the power of pretrained models in resource-constrained settings, and we hope it can be a useful tool for training small models in the large-model era.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+The initialization of neural network weights is crucial for their optimization. Proper initialization aids in model convergence and prevents issues like gradient vanishing.  Two prominent initialization techniques, Xavier initialization~\citep{Glorot2010} and Kaiming initialization~\citep{he2015delving}, have played substantial roles in neural network training. They remain the default methods in modern deep learning libraries like PyTorch~\citep{Paszke2019}.
+
+\begin{wrapfigure}[]{R}{0.5\textwidth}
+\includegraphics[width=1\linewidth]{figs/Modelzoo.pdf}\\
+\caption{Large pretrained models offer new opportunities for initializing small models.}
+\end{wrapfigure}
+
+These methods were developed for training neural networks from random initialization. At that time, it was the common practice. However, the landscape has changed.
+A variety of pretrained models are now readily available, thanks to collective efforts from the community~\citep{wolf2019huggingface,rw2019timm}. These models are trained on large datasets like ImageNet-21K~\citep{ImageNet1k} and LAION-5B~\citep{schuhmann2022laion} and are often optimized by experts. As a result, fine-tuning from these pretrained models~\citep{kolesnikov2020big,hu2021lora} is usually considered a preferred option today, rather than training models from scratch.
+
+However, these pretrained large models can be prohibitive in their resource demand, preventing their wide adoption for resource-constrained settings, e.g., on mobile devices. For many pretrained model families, even the smallest model instance can be considered extremely large in certain contexts. 
+For example, masked autoencoders (MAE)~\citep{he2021masked} and CLIP~\citep{radford2021learning} both provide ViT-Base~\citep{Dosovitskiy2021}, a 80M-parameter architecture, as their smallest pretrained Transformer model. This is already too large for applications on edge devices, and the smallest LLaMA~\citep{touvron2023llama} model is even another 100 times larger, with 7B parameters.  
+With few small pretrained models available, developers would have to train them from scratch on target datasets to suit their needs. This approach misses the opportunity to utilize large pretrained models, whose knowledge is learned from extensive training on large data.
+
+In this work, we tackle this issue by introducing a weight initialization method that uses large pretrained models to train small models. Specifically, we introduce \textit{weight selection}, where a subset of weights from a pretrained large model is selected to initialize a smaller model. This allows for knowledge learned by the large model to transfer to the small model through its weights. Thanks to the modular design of modern neural networks, weight selection involves only three simple steps: layer selection, component mapping, and element selection. This method can be applied to any smaller model within the same model family as the large model. Using weight selection for initializing a small model is straightforward and adds no extra computational cost compared to training from scratch. It could also be useful even for large model training, e.g., initializing a LLaMA-7B with trained weights from LLaMA-30B.
+
+We apply weight selection to train small models on image classification datasets of different scales. We observe significant improvement in accuracy across datasets and models compared with baselines. Weight selection also substantially reduces the training time required to reach the same level of accuracy. Additionally, it can work alongside another popular method for knowledge transfer from large models -- knowledge distillation~\citep{hinton2015distilling}. We believe weight selection can be a general technique for training small models. Our work also encourages further research on utilizing pretrained models for efficient deployment.
+
+
+
+\section{Related Work}
+
+
+\textbf{Weight initialization.}
+Weight initialization is a crucial aspect of model training. 
+~\citet{Glorot2010} maintain constant variance by setting the initial values of the weights using a normal distribution, aiming to prevent gradient vanishing or explosion. ~\citet{he2015delving} modify it to adapt to ReLU activations~\citep{Nair2010}.
+\citet{Mishkin2016} craft the orthogonality in weight matrices to keep gradient from vanishing or exploding. \citet{saxe2013exact} and \citet{vorontsov2017orthogonality} put soft constraints on weight matrices to ensure orthogonality. 
+
+There are methods that use external sources of knowledge like data distribution or unsupervised training to initialize neural networks. A data-dependent initialization can be obtained from performing K-means clustering or PCA~\citep{krahenbuhl2015data, tang2017weed} on the training dataset. \cite{larochelle2009exploring}, \cite{masci2011stacked}, \cite{trinh2019selfie}, and \cite{Gani_2022_BMVC} show training on unsupervised objectives can provide a better initialization for supervised training.
+
+\textbf{Utilizing pretrained models.}
+Transfer learning~\citep{zhuang2020comprehensive} is a common framework for using model weights pretrained from large-scale data. 
+Model architecture is maintained and the model is fine-tuned on specific downstream tasks~\citep{kolesnikov2020big}. 
+Knowledge distillation involves training a usually smaller student model to approximate the output of a teacher model~\citep{hinton2015distilling, tian2019contrastive,beyer2022knowledge}. This allows the student model to maintain the performance of a teacher while being computationally efficient. Another alternative approach for using pretrained models is through weight pruning~\citep{lecun1990optimal, han2015learning, Li2017, liu2018rethinking}. It involves removing less significant weights from the model, making it more efficient without significantly compromising performance.
+\citet{lin2020weight} transform parameters of a large network to an analogous smaller one through learnable linear layers using knowledge distillation to match block outputs. \citet{sanh2019distilbert} and \citet{shleifer2020pre} create smaller models by initializing with a subset of layers from a pretrained BERT~\citep{devlin2018bert}.  This method requires the smaller model to have the same width as teacher's. \citet{czyzewski2022breaking} borrow weights from existing convolutional networks to initialize novel convolutional neural networks. \citet{chen2015net2net} and \citet{chen2021bert2bert} transform weights from smaller networks as an effective initialization for larger models to accelerate convergence. \citet{trockman2022understanding} initialize convolutional layers with Gaussian distribution according to pretrained model's covariance. Similarly, \citet{trockman2023mimetic} initialize self-attention layers according to observed diagonal patterns from pretrained ViTs. These two methods use statistics from but do not directly utilize pretrained parameters. The concurrent work, ~\citet{xia2023sheared}, applies structured pruning to reduce existing large language models to their smaller versions and uses the pruned result as an initialization.
+  Weight selection, in contrast, directly utilizes pretrained parameters, does not require extra computation, and is suitable for initializing any smaller variants of the pretrained model.
+
+
+
+\section{Weight Selection}
+
+
+ Given a pretrained model, our goal is to obtain an effective weight initialization for a smaller-size model within the same model family. Borrowing terminology from knowledge distillation, we refer to the pretrained model as \textit{teacher} and the model we aim to initialize as \textit{student}.
+
+\subsection{Approach}
+Modern neural network architectures often follow a modular approach: design a layer and replicate it to build the model~\citep{He2016, Vaswani2017, tolstikhin2021mlp, Dosovitskiy2021, liu2022convnet}. This design ethos promotes scalability: models can be widened by increasing the embedding dimension or the number of channels in each block, and deepened by stacking more layers. It also enables us to perform weight selection following three steps: layer selection, component mapping, and element selection.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=.9\linewidth]{figs/weight-selection.pdf}\\
+\caption{\textbf{Weight selection.} To initialize a smaller variant of a pretrained model, we uniformly select parameters from the corresponding component of the pretrained model.}
+\label{fig:ws}
+\end{figure}
+
+\textbf{Layer selection.} Selecting layers from teacher is the first step. For each layer in student, a layer from teacher is selected as the source for initialization. The procedure for layer selection is slightly different for \emph{isotropic} architectures and \emph{hierarchical} architectures. An isotropic architecture refers to the neural network where each layer exhibits a consistent and uniform layerwise design throughout the model. ViT~\citep{Dosovitskiy2021} and MLP-mixer~\citep{tolstikhin2021mlp} belong to isotropic architectures. A hierarchical architecture is characterized by multi-scale representations and a hierarchy in embedding dimensions. Hierarchical architectures typically have stages with varying scales and embedding dimensions. For example, classic convolutional networks like VGG~\citep{Simonyan2014} progressively decrease spatial dimensions while increasing channel dimensions, capturing multi-scale features. Modern architectures like Swin-Transformer~\citep{Liu2021swin} and ConvNeXt~\citep{liu2022convnet} also employ this hierarchical design.
+
+For isotropic architectures, we select the first $N$ layers from the teacher, where $N$ represents the student's layer count, denoted as \emph{first-N selection}. When dealing with hierarchical structures like ConvNeXt~\citep{liu2022convnet}, first-N selection is applied at each individual stage. An alternative method is \emph{uniform} layer selection, where evenly-spaced layers in teacher are selected.
+
+\textbf{Component mapping.} In the second step, we map components between student and teacher. From the previous step, we obtained layer mapping from teacher to student. The task is then reduced to initializing one student layer with one teacher layer. Thanks to the modular approach adopted by modern neural network design, layers in models of the same family have an identical set of components which only differ in their width. The process for matching the corresponding components is thus a natural one-to-one mapping.
+
+\textbf{Element selection.} Upon establishing component mapping, the next step is to initialize student's component using its larger counterpart from teacher. The default method for element selection is \emph{uniform selection}, where evenly-spaced elements are selected from teacher's tensor as shown in figure \ref{fig:ws}. Details on \emph{uniform selection} and other element selection methods will be introduced next part.
+
+\subsection{Methods for element selection}
+
+In this part, we formulate element selection and introduce different selection criteria. Consider a weight tensor \( W_s\) from student that we seek to initialize with teacher's weight tensor \( W_t\). If \(W_t\) has shape $t_1, t_2, ..., t_n$, then $W_s$, which is of the same component type with $W_t$, will also span n dimensions. Our goal is to select a subset of $W_t$'s elements to initialize $W_s$. Several possible methods for element selection are discussed as follows. We compare the performance of these element selection methods in Section \ref{sec:comparisons}. We find that as long as consistency is maintained (as explained in the paragraph \emph{Random selection with consistency}, weight selection can achieve a similar level of performance. We propose using uniform selection as default for weight selection in practice. 
+
+\textbf{Uniform selection  (default).} For each dimension $i$ of $W_t$, select evenly-spaced $s_i$ slices out of $t_i$. For example, to initialize a linear layer $W_s$ of shape $2\times3$ with a linear layer $W_t$ of shape $4\times6$, we select 1st and 3rd slice along the first dimension, and 1st, 3rd, and 5th slice along the second dimension. 
+ We present pseudocode for uniform selection in Algorithm \ref{alg}. The algorithm starts with a copy of teacher's weight tensor $W_t$ and iteratively performs selection on all dimensions of $W_t$ to reach the desired shape for student. Notably, in architectures that incorporate grouped components — such as the multi-head attention module in ViTs and the grouped convolution in ResNeXt~\citep{Xie2017} — \emph{uniform selection} absorbs information from all groups. For example, when applied to ViTs, \emph{uniform selection} will select parameters from all heads in the attention block, which is likely to be beneficial for inheriting knowledge from the pretrained ViTs.
+ 
+\begin{algorithm}
+\caption{Uniform element selection from teacher's weight tensor}
+\begin{algorithmic}[1]
+\Require  $W_t$ \Comment{teacher's weight tensor}
+\Require $s$ \Comment{desired dimension for student's weight tensor}
+\Ensure $W_s$ with shape $s$ 
+\Procedure{UniformElementSelection}{$W_t, \text{student\_shape}$}
+    \State $W_s \gets \text{Copy of } W_t$ \Comment{student's weight tensor}
+    \State $n \gets \text{length of } W_t.\text{shape}$
+    \For{$i = 1 \to n$}
+        \State $d_t \gets W_t.\text{shape}[i]$
+        \State $d_s \gets s[i]$
+        \State $indices \gets \text{Select } d_s \text{ evenly-spaced numbers from 1 to } d_t$
+        \State $W_s \gets \text{Select } indices \text{ along } W_s \text{'s } i^{th} \text{dimension}$
+    \EndFor
+    \State \Return $W_s$
+\EndProcedure
+\end{algorithmic}
+\label{alg}
+\end{algorithm}
+
+\textbf{Consecutive selection.} For each dimension $i$ of $W_t$, select \emph{consecutive} $s_i$ slices out of $t_i$. In contrast to \emph{uniform selection}, for architectures with grouped components, \emph{consecutive selection} selects some entire groups while omitting the contrast. For architectures without such grouped components, \emph{consecutive selection} is equivalent to \emph{uniform selection}.
+
+\textbf{Random selection (with consistency). } For all weight tensors, and for each dimension $i$ of $W_t$, select the \emph{same} randomly-generated set of $s_i$ slices out of $t_i$. Through empirical experiments in Section \ref{sec:comparisons}, we find that \emph{consistency} (selecting the same indices for all weight matrices) is key for weight selection to reach its best performance. Motivation for maintaining consistency stems from the existence of residual connections — neurons that are added in the teacher model should have their operations preserved in the student. Furthermore, maintaining consistency preserves complete neurons during element selection, since only consistent positions are selected. It is worth noting that \emph{uniform selection} and \emph{consecutive selection} inherently preserve consistency, which are both special instances of \emph{random selection with consistency}. %, where the set of indices for selection is predetermined.
+
+\textbf{Random selection (without consistency).} Along every dimension $i$ of $W_t$, randomly select $s_i$ slices out of $t_i$. Unlike \emph{random selection w/ consistency}, this method does not require selecting the same indices for every weight tensor. We design this method to examine the importance of \emph{consistency}.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+\subsection{Settings}
+
+\textbf{Datasets.} We evaluate weight selection on 9 image classification datasets including ImageNet-1K~\citep{ImageNet1k}, CIFAR-10, CIFAR-100~\citep{cifar10}, Flowers~\citep{Flowers}, Pets~\citep{Pets}, STL-10~\citep{stl10}, Food-101~\citep{food101}), DTD~\citep{dtd}, SVHN~\citep{svhn} and EuroSAT~\citep{eurosat1, eurosat2}. These datasets vary in scales ranging from 5K to 1.3M training images. 
+
+\textbf{Models.} We perform experiments on ViT-T/16~\citep{Touvron2020} and ConvNeXt-F~\citep{liu2022convnet}, with ImageNet-21K pretrained ViT-S/16 and ConvNeXt-T as their teachers respectively. We obtain weights for ImageNet-21K pretrained ViT-S/16 from~\citet{steiner2021augreg} and ImageNet-21K pretrained ConvNeXt-T from~\citet{liu2022convnet}. We present the detailed configurations in Table \ref{tab:config}.
+\begin{table}[h]
+    \centering
+    \small
+    \addtolength{\tabcolsep}{3pt}
+    \def\arraystretch{1.07}
+    \begin{tabular}{c|cc|cc}
+    configuration & \multicolumn{2}{c|}{student} & \multicolumn{2}{c}{teacher} \\
+    \Xhline{1.0pt}
+    model & ViT-T & ConvNeXt-F & ViT-S & ConvNeXt-T \\
+    \hline
+    depth & 12 & 2 / 2 / 6 / 2 & 12 & 3 / 3 / 9 / 3 \\
+    embedding dimension & 192 & 96 / 192 / 384 / 768 & 384 & 48 / 96 / 192 / 384 \\
+    number of heads & 3 & - & 6 & - \\
+    number of parameters & 5M & 5M & 22M & 28M \\
+    \hline
+    \end{tabular}
+    \caption{\textbf{Model Configurations.} We perform main experiments on ConvNeXt and ViT, and use student that halve the embedding dimensions of their corresponding teacher.}
+    \label{tab:config}
+\end{table}
+
+\textbf{Training.} We follow the training recipe from ConvNeXt~\citep{liu2022convnet} with adjustments to batch size, learning rate, and stochastic depth rate~\citep{Huang2016deep} for different datasets. To ensure a fair comparison, we adapt hyperparameters to baseline (training with random initialization), and the same set of hyperparameters is used for training with weight selection.
+
+\textbf{Random initialization baseline.} We utilize the model-specific default initialization from timm library~\citep{rw2019timm}, a popular computer vision library with reliable reproducibility. Its default initialization of ViT-T and ConvNeXt-F employs a truncated normal distribution with a standard deviation of 0.02 for linear and convolution layers. The truncated normal distribution, designed to clip initialization values, is adopted to develop modern neural networks~\citep{liu2022convnet}. 
+
+\subsection{Results}
+
+Experiment results are presented in Table~\ref{tab:main}. Across all 9 image classification datasets, weight selection consistently boosts test accuracy, especially for smaller datasets. Notably, weight selection addresses the well-known challenge of training ViT on small datasets, which likely contributes to the significant accuracy improvement for ViT. Training curves for ImageNet-1K are shown in Figure~\ref{figure:train-curve}. Both models benefit from weight selection early on and maintain this advantage throughout training.
+
+\begin{table}[h]
+\begin{subtable}{0.5\linewidth}
+\centering
+\small
+\addtolength{\tabcolsep}{-3pt}
+\def\arraystretch{1.07}
+\begin{tabular}{c|cgc}
+dataset (scale $\downarrow$ ) & random init & weight selection & change \\
+\Xhline{1.0pt}
+ImageNet-1K & 73.9 & 75.6 & \better{1.6} \\
+SVHN & 94.9 & 96.5 & \better{1.6} \\
+Food-101 & 79.6 & 86.9 & \better{7.3} \\
+EuroSAT & 97.5 & 98.6 & \better{1.1} \\
+CIFAR-10 & 92.4 & 97.0 & \better{4.6} \\
+CIFAR-100 & 72.3 & 81.4 & \better{9.1} \\
+STL-10 & 61.5 & 83.4 & \better{21.9} \\
+Flowers & 62.4 & 81.9 & \better{19.5} \\
+Pets & 25.0 & 68.6 & \better{43.6} \\
+DTD & 49.4 & 62.5 & \better{13.1} \\
+\end{tabular}
+\caption{\vit{}}
+\end{subtable}%
+\begin{subtable}{0.5\linewidth}
+\centering
+\small
+\addtolength{\tabcolsep}{-3pt}
+\def\arraystretch{1.07}
+\begin{tabular}{cgc}
+  random init & weight selection & change  \\
+\Xhline{1.0pt}
+76.1 & 76.4 & \better{0.3} \\             % ImageNet-1K
+95.7 & 96.9 & \better{1.2} \\             % svhn
+86.9 & 89.0 & \better{2.1} \\             % food101
+98.4 & 98.8 & \better{0.4} \\             % eurosat
+96.6 & 97.4 & \better{0.8} \\             % CIFAR-10
+81.4 & 84.4 & \better{3.0} \\             % CIFAR-100
+81.4 & 92.3 & \better{10.9} \\            % STL-10
+80.3 & 94.5 & \better{14.2} \\            % Flowers (assuming 102 category)
+72.9 & 87.3 & \better{14.4} \\            % Pets
+63.7 & 68.8 & \better{5.1} \\             % dtd
+
+\end{tabular}
+\caption{\convnext{}}
+\end{subtable}
+\caption{\textbf{Test accuracy on image classification datasets.} On all 9 datasets, employing weight selection for initialization leads to an improvement in test accuracy. Datasets are ordered by their image counts. Weight selection provides more benefits when evaluated on datasets with fewer images.}
+\label{tab:main}
+\end{table}
+
+\begin{figure}[h]
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/imagenet-vit.pdf}
+    \caption{ViT-T}
+  \end{subfigure}%
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/imagenet-convnext.pdf}
+    \caption{ConvNeXt-F}
+  \end{subfigure}
+  \caption{\textbf{Training curves on ImageNet-1K.} When initialized using weight selection from ImageNet-21K pretrained models, both ViT-T (from ViT-S) and ConvNeXt-F (from ConvNeXt-T) exhibit superior performance compared to their randomly-initialized counterparts.}
+  \label{figure:train-curve}
+\end{figure}
+
+\subsection{Comparisons}
+\label{sec:comparisons}
+\textbf{Advantage over classic initialization.} We compare weight selection and its variants with two widely-adopted initialization methods: Xavier initialization~\citep{Glorot2010} and Kaiming initialization~\citep{he2015delving} and present results on CIFAR-100 as shown in Table \ref{main:other}. 
+All variants of weight selection yield considerably better results than classic initialization methods. 
+
+\textbf{Comparison of selection methods.} Consistency is the key for weight selection to reach its best performance. For both model architectures, uniform selection, consecutive selection, and random selection with consistency achieve a similar level of performance. Note that uniform selection and consecutive selection inherently maintain consistency. When removing consistency, a sharp drop in performance is observed. For random selection experiments, we report the median performance of three different selection results.
+
+\begin{table}[h]
+\centering
+\small
+\addtolength{\tabcolsep}{-1pt}
+\def\arraystretch{1.07}
+\begin{tabular}{l|c|c}
+init	&	ViT-T	&	ConvNeXt-F	\\
+\Xhline{1.0pt}
+timm default (trunc normal)	&	72.3	&	81.4	\\
+Xavier~\citep{Glorot2010}	&	72.1	&	82.8	\\
+Kaiming~\citep{he2015delving}	&	73	&	82.5	\\
+\gr
+weight selection (uniform)	&	81.4	&	\textbf{84.4}	\\
+weight selection (consecutive)	&	81.6	&	84.0	\\
+weight selection (random w/ consistency)	&	\textbf{81.7}	&	83.9	\\
+weight selection (random w/o consistency)	&	77.4	&	82.8	\\
+\end{tabular}
+\caption{\textbf{Comparison with classic initialization methods.} We present CIFAR-100 test accuracy for weight selection's variants and classic initialization methods. Weight selection methods with consistency outperform classic initialization methods by a large margin.}
+\label{main:other}
+\end{table}%
+
+\subsection{Compatibility with Knowledge Distillation}
+
+Weight selection transfers knowledge from pretrained models via parameters. Another popular approach for knowledge transferring is knowledge distillation~\citep{hinton2015distilling}, which utilizes outputs from pretrained models. Here we explore the compatibility of these two techniques.
+
+\textbf{Settings.} We evaluate the performance of combining weight selection with two different approaches in knowledge distillation -- logit-based distillation and feature-based distillation by using weight selection as initialization for student in knowledge distillation. Logit-based distillation uses KL-divergence as the loss function for matching student's and teacher's logits. Denote student's output probabilities as $p_s$, and teacher's output probabilities as $p_t$, the loss for logit-based distillation can be formulated as
+\begin{equation}
+   \mathcal{L} = \mathcal{L}_{class} + \alpha \cdot KL(p_t || p_s)
+\end{equation}
+
+where $L_{class}$ is supervised loss, and $\alpha$ is the coefficient for distillation loss. Note that matching logits requires teacher to be trained on the same dataset as student. For logit-based distillation, We train ViT-T on ImageNet-1K while using the ImageNet-1K pretrained ViT-S model from DeiT~\citep{Touvron2020} as the teacher for both knowledge distillation and weight selection. $\alpha$ is set to 1.
+
+Feature-based distillation steps in when a classification head of the target dataset is not available. Denote teacher's output as $O_t$, and student's as $O_s$. Feature-based distillation can be formulated as
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{class} + \alpha \cdot L_1(O_{t}, MLP(O_{s}))
+\end{equation}
+An MLP is used to project student's output to teacher's embedding dimension, and $L_1$ loss is used to match the projected student's output and teacher's output. For feature-based distillation, we perform CIFAR-100 training experiments on ViT-T, using ImageNet-21K pretrained ViT-S as the teacher for both knowledge distillation and weight selection. We tune $\alpha$ on distillation trials and use the same value for $\alpha$ for trials that combine distillation and weight selection.
+
+
+\textbf{Results.} Table \ref{tab:distill} provides results for knowledge distillation and weight selection when applied individually or together. These results show the compatibility between weight selection and different types of knowledge distillation. 
+Without incurring additional inference costs, employing weight selection alone produces a better result than vanilla logit-based distillation and feature-based distillation.
+More importantly, the combination of weight selection and knowledge distillation delivers the best results, boosting accuracies to 76.0\% on ImageNet-1K and 83.9\% on CIFAR-100. These results further confirm weight selection's usefulness as an independent technique and the compatibility between weight selection and knowledge distillation.
+\begin{table}[h]
+\centering
+\small
+\addtolength{\tabcolsep}{-3pt}
+\def\arraystretch{1.07}
+    \begin{tabular}{l|cc|cc}
+       setting  & \multicolumn{2}{c|}{ImageNet-1K (logit-based distillation)} & \multicolumn{2}{c}{CIFAR-100 (feature-based distillation)} \\
+    \Xhline{1.0pt}
+         & test acc & change & test acc & change \\
+         baseline	&	73.9	&	-	&	72.3	&	-	\\
+distill	&	74.8	&	\better{0.9}	&	78.4	&	\better{6.4}	\\
+\gr
+ weight selection	&	\textbf{75.5}	&	\better{1.6}	&	\textbf{81.4}	&	\better{9.1}	\\
+ \gr
+distill + weight selection	&	\textbf{76.0}	&	\better{2.1}	&	\textbf{83.9}	&	\better{11.6}	\\
+    \end{tabular}
+    \caption{\textbf{Compatibility with knowledge distillation.} Weight selection is useful as an independent technique, and can be combined with knowledge distillation to achieve the best performance.}
+    \label{tab:distill}
+\end{table}
+
+
+
+\section{Analysis}
+
+
+In this section, we perform a comprehensive analysis of weight selection. Unless otherwise specified, the standard setting (for comparison) of weight selection is initializing ViT-T with uniform selection from the ImageNet-21K pretrained ViT-S, trained and evaluated on CIFAR-100.
+
+\textbf{Reduction in training time.} We find weight selection can significantly reduce training time. We directly measure the reduction in training time by training ViT-T with weight selection for different numbers of epochs and present the results in Figure \ref{fig:shorter-train}. The number of warmup epochs is modified to maintain its ratio with the total epochs for each trial. With weight selection, the same performance on CIFAR-100 can be obtained with only 1/3 epochs compared to training from random initialization.
+
+\begin{figure}[h]
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/Analysis-shorter.pdf}
+    \scriptsize{training epochs}
+    \caption{Comparison with random initialization}
+  \label{fig:shorter-train}
+  \end{subfigure}%
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\linewidth]{figs/Analysis-pretraining.pdf}
+    \scriptsize{pretraining epochs}
+    \caption{Comparison with pretraining + finetuning}
+    \label{fig:shorter-pre}
+  \end{subfigure}
+  \caption{\textbf{Faster training.} Compared to random initialization, ViT-T can reach the same performance on CIFAR-100 with only 1/3 epochs compared to training from random initialization. When compared to pretraining (on ImageNet-1K) + finetuning, weight selection is able to match the accuracy at 60 epochs of pretraining, saving 6.12x training time.}
+  
+\end{figure}
+\textbf{Comparison with transfer learning.} We conduct experiments to find the training budget needed for pretraining to match the accuracy of weight selection. For this experiment, we train ViT-T on ImageNet-1K with different numbers of epochs and then fine-tune on CIFAR-100 for 300 epochs. As shown in Figure \ref{fig:shorter-pre}, it takes 60 epochs of pretraining on ImageNet-1K to achieve the same performance on CIFAR-100. Under this setting, weight selection is 6.12x faster compared to reaching the same performance with pretraining, without need to access the dataset used for pretraining.
+\textbf{Pretrained models.}
+We study the effect of using different pretrained models as weight selection teacher. Models with supervised pretraining turn out to be the best teacher. We evaluate the performance of ViT-B as teacher under different pretraining regimes: CLIP~\citep{radford2021learning}, MAE~\citep{he2021masked}, and DINO~\citep{caron2021emerging}. Table \ref{ab:regime} presents the results. Initializing with pretrained weights consistently outperforms random initialization. ImageNet-21K pretrained teacher provides the most effective initialization. Note that for this experiment, we use ViT-B as teacher for weight selection, since it is the smallest model that MAE and CLIP provide.
+\begin{table}[h]
+\centering
+\small
+\addtolength{\tabcolsep}{-3pt}
+\def\arraystretch{1.07}
+    \begin{tabular}{l|ccccc}
+Pretrained models &	CIFAR-10	&	CIFAR-100	&	STL-10	\\
+ \Xhline{1.0pt}
+\gr
+supervised (ImageNet-21K)	&	95.1	&	\textbf{77.6}	&	\textbf{73.1} \\
+CLIP~\citep{radford2021learning}	&	94.9	&	77.3	&	66.0	\\
+MAE~\citep{he2021masked}	&	\textbf{95.9}	&	77.2	&	71.0	\\
+DINO~\citep{caron2021emerging}	&	95.0 & 75.7 & 69.4	\\
+    \end{tabular}
+    \caption{\textbf{Different pretrained models.} Supervised pretraining makes the best teacher.}
+    \label{ab:regime}
+\end{table}
+
+\textbf{Layer selection.}
+\cite{shleifer2020pre} select evenly-spaced layers from BERT to initialize small models. We compare two layer selection methods: first-N layer selection and uniform layer selection. To evaluate different layer selection methods, we create ViT-A of 6 layers (half of the ViT-T depth), with other configurations identical to ViT-T. In this experiment, we use ViT-A and ConvNeXt-F as student, and ImageNet-21K pretrained ViT-S and ConvNeXt-T as their weight selection teacher. From the results presented in Table \ref{ab:select}, we find first-N layer selection performs consistently better than uniform layer selection. Presumably, since layers initialized by first-N selection are naturally contiguous and closer to input processing, they offer a more effective initialization for smaller models.
+
+\begin{table}[h]
+    \centering
+\small
+\addtolength{\tabcolsep}{8pt}
+\def\arraystretch{1.07}
+    \begin{tabular}{c|c|c}
+setting	&	ViT-A	&	ConvNeXt-F	\\
+\Xhline{1.0pt}
+random init	&	69.6	&	81.3	\\
+\gr
+first-N layer selection	&	\textbf{77.6}	&	\textbf{84.4}	\\
+uniform layer selection	&	76.7	&	83.2 \\
+\end{tabular}
+    \caption{\textbf{Layer selection.} First-N layer selection performs better than uniform layer selection.}
+    \label{ab:select}
+\end{table}
+\textbf{Comparison with pruning.} We test the existing structured and unstructured pruning methods on reducing pretrained ViT-S to ViT-T.  An important thing to note is that our setting is different from neural network pruning. Structured pruning~\citep{li2016pruning} typically only prunes within residual blocks for networks with residual connections, and unstructured pruning~\citep{han2015learning} prune weights by setting weights to zero instead of removing it. Despite that these pruning methods are not designed for our setting, we can extend structured and unstructured pruning methods to be applied here. Specifically, we can adopt $L_1$ pruning and magnitude pruning for element selection. For $L_1$ pruning, we use $L_1$ norm to prune the embedding dimension. For magnitude pruning, we squeeze the selected parameters into the required shape of student.
+
+We present results in Table \ref{ab:prune}.
+\textit{$L_1$ pruning} yields better results compared to random initialization baseline. However, since $L_1$ norm inevitably breaks consistency, it could not reach the same performance with weight selection. \textit{Magnitude pruning} only produces marginally better results over random initialization, presumably due to the squeezing operation which breaks the original structure.
+\begin{minipage}{0.55\textwidth}
+    \begin{table}[H]
+        \centering
+        \small
+        \addtolength{\tabcolsep}{1pt}
+        \def\arraystretch{1.07}
+        \begin{tabular}{c|c|c}
+            setting & ViT-T & ConvNeXt-F \\
+            \hline
+            random init & 72.3 & 81.4 \\
+            \gr
+            weight selection & \textbf{81.4} & \textbf{84.4} \\
+            $L_1$ pruning & 79.5 & 82.8 \\
+            magnitude pruning & 73.8 & 81.9 \\
+        \end{tabular}
+        \caption{\textbf{Comparison with pruning.} $L_1$ and \emph{magnitude} pruning performs worse than weight selection.}
+        \label{ab:prune}
+    \end{table}
+\end{minipage}%
+\hfill
+\begin{minipage}{0.40\textwidth}
+
+    \begin{table}[H]
+    \centering
+        \small
+        \addtolength{\tabcolsep}{1pt}
+        \def\arraystretch{1.07}
+        \begin{tabular}{c|c|c}
+            teacher  & params & test acc \\
+            \hline
+            \gr
+            ViT-S & 22M & \textbf{81.4} \\
+            ViT-B & 86M & 77.6 \\
+            ViT-L & 307M & 76.9 \\
+        \end{tabular}
+        \caption{\textbf{Teacher's size.} Smaller teacher provides better initialization.}
+        \label{ab:size}
+    \end{table}
+    \end{minipage}
+\textbf{Teacher's size.} We show that initializing from a teacher of closer size produces better results. A larger teacher means a higher percentage of parameters will be discarded, which translates to more information loss during weight selection. We present results for using ViT-S, ViT-B, and ViT-L as weight selection teacher to initialize ViT-T in Table \ref{ab:size}.  Interestingly, even a 5M-parameter subset from 301M parameters in ViT-L is an effective initialization, increasing accuracy by 4.5\%.
+
+\textbf{Linear probing.} We use linear probing to directly measure the raw model's ability as a feature extractor, which can be a good indicator of the initialization quality. Linear probing is a technique used to assess a pretrained model's representations by training a linear classifier on top of the fixed features extracted from the model. 
+
+Following the recipe in~\citet{he2021masked}, we apply linear probing on CIFAR-100 to evaluate ViT-T and ConvNeXt-F initialized with weight selection from their ImageNet-21K pretrained teachers, ViT-S and ConvNeXt-T respectively. We compare between random initialization and weight selection as shown in Table \ref{method:linear_probe}. Without any training, weight selection performs significantly better than random initialization in producing features.
+
+\begin{table}[H]
+\centering
+\small
+\addtolength{\tabcolsep}{-.3pt}
+\def\arraystretch{1.07}
+   \begin{tabular}{c|cc}
+        setting & ViT-T & ConvNeXt-F\\
+        \Xhline{1.0pt}
+        random init	&	13.5 &	7.1 \\
+        \gr
+        weight selection	&	\textbf{28.2} &	\textbf{23.6} \\
+    \end{tabular}
+    \caption{\textbf{Linear probing on CIFAR-100.} Weight selection produces a non-trivial feature extractor.}
+    \label{method:linear_probe}
+\end{table}
+
+\textbf{Weight components.} We conduct ablation studies on ViT-T to understand the influence of distinct model components on performance. In particular, we evaluate the performance of weight selection without one of the following particular types of layers: patch embedding, position embedding, attention block, normalization layer, or MLP layer. As illustrated in Table \ref{ab:modelcomponent}, excluding component from initialization leads to substantial drops in accuracy for all datasets. The results confirm that initializing with all components from pretrained models is necessary.
+\begin{table}[h]
+\centering
+\small
+\addtolength{\tabcolsep}{-3pt}
+\def\arraystretch{1.07}
+    \begin{tabular}{l|ccccc}
+Setting &	CIFAR-10	&	CIFAR-100	&	STL-10	\\
+ \Xhline{1.0pt}
+random init &  92.4 & 72.3  & 61.5 \\
+\gr
+ weight selection  & \textbf{97.0} & \textbf{81.4}  & \textbf{83.4} \\
+w/o patch embed	&	96.8	&	79.5	&	77.1	\\
+w/o pos embed	&	95.6	&	78.4	&	80.2	\\
+w/o attention	&	96.2	&	77.3	&	80.5	\\
+w/o normalization	&	96.2	&	79.0	&	79.8	\\
+w/o mlp	&	95.6	&	78.8	&	74.2	\\
+    \end{tabular}
+    \caption{\textbf{ViT component ablation.} Using all components from pretrained models is the best.}
+    \label{ab:modelcomponent}
+\end{table}
+
+\textbf{Longer training on ImageNet-1K.}
+To assess if weight selection remains beneficial for extended training durations, we use the improved training recipe from ~\cite{liu2023dropout}. Specifically, the total epochs are extended to 600, and mixup / cutmix are reduced to 0.3. The results, as displayed in Table \ref{tab:longer}, affirm that our method continues to provide an advantage even under extended training durations. Both ViT-T and ConvNeXt-F, when initialized using weight selection, consistently surpass models with random initialization. This confirms that weight selection does not compromise the model's capacity to benefit from longer training.
+\begin{table}[h]
+    \centering
+\small
+\addtolength{\tabcolsep}{-3pt}
+\def\arraystretch{1.07}
+    \begin{tabular}{l|cccc}
+       setting  & \multicolumn{2}{c}{ViT-T} & \multicolumn{2}{c}{ConvNeXt-F} \\
+    \Xhline{1.0pt}
+         & test acc & change & test acc & change \\
+
+ random init        	&	73.9	&	-	&	76.1	&	-	\\
+\gr
+weight selection	&	\textbf{75.5}	&	\better{1.6}	&	\textbf{76.4}	&	\better{0.3}	\\
+random init (longer training)	&	76.3	&	-	&	77.5	&	-	\\
+\gr
+weight selection (longer training)	&	\textbf{77.4}	&	\better{1.1}	&	\textbf{77.7}	&	\better{0.2}	\\
+    \end{tabular}
+    \caption{\textbf{Longer training.} Weight selection's improvement is robust under stronger recipe.}
+    \label{tab:longer}
+\end{table}
+\textbf{Mimetic initialization.}
+Mimetic initialization~\citep{trockman2023mimetic} uses the diagonal properties observed in the pretrained self-attention layer's weights to initialize ViTs. We present results for mimetic initialization in Table \ref{ab:component}. By directly utilizing pretrained parameters, weight selection outperforms mimetic initialization by a large margin. In addition, we visualize the product of $W_qW_k^T$ and $V W_{proj}$  the first head in the first attention block of ViT-T with random initialization, pretrained ViT-S, and ViT-T with weight selection. As shown in Figure \ref{fig:mimetic}, weight selection enables small models to inherit the desirable diagonal properties in their self-attention layers, which typically only exist in pretrained models.
+\begin{table}[h]
+\centering
+\small
+\addtolength{\tabcolsep}{-3pt}
+\def\arraystretch{1.07}
+    \begin{tabular}{l|ccccc}
+setting &	CIFAR-10	&	CIFAR-100	&	STL-10	\\
+ \Xhline{1.0pt}
+random init &  92.4 & 72.3  & 61.5 \\
+ mimetic init & 93.3 & 74.7  & 67.5 \\
+\gr
+weight selection & \textbf{97.0} & \textbf{81.4} & \textbf{83.4} \\
+    \end{tabular}
+    \caption{\textbf{Comparison with mimetic initialization.} Weight selection significantly outperforms mimetic initialization by directly utilizing pretrained parameters.}
+    \label{ab:component}
+\end{table}
+
+\begin{figure}[h]
+  \centering
+  \begin{subfigure}[b]{0.30\textwidth}
+    \includegraphics[width=\textwidth]{figs/random.pdf}
+    \caption{random init}
+  \end{subfigure}%
+  \hfill
+  \begin{subfigure}[b]{0.30\textwidth}
+    \includegraphics[width=\textwidth]{figs/vit-s.pdf}
+    \caption{pretrained ViT-S}
+  \end{subfigure}%
+  \hfill
+  \begin{subfigure}[b]{0.30\textwidth}
+    \includegraphics[width=\textwidth]{figs/uniform-selection.pdf}
+    \caption{weight selection}
+  \end{subfigure}
+  \caption{\textbf{Visualization of self-attention layers.} Visualization of $W_q W_k^T$ (left) and $V W_{proj}$ (right) for ViT-T with random initialization, pretrained ViT-S, and ViT-T with weight selection. Weight selection can inherit the diagonal property of self-attention layers that only exists in pretrained ViTs.}
+  \label{fig:mimetic}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+We propose weight selection, a novel initialization method that utilizes large pretrained models. With no extra cost, it is effective for improving the accuracy of a smaller model and reducing its training time needed to reach a certain accuracy level.  
+We extensively analyze its properties and compare it with alternative methods.
+We hope our research can inspire further exploration into utilizing large pretrained models to create smaller models.
+
+
+\textbf{Acknowledgement.} We would like to thank Haodi Zou for creating illustrative figures, and Mingjie Sun, Boya Zeng, Chen Wang, Jiatao Gu, Maolin Mao for valuable discussions and feedback.
+\newpage
+
+
+
+

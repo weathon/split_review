@@ -1,0 +1,364 @@
+\title{Segment, Select, Correct: A Framework for Weakly-Supervised Referring Segmentation}
+
+\begin{abstract}
+Referring Image Segmentation (RIS) -- the problem of identifying objects in images through natural language sentences -- is a challenging task currently mostly solved through supervised learning. However, while collecting referred annotation masks is a time-consuming process, the few existing weakly-supervised and zero-shot approaches fall significantly short in performance compared to fully-supervised learning ones. To bridge the performance gap without mask annotations, we propose a novel weakly-supervised framework that tackles RIS by decomposing it into three steps: obtaining instance masks for the  object mentioned in the referencing instruction (\textit{segment}), using zero-shot learning to select a potentially correct mask for the given  instruction (\textit{select}), and bootstrapping a model which allows for fixing the mistakes of zero-shot selection (\textit{correct}). In our experiments, using only the first two steps (zero-shot segment and select) outperforms other zero-shot baselines by as much as 16.5\%, while our full method improves upon this much stronger baseline and sets the new state-of-the-art for weakly-supervised RIS, reducing the gap between the weakly-supervised and fully-supervised methods in some cases from around 33\% to as little as 7\%.\blfootnote{$^*$Work primarily done during FE's internship at Five AI Ltd.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Identifying particular object instances in images using natural language expressions -- defined in the literature as referring image segmentation (RIS) \cite{wang2022cris,yang2022lavt,wu2022towards,yu2023zero} -- is an important problem that has many real-world applications including autonomous driving, general human-robot interactions~\cite{wang2019reinforced} or natural language-driven image editing~\cite{chen2018language} to name a few. This problem is typically solved by training large vision and language models using supervised data from datasets of \texttt{image}, \texttt{referring expressions} and \texttt{referred mask} triplets~\cite{hu2016segmentation, yang2022lavt}.
+
+However, collecting the required annotation masks for this task can be difficult, since annotating dense prediction masks given referring expressions is a time consuming process. Existing weakly-supervised \cite{strudel2022weakly} and zero-shot \cite{yu2023zero} approaches attempt to address this problem by eliminating the need for using these masks, yet their performance is significantly worse than fully-supervised learning alternatives.
+
+In this work, we tackle the problem of learning a weakly-supervised referring image segmentation model by leveraging the insight that fundamentally the problem can be divided into two steps: (i) obtaining instance masks for the desired object class referred in the expression (e.g., given the sentence \textit{"the {\color{SeaGreen}\textbf{car}} on the left of the person"} the desired object class is {\color{SeaGreen}\textbf{car}}), and (ii) choosing the right mask from the ones obtained based on the referencing instruction (e.g., in the previous example it should be the {\color{SeaGreen}\textbf{car}} that is \textit{"on the left of the person"} instead of any other ones in the image). 
+
+To solve (i), we design an open-vocabulary instance segmentation for referring expressions that generates all instance segmentation masks for that object. Given an accurate selection mechanism, we could solve (ii) directly, and to achieve this we first propose a zero-shot step based on work by \cite{yang2023fine}. However, this mechanism -- as the CLIP-based zero-shot selection proposed by \cite{yu2023zero} -- makes mistakes which significantly reduce the performance of the overall system, despite the fact that (i) generates strong candidate masks. To tackle this problem, we propose a corrective step that trains a model to perform weakly-supervised RIS. This step pre-trains a model using the zero-shot selected masks from step (ii) and corrects potential mistakes using a constrained greedy matching scheme.
+Our full method is summarized in Figure~\ref{fig:overview-instance}. 
+
+Our main contributions are: (1) we introduce \textit{segment}, \textit{select}, \textit{correct} (\ours) as a three-stage framework to perform referring image segmentation \textbf{without supervised referring masks} by training a model on pseudo-masks obtained using a zero-shot pipeline; (2) we establish new state-of-the-art performance in both zero-shot and weakly-supervised RIS, outperforming the zero-shot method by \cite{yu2023zero} by as much as $19\%$, and the weakly-supervised methods by \cite{liu2023referring, kim2023shatter} by significant margins (up to $26\%$) in most testing sets in RefCOCO \cite{yu2016modeling}, RefCOCO+ \cite{mao2016generation} and RefCOCOg \cite{nagaraja2016modeling}. Finally, we highlight the benefits of our design choices in a series of ablations of the stages of the framework.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/diagrams/overall_diagram.pdf}
+    \caption{\textbf{\textit{Segment}, \textit{Select}, \textit{Correct} for Referring Image Segmentation}: our three stage approach consists of using an open-vocabulary segmentation step from referring expressions to obtain all the candidate masks for the object in those sentences (\textit{segment}, Stage 1), followed by a zero-shot instance choice module to select the most likely right mask (\textit{select}, Stage 2), and then training a corrected RIS model using constrained greedy matching to fix the zero-shot mistakes (\textit{correct}, Stage 3).}
+    \label{fig:overview-instance}
+\end{figure}
+
+
+
+\section{Preliminaries and Related Work}
+
+\label{sec:preliminaries_related_work}
+
+\subsection{Problem setup and Notation}
+\label{sec:problem_setup}
+
+Formally, the objective of referring image segmentation is to obtain a model $f: \mathbb{R}^{\mathcal{I}}\times \mathcal{T} \to [0, 1]^{\mathcal{I}}$, where for a given input image $\img \in \mathbb{R}^{\mathcal{I}}$ and an expression $\sent \in \mathcal{T}$ the model outputs a binary, pixel-level mask of $1$ where the referred object in $\sent$ exists, and $0$ elsewhere. Most of the existing literature treat this as a supervised learning problem, taking a dataset of image, referring sentences and segmentation mask pairs, i.e., $(\img_i, \sent_i, \mask_i)$, and training a text-conditioned segmentation pipeline end-to-end using a binary cross-entropy loss \cite{wang2022cris,wu2022towards,yang2022lavt}. Training and testing datasets commonly used include RefCOCO \cite{yu2016modeling}, RefCOCO+ \cite{mao2016generation}, and RefCOCOg \cite{nagaraja2016modeling}.
+
+Crucially to our work, these datasets contain implicitly more information that is not leveraged in any previous work which comes from the dataset building process. For example, on building RefCOCO, the authors from \cite{yu2016modeling} started with an image from the COCO dataset \cite{lin2014microsoft}, selected $2-3$ segmentation masks from objects in that image, and asked users to create $3$ sentences referring to that specific instance of the object in the frame. In practice, this means that for each image $\img_i$ in the dataset we have a set $\Bigl\{\mask_{i,j}, \{\sent_{i, j, k}\}_{k=1}^{n^\sent_{i,j}}\Bigr\}$
+where for each object mask, $\mask_{i, j}$, for all $k$, $\sent_{i,j,k}$ are references to the same object. 
+
+\textbf{Weakly-supervised setting.} While these datasets are generated by augmenting existing segmentation ones with descriptive sentences, it could be easier to obtain several referring sentences to the same object than to annotate a dense mask for the objects of interest. In that case we might have a large dataset of the form $\mathcal{D} = \{\img_i, \{\sent_{i, j, k}\}_{k=1}^{n^\mathbf{O}_{i,j}}\}_{i=1}^{n^\img}$, where each object $\mathbf{O}_{i,j}$ of the $n_{ij}^O$ existing objects is implicitly described by the set of referring expressions without \textit{a priori} knowledge of its mask. This is the setup from previous works \cite{strudel2022weakly, liu2023referring, kim2023shatter}. 
+
+\textbf{CLIP.} We use the text and image encoders of CLIP \cite{radford2021learning}, which we refer to as $\psi_{\text{CLIP}}: \mathcal{T} \to \mathbb{R}^{e}$ and $\phi_{\text{CLIP}}: \mathbb{R}^{\mathcal{I}} \to \mathbb{R}^{e}$, respectively.
+
+\subsection{Related Work}
+
+\textbf{Fully and Weakly-Supervised Referring Image Segmentation.} The problem of segmenting target objects in images using natural language expressions was first tackled by \cite{hu2016segmentation} using a recurrent neural network. Since then, a variety of \textit{fully-supervised} solutions (i.e., using both referring expressions and pixel-dense masks) have been introduced in the literature \cite{margffoy2018dynamic,li2018referring,jing2021locate,chen2022position,ding2021vision,feng2021encoder,yang2022lavt,liu2023polyformer}. Most recent methods within this category tend to focus on extracting language features using Transformer \cite{vaswani2017attention,devlin2018bert} based models \cite{jing2021locate,ye2019cross,yang2022lavt,ouyangslvit}, which are then fused with initial image features obtained using convolutional networks \cite{jing2021locate,ye2019cross} or transformer-based encoders \cite{yang2022lavt,ouyangslvit,liu2023polyformer} in a cross-modal pipeline. \cite{wang2022cris} proposed a contrastive pre-training framework similar to CLIP \cite{radford2021learning} to learn separate image and text transformers in a fully-supervised setting. \cite{strudel2022weakly} proposed TSEG, the first \textit{weakly-supervised} approach to this problem by training a model without the use of pixel-dense segmentation masks, a setting more recently explored by \cite{liu2023referring} and \cite{kim2023shatter}.
+
+\textbf{Zero-shot Pixel-Dense Tasks and Referring Image Segmentation.} Recent zero-shot approaches use large-scale pre-pretraining to transfer the learned skills to previously unseen tasks without explicit training. CLIP \cite{radford2021learning} is an example of such an approach on image-text pairs. This idea has also been applied to language-driven pixel-dense prediction tasks, such as open-vocabulary object detection \cite{gu2021open,bangalath2022bridging,liu2023grounding,minderer2023scaling} or semantic segmentation \cite{mukhoti2023open,chen2023exploring,liang2023open}; and to class-agnostic instance segmentation \cite{wang2022freesolo,wang2023cut,kirillov2023segment}. In \cite{yu2023zero} the authors introduce the first zero-shot approach to referring image segmentation by combining FreeSolo \cite{wang2022freesolo} to generate object instance masks and selecting one using a CLIP-based approach.
+
+
+
+\section{Three-Stage Framework for Referring Image Segmentation}
+
+\label{sec:method}
+
+Our approach consists of three stages, as shown in Figure~\ref{fig:overview-instance}. Stages 1 and 2 leverage existing pre-trained models in a zero-shot manner to obtain two sets of masks from the original, mask-less dataset (\graydataset in Figure~\ref{fig:overview-instance}): one containing \textit{all instance masks} of the referred object in the original dataset expressions (\bluedataset in Figure~\ref{fig:overview-instance}), and the other containing a zero-shot \textit{choice of which mask is referenced} in the expression (\greendataset in Figure~\ref{fig:overview-instance}). Both of these are used as input to Stage 3, where we first use set \greendataset to pre-train a grounded model, and then use set \bluedataset (containing all instance masks) within a constrained greedy matching training framework to \textit{bootstrap and correct} zero-shot selection mistakes. Stages 1, 2 and 3 are described in detail in Sections \ref{sec:stage_1}, \ref{sec:stage_2} and \ref{sec:stage_3}, respectively.
+
+\subsection{\textit{Segment}: Open-Vocabulary Segmentation from Referring Expressions}
+\label{sec:stage_1}
+
+The goal of this section is to establish a method to extract all instance segmentation masks for image $\img_i$ given a set of referring expressions $\sent_{i,j,k}$ from the \graydataset dataset. Throughout this process, we assume these sentences explicitly include the object being referred in the expression. To achieve this, we introduce a three-step, zero-shot process (presented in Figure~\ref{fig:open-vocab-instance-segmentation}):
+\begin{enumerate}
+    \item \textbf{Noun Extraction (NE)}: in a similar fashion to~\cite{yu2023zero}, we use a text dependency parser such as spaCy \cite{spacy} to extract the \textit{key noun phrase} (i.e., subject noun) in each of the referring expressions $\sent_{i,j,k}$. 
+    \item \textbf{Dataset Class Projection (CP)}: using CLIP's text encoder \cite{radford2021learning}, we project the extracted noun phrase to a set of objects specific to the dataset context by picking the label which has the maximum similarity with each extracted phrase. For performance reasons, we consider a contextualized version of both the dataset labels and noun phrases, using {\small \texttt{"a picture of [CLS]"}} as input to $\psi_{\text{CLIP}}$ ahead of computing the embedding similarity. 
+    \item \textbf{Open-Vocabulary Instance Segmentation (OS)}: all the projected nouns corresponding to $\sent_{i,j,k}, \forall k$ and the image $\img_{i}$ are then passed to an open-vocabulary instance segmentation model. We obtain it by combining an open-set object detector (e.g., Grounding DINO~\cite{liu2023grounding}) and a class-agnostic object segmentation model (e.g., SAM~\cite{kirillov2023segment} or FreeSOLO~\cite{wang2022freesolo}) to obtain all the possible instance segmentation masks for the referring object. The output of this process is a set of pseudo-ground-truth instance segmentation masks for each $\sent_{i,j,k}$ defined as $\{\pseudomask^c_{i,j,k}\}_1^C$ for each binary mask $\pseudomask^c_{i,j,k}\in [0,1]^{\mathcal{I}}$.
+\end{enumerate}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/diagrams/open_vocab_ref_img_segmentation.pdf}
+    \caption{\textbf{Open-Vocabulary Segmentation from Referring Expressions}: given a referring expression, we first extract the key noun phrase, project it to a set of context-specific classes, and then use open-vocabulary instance segmentation to obtain all the candidate masks for the object.}
+    \label{fig:open-vocab-instance-segmentation}
+\end{figure}
+
+As a result of these steps, we will have successfully constructed set \bluedataset which will be used in Stages 2 and 3. In Section~\ref{sec:ablation_mask_gen} we perform an ablation over each of these steps.
+
+\subsection{\textit{Select}: Zero-Shot Choice for Referring Image Segmentation}
+\label{sec:stage_2}
+
+\begin{wrapfigure}[15]{R}{0.50\textwidth}
+    \begin{minipage}{\linewidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/diagrams/zero_shot_choice.pdf}
+        \caption{\textbf{Zero-Shot Choice for Referring Image Segmentation}: following the main idea from \cite{yang2023fine}, we choose a zero-shot mask from the candidate ones by performing a visual prompting to obtain images with the object highlighted via reverse blurring, and then use CLIP similarity to determine the most likely mask choice.}
+        \label{fig:zero-shot-choice}
+    \end{minipage}
+\end{wrapfigure}
+
+Given the mechanism in Stage 1, for each image $\img_i$ and referring expression $\sent_{i,j,k}$ we now have a set of binary masks $\{\pseudomask^1_{i,j,k},\dots,\pseudomask^C_{i,j,k}\}$. The goal in Stage 2 is to determine which of these candidate masks corresponds to the single object referred in $\sent_{i,j,k}$. \cite{shtedritski2023does} and \cite{yang2023fine} observe that CLIP, potentially due to its large training dataset, contains some visual-textual referring information. \cite{yang2023fine} note that CLIP when visually prompted using a reverse blurring mechanism (\textit{i.e.}, when everything but the object instance is blurred) achieves good zero-shot performance on the similar task of Referring Expression Comprehension.
+
+With this insight, we apply the same visual prompting technique to the instance selection problem, as shown visually in Figure~\ref{fig:zero-shot-choice}. Given $\sent_{i,j,k}$, we compute its CLIP text embedding, $\psi_{\text{CLIP}}(\sent_{i,j,k})$ and choose the mask that satisfies:
+\begin{equation}
+\label{eq:clip_selection}
+\max_{c\in \{1,\dots,C\}}\; \text{\textsc{sim}}\left(\phi_{\text{CLIP}}(\img^c_{i,j,k}), \psi_{\text{CLIP}}(\sent_{i,j,k})\right),
+\end{equation}
+where \textsc{sim} is the cosine similarity, defined as $\text{\textsc{sim}}(u, v) = u^\top v / \|u\| \|v\|$ for vectors $u$ and $v$, and $\img^c_{i,j,k}$ is the visually prompted version of $\img_{i}$ for $\pseudomask^c_{i,j,k}$ using the reverse blurring mechanism (with $\sigma=50$) as in~\cite{yang2023fine}. This effectively constructs the pre-training set \greendataset which is used in Stage 3. In Section~\ref{sec:ablation_zs_choice} we perform ablations over this stage's zero-shot instance choice pipeline.
+
+\subsection{\textit{Correct}: Constrained Greedy Matching for Weakly-Supvervised RIS}
+\label{sec:stage_3}
+
+In practice, we have a complete, zero-shot referring image segmentation method using just Stages 1 and 2 of the pipeline. While this might yield good performance already, the zero-shot choice mechanism from Stage 2 will inevitably make mistakes due to a lack of explicit modeling of reference information in the CLIP embedding similarity. We introduce in Stage 3 (Figure \ref{fig:grounded-contrastive-training}) a training scheme that attempts to (i) \textit{pre-train} a grounded model -- \ie, one with some degree of vision-language alignment -- given the information already available in the zero-shot chosen masks of Stage 2, and (ii) \textit{correct} some of those mistakes through a constrained greedy matching loss with all the possible masks of Stage 1.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/diagrams/greedy_matching_training_horizontal.pdf}
+    \caption{\textbf{Grounding + Constrained Greedy Matching}: using set \protect\greendataset masks, we start by pre-training a zero-shot bootstrapped model (\zsbootstrap) that grounds referring concepts which is used to initialize a corrected model trained using set \protect\bluedataset masks with constrained greedy matching.}
+    \label{fig:grounded-contrastive-training}
+\end{figure}
+
+To achieve (i), we simply take set \greendataset and train a bootstrapped model (e.g., with the LAVT architecture \cite{yang2022lavt}) using a cross-entropy loss. The idea is that the resulting model -- referred throughout as \zsbootstrap\xspace -- should generalize over the training data, \textit{grounding} it (i.e., obtaining vision and language alignment) on the concept of referring instructions from the zero-shot outputs of Stage 2.
+
+To achieve (ii) and correct the mistakes of the zero-shot choice we can use the data from set \bluedataset, which (ideally) contains the instance masks of all the objects of the same category as the referenced one in a scene. Given we do not have access to the ground-truth masks, we cannot know which masks are incorrect. However, from the weakly-supervised dataset format described in Section~\ref{sec:problem_setup}, we know that two references corresponding to the same object $\mathbf{O}_{i,j}$ \textit{should have the same mask}, and those corresponding to different objects $\mathbf{O}_{i,j}$ and $\mathbf{O}_{i,j'}$, $j\neq j'$, \textit{should not have the same mask}. 
+
+For ease of notation we will drop the image index $i$ for the rest of this section (given the loss is defined per image) and consider $\prediction_{j,k} = f(\img, \sent_{j,k})$. We design a loss that simultaneously drives the model towards the most likely mask from set \bluedataset (\textit{i.e.,} from the set $\{\pseudomask^1_{j,k},\dots,\pseudomask^C_{j,k}\}$), while ensuring that different objects in the same image choose different masks. 
+We take inspiration from the work of \cite{romera2016recurrent}, in which the authors use the Hungarian method to solve the bipartite matching problem of outputting segmentation masks using a recurrent network. Similarly, we define our matching problem as:
+\begin{equation}
+\label{eq:greedy_matching_problem}
+\max_{\delta \in \Delta}\quad \ell_{\text{match}}(\prediction_{j,k}, \{\pseudomask^1_{j,k},\dots,\pseudomask^C_{j,k}\}, \delta) = \sum_{j,k,c} \ell_\text{IoU}(\prediction_{j,k}, \pseudomask^c_{j,k}) \delta_{j,k,c},
+\end{equation}
+where $\ell_{\text{IoU}}$ is a differentiable IoU loss as defined by \cite{romera2016recurrent}, and $\delta_{j,k,c}$ is a binary variable defining whether the mask $\pseudomask^c_{j,k}$ for $c\in\{1,\dots,C\}$ has been matched to object $\mathbf{O}_{j}$ for all $k$, subject to the constraint that $\delta \in \Delta$ where:
+\begin{multline}
+\Delta = \Biggl\{
+\delta_{j, k, c} \in \{0, 1\},\;\\
+\underbrace{\sum_c \delta_{j,k,c} = 1\; \forall j, k}_{\substack{\text{\circled{1} choose one mask} \\ \text{per output prediction}}}, \; 
+\underbrace{\delta_{j,k,c} = \delta_{j,k',c}\; \forall c, j, k\neq k'}_{\substack{\text{\circled{2} every reference of the same} \\ \text{object has the same mask}}},\;
+\underbrace{\sum_{j} \delta_{j,k,c} \leq 1, \forall k, c}_{\substack{\text{\circled{3} references to different} \\ \text{objects have different masks}}}
+\Biggr\}.
+\end{multline}
+
+Note that while the perfect matching problem from \cite{romera2016recurrent} admits an optimal solution under Hungarian matching, this is not the case in our setup as the number of set \bluedataset masks might be smaller than the number of objects if Stage 1 fails to segment one or more instances of the object in the scene. So instead we perform \textit{constrained greedy matching} by taking $j^1, k^1, c^1 = \max l_\text{IoU}(\prediction_{j,k}, \pseudomask^c_{j,k})$ across all sentences and candidate masks, and assigning $\delta^*_{j^1, k, c^1} = 1$, for all $k$ -- thus guaranteeing \circled{2}. $(j^1, c^1)$ then get added to an exclusion set $\mathcal{C}$, and the next matching occurs by considering $j^2, k^2, c^2 = \max_{(j, c)\notin \mathcal{C}} l_\text{IoU}(\prediction_{j,k}, \pseudomask^c_{j,k})$ -- guaranteeing \circled{1} and \circled{3}. This process continues until the full matching, $\delta^*$, has been determined -- pseudocode for the process is presented in Algorithm \ref{alg:greedy_contrastive_matching}. While constrained greedy matching does not guarantee the optimality of the problem solution, empirically it often yields the same one as Hungarian matching at a fraction of the running time. 
+
+With the matching determined, the loss per image becomes:
+\begin{equation}
+\label{eq:ice_loss}
+\mathcal{L} = \sum_{j,k,c} \mathcal{L}_{\text{CE}}\left(\prediction_{j,k}, \pseudomask_{j,k}^c\right) \delta^*_{j, k, c},
+\end{equation}
+where $\mathcal{L}_{\text{CE}}$ is the cross-entropy loss. Assuming $f$ already has some referring information from pre-training, this is expected to improve the performance of the overall model as it will force it to satisfy conditions \circled{1}, \circled{2} and \circled{3}.
+
+\begin{algorithm}[t]
+    \begin{algorithmic}[1]
+        \State \textbf{Input:} mask choices $\{\pseudomask^c_{j,k}\}_c$, model predictions $\prediction_{j,k}$
+        \State \textbf{Result:} greedy matching $\delta_{j,k,c}^*$
+        \State $\delta_{j,k,c}^* \leftarrow 0$
+        \State $\mathcal{C} \leftarrow \emptyset$ \Comment{Initialize the exclusion set}
+        \State $\mathcal{M} \leftarrow \left\{j,k,c: \ell_{\text{IoU}}\left(\prediction_{j,k}, \pseudomask^c_{j,k}\right)\right\}$ \Comment{Compute pseudo-IoU for all mask \& prediction pairs}
+        \State \textsc{Sort}($\mathcal{M}$) \Comment{Sort them in descending order}
+        \While{$\mathcal{M} \neq \emptyset$}
+            \State $j', k', c' \leftarrow \text{\textsc{Pop}}(\mathcal{M})$ \Comment{Get the next highest IoU mask choice}
+            \If{$c \in \mathcal{C}$ or $j \in \mathcal{C}$} \Comment{If either the object or mask has been matched, skip it}
+                \State \textbf{continue}
+            \EndIf
+            \For{$k$} \Comment{Match it for all expressions of the same object}
+                \State $\delta_{j',k,c'}^* \leftarrow 1$
+            \EndFor
+            \State $\mathcal{C} \leftarrow \mathcal{C} \cup \{(j', c')\}$ \Comment{Add object+mask to exclusion set to avoid re-match}
+        \EndWhile
+        \State \textbf{return} $\delta_{j,k,c}^*$
+    \end{algorithmic}
+\caption{Constrained Greedy Matching}
+\label{alg:greedy_contrastive_matching}
+\end{algorithm}
+
+\begin{table}[t]
+  \caption{\textbf{Zero-shot and Weakly-Supervised Comparison}: oIoU (top) and mIoU (bottom) results on benchmark datasets for our corrected model trained using constrained greedy matching (\ours), as well as our zero-shot (\zsours) method, along with the existing baselines GL CLIP \cite{yu2023zero}, TSEG \cite{strudel2022weakly}, TRIS \cite{liu2023referring}, Shatter\&Gather \cite{kim2023shatter}, and LAVT \cite{yang2022lavt}, and ablations. The first column refers to the type of method: zero-shot (ZS), weakly-supervised (WS) or fully-supervised (FS). Best zero-shot results are highlighted in \zsbest{\textbf{purple}}, and the best weakly-supervised ones in \wsbest{\textbf{green}}. For RefCOCOg, U and G refer to the UMD and Google partitions, respectively.}
+  \label{tab:main_results}
+  \centering
+  {
+  \scriptsize
+  \begin{tabular}{p{0.04\textwidth}p{0.23\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}}
+    \toprule
+    \multirow{2}{*}{} & \multirow{2}{*}{} & \multicolumn{3}{c}{RefCOCO} & \multicolumn{3}{c}{RefCOCO+} & \multicolumn{3}{c}{RefCOCOg}\\
+    & & val & testA & testB & val & testA & testB & val(U) & test(U) & val(G) \\
+    \midrule
+    \multicolumn{11}{l}{oIoU}\\
+    \midrule
+    \multirow{5}{*}{ZS} & GL CLIP \cite{yu2023zero} & 24.88 & 23.61 & 24.66 & 26.16 & 24.90 & 25.83 & 31.11 & 30.96 & 30.69\\
+    & GL CLIP (SAM) & 24.50 & 26.00 & 21.00 & 26.88 & 29.95 & 22.14 & 28.92 & 30.41 & 28.92 \\
+    & SAM + Select & 18.54 & 17.42 & 18.65 & 18.65 & 18.69 & 19.59 & 17.33 & 17.87 & 17.91 \\
+    & G-DINO + SAM & 27.59 & 30.12 & 25.62 & 25.97 & 27.27 & 25.05 & 30.98 & 31.88 & 31.69 \\
+    & \zsours (\textit{Ours}) & \zsbest{\textbf{34.39}} & \zsbest{\textbf{42.20}} & \zsbest{\textbf{28.43}} & \zsbest{\textbf{36.29}} & \zsbest{\textbf{46.53}} & \zsbest{\textbf{28.81}} & \zsbest{\textbf{39.29}} & \zsbest{\textbf{41.81}} & \zsbest{\textbf{42.39}} \\
+    \midrule
+    \multirow{2}{*}{WS} & TRIS \cite{liu2023referring} & 31.17 & 32.43 & 29.56 & 30.90 & 30.42 & 30.80 & 36.00 & 36.19 & 36.23 \\
+    & \ours (\textit{Ours}) & \wsbest{\textbf{57.22}} & \wsbest{\textbf{64.11}} & \wsbest{\textbf{48.23}} & \wsbest{\textbf{47.97}} & \wsbest{\textbf{56.79}} & \wsbest{\textbf{34.91}} & \wsbest{\textbf{43.18}} & \wsbest{\textbf{45.12}} & \wsbest{\textbf{42.58}}\\
+    \midrule
+    FS & \supcolor{LAVT} \cite{yang2022lavt} & \supcolor{72.73} & \supcolor{75.82} & \supcolor{68.79} & \supcolor{62.14} & \supcolor{63.38} & \supcolor{55.10} & \supcolor{61.24} & \supcolor{62.09} & \supcolor{60.50}\\
+    
+    \midrule
+    \midrule
+
+    \multicolumn{11}{l}{mIoU} \\
+    \midrule
+    \multirow{5}{*}{ZS} & GL CLIP \cite{yu2023zero} & 26.20 & 24.94 & 26.56 & 27.80 & 25.64 & 27.84 & 33.52 & 33.67 & 33.61\\
+     & GL CLIP (SAM) & 30.79 & 33.08 & 27.51 & 32.99 & 37.17 & 29.47 & 39.45 & 40.85 & 40.66 \\
+     & SAM + Select & 22.39 & 20.18 & 22.60 & 22.20 & 22.08 & 23.52 & 22.60 & 23.51 & 23.54 \\
+     & G-DINO + SAM & 33.37 & 34.83 & \zsbest{\textbf{32.31}} & 30.27 & 30.36 & 30.51 & 37.08 & 37.08 & 37.39 \\
+     & \zsours (\textit{Ours}) & \zsbest{\textbf{40.96}} & \zsbest{\textbf{48.57}} & 31.60 & \zsbest{\textbf{41.77}} & \zsbest{\textbf{51.84}} & \zsbest{\textbf{31.75}} & \zsbest{\textbf{45.36}} & \zsbest{\textbf{47.18}} & \zsbest{\textbf{48.11}} \\
+    \midrule
+    \multirow{3}{*}{WS} & TSEG \cite{strudel2022weakly} & 25.95 & -- & -- & 22.62 & -- & -- & 23.41 & -- & -- \\
+    & Shatter\&Gather \cite{kim2023shatter} & 34.76 & 34.58 & 35.01 & 28.48 & 28.60 & 27.98 & -- & -- & 28.87 \\
+     & \ours (\textit{Ours}) & \wsbest{\textbf{63.15}} & \wsbest{\textbf{69.37}} & \wsbest{\textbf{53.81}} & \wsbest{\textbf{54.03}} & \wsbest{\textbf{62.19}} & \wsbest{\textbf{40.28}} & \wsbest{\textbf{49.51}} & \wsbest{\textbf{50.31}} & \wsbest{\textbf{49.78}}\\
+    \midrule
+    FS & \supcolor{LAVT} \cite{yang2022lavt} & \supcolor{74.46} & \supcolor{76.89} & \supcolor{70.94} & \supcolor{65.81} & \supcolor{70.97} & \supcolor{59.23} & \supcolor{63.34} & \supcolor{63.62} & \supcolor{63.66}\\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+The aim of this section is to showcase the effectiveness of our method in closing the gap of zero-shot and weakly-supervised methods with the fully-supervised state-of-the-art using only images and referring sentences. To achieve this, we report results on:
+\begin{itemize}
+    \item \textbf{Segment+Select} (\zsours \xspace-- \textit{zero-shot}): using the open-vocabulary instance segmentation paired with the zero-shot instance choice to perform zero-shot RIS on each sample of the validation and test datasets (Stages 1 and 2 of Figure \ref{fig:overview-instance}), and
+    \item \textbf{Segment+Select+Correct} (\ours \xspace-- \textit{weakly-supervised}): the full pipeline described in Section \ref{sec:method}, including the grounding/pre-training step using set \greendataset masks to generate a Zero-shot Bootstrapped (\zsbootstrap) model and the constrained greedy matching training stage using set \bluedataset masks to obtain the final corrected model (Stages 1, 2 and 3 of Figure \ref{fig:overview-instance}).
+\end{itemize}
+To justify the design choices taken at each step, we perform ablations on the open-vocabulary instance mask generation from Stage 1 in Section \ref{sec:ablation_mask_gen}, on the zero-shot instance choice mechanism from Stage 2 in Section \ref{sec:ablation_zs_choice}, and on the constrained greedy matching loss used in Stage 3 in Section \ref{sec:ablation_ct}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=1\textwidth]{figures/objects_per_image_histogram.pdf}
+    \caption{\textbf{Object Instances per Image}: distribution of the number of object instances, $\mathbf{O}_{i,j}$, referenced in each image, $I_i$, within the training sets of the studied datasets.}
+    \label{fig:histogram_objects_per_image}
+\end{figure}
+
+\textbf{Datasets and Evaluation.} Following the established literature, we report results on RefCOCO \cite{yu2016modeling}, RefCOCO+ \cite{mao2016generation} and RefCOCOg \cite{nagaraja2016modeling}, which have 19,994, 19,992 and 26,711 images in total with 142,210, 141,564, 104,560 referring expressions, respectively. As mentioned in Section~\ref{sec:problem_setup}, each image in these datasets includes a certain number of object instances, which in turn include 3 referring expressions each. 
+In Figure~\ref{fig:histogram_objects_per_image} we show the distribution of the number of objects per image in the training sets of RefCOCO, RefCOCO+ and RefCOCOg (umd and google splits). 
+The higher the average number of object instances per image, the more effective we expect the loss from Stage 3 to be in correcting the zero-shot selection mistakes from Stage 2. 
+In terms of evaluation metrics, following previous works we report overall and mean Intersection over Union (oIoU and mIoU, respectively).
+
+\textbf{Implementation Details.} For Stage 1, we use spaCy \cite{spacy} as the text dependency parser, the text encoder of CLIP's ViT-B/32 \cite{radford2021learning} for the class projection, Grounding DINO \cite{liu2023grounding} as the open-set object detector and SAM \cite{kirillov2023segment} as the class-agnostic object segmentation model. For Stage 2, we use CLIP with a ViT-L/14@336px visual backbone and a self-attention Transformer as a text encoder to compute the CLIP similarity. The models trained in Stage 3 follow the cross-modal architecture of LAVT \cite{yang2022lavt}. They use a BERT \cite{wolf2020transformers} encoder, and we initialize the Transformer layers with the weights of the Swin Transformer \cite{liu2021swin} pre-trained on ImageNet-22k \cite{deng2009imagenet}. The optimizer (AdamW), learning rate ($5\times 10^{-4}$), weight decay ($10^{-2}$) and other initialization details also follow the ones of LAVT \cite{yang2022lavt}, with the exception of the batch size which we set at 60 instead of the original 32. Given we use 4 NVIDIA A40 GPUs (48GB VRAM each), this batch size change leads to significant speed-ups without noticeable performance changes. We pre-train our bootstrapped model (\zsbootstrap) for 40 epochs, and subsequently train the corrected constrained greedy matching one (\ours) for a further 40 epochs.
+
+\textbf{Baselines.} We compare with previously established baselines: the zero-shot method Global-Local CLIP (GL CLIP, \cite{yu2023zero}), the weakly-supervised baselines TSEG \cite{strudel2022weakly}, TRIS \cite{liu2023referring} and Shatter\&Gather \cite{kim2023shatter}, and the fully-supervised method LAVT \cite{yang2022lavt}. The first step of GL CLIP generates a pool of class-agnostic segmentation masks using FreeSOLO \cite{wang2022freesolo}, which is followed by a selection step using a global-local CLIP similarity mechanism. Since our method uses SAM \cite{kirillov2023segment} in Stage 1, for fairness of comparison, we also report results on an ablation of GL CLIP which uses SAM to generate the candidate masks -- we refer to it as GL CLIP (SAM). We also compare with two simple baselines inspired by our method: SAM + Select, which uses SAM to obtain all object masks in the image and then the reverse blur selection mechanism from Stage 2; and G-DINO + SAM, which simply takes the highest scoring mask generated by SAM when prompted with the highest confidence bounding box obtained with Grounding DINO \cite{liu2023grounding}. 
+
+\subsection{Zero-shot (\zsours) and Weakly-Supervised (\ours) Experiments}
+\label{sec:main_results}
+
+In Table~\ref{tab:main_results} we report the performance of our zero-shot method, \zsours, our main trained method, \ours, and other existing methods and ablations. Overall, our zero-shot and weakly-supervised method outperform the baselines in a majority of the test sets, establishing new state-of-the-art results in both. 
+
+\textbf{Zero-shot Performance.} We observe that our zero-shot method mostly outperforms the baselines considered in the validation and test datasets considered, with oIoU improvements of $2.9-16.5\%$ depending on the dataset and baseline considered. The fact GL CLIP (SAM) still significantly under performs \zsours suggests that a better class-agnostic instance segmentation method (\ie., SAM vs FreeSOLO) \textit{is not the main driver} behind our improvements. In several scenarios, we also observe that \zsours improves upon the weakly-supervised TRIS and Shatter\&Gather.
+
+\textbf{Weakly-supervised Performance.} By pre-training and correcting the potential zero-shot mistakes using the constrained greedy loss, the performance improves significantly. Our weakly-supervised method leads to oIoU improvements of up to $22.8\%$ over \zsours, all without using any supervised referring segmentation masks. As expected from Figure \ref{fig:histogram_objects_per_image}, these improvements are more marked in RefCOCO and RefCOCO+ than in RefCOCOg. These weakly-supervised results are still below the fully-supervised ones, yet note that, for example, in RefCOCO+ testA our model's oIoU only lags the fully-supervised LAVT by less than $7\%$, a significant improvement from the previous $33\%$ gap of TRIS in that same test set. In all cases, \ours establishes a new state-of-the-art in weakly-supervised RIS, outperforming TRIS, TSEG and Shatter\&Gather by oIoU and mIoU margins as high as $31\%$ and $34\%$, respectively.
+
+\begin{wraptable}[15]{R}{0.45\textwidth}
+    \begin{minipage}{\linewidth}
+    \caption{\textbf{Open-Vocabulary Instance Mask Generation}: ablation of the steps of mask generation Noun Extraction (\textbf{NE}), Dataset Class Projection (\textbf{CP}) and Class-agnostic Instance Segmentation (\textbf{CS}) on the first $1,000$ samples of the RefCOCO training set. Evaluation metrics computed by selecting the highest mIoU mask compared to the ground-truth.}
+    \label{tab:ablation_stage_1}
+    \centering
+    {
+        \scriptsize
+        \begin{tabular}{P{0.17\textwidth}P{0.11\textwidth}P{0.27\textwidth}P{0.17\textwidth}P{0.17\textwidth}}
+            \toprule
+            NE & CP & CS & oIoU & mIoU\\
+            \midrule
+            spaCy & \checkmark & SAM & \textbf{73.27} & \textbf{74.31} \\
+            nltk & \checkmark & SAM & 63.05 & 66.06 \\
+            spaCy & \xmark & SAM & 58.87 & 62.20 \\
+            spaCy & \checkmark & FreeSOLO & 61.31 & 62.98 \\
+            \bottomrule
+        \end{tabular}
+    }
+    \end{minipage}
+\end{wraptable}
+
+\textbf{Efficiency Comparison.} A key difference between the zero-shot baselines (including our \zsours) and our full method \ours is that the latter requires a "pre-processing" step (Stages 1 and 2) to be applied to the full training set followed by two training steps (Stage 3). This induces a one-time overhead of training our weakly-supervised model which is approximately $2.5\times$ that of the fully-supervised LAVT (with the same architecture). 
+However, once \ours is trained, the average inference time per sample is $2.4-14\times$ faster than the zero-shot methods and comparable to that of TRIS. A forward pass on a single NVIDIA A40 GPU only takes $0.2s$ compared to $0.49s$, $2.95s$ and $1.78s$ for GL CLIP, GL CLIP (SAM), and \zsours, respectively. GL CLIP (SAM) is $\sim6\times$ slower than GL CLIP due to the increased inference time and number of candidate masks per dataset sample for SAM vs. FreeSOLO (111 vs. 49 on average, respectively). 
+
+\subsection{Ablation on Stage 1: Open-vocabulary Instance Mask Generation}
+\label{sec:ablation_mask_gen}
+
+In this section, we validate our design choices in generating the instance masks using the procedure described in Section \ref{sec:stage_1}. While this is an important step for the purposes of cross-validation, it is key not to run it on all validation and test sets, as this could otherwise lead to over-fitting the generation process to the mask ground-truth available in these datasets.
+
+With this in mind, we experiment on the first $1,000$ training set examples of RefCOCO by varying the noun extraction mechanism -- using nltk \cite{loper2002nltk} instead of spaCy \cite{spacy} --, with or without context dataset projection and ablations on the open-vocabulary instance segmentation module -- using FreeSOLO \cite{wang2022freesolo} instead of SAM \cite{kirillov2023segment}. In Table~\ref{tab:ablation_stage_1}, we present the results of these ablations evaluated by choosing the closest mask to the ground-truth ones for each referring sentence.
+We observe that our choice performs the best in terms of oIoU and mIoU on this cross-validation set, and that context dataset projections are an important factor in achieving that performance. Note that while \cite{yu2023zero} put the FreeSOLO upper bound limit on RefCOCO val set at $42.08\%$ oIoU, we achieve significantly better masks with FreeSOLO ($61.31\%$ oIoU) since we do not query the method on the full image, but rather a cropped version around the bounding box initially obtained by GroundingDINO (part of OS described in Section \ref{sec:stage_1}).
+
+\subsection{Ablation on Stage 2: Zero-Shot Instance Choice}
+\label{sec:ablation_zs_choice}
+
+\begin{wraptable}[16]{R}{0.5\textwidth}
+    \begin{minipage}{\linewidth}
+      \caption{\textbf{Zero-shot Instance Choice}: ablation of the zero-shot instance choice options on the first $1,000$ examples of the RefCOCO training set. \supcolor{Oracle} is in gray as it provides a benchmark by comparing to the inaccessible at inference time ground-truth masks (copied from Table \ref{tab:ablation_stage_1}). ViT-B32 and ViT-L14 refer to the ViT-B/32 and ViT-L/14@336px CLIP visual backbones.}
+      \label{tab:ablation_stage_2}
+      \centering
+      {
+      \scriptsize
+      \begin{tabular}{P{0.19\textwidth}P{0.26\textwidth}P{0.21\textwidth}P{0.11\textwidth}P{0.11\textwidth}}
+        \toprule
+        Choice & Prompt & Backbone & oIoU & mIoU \\
+        \midrule
+        \supcolor{Oracle} & \supcolor{--} & \supcolor{--} & \supcolor{73.27} & \supcolor{74.31} \\
+        Random & -- & -- & 21.81 & 23.76 \\\midrule
+        \multirow{2}{*}{ZS} & \multirow{2}{*}{Red Ellipse} & ViT-B32 & 23.36 & 27.34 \\
+        &  & ViT-L14 & 34.87 & 38.38 \\\midrule
+        \multirow{2}{*}{ZS} & \multirow{2}{*}{Reverse Blur} & ViT-B32 & 35.44 & 39.18 \\
+        & & ViT-L14 & \textbf{38.21} & \textbf{41.95} \\
+        \bottomrule
+      \end{tabular}
+      }
+    \end{minipage}
+\end{wraptable}
+
+In a similar fashion to Section \ref{sec:ablation_mask_gen}, to study the effect of the zero-shot instance choice in producing good grounding masks for our model, we perform ablations using different visual prompting mechanisms -- Red Ellipse from \cite{shtedritski2023does} and Reverse Blur from \cite{yang2023fine} -- with different CLIP visual backbones, and compare them to simple baselines like randomly choosing the right mask (Random) or by accessing the ground-truth ones (Oracle). The results are presented in Table \ref{tab:ablation_stage_2}. Note that on average there are 4.3 object instances per image, so as expected Random achieves approximately $\nicefrac{1}{4}$ of the performance of Oracle. With the exception of Oracle, which is inaccessible at inference time, the Reverse Blur approach from \cite{yang2023fine} with a CLIP ViT-L/14@336px visual backbone outperforms all other approaches, validating our choice at the level of Stage 2. However, the gap between the oracle and our zero-shot choice highlights there is significant room for improvement in Stage 3.
+
+\textbf{On Correcting Mistakes at Stage 2.} A natural question at this point is whether we can correct the zero-shot choice directly instead of requiring a Stage 3. To test this, we apply the constrained greedy matching algorithm by replacing $\ell_{\text{match}}$ from Eq. \ref{eq:greedy_matching_problem} with the CLIP similarity from Eq. \ref{eq:clip_selection} to the generation of masks for the first $1,000$ training set examples of RefCOCO, obtaining an oIoU of 38.56 and an mIoU of 41.21. Comparing these results with the performance of the instance choice from \ref{tab:ablation_stage_2} on the same examples and with the performance of \ours from Table \ref{tab:main_results}, correcting the zero-shot choice in this manner does not appear to be as effective as our Stage 3. 
+
+\subsection{Ablation on Stage 3: Correction via Constrained Greedy Matching}
+\label{sec:ablation_ct}
+
+With the goal of understanding how effective constrained greedy matching is to the performance of our method, we ablate over that second training step of Stage 3. Starting from the pre-trained model using set \greendataset masks, \zsbootstrap, we report in Table \ref{tab:ablation_stage_3} the effect of training on those masks for 40 further epochs to match the total compute used in our method (\textsc{+40 epochs}) as well as training with constrained greedy matching (\ours). Observe that training for a further 40 epochs on set \greendataset masks leads to a minimal increment over the baseline performance, while allowing the model to choose the greedy match from all the instance masks (set \bluedataset masks) via the loss from Section \ref{sec:stage_3} leads to a performance boost.
+
+\begin{table}[t]
+  \caption{\textbf{Constrained Greedy Matching Ablation}: comparison of fine-tuning \zsbootstrap (pre-trained on set \protect\greendataset masks) using the same zero-shot selected masks for 40 further epochs (\textsc{+40 epochs}) and constrained greedy matching (\ours).}
+  \label{tab:ablation_stage_3}
+  \centering
+  {
+  \scriptsize
+  \begin{tabular}{P{0.09\textwidth}p{0.18\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}P{0.07\textwidth}}
+    \toprule
+    \multirow{2}{*}{} & \multirow{2}{*}{} & \multicolumn{3}{c}{RefCOCO} & \multicolumn{3}{c}{RefCOCO+} & \multicolumn{3}{c}{RefCOCOg}\\
+    & & val & testA & testB & val & testA & testB & val(U) & test(U) & val(G) \\
+    \midrule
+    \multirow{3}{*}{oIoU} & \zsbootstrap & 35.05 & 42.86 & 26.71 & 36.18 & 45.37 & 27.46 & 38.97 & 40.88 & 37.61\\
+    & \textsc{+40 epochs} & 37.02 & 45.77 & 29.08 & 36.71 & 45.76 & 28.61 & 38.96 & 40.90 & 36.87\\
+    & \ours & \textbf{57.22} & \textbf{64.11} & \textbf{48.23} & \textbf{47.97} & \textbf{56.79} & \textbf{34.91} & \textbf{43.18} & \textbf{45.12} & \textbf{42.58}\\
+    
+    \midrule
+    \midrule
+
+    \multirow{3}{*}{mIoU} & \zsbootstrap & 39.49 & 46.70 & 28.93 & 39.56 & 47.86 & 29.76 & 44.25 & 45.35 & 42.09\\
+     & \textsc{+40 epochs} & 41.12 & 48.86 & 31.21 & 40.53 & 48.55 & 31.15 & 44.02 & 44.96 & 42.27\\
+     & \ours & \textbf{63.15} & \textbf{69.37} & \textbf{53.81} & \textbf{54.03} & \textbf{62.19} & \textbf{40.28} & \textbf{49.51} & \textbf{50.31} & \textbf{49.78}\\
+    \bottomrule
+  \end{tabular}
+  }
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{1\textwidth}
+        \centering
+        \includegraphics[width=0.94\textwidth]{figures/constrained_greedy_matching_examples.pdf}
+    \end{subfigure}
+    \caption{\textbf{Qualitative Constrained Greedy Matching Ablation}: qualitative training set examples of the RefCOCO dataset with all the masks available (Mask Options), the model's output (Model Prediction) and the mask which will be used in the cross-entropy loss term in the training (CE Mask). In (a) \textsc{+40 epochs}, the training is limited to the single zero-choice mask, which in this case is incorrect for one example per pair. Our constrained greedy matching loss in (b) (\ours) can choose between different instances of the class, allowing it to correct the initial zero-shot error.}
+    \label{fig:ablation_ct_examples}
+\end{figure}
+
+To qualitatively understand the significant improvement brought by constrained greedy matching, in Figure~\ref{fig:ablation_ct_examples} we showcase RefCOCO training dataset examples where \zsours was originally wrong for one of them. For example, in rows 1 and 2 of Figure \ref{fig:ablation_ct_examples} both \textit{"catcher"} and \textit{"umpire"} are matched to the catcher by \zsours, which means the \textsc{+40 epochs} model is always forced to choose that mask (CE Mask is always that zero-shot one). By contrast, our constrained greedy matching loss allows the model to choose from all the players in the field, such that when the catcher mask is matched to the prediction from row 1, \textit{"umpire"} is now matched to the umpire mask given the mIoU is greater with that one than with any of the remaining ones. By allowing the model to choose between the training masks in greedy matching, the model is able to recover from the incorrect zero-shot choice in these cases -- this effect is compounded over the training epochs as better matching initially leads to quicker correction of future mistakes.
+
+
+
+\section{Discussion and Limitations}
+
+
+We propose a three-stage pipeline for weakly-supervised RIS that obtains all the instance masks for the referred object (\textit{segment}), gets a good first guess on the right one using a zero-shot instance choice method (\textit{select}), and then bootstrap and corrects it through the constrained greedy matching loss (\textit{correct}). Our zero-shot method (\zsours) outperforms other zero-shot baselines by as much as $16.5\%$, and our full method (\ours) sets the new state-of-the-art for this task, reducing the gap between weakly-supervised and fully-supervised models to as little as $7\%$ in some cases from nearly $33\%$ with TRIS \cite{liu2023referring}. 
+We show \ours is more successful in datasets where there are more referenced objects per image. A future direction for this work would be to explore using a pre-trained visual question answering model to automatically generate these multiple references. One of the limitations of our method is the class projection mechanism used in Stage 1, which requires one to know \textit{a priori} at least the general types of objects that will be encountered. With the emergence of more performing open-vocabulary instance segmentation methods, this need will likely fade as the Class Projection (CP) gap present in Table \ref{tab:ablation_stage_1} will be reduced.
+
+
+
+

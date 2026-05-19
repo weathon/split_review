@@ -1,0 +1,328 @@
+\title{Do I Know This Entity? Knowledge Awareness and Hallucinations in Language Models}
+
+\begin{abstract}
+Hallucinations in large language models are a widespread problem, yet the mechanisms behind whether models will hallucinate are poorly understood, limiting our ability to solve this problem. Using sparse autoencoders as an interpretability tool, we discover that a key part of these mechanisms is \textit{entity recognition}, where the model detects if an entity is one it can recall facts about. Sparse autoencoders uncover meaningful directions in the representation space, these detect whether the model recognizes an entity, e.g. detecting it doesn't know about an athlete or a movie. This suggests that models can have self-knowledge: internal representations about their own capabilities. These directions are causally relevant: capable of steering the model to refuse to answer questions about known entities, or to hallucinate attributes of unknown entities when it would otherwise refuse. We demonstrate that despite the sparse autoencoders being trained on the base model, these directions have a causal effect on the chat model's refusal behavior, suggesting that chat finetuning has repurposed this existing mechanism. Furthermore, we provide an initial exploration into the mechanistic role of these directions in the model, finding that they disrupt the attention of downstream heads that typically move entity attributes to the final token.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Large Language Models (LLMs) have remarkable capabilities~\citep{radford2019language,gpt3,hoffmann2022an,palm} yet have a propensity to hallucinate: generating text that is fluent but factually incorrect or unsupported by available information~\citep{hallucinations_nlg,minaee2024large}. This significantly limits their application in real-world settings where factuality is crucial, such as healthcare. Despite the prevalence and importance of this issue, the mechanistic understanding of whether LLMs will hallucinate on a given prompt remains limited. While there has been much work interpreting factual recall~\citep{geva-etal-2023-dissecting,nanda2023factfinding,chughtai2024summing}, it has mainly focused on the mechanism behind recalling known facts, not on hallucinations or refusals to answer, leaving a significant gap in our understanding.
+
+Language models can produce hallucinations due to various factors, including flawed data sources or outdated factual knowledge~\citep{huang2023surveyhallucinationlargelanguage}. However, an important subset of hallucinations occurs when models are prompted to generate information they don't possess. We operationalize this phenomenon by considering queries about entities of different types (movies, cities, players, and songs). Given a question about an unknown entity, the model either hallucinates or refuses to answer. In this work, we find linear directions in the representation space that encode a form of self-knowledge: assessing their own knowledge or lack thereof regarding specific entities. These directions are causally relevant for whether it refuses to answer. We note that the existence of this kind of self-knowledge does not necessarily imply the existence of other forms of self-knowledge, and may be specific to the factual recall mechanism.
+
+We find these directions using Sparse Autoencoders~(SAEs)~\citep{bricken2023monosemanticity,cunningham2023sparse}. SAEs are an interpretability tool for finding a sparse, interpretable decomposition of model representations. They are motivated by the Linear Representation Hypothesis~\citep{park2023linear,mikolov_distributed}: that interpretable properties of the input (features) such as sentiment~\citep{tigges2023linear} or truthfulness~\citep{li2023inferencetime,zou2023representation} are encoded as linear directions in the representation space, and that model representations are sparse linear combinations of these directions. We use Gemma Scope~\citep{lieberum2024gemmascopeopensparse}, which offers a suite of SAEs trained on every layer of Gemma 2 models~\citep{gemmateam2024gemma2improvingopen}, and find internal representations of self-knowledge in Gemma 2 2B and 9B.
+
+\citet{arditi2024refusallanguagemodelsmediated} discovered that the decision to refuse a harmful request is mediated by a single direction. Building on this work, we demonstrate that a model's refusal to answer requests about attributes of entities (\textit{knowledge refusal}) can similarly be steered with our found entity recognition directions. This finding is particularly intriguing given that Gemma Scope SAEs were trained on the base model on pre-training data. Yet, SAE-derived directions have a causal effect on knowledge-based refusal in the chat model-a behavior incentivized in the finetuning stage. This insight provides additional evidence for the hypothesis that finetuning often repurposes existing mechanisms~\citep{jain2024mechanistically,prakash2024finetuningenhancesexistingmechanisms,refuse_too}.
+
+
+\begin{table}[!t]
+\centering
+  {\fontsize{8.75}{9}\selectfont
+\begin{tabular}{p{0.43\textwidth}p{0.43\textwidth}}
+\toprule
+\textbf{Known Entity Latent Activations} & \textbf{Unknown Entity Latent Activations} \\
+\midrule
+Michael \hlgreen{Jordan}{18} & Michael \hlred{Jo}{8}\hlred{ordan}{16} \\
+\addlinespace
+When was the player \hlgreen{LeBron}{8} \hlgreen{James}{4} born? & When was the player Wilson \hlred{Brown}{15} born? \\
+\addlinespace
+He was born in the city of \hlgreen{San Francisco}{4} & He was born in the city of \hlred{Anthon}{5} \\
+\addlinespace
+I just watched the movie 12 \hlgreen{Angry}{7} \hlgreen{Men}{8} & I just watched the movie 20 \hlred{Angry}{7} \hlred{Men}{7} \\
+\addlinespace
+The \hlgreen{Beatles}{17} song `Yellow \hlgreen{Submarine}{7}\hlgreen{`}{3} & The Beatles song `\hlred{Turquoise}{16} \hlred{Submarine}{8}\hlred{'}{5} \\
+\bottomrule
+\end{tabular}}
+\caption{Pair of sparse autoencoder latents that activate on known (left) and unknown entities (right) respectively. They fire consistently across entity types (movies, cities, songs, and players).}
+\label{table:activations_unknown_latent}
+\end{table}
+
+Overall, our contributions are as follows:
+
+\begin{itemize}
+    \item Using sparse autoencoders (SAEs) we \textbf{discover directions in the representation space on the final token of an entity, detecting whether the model can recall facts about the entity}, a form of self-knowledge about its own capabilities.
+    \item Our findings show that \textbf{entity recognition directions generalize across diverse entity types}: players, films, songs, cities, and more.
+    \item We demonstrate that these directions \textbf{causally affect knowledge refusal in the chat model}, i.e. by steering with these directions, we can cause the model to hallucinate rather than refuse on unknown entities, and refuse to answer questions about known entities.
+    \item We find that \textbf{unknown entity recognition directions disrupt the factual recall mechanism}, by suppressing the attention of attribute extraction heads, shown in prior work \citep{nanda2023factfinding,geva-etal-2023-dissecting} to be a key part of the mechanism.
+    \item We go beyond merely understanding knowledge refusal, and find \textbf{SAE latents, seemingly representing uncertainty, that are predictive of incorrect answers}.
+\end{itemize}
+
+
+
+\section{Sparse Autoencoders}
+
+\begin{figure}[!t]
+\begin{centering}
+    \includegraphics[width=1\textwidth]{images/freq_acts_scores_v2.pdf}
+    \caption{We identify SAE latents in the final token of the entity residual stream (i.e. hidden state) that almost exclusively activate on either unknown or known entities (scatter plot on the left). Modulating the activation values of these latents, e.g. increasing the known entity latent when asking a question about a made-up athlete increases the tendency to hallucinate.}
+    \label{fig:freq_acts_scores}
+\end{centering}
+\end{figure}
+Dictionary learning~\citep{OLSHAUSEN19973311} offers a powerful approach for disentangling features in superposition. Sparse Autoencoders (SAEs) have proven to be effective for this task~\citep{sparse_alignment_forum,bricken2023monosemanticity}. SAEs project model representations ${\vx \in \mathbb{R}^{d}}$ into a larger dimensional space ${a(\vx) \in \mathbb{R}^{d_{SAE}}}$. In this work, we use the SAEs from Gemma Scope~\citep{lieberum2024gemmascopeopensparse}\footnote{We use the default sparsity for each layer, the ones available in Neuronpedia~\citep{neuronpedia}.}, which use the JumpReLU SAE architecture~\citep{rajamanoharan2024jumpingaheadimprovingreconstruction}, which defines the function
+\begin{equation}\label{eq:jumprelu_sae}
+    \text{SAE}(\vx) = a(\vx)\mW_{\text{dec}} + \vb_{\text{dec}},
+\end{equation}
+where
+\begin{equation}\label{eq:jumprelu_sae2}
+    a(\vx) = \text{JumpReLU}_{\theta}\bigl(\vx\mW_{\text{enc}} + \vb_{\text{enc}}\bigr),
+\end{equation}
+with the activation function~\citep{erichson2019jumpreluretrofitdefensestrategy} $\text{JumpReLU}_{\theta}(\vx) = \vx \odot H(\vx - \theta)$, composed by $H$, the Heaviside step function, and $\theta$, a learnable vector acting as a threshold. Intuitively, this is zero below the threshold, and then the identity, with a discontinuous jump at the threshold. $\mW_{\text{enc}}$, $\vb_{\text{enc}}$ and $\mW_{\text{dec}}$, $\vb_{\text{dec}}$ are the weight matrices and bias of the encoder and decoder respectively. We refer to \textit{latent activation} to a component in $a(\vx)$, while we reserve the term \textit{latent direction} to a (row) vector in the dictionary $\mW_{\text{dec}}$.
+
+ \Cref{eq:jumprelu_sae} shows that the model representation can be approximately reconstructed by a linear combination of the \textit{SAE decoder latents}, which often represent monosemantic features~\citep{cunningham2023sparse,bricken2023monosemanticity,templeton2024scaling,gao2024scalingevaluatingsparseautoencoders}. By incorporating a sparsity penalty into the training loss function, we can constrain this reconstruction to be a sparse linear combination, thereby enhancing interpretability:
+\begin{equation}\label{eq:loss_sae}
+    \mathcal{L}(\vx) = \underbrace{\norm{\vx - \text{SAE}(\vx)}_2^2}_{\mathcal{L}_{\text{reconstruction}}} + \underbrace{\lambda\norm{a(\vx)}_0}_{\mathcal{L}_{\text{sparsity}}}.
+\end{equation}
+
+\paragraph{Steering with SAE Latents.} Recall from~\Cref{eq:jumprelu_sae} that SAEs reconstruct a model's representation as ${\vx \approx a(\vx)\mW_{\text{dec}} + \vb_{\text{dec}}}$. This means that the reconstruction is a linear combination of the decoder latents (rows) of $\mW_{\text{dec}}$ plus a bias, i.e. ${\vx \approx \sum_{j} a_j(\vx) \mW_{\text{dec}}[j,:]}$. Thus, increasing/decreasing the activation value of an SAE latent, $a_j(\vx)$, is equivalent to doing activation steering~\citep{turner2023activation} with the decoder latent vector, i.e. updating the residual stream as follows:
+\begin{equation}\label{eq:act_steering}
+\vx^{\text{new}} \gets \vx + \alpha \vd_j.
+\end{equation}
+
+
+
+\section{Methodology}
+
+To study how language models reflect knowledge awareness about entities, we build a dataset with four different entity types: (basketball) players, movies, cities, and songs from Wikidata~\citep{wikidata}. For each entity, we extract associated attributes available in Wikidata. Then, we create templates of the form (entity type, entity name, relation, attribute) and prompt Gemma 2 2B and 9B models~\citep{gemmateam2024gemma2improvingopen} to predict the attribute given (entity type, relation, entity name), for instance:
+
+\begin{equation}\label{ex:factual_recall_example}
+\hspace{-0.5cm}\texttt{The} \eqnmark[blue_drawio]{entity_type}{\texttt{movie}}\eqnmark[green_drawio]{entity_name}{\texttt{12 Angry Men}} \eqnmark[purple]{relation}{\texttt{was directed by}} \eqnmarkbox[dark_green_drawio]{attribute}{\text{\rule{0.4cm}{0.1mm}}}
+\annotate[yshift=0em]{above, left, label below}{entity_type}{Entity type}
+\annotate[yshift=0em]{above, label below}{relation}{Relation}
+\annotate[yshift=0em]{below, left, label above}{entity_name}{Entity name}
+\annotate[yshift=0em]{below, right, label above}{attribute}{Attribute}
+\end{equation}
+
+We then categorize entities into `known' or `unknown'. Known entities are those where the model gets at least two attributes correct, while unknown are where it gets them all wrong, we discard any in-between.}. See~\Cref{sec:division_known_unknown} for a description of the process. Finally, we split the entities into train/validation/test (50\%, 10\%, 40\%) sets.
+
+We run the model on the set of prompts containing known and unknown entities. Inspired by~\citet{meng2022locating,geva-etal-2023-dissecting,nanda2023factfinding} we use the residual stream of the final token of the entity, $\vx^{\text{known}}$ and $\vx^{\text{unknown}}$. In each layer ($l$), we compute the activations of each latent in the SAE, i.e.~$a_{l,j}(\vx^{\text{known}}_l)$ and $a_{l,j}(\vx^{\text{unknown}}_l)$. For each latent, we obtain the fraction of the time that it is active (i.e. has a value greater than zero) on known and unknown entities respectively:
+\begin{equation}\label{eq:frequency_activations}
+f^{\text{known}}_{l,j} = \frac{\sum_i^{N^{\text{known}}}\mathds{1}[a_{l,j}(\vx_{l,i}^{\text{known}}) > 0]}{N^{\text{known}}}, \quad f^{\text{unknown}}_{l,j} = \frac{\sum_i^{N^{\text{unknown}}}\mathds{1}[a_{l,j}(\vx_{l,i}^{\text{unknown}}) > 0]}{N^{\text{unknown}}},
+\end{equation}
+where $N^{\text{known}}$ and $N^{\text{unknown}}$ are the total number of prompts in each subset. Then, we take the difference, obtaining the \textit{latent separation scores} ${s^{\text{known}}_{l,j} = f^{\text{known}}_{l,j} - f^{\text{unknown}}_{l,j}}$ and ${s^{\text{unknown}}_{l,j} = f^{\text{unknown}}_{l,j} - f^{\text{known}}_{l,j}}$, for detecting known and unknown entities respectively.
+ 
+
+
+\section{Sparse Autoencoders Uncover Entity Recognition Directions}
+
+
+\begin{comment}
+\begin{figure}[t]
+\centering
+    \includegraphics[width=0.8\textwidth]{images/entities_top_scores_layers_known_unknown.png}
+    \caption{Layerwise evolution of the Top 5 latents, as measured by their known (left) and unknown (right) latent separation scores ($s^{\text{known}}$ and $s^{\text{unknown}}$). Error bars show maximum and minimum scores. MaxMin (red line) refers to the minimum separation score across entities of the best latent. This represents how entity-agnostic is the most general latent per layer. In both cases, the middle layers provide the best-performing latents.}
+    \label{fig:evolution_scores}
+\end{figure}
+\end{comment}
+
+We find that the separation scores of some of the SAE latents in the training set are high, i.e. they fire almost exclusively on tokens of either known or unknown entities, as depicted in the scatter plot in~\Cref{fig:freq_acts_scores} for Gemma 2 2B and~\Cref{fig:gemma-2-9b_feature_activation_frequencies_player},~\Cref{sec:gemma-2-9b_feature_activation_frequencies} for Gemma 2 9B. An interesting observation is that latent separation scores reveal a consistent pattern across all entity types, with scores increasing throughout the model and reaching a peak around layer 9 before plateauing~(\Cref{fig:evolution_scores}). This indicates that \textit{latents better distinguishing between known and unknown entities are found in the middle layers}.
+
+\begin{figure}
+\centering
+\begin{minipage}{.5\textwidth}
+  \centering
+  \includegraphics[width=.85\linewidth]{images/gemma-2-2b_entities_top_scores_layers_known.pdf}
+\end{minipage}%
+\begin{minipage}{.5\textwidth}
+  \centering
+  \includegraphics[width=.85\linewidth]{images/gemma-2-2b_entities_top_scores_layers_unknown.pdf}
+\end{minipage}
+\caption{Layerwise evolution of the Top 5 latents in Gemma 2 2B SAEs, as measured by their known (left) and unknown (right) latent separation scores ($s^{\text{known}}$ and $s^{\text{unknown}}$). Error bars show maximum and minimum scores. MaxMin (red line) refers to the minimum separation score across entities of the best latent. This represents how entity-agnostic is the most general latent per layer. In both cases, the middle layers provide the best-performing latents.}
+\label{fig:evolution_scores}
+\end{figure}
+
+We also examine the level of generality of the latents by measuring their minimum separation score across entity types ($t$): players, song, cities and movies. A high minimum separation score indicates that a latent performs robustly across entity types, suggesting strong generalization capabilities. For this purpose, for each layer ($l$) we compute ${\text{MaxMin}^{\text{known},l} = \max_{j} \min_{t} s^{\text{known},t}_{l,j}}$, and similarly for unknown entities. The increasing trend shown in the MaxMin~(red) line in~\Cref{fig:evolution_scores} for Gemma 2 2B and in~\Cref{fig:gemma_2_9b_entities_top_scores_layers_known_unknown},~\Cref{sec:evol_latents_gemma_2_9b} for Gemma 2 9B suggests that more \textit{generalized} latents—those that distinguish between known and unknown entities across various entity types—are concentrated in these intermediate layers. This finding points to a hierarchical organization of entity representation within the model, with more specialized, worse quality, latents in earlier layers and more generalized, higher quality entity-type-agnostic features emerging in the middle layers.
+
+Next, we compute the minimum separation scores by considering every SAE latent in every layer, i.e. ${\min_{t} s^{\text{known},t}_{l,j}}$ for $1\leq l \leq L$ and  $1\leq j \leq d_{SAE}$, and equivalently for unknown entities. To ensure specificity to entity tokens, we exclude latents that activate frequently (>2\%) on random tokens sampled from the Pile dataset~\citep{pile}. The latents with highest minimum separation scores exhibit the most generalized behavior out of all latents, and will be the focus of our subsequent analysis:
+\begin{equation}\label{eq:argmax_min}
+\hspace{-0.3cm}
+    \text{\textit{known entity latent}} = \argmax_{l,j}\; \underbrace{\min_{t} s^{\text{known},t}_{l,j}}_{\mathclap{\substack{\text{min known separation score} \\ \text{of latent $l,j$ across entity types}}}}\;\; \text{and}\;\; \text{\textit{unknown entity latent}} = \argmax_{l,j}\; \min_{t} \underbrace{s^{\text{unknown}, t}_{l,j}}_{\mathclap{\substack{\text{min unknown separation score} \\ \text{of latent $l,j$ across entity types}}}}.
+\end{equation}
+~\Cref{table:activations_unknown_latent} demonstrates the activation patterns of the Gemma 2 2B topmost known entity latent on prompts with well-known entities~(left), and the patterns for the topmost unknown entity latent~(right), firing across entities of different types that cannot be recognized. In~\Cref{sec:latents_diverse_entities} we provide the activations of these latents on sentences containing a diverse set of entity types, suggesting that indeed they are highly general. In the following sections, we explore how these latents influence the model's overall behavior.
+\begin{figure}[!t]
+\centering
+\begin{minipage}{.57\textwidth}
+  \centering
+  \includegraphics[width=.99\linewidth]{images/gemma-2-2b_k0_u0_entity_last_to_end_k400_u400_test.pdf}
+\end{minipage}%
+\hspace{15pt}
+\begin{minipage}{.38\textwidth}
+  \centering
+  \includegraphics[width=.73\linewidth]{images/example_unknown_steering.pdf}
+\end{minipage}
+\caption{\textbf{Left}: Number of times Gemma 2 2B refuses to answer in 100 queries about unknown entities. We examine the unmodified original model, the model steered with the known entity latent and unknown entity latent, and the model with the unknown entity latent projected out of its weights (referred to as Orthogonalized model). Steering with (10) random latents are shown for comparison. \textbf{Right}:~This example illustrates the effect of steering with the unknown entity recognition latent (same as in~\Cref{table:activations_unknown_latent}). The steering induces the model to refuse to answer about a well-known basketball player.}
+\label{fig:refusal_plot}
+\end{figure}
+
+
+
+\section{Entity Recognition Directions Causally Affect Knowledge Refusal}
+
+\begin{comment}
+  \begin{figure}[!t]
+	\begin{centering}\includegraphics[width=0.85\textwidth]{images/refusal_plot.png}
+	\caption{\textbf{Left}:~Number of times the model refuses to answer in 100 queries about unknown entities. We examine the unmodified original model, the model steered with the known entity latent, the model steered with the unknown entity latent, and a version with the unknown entity latent projected out the model weights (referred to as Orthogonalized model). \textbf{Right}:~This example illustrates the effect of steering with the unknown entity recognition latent (same as in~\Cref{table:activations_unknown_latent}). The steering induces the model to refuse to answer about a well-known basketball player.}
+	\label{fig:refusal_plot}
+	\end{centering}
+\end{figure}
+\end{comment}
+
+We define \textit{knowledge refusal} as the model declining to answer a question due to reasons like a lack of information or database access as justification, rather than safety concerns. To quantify knowledge refusals, we adapt the factual recall prompts as in Example~\ref{ex:factual_recall_example} into questions:
+
+\begin{equation}\label{ex:question_factual_recall_example}
+\hspace{-0.5cm}\eqnmark[purple]{relation}{\texttt{Who directed}} \texttt{the} \eqnmark[blue_drawio]{entity_type}{\texttt{movie}}\eqnmark[green_drawio]{entity_name}{\texttt{12 Angry Men}} \texttt{? }\eqnmarkbox[dark_green_drawio]{attribute}{\text{\rule{0.4cm}{0.1mm}}}
+\annotate[yshift=0em]{above, right, label below}{entity_type}{Entity type}
+\annotate[yshift=0em]{above, left, label below}{relation}{Relation}
+\annotate[yshift=0em]{below, left, label above}{entity_name}{Entity name}
+\annotate[yshift=0em]{below, right, label above}{attribute}{Attribute}
+\end{equation}
+
+and we define a set of common knowledge refusal completions and detect if any of these occur with string matching, e.g. \textit{`Unfortunately, I don't have access to real-time information...'}. Gemma 2 includes both a base model, and a fine-tuned chat (i.e. instruction tuned) model. In~\Cref{sec:saes_entity_recognition} we found the entity recognition latents by studying the base model, but here focus on the chat model, as they have been explicitly fine-tuned to perform knowledge refusal where appropriate~\citep{gemmateam2024gemma2improvingopen}\footnote{The Gemma 2 technical report~\citep{gemmateam2024gemma2improvingopen} mentions \textit{``including subsets of data that encourage refusals to minimize hallucinations improves performance on factuality metrics''}. This pattern is consistent with recent language models, such as Llama 3.1~\citep{dubey2024llama3herdmodels}, where the explicit finetuning process for knowledge refusal has been documented.}, and the factuality of chat models is highly desirable.
+We hypothesize that entity recognition directions could be used by chat models to induce knowledge refusal. To evaluate this, we use a test set sample of 100 questions about unknown entities, and measure the number of times the model refuses by steering~(as in~\Cref{eq:act_steering}) with the entity recognition latents the last token of the entity and the following end-of-instruction-tokens.\footnote{We use a validation set to select an appropriate steering coefficient $\alpha$. In~\Cref{sec:examples_steering_coeff} we show generations of Gemma 2B IT with different steering coefficients. We select $\alpha \in [400,550]$, which corresponds to around two times the norm of the residual stream in the layers where the entity recognition latents are present~(\Cref{sec:norm_residual_streams}).} \Cref{fig:refusal_plot}~(left) illustrates the original model refusal rate~(blue bar), showing some refusal across entity types. We see that the entity recognition SAE latents found in the base model transfer to the chat model and, by increasing the known entity latent activation we are able to reduce refusal in three entity types. Conversely, increasing the unknown entity latent induces almost 100\% refusal across all entity types. We also include an \textit{Orthogonalized model} baseline, which consists of doing weight orthogonalization~\citep{arditi2024refusallanguagemodelsmediated} on every matrix writing to the residual stream. Weight orthogonalization modifies each row of a weight matrix to make it perpendicular to a specified direction vector $\vd$. This is achieved by subtracting the component of each row that is parallel to $\vd$:
+\begin{equation}\label{eq:weight_orthogonalization}
+\mW_{\text{out}}^{\text{new}} \gets \mW_{\text{out}} - \mW_{\text{out}}\vd^{\intercal}\vd.
+\end{equation}
+By doing this operation on every output matrix in the model we ensure no component is able to write into that direction. The resulting orthogonalized model exhibits a large reduction in refusal responses, suggesting this direction plays a crucial role in the model's knowledge refusal behavior. We also include the average refusal rate after steering with 10 differents random latents, using the same configuration (layer and steering coefficient) that the known and unknown entity latents respectively. Additional analysis of the Gemma 2 9B model, detailed in Section~\ref{sec:refusal_gemma2_9b}, reveals similar patterns, albeit with less pronounced effects compared to the 2B model.
+
+\Cref{fig:refusal_plot}~(right) shows a refusal response for a well-known basketball player generated by steering with the unknown entity latent. In~\Cref{fig:freq_acts_scores}~(right) we observe that when asked about a non-existent player, Wilson Brown, the model without intervention refuses to answer. However, steering with the known entity latent induces a hallucination.
+
+
+\section{Mechanistic Analysis}
+
+\begin{figure}[!t]
+	\begin{centering}\includegraphics[width=1\textwidth]{images/attn_plots.pdf}
+	\caption{(a,b) Activation patching on the residual streams and the output of attention heads in the last position (song entities). We patch clean (from known entities prompts) representations into a corrupted forward pass (from unknown entities prompts) and measure the logit difference recovered. (c) Attention paid from the last position to the last token of the entity is greater when faced with a known entity in attribute-extraction heads. (d,e,f) Effect on attention scores, as in (c), after steering the last token of the entity with the unknown entity latent (d), known entity latent (e), and a random vector with same norm (f).}
+	\label{fig:attn_plots}
+	\end{centering}
+\end{figure}
+\paragraph{Entity Recognition Directions Regulate Attention to Entity.}\label{sec:attn_behavior}
+
+In the previous section, we saw that entity recognition latents had a causal effect on knowledge refusal. Here, we look at how they affect the factual recall mechanism (\textit{aka} circuit) in prompts of the format of Example~\ref{ex:factual_recall_example}. This has been well studied before on other language models~\citep{nanda2023factfinding,geva-etal-2023-dissecting,meng2022locating}. We replicate the approach of~\citet{nanda2023factfinding} on Gemma 2 2B and 9B and find a similar circuit. Namely, early attention heads merge the entity's name into the last token of the entity, and downstream attention heads extract relevant attributes from the entity and move them to the final token position~(\Cref{fig:attn_plots}~(a, b)), this pattern holds across various entity types and model sizes~(\Cref{sec:act_patching_all_gemma_2_2b} and \Cref{sec:act_patching_all_gemma_2_9b}). To do the analysis, we perform activation patching~\citep{geiger-etal-2020-neural,causal_mediation_bias,meng2022locating} on the residual streams and attention heads' outputs~(see~\Cref{sec:activation_patching} for a detailed explanation on the method). We use the denoising setup~\citep{heimersheim2024use}, where we patch representations from a clean run (with a known entity) and apply it over the run with a corrupted input (with an unknown entity).\footnote{We show the proportion of logit difference recovered after each patch in~\Cref{fig:attn_plots}~(a). A recovered logit difference of 1 indicates that the prediction after patching is the same as the original prediction in the clean run.}
+Expanding on the findings of~\citet{yuksekgonul2024attention}, who established a link between prediction accuracy and attention to the entity tokens, our study reveals a large disparity in attention between known and unknown entities, for instance the attribute extraction heads L18H5 and L20H3~(\Cref{fig:attn_plots}~(c)), which are overall relevant across entity types in Gemma 2 2B (see example of attributes extracted by these heads in~\Cref{sec:heads_entities_attributes}). Notably, attention scores are higher when faced with a known entity. We also observe a causal relationship between the entity recognition latents and the behavior of these attention heads. Steering with the top unknown entity latent reduces the attention to the last token of the entity, even in prompts with a known entity~(\Cref{fig:attn_plots}~(d)), while steering with the known entity latent increases the attention scores~(\Cref{fig:attn_plots}~(e)). We show in~\Cref{fig:attn_plots}~(f) the results of steering with a random vector baseline for comparison, and in~\Cref{sec:rnd_latent_steering} the results of steering with a random SAE latent. In~\Cref{sec:attn_after_steering} we illustrate the average attention score change to the entity tokens after steering on the residual streams of the last token of the entities in Gemma 2 2B and 9B with the top 3 known and unknown entity latents. The results reveal an increase/decrease attention score across upper layer heads, with the 9B model showing more subtle effects when steered using unknown latents.
+
+These results provide compelling evidence that the entity recognition SAE latent directions play a crucial role in regulating the model's attention mechanisms, and thereby their ability to extract attributes.%This establishes a link between the model's self-evaluated knowledge and its influence on both accuracy and the occurrence of factual errors.
+
+\begin{figure}[!t]
+	\begin{centering}\includegraphics[width=0.9\textwidth]{images/logit_diffs_dyk.pdf}
+	\caption{Logit difference between ``Yes'' and ``No'' predictions on the question ``Are you sure you know the \{entity\_type\} \{entity\_name\}? Answer yes or no.'' after steering with unknown (left) and known (right) entity recognition latents.}
+	\label{fig:logit_diffs_dyk}
+	\end{centering}
+\end{figure}
+
+\paragraph{Early Entity Recognition Directions Regulate Expressing Knowledge Uncertainty.}
+
+We have shown that the entity recognition latents causally affect the model's knowledge refusal, implicitly using its knowledge of whether it recognises an entity, but not whether they are used when explicitly asking a model whether it recognises an entity. To investigate this, we use the following prompt structure:
+\begin{equation}\label{ex:do_you_know_ex}
+\begin{aligned}
+\texttt{Are you sure you know the \{entity\_type\}} \; \{\texttt{entity}\} \texttt{? Answer yes or no. Answer: \rule{0.6cm}{0.1mm}}
+\end{aligned}
+\end{equation}
+We then steer the residual streams of the last token of the entity by upweighting the entity recognition latents. In~\Cref{fig:logit_diffs_dyk} we show the results on the logit difference between \texttt{Yes} and \texttt{No} responses. The left plot illustrates the effect of steering known entities prompts with the unknown entity latent. This intervention results in a reduction of the logit difference. For comparison, we include a random baseline where we apply a randomly sampled SAE latent with the same coefficient. In the right plot, we steer unknown entities prompts with the known entity latent. Despite the model's inherent bias towards \texttt{Yes} predictions for unknown entities (indicated by positive logit differences in the `Original' column), which indicates the model struggles to accurately express their uncertainty~\citep{yona2024largelanguagemodelsfaithfully}, this intervention leads to a positive shift in the logit difference, suggesting that the entity recognition latents, although slightly, have an effect on the expression of uncertainty about knowledge of entities. A similar pattern can be observed in Gemma 2 9B~(\Cref{sec:gemma_2_9b_self_reflection}).
+\begin{table}[t]
+\centering
+{\fontsize{8.75}{9}\selectfont
+\begin{tabular}{p{0.88\textwidth}}
+\toprule
+\multicolumn{1}{c}{\textbf{`Unknown' Latent Activations}} \\
+\midrule
+``Apparently one or two people were shooting or shooting at each other \hlred{for}{4} \hlred{reasons}{15} \hlred{unknown}{8} when eight people were struck by the gunfire \\
+\addlinespace
+...and the Red Cross all responded to the fire. The \hlred{cause}{15} \hlred{of}{3} \hlred{the}{3} \hlred{fire}{15} \hlred{remains}{3} \hlred{under}{3} investigation. \\
+\addlinespace
+The Witcher Card Game will have another round of beta tests this \hlred{spring}{1} \hlred{(}{8}\hlred{platforms}{15} \hlred{TBA}{4}) \\
+\addlinespace
+\hlred{His}{5} \hlred{condition}{15} \hlred{was}{10} \hlred{not}{5} \hlred{disclosed}{3}, but police said he was described as stable. \\
+\bottomrule
+\end{tabular}}
+\caption{Activations of the Gemma 2B IT `unknown' latent on the maximally activating examples provided by Neuropedia~\citep{neuronpedia}.}
+\label{tab:3130}
+\end{table}
+
+
+\section{Uncertainty Directions}
+
+\begin{comment}
+\begin{figure}[!t]
+\footnotesize
+\begin{minipage}[b]{0.75\textwidth}
+  \centering
+{\fontsize{9}{9}\selectfont\begin{tabular}{p{0.85\textwidth}}
+\toprule
+\multicolumn{1}{c}{\textbf{`I Don't Know' (IDK) Latent Activations}} \\
+\midrule
+``Apparently one or two people were shooting or shooting at each other \hlred{for}{4} \hlred{reasons}{15} \hlred{unknown}{8} when eight people were struck by the gunfire \\
+\addlinespace
+...and the Red Cross all responded to the fire. The \hlred{cause}{15} \hlred{of}{3} \hlred{the}{3} \hlred{fire}{15} \hlred{remains}{3} \hlred{under}{3} investigation. \\
+\addlinespace
+The Witcher Card Game will have another round of beta tests this \hlred{spring}{1} \hlred{(}{8}\hlred{platforms}{15} \hlred{TBA}{4}) \\
+\addlinespace
+\hlred{His}{5} \hlred{condition}{15} \hlred{was}{10} \hlred{not}{5} \hlred{disclosed}{3}, but police said he was described as stable. \\
+\bottomrule
+\end{tabular}}
+      \end{minipage}
+    \hspace{0.2cm}
+  \begin{minipage}[b]{0.2\textwidth}
+    \centering
+    
+    \includegraphics[width=0.7\textwidth]{images/logits_3130_gemma_2b_it.png}
+    \end{minipage}
+    \caption{\textbf{Left}: Activation of the uncertainty latent on the maximally activating examples provided by Neuropedia. \textbf{Right}: Top 10 tokens with highest logit increases by latent's influence.}
+  \end{figure}
+\end{comment}
+
+Having studied how base models represent features for entity recognition, we now explore internal representations that may differentiate between correct and wrong answers. Our investigation focuses on chat models, which are capable of refusing to answer, and we search for directions in the representation space signaling uncertainty or lack of knowledge potentially indicative of upcoming errors. For this analysis we use our entities dataset, and exclude instances where the model refuses to respond, and leave only prompts that elicit either correct predictions or errors from the model.
+
+Our study focuses on the study of the residual streams \textit{before} the answer. We hypothesize that end-of-instruction tokens, which always succeed the instruction, may aggregate information about the whole question~\citep{marks2023geometry}.\footnote{This concept was termed by~\citet{tigges2023linear} as the `summarization motif'.} We select the token \texttt{model} and use examples such as:
+\begin{equation}
+\resizebox{.99\hsize}{!}{$
+    \texttt{<start\_of\_turn>user\textbackslash nWhen was the player Wilson Brown born?<end\_of\_turn>\textbackslash n<start\_of\_turn>} \underline{\texttt{model}}\texttt{\textbackslash n}$}
+\end{equation}
+
+For each entity type and layer with available SAE we extract the representations of the \texttt{model} residual stream, for both correct and mistaken answers, and gather the SAE latent activations. We are interested in seeing whether there are SAE latents that convey information about how unsure or uncertain the model is to answer to a question, but still fails to refuse, giving rise to hallucinations. 
+
+To capture subtle variations in model uncertainty, which may be represented even when attributes are correctly recalled, we focus on quantifying differences in activation levels between correct and incorrect responses. For each latent, we compute the t-statistic using two activation samples: $a_{l,j}(\vx_l^{\text{correct}})$ for correct responses and $a_{l,j}(\vx_l^{\text{error}})$ for incorrect ones. The t-statistic measures how different the two sample means are from each other, taking into account the variability within the samples:
+\begin{equation}\label{eq:t_test}
+    \text{t-statistic}_{l,j} = \frac{\mu({a_{l,j}(\vx_l^{\text{correct}}))} - \mu({a_{l,j}(\vx_l^{\text{error}}))}}{\sqrt{\frac{\sigma(a_{l,j}(\vx_l^{\text{correct}}))^2}{n^{\text{correct}}} + \frac{\sigma(a_{l,j}(\vx_l^{\text{error}}))^2}{n^{\text{error}}}}}.
+\end{equation}
+
+We use a pre-trained SAE for the 13th layer (out of 18) of Gemma 2B IT\footnote{\url{https://huggingface.co/jbloom/Gemma-2b-IT-Residual-Stream-SAEs}. We note that Gemma Scope doesn't provide SAEs for Gemma 2 2B IT.}, and the available Gemma Scope SAEs for Gemma 2 9B IT, at layers 10, 21, and 32 (out of 42). Our approach for detecting top latents, similar to the entity recognition method described in~\Cref{sec:saes_entity_recognition} focuses on the top latents with the highest minimum t-statistic score across entities, representing the most general latents. We split the dataset into train and test sets, and use the training set to select the top latents. The left panel of Figure~\ref{fig:logits_3130_gemma_2b_it_logits} reveals a distinct separation between the latent activations at the \texttt{model} token when comparing correct versus incorrect responses in the test set. Using this latent as a classifier, it achieves 73.2 AUROC score, and by calibrating the decision threshold on a validation set, it gets an F1 score of 72. See~\Cref{sec:split_gemma-2b-it_latent_3130_activation_distribution_by_entity} with separated errors by entity type. Table~\ref{tab:3130} illustrates the activations of the highest-scoring latent in Gemma 2B IT's SAE on a large text corpus~\citep{penedo2024finewebdatasetsdecantingweb}\footnote{\url{https://huggingface.co/datasets/HuggingFaceFW/fineweb}.}, showing it triggers on text related to uncertainty or undisclosed information. Figure~\ref{fig:logits_3130_gemma_2b_it_logits}~(right) illustrates the top tokens with higher logit increase by this latent, further confirming its association with concepts of unknownness.\footnote{We omit the players category since Gemma 2B IT refuses to almost all of those queries.} Similar latent separations between correct and incorrect answers can also be observed in Gemma 2 9B IT~(\Cref{sec:top_t_statistic_gemma_2_9b_it}).
+
+
+\begin{figure}[t]
+\centering
+\begin{minipage}{.5\textwidth}
+  \centering
+  \includegraphics[width=.8\linewidth]{images/gemma-2b-it_latent_3130_activation_distribution_by_entity.pdf}
+\end{minipage}%
+\begin{minipage}{.5\textwidth}
+  \centering
+  \includegraphics[width=.35\linewidth]{images/logits_3130.pdf}
+\end{minipage}
+ \caption{\textbf{Left}: Activation values of the Gemma 2B IT `unknown' latent on correct and incorrect responses. \textbf{Right}: Top 10 tokens with the highest logit increases by the `unknown' latent influence.}
+\label{fig:logits_3130_gemma_2b_it_logits}
+\end{figure}
+
+
+
+\section{Related Work}
+
+Recent advances in mechanistic interpretability in language models~\citep{ferrando2024primerinnerworkingstransformerbased} have shed light on the factual recall process in these systems. Key discoveries include the aggregation of entity tokens~\citep{nanda2023factfinding}, the importance of early MLPs for entity processing~\citep{rome}, and the identification of specialized extraction relation heads~\citep{geva-etal-2023-dissecting,chughtai2024summing}.
+Despite these insights, there remains a significant gap in our understanding of the mechanisms underlying failures in attribute extraction leading to hallucinations.~\citet{gottesman2024estimatingknowledgelargelanguage} demonstrated that the performance of probes trained on the residual streams of entities correlates with its ability to answer questions about them accurately.~\citet{yuksekgonul2024attention} established a link between increased attention to entity tokens and improved factual accuracy.~\citep{yu2024mechanisticunderstandingmitigationlanguage} proposed two mechanisms for non-factual hallucinations: inadequate entity enrichment in early MLPs and failure to extract correct attributes in upper layers. Our research aligns with studies on hallucination prediction~\citep{kossen2024semanticentropyprobesrobust,varshney2023stitch}, particularly those engaging with model internals~\citep{chwang2023androids,azaria-mitchell-2023-internal}.
+Additionally, our work contributes to the growing body of literature on practical applications of sparse autoencoders, as investigated by~\citet{marks2024sparsefeaturecircuitsdiscovering,attention_saes_gpt2_2}. While the practical applications of sparse autoencoders in language model interpretation are still in their early stages, our research demonstrates their potential.
+
+
+
+\section{Conclusions}
+
+In this paper, we use sparse autoencoders to identify directions in the model's representation space that encode a form of self-knowledge about entities. These directions, found in the base model, are causally relevant to the knowledge refusal behavior in the chat-based model. We demonstrated that, by manipulating these directions, we can control the model's tendency to refuse answers or hallucinate information. We also provide insights into how the entity recognition directions influence the model behavior, such as regulating the attention paid to entity tokens, and their influence in expressing knowledge uncertainty. Finally, we uncover directions representing model uncertainty to specific queries, capable of discriminating between correct and mistaken answers. This work contributes to our understanding of language model behavior and opens avenues for improving model reliability and mitigating hallucinations.
+
+\begin{comment}
+\subsubsection*{Author Contributions}
+If you'd like to, you may include  a section for author contributions as is done
+in many journals. This is optional and at the discretion of the authors.
+\end{comment}
+
+
+
+

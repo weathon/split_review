@@ -68,6 +68,8 @@ def main():
         ])
 
     running_messages = list(prefix_messages)
+    appended_chars = 0
+    MAX_APPENDED_CHARS = 300_000
 
     for idx, rf in enumerate(review_files, 1):
         pid = rf.stem
@@ -110,9 +112,10 @@ def main():
         match_str = "N/A" if pred_decision in ("Error", "N/A") else ("YES" if pred_decision == gt_binary else "NO")
         print(f"[{idx}/{len(review_files)}] {pid} pred={pred} gt={gt_avg:.2f} match={match_str}")
 
-        if out is not None:
+        if out is not None and appended_chars < MAX_APPENDED_CHARS:
             running_messages.append({"role": "user", "content": user_msg})
             running_messages.append({"role": "assistant", "content": out})
+            appended_chars += len(user_msg) + len(out)
 
         gt_scores = [row.get(f"score_{k}") for k in range(7)]
         gt_scores_padded = ["" if pd.isna(s) else f"{float(s):.1f}" for s in gt_scores]

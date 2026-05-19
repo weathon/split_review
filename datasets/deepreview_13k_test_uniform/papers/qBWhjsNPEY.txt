@@ -1,0 +1,539 @@
+\title{DeepZero: Scaling Up Zeroth-Order Optimization for Deep Model Training}
+
+\begin{abstract}
+Zeroth-order (ZO) optimization has become a popular technique for solving machine learning (ML) problems when first-order (FO) information is difficult or impossible to obtain. However, the scalability of ZO optimization remains an open problem: Its use has primarily been limited to relatively small-scale ML problems, such as sample-wise adversarial attack generation. To our best knowledge, no prior work has demonstrated the effectiveness of ZO optimization in training deep neural networks (DNNs) without a significant decrease in performance. To overcome this roadblock, we develop \textit{\DeepZero}, a principled ZO deep learning (DL) framework that can scale ZO optimization to DNN training from scratch through three primary innovations.
+\textit{First}, we demonstrate the advantages of coordinate-wise gradient estimation ({\CGE}) over randomized vector-wise gradient estimation in training accuracy and computational efficiency. 
+\textit{Second},  we propose a sparsity-induced ZO training protocol that extends the model pruning methodology using only finite differences to explore and exploit the sparse DL prior in {\CGE}. 
+\textit{Third}, we develop the methods of feature reuse and forward parallelization to advance the practical implementations of ZO training.
+Our extensive experiments show that DeepZero achieves state-of-the-art (SOTA) accuracy on ResNet-20 trained on CIFAR-10, approaching FO training performance for the first time. Furthermore, we show the practical utility of DeepZero in applications of certified adversarial defense and DL-based partial differential equation error correction, achieving 10-20\% improvement over SOTA. We believe our results will inspire future research on scalable ZO optimization and contribute to advancing  DL with black box.
+
+\end{abstract}
+
+\section{Introduction}
+
+ 
+
+\vspace*{-3mm}
+\vspace*{-3mm}
+
+In the realm of machine learning (ML), optimization algorithms have played a crucial role in enabling the training of complex models, yielding unprecedented insights and predictive capabilities across diverse domains. Over the years, first-order (FO) gradient-based methods, such as stochastic gradient descent (SGD) and its variants \citep{gardner1984learning, amari1993backpropagation, bottou2010large, bottou2012stochastic}, have become the default choice for model training. These methods rely on gradient information to iteratively update model parameters, aiming to minimize a given loss function. Nonetheless, several practical settings exist where FO gradient information is either unavailable or infeasible to compute, calling for alternative strategies.
+Zeroth-order (ZO) optimization \citep{flaxman2005online,shamir2013complexity,ghadimi2013stochastic,nesterov2015random,duchi2015optimal,liu2018zeroth,ilyas2018prior, zhang2024revisiting}
+has emerged as a promising approach to address these challenges, as it leverages finite differences of function values to estimate gradients, rather than requesting explicit gradient information. 
+Therefore, with minor modifications to FO algorithms, ZO optimization can be applied to various real-world circumstances where FO gradients are difficult to obtain. 
+For example, in disciplines like physics and chemistry, ML models may interact with intricate simulators or experiments where the underlying systems are non-differentiable \citep{thelen2022comprehensive, tsaknakis2022zeroth, louppe2019adversarial, souza2023exploring, baydin2020differentiable}.  
+Additionally, black-box learning scenarios often arise when deep learning (DL) models are integrated with third-party APIs, such as adversarial attack and defense against black-box DL models \citep{chen2017zoo,ilyas2018black,zhang2022robustify,verma2023certified} and black-box prompt learning for language-model-as-a-service \citep{diao2022black,sun2022black}.
+Furthermore, the principled backpropagation (BP) mechanism  \citep{amari1993backpropagation, rumelhart1995backpropagation} for calculating FO gradients may also not be supported when implementing DL models on hardware systems \citep{gu2021efficient, tavanaei2019deep, greengard2020neuromorphic, jabri1992weight, gu2021l2ight}.
+In addition to ZO optimization, another relevant research direction in the field of DL focuses on developing biologically-plausible, BP-free methods. Examples include forward gradient-based methods \citep{ren2022scaling, baydin2022gradients, silver2021learning, belouze2022optimization}, greedy layer-wise learning \citep{nokland2019training},  and Hebbian learning \citep{isomura2018error, moraitis2022softhebb}. However, these techniques require access to computational graphs and are highly dependent on the used DL software frameworks and/or model architectures. In contrast, ZO optimization solely relies on model queries and is free of computational graphs utilized. As a result, ZO optimization has broad applicability to DL problems that involve black-box query-only components.
+Despite the promise of ZO optimization, scalability bottlenecks hinder its application in medium or large-scale DNN training 
+\citep{wang2017stochastic, liu2018zeroth, ohta2020sparse, cai2021zeroth, zhang2022robustify}.  
+As problem dimensionality increases, the accuracy and efficiency of traditional ZO methods deteriorate. 
+This is because ZO finite difference-based gradient estimates are biased estimators of FO gradients, and the bias becomes more pronounced in higher-dimensional spaces \citep{liu2018zeroth, cai2021zeroth,balasubramanian2018zeroth}.
+
+These challenges motivate the central question addressed in this work: 
+\textit{\textbf{(Q)} How to scale up ZO optimization for training deep models?}
+To address \textbf{(Q)}, we propose a novel framework, `{\DeepZero}', which infuses novel model pruning and parallel computing techniques to scale up ZO DNN training (see \textbf{Fig.\,\ref{fig: overview}} for a schematic overview). Our \textbf{main contributions} are summarized below.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.9\linewidth]{figs/overview.pdf}
+    \caption{\footnotesize{
+    Overview of our {\DeepZero} framework.
+    \textbf{A:} ZO gradient estimation via model queries (Sec.\,\ref{sec: ZO_opt_backgroup}).
+    \textbf{B:} Model pruning 
+    guides gradient sparsity (Sec.\,\ref{sec: sparse_ZO_train}).
+    \textbf{C:} Acceleration by parallelization and feature reuse (Sec.\,\ref{sec: acceleration}). 
+    \textbf{D:} 
+    {\DeepZero} comparison with the computational graph free baseline Pattern Search   \citep{chiang2023loss} and  computational graph dependent methods without BP, Align-Ada \citep{boopathy2022train}, LG-FG-A and FG-W \citep{ren2022scaling}, on  CIFAR-10. 
+    }
+    }
+    \label{fig: overview}
+    \vspace*{-8mm}
+\end{figure}
+\ding{182} We show that deterministic \underline{c}oordinate-wise \underline{g}radient \underline{e}stimation (\CGE) outperforms vector-wise \underline{r}andomized \underline{g}radient \underline{e}stimation (\RGE) in both accuracy and computation efficiency when scaling to deep model training. 
+Further, CGE becomes increasingly advantageous as model depth increases.
+
+\ding{183} 
+We show that sparsity is crucial for realizing model training via  {\CGE} with finite differences. 
+In contrast to prior work, we find that sparsity for black-box models can be obtained for `free' by extending the current pruning-at-initialization technique to the ZO learning paradigm. 
+The established synergy between pruning and {\CGE} presents a promising avenue for efficient ZO training of DNNs. 
+
+\ding{184} 
+We identify the parallelization-fit property inherent to {\CGE}-based ZO optimization and propose a novel \textit{forward parallelization} method based on this property. Our framework enables \textit{feature reuse} in deep learning, which further accelerates parallel training by eliminating redundant computations.
+
+\ding{185}
+We introduce our proposed ZO deep model training framework, `{\DeepZero}'. To demonstrate the empirical superiority of {\DeepZero}, we conduct extensive experiments on both standard image classification benchmarks and real-world black-box DL applications. For example, when employing {\DeepZero} to train a ResNet20 on CIFAR-10, we obtain $86.94\%$ testing accuracy, the best reported in the literature of gradient-free model training. 
+We also exemplify the vast potential and practical impact of {\DeepZero} in two real-world DL tasks: black-box defense for adversarial robustness \citep{zhang2022robustify} and physics-informed DL with solver-in-the-loop \citep{um2020solver}. 
+
+To clarify, our work aims to extend the scalability of ZO optimization for DL applications, addressing cases where FO optimization becomes challenging or infeasible.
+ Yet, it is essential to note that the proposed advancements in ZO training are not intended to overcome the ultimate scalability challenges to train deep networks at any scale.
+\vspace*{-4mm}
+
+
+\section{Related Work}
+
+\vspace*{-3mm}
+ 
+\textbf{Classical gradient-free optimization.} Early research efforts can be broadly categorized into two groups: direct search-based methods (DSMs) and model-based methods (MBMs) \citep{wright1999numerical,conn2009introduction,rios2013derivative,larson2019derivative}. DSMs include techniques like coordinate \citep{fermi1952numerical} and pattern search \citep{torczon1991convergence} methods and the Nelder-Mead simplex method \citep{nelder1965simplex}. MBMs consist of model-based descent \citep{bortz1998simplex} and trust region \citep{conn2000trust} methods. Evolutionary optimization offers a generic population-based gradient-free computational framework including genetic algorithms \citep{grefenstette1993genetic} and particle swarm optimization \citep{vaz2009pswarm}. 
+Bayesian optimization \citep{shahriari2015taking,eriksson2019scalable} has garnered recent attention by using a Gaussian process (GP) to fit a black-box objective function and estimate an optimization solution. However, acquiring an accurate GP is computationally intensive. 
+ 
+\textbf{Zeroth-order optimization.}
+In contrast to classical gradient-free methods, ZO optimization approximates gradients using finite differences, simplifying implementation by minimizing modifications of 
+FO gradient-based algorithms. 
+Like FO methods, ZO enjoys provable convergence guarantees \citep{nesterov2017random,duchi2015optimal,liu2020primer}.
+ZO optimization has gained significant attention for its success in solving various emerging ML problems \citep{ghadimi2013stochastic, nesterov2015random, flaxman2005online, duchi2015optimal}. 
+Examples include adversarial attack and defense \citep{chen2017zoo, tu2019autozoom,ye2018hessian,ilyas2018black,zhang2022robustify,verma2023certified, zhao2019design, hogan2018universal, shu2022zeroth},
+model-agnostic contrastive  explanation   \citep{dhurandhar2019model}, visual prompting for transfer learning \citep{tsai2020transfer}, computational graph unrolling \citep{vicol2023low},   automated ML \citep{gu2021optimizing,wang2022zarts},
+policy search in reinforcement learning \citep{vemula2019contrasting},  network resource management \citep{liu2018zeroth}, 
+ML-based scientific workflow optimization  \citep{tsaknakis2022zeroth}, and on-chip learning \citep{gu2021efficient}. Despite ZO's successes in solving ML problems, its application has been limited to relatively small scales. 
+For instance, ZO optimizers used for generating adversarial attacks, contrastive explanations, and visual prompts only operate in the input parameter space, which has the dimension of a single input example. 
+Some acceleration techniques have been developed to improve ZO performance in larger problems, such as using historical information to enhance a ZO gradient estimator \citep{meier2019improving,cheng2021convergence}, and exploiting gradient sparsity to reduce ZO dependence on problem size \citep{wang2017stochastic,cai2022zeroth,cai2021zeroth,balasubramanian2018zeroth,ohta2020sparse,gu2021efficient}.
+While gradient sparsity has been used to improve scalability~\citep{bartoldson2023compute}, we propose an advanced strategy that leverages model pruning techniques to identify and exploit sparsity in neural network parameters effectively. 
+Our approach is less restrictive than traditional gradient sparsity assumptions and allows for greater flexibility in selecting what to prune. 
+To the best of our knowledge, no prior work has demonstrated the practicality of scalable ZO optimization for deep model training without significant performance loss compared to the FO counterpart. 
+
+\textbf{DL without backpropagation.}
+Forward gradient learning \citep{baydin2022gradients,ren2022scaling,silver2021learning,belouze2022optimization}, which builds upon the forward-mode automatic differentiation (AD) capabilities of current DL software frameworks, does not rely on finite differences to approximate FO gradients like ZO optimization. Instead, it relies on forward-mode AD to calculate a forward (directional) gradient. 
+This gradient is obtained by projecting the FO gradient onto a direction vector and is an unbiased estimator of the FO gradient \citep{baydin2022gradients}. 
+In contrast, ZO gradient estimation based on finite differences is biased \citep{duchi2015optimal,liu2020primer}.
+However, one main limitation of forward gradient learning is that it requires full access to AD software and the deep model, making it impractical for solving black-box DL problems. 
+Recent advances in \citep{ren2022scaling} further improved the scalability of forward gradient learning by using finer-level model information to design architecture-specific local objective functions.
+Other BP-free DL methods are motivated by seeking a biological interpretation of DL but share similar limitations with forward gradient learning. 
+Some examples include greedy layer-wise learning \citep{nokland2019training}, input-weight alignment for wide neural networks in the neural tangent kernel (NTK) regime \citep{boopathy2022train}, the Forward-Forward algorithm \citep{hinton2022forward}, Hebbian Learning \citep{isomura2018error, moraitis2022softhebb}, and synthetic gradients \citep{jaderberg2017decoupled}.
+\vspace*{-3mm}
+
+
+\section{ZO Optimization through Function Value-based Gradient Estimation: Randomized or Coordinate-wise?}
+
+\label{sec: ZO_opt_backgroup}
+\vspace*{-2mm}
+
+We now introduce the ZO optimization setup 
+and discuss two 
+ZO gradient estimation schemes:  deterministic coordinate-wise gradient estimation (\textbf{\CGE}) and randomized vector-wise gradient estimation (\textbf{\RGE}). We will demonstrate the advantage of {\CGE} over {\RGE} for DNN training. 
+This inspires further improvements 
+for scaling {\CGE}-based ZO optimization.
+\textbf{ZO optimization and gradient estimation.}
+Let $\ell(\boldsymbol \theta)$ denote a \textbf{loss function} that we want to minimize over the \textbf{optimization variables} $\btheta \in \mathbb R^d$ (\textit{e.g.}, model parameters of a neural network).
+The ZO   optimizer interacts with the objective function $\ell$ only by submitting inputs (\textit{i.e.}, realizations of $\boldsymbol \theta$) and receiving the corresponding function values. It slightly modifies the commonly-used first-order (FO) gradient-based algorithm by approximating the FO gradient through function value-based gradient estimates \citep{liu2020primer}. 
+This 
+is essential when explicit differentiation is difficult due to the black-box nature of the loss function 
+\citep{zhang2022robustify,liu2020min,chen2017zoo}, or
+when explicit differentiation is undesired due to concerns about energy efficiency \citep{gu2021efficient,liu2018zeroth_admm}.
+{\RGE} \citep{nesterov2017random,ghadimi2013stochastic,duchi2015optimal,spall1992multivariate} and {\CGE} \citep{kiefer1952stochastic,lian2016comprehensive,berahas2022theoretical} are two commonly-used  gradient estimators based on finite differences of $\ell$. 
+{\RGE} acquires finite differences via random perturbations of 
+$\boldsymbol \theta$
+while {\CGE} uses deterministic coordinate-wise perturbations of $\boldsymbol \theta$ \citep{liu2020primer}. Their formal definitions are given by 
+
+\vspace*{-5mm}
+{\small{
+\begin{align}
+    \text{(\textbf{\RGE})} ~~ \hat{\nabla}_{\btheta} \ell(\btheta) = \frac{1}{q} \sum_{i=1}^q \left [ \frac{\ell(\btheta + \mu \mathbf u_i) - \ell(\btheta)}{\mu}  \mathbf u_i \right ];  ~
+    \text{(\textbf{\CGE})} ~~ \hat{\nabla}_{\btheta} \ell(\btheta) = \sum_{i=1}^d \left [ \frac{\ell(\btheta + \mu \mathbf e_i) - \ell(\btheta)}{\mu}  \mathbf e_i \right ],
+    \label{eq: RGE_CGE}
+\end{align}}}%
+\begin{wrapfigure}{r}{50mm}
+\vspace*{-5mm}
+\centerline{
+\includegraphics[width=50mm,height=!]{figs/CGE_RGE_acc_oneY.pdf}
+}
+\vspace*{-3mm}
+\caption{\footnotesize{ 
+Performance comparison of training a simple CNN with varying numbers of parameters on   CIFAR-10   using different training methods.
+}}
+\label{fig: Acc_CGE_RGE}
+\vspace*{-6mm}
+\end{wrapfigure}%
+where  $\hat{\nabla}_{\btheta} \ell$ denotes an estimation of the FO gradient $\nabla_{\btheta}\ell$ with respect to $\btheta$. In {({\RGE})}, $\mathbf u_i $ denotes a randomized perturbation vector, \textit{e.g.},  drawn from the standard Gaussian distribution $\mathcal N(\mathbf 0, \mathbf I)$, $\mu > 0$ is a perturbation size (\textit{a.k.a.} smoothing parameter), and $q$ is the number of random directions used to acquire finite differences. 
+In {(\CGE)}, $\mathbf e_i$ denotes a standard basis vector, and $\frac{\ell(\btheta + \mu \mathbf e_i) - \ell(\btheta)}{\mu}$ provides the finite-difference estimation of the partial derivative of $\ell(\btheta)$ at the $i$th coordinate $\btheta_i$.
+Finite difference approximations in \eqref{eq: RGE_CGE} are motivated by \textit{directional derivatives}. Take {\RGE} (with $q = 1$) as an example. As $\mu \to 0$, finite difference in {\RGE}  converges to directional derivative $\ell^\prime(\btheta) \Def \mathbf u^T \nabla_{\btheta} \ell(\btheta) = \lim_{\mu \to 0} \frac{\ell(\btheta + \mu \mathbf u_i) - \ell(\btheta)}{\mu} $ of the function $\ell$ at the point $\btheta$ in the direction $\mathbf u$ \citep{urruty1993convex}. As a result, the expression 
+$ \ell^\prime(\btheta) \mathbf u$ yields 
+$
+\mathbb E[    \ell^\prime(\btheta) \mathbf u ] = \mathbb E[  (\mathbf u \mathbf u^T) \nabla_{\btheta} \ell(\btheta)  ]  = \nabla_{\btheta} \ell(\btheta)
+$ (recall that $\mathbb E[ \mathbf u \mathbf u^T] = \mathbf I$). 
+This implies that $\ell^\prime(\btheta) \mathbf u$ is an \textit{unbiased} gradient estimator of $\nabla_{\btheta} \ell(\btheta)$ and its \textit{biased} finite difference approximation is given by \eqref{eq: RGE_CGE} \citep{duchi2015optimal}.
+
+\textbf{{\RGE} or {\CGE}?}  
+First, the \textit{function query costs} for {\RGE} and {\CGE} differ, with {\RGE} taking $O(q)$ queries and {\CGE} taking $O(d)$ queries based on \eqref{eq: RGE_CGE}.
+Compared to {\CGE}, {\RGE} has the flexibility to specify $q < d$ to reduce the number of function evaluations. 
+Despite the query efficiency, it remains uncertain whether {\RGE} can deliver satisfactory accuracy when training a deep 
+model from scratch.
+To this end, we undertake a preliminary investigation wherein we train a basic convolutional neural network (CNN) of different sizes on CIFAR-10, employing both {\RGE} and {\CGE}. To ensure a fair comparison in query complexity, we set the query number $q$ in {\RGE} equal to the problem size $d$ used in {\CGE}.
+\textbf{Fig.\,\ref{fig: Acc_CGE_RGE}} presents the test accuracy of the learned CNN against the number of model parameters (equivalent to the number of model queries). 
+Here the training recipe 
+is specified by the FO SGD, the ZO {\RGE}-based SGD, and the ZO {\CGE}-based SGD. 
+We observe that {\CGE} can achieve test accuracy comparable to FO training and significantly outperforms {\RGE}.  
+This experiment highlights the superiority of {\CGE} over {\RGE} in terms of optimization accuracy even when the latter uses $q = d$. This \textit{accuracy merit} of {\CGE} is particularly valuable when training  more complex neural networks.
+In Appx.\,\ref{app: zo}, we provide a detailed analysis of the computational costs using {\CGE} vs. {\RGE}. The time cost relative to model depth is shown in Fig.\,\ref{fig: Time_CGE_RGE}. And Tab.\,\ref{tab: rge_cge_time_compare} assesses gradient estimation time costs. We find that {\CGE} demonstrates greater time efficiency than RGE. The computation efficiency loss of {\RGE} is in that it needs to generate and integrate a $d$-dimension perturbation vector into the entire model at once every query.
+Based on the advantages of {\CGE} over {\RGE} in terms of both accuracy and computation efficiency, we choose {\CGE} as the preferred ZO gradient estimator. 
+However, query complexity of {\CGE} is still a bottleneck, as it scales with model size $d$.
+
+
+\vspace*{-4mm}
+
+
+\section{Sparsity-Assisted ZO Training: A Pruning Lens and Beyond}
+
+\label{sec: sparse_ZO_train}
+\vspace*{-3mm}
+One valuable property of {\CGE} is the disentanglement of finite differences across coordinates, which suggests that reducing {\CGE}'s query complexity is aligned with pruning the model weights that are being optimized. 
+With this in mind, we propose integrating ZO optimization with {\textit{pruned gradients}} to design a more effective inductive bias for ZO deep model training.
+It is worth noting that the sparsity has been explored in several existing ZO optimization methods to improve the query efficiency of gradient estimation \citep{wang2017stochastic,cai2022zeroth,cai2021zeroth,balasubramanian2018zeroth,ohta2020sparse,gu2021efficient}. 
+However, prior work suffered from two main limitations. Firstly, exact sparsity was assumed in the original FO gradients, which required an additional sparse learning method (such as LASSO \citep{wang2017stochastic}) to recover these sparse gradients from function queries. 
+Secondly, it remains unclear how to optimize the sparsity pattern via a ZO oracle, as the existing method calls for overly heuristics-based pruning methods (e.g., random \citep{gu2021efficient} or magnitude \citep{ohta2020sparse, zhang2022data} pruning). 
+Overly increasing sparsity ultimately limits optimization performance. 
+In what follows, we propose a new pruning approach that relies only on model queries, enjoys computation efficiency, and can improve ZO optimization accuracy by inducing an appropriate gradient sparsity.
+
+ 
+\textbf{{\zograsp}: Model pruning via ZO oracle.} 
+The compressibility of model weights for DL has been extensively studied \citep{han2015deep, frankle2018lottery,  
+ma2021sanity, 
+zhang2022advancing, zhang2022data,blalock2020state,tanaka2020pruning,lee2018snip,wang2020picking,su2020sanity, diffenderfer2021winning}. For instance, the lottery ticket hypothesis \citep{frankle2018lottery} demonstrated that a randomly initialized, dense neural network contains a high-quality \textit{sparse subnetwork}. 
+However, current effective pruning methods incorporate model training as an intermediate step \citep{frankle2018lottery,  ma2021sanity, zhang2022advancing, diffenderfer2021multi}. \textit{Thus, they are not well-suited for finding sparsity via a ZO oracle.}
+
+To address the above challenge, we draw inspiration from training-free pruning methods, known as pruning-at-initialization \citep{tanaka2020pruning,lee2018snip,wang2020picking}. Within this family, gradient signal preservation (\grasp) \citep{wang2020picking} is a method to identify the sparsity prior of DL through the gradient flows of a randomly-initialized network. 
+While {\grasp} still requires the FO and second-order derivative information, we can estimate these derivatives using {only function queries} to design the ZO version of {\grasp} (termed  \textbf{\zograsp}). Specifically, {\grasp} \citep{wang2020picking} assigns pruning scores (denoted by $\mathbf S$) to  model initialization $\btheta$. These scores reflect the change in gradient flow after pruning the weights:
+
+\vspace*{-5mm}
+{\small{
+\begin{align}
+\mathbf S = - \boldsymbol{\theta} \odot (\mathbf H \mathbf g), ~~ \mathbf H = \nabla_{\boldsymbol{\theta}, \boldsymbol{\theta}}^2 \ell (\boldsymbol{\theta}) 
+, ~\mathbf g = \nabla_{\boldsymbol{\theta}} \ell (\boldsymbol{\theta}) 
+,
+\label{eq: grasp}
+\end{align}
+}}%
+where recall that $\ell$ is the loss function of model training, $\odot$ denotes the entry-wise multiplication, and $\mathbf H \mathbf g$ represents the Hessian-gradient product.
+Using the ZO learning paradigm, we can first approximate the Hessian-gradient product as the finite difference between two gradients (\textit{i.e.}, $\nabla_{\boldsymbol{\theta}}\ell( \boldsymbol{\theta} + \mu \mathbf g  )$ and $\nabla_{\boldsymbol{\theta}} \ell(\boldsymbol{\theta})$), in the direction $\mathbf g$ with the smoothing parameter $\mu$.  
+Second, we replace the FO gradient $\nabla_{\btheta} \ell$ with the ZO gradient estimate $\hat{\nabla}_{\btheta} \ell$ given in \eqref{eq: RGE_CGE}. Combining this yields  {\zograsp}:
+
+\vspace*{-5mm}
+{\small { \begin{align}
+\hat{\mathbf S} \Def  -\btheta \odot 
+ \frac{ \hat{\nabla}_{\boldsymbol{\theta}}\ell( \boldsymbol{\theta} + \mu \hat{\mathbf g}  ) - \hat{\nabla}_{\boldsymbol{\theta}} \ell(\boldsymbol{\theta}) }{\mu}.
+    \label{eq: grad_vec_product_approx1}
+\end{align}}}%%%
+\vspace*{-5mm}%
+
+In practice, we found that the pruning mask determined by ranking the entries in $\hat{\mathbf S}$ is resilient to the ZO gradient estimation error. 
+Therefore, we utilize {\RGE} with a relatively small number of queries ($q < d$) to implement {\zograsp}. 
+This reduces the function query cost without compromising pruning performance; see \textbf{Tab.\,\ref{tab: pruning_com_rn20}} and \textbf{Tab.\,\ref{tab: pruning_com_rn18}} for empirical justifications.  
+\iffalse
+\textbf{Tab.\,\ref{tab: pruning_com_rn20}} and \textbf{Tab
+provide the CIFAR-10 test accuracy of {\zograsp}-sparsified ResNet-20 and ResNet-18 at varying sparsities (compared against random pruning and FO-{\grasp}). 
+\fi 
+Our results show that {\zograsp} significantly outperforms random pruning and yields pruned models with accuracy comparable to FO-{\grasp}. 
+ 
+
+\textbf{Integrating sparsity with {\CGE}.}
+As finite differences in {\CGE} \eqref{eq: RGE_CGE} are decomposable over weights, it is easy to incorporate sparsity into {\CGE}. 
+To retain the accuracy benefits of training dense models, we incorporate gradient sparsity (in {\CGE}) rather than weight sparsity. This ensures that we train a dense model in the weight space, rather than training a sparse model where the sparsity determined by {\zograsp} is directly applied.
+Let $\mathcal S_{\zograsp}$ be the coordinate set of unpruned model weights found by   {\zograsp}. 
+The sparsity-induced {\CGE} is given by
+
+\vspace*{-5mm}
+{\small{
+ \begin{align}
+     \hat \nabla_{\boldsymbol \theta}   \ell ({\boldsymbol \theta} ) =  \sum_{i \in \mathcal S_{\zograsp}
+     } \left [ \frac{\ell ({\boldsymbol \theta}   + \mu \mathbf e_i ) - \ell({\boldsymbol \theta} )}{\mu} \mathbf e_i \right ].
+     \tag{\text{Sparse-{\CGE}}}
+     \label{eq: CGE_sparsity}
+ \end{align}
+ }}%
+ It is clear that  \eqref{eq: CGE_sparsity} reduces the query complexity of the original {\CGE} from $O(d)$ to $O(|\mathcal S_{\zograsp}|)$, where $|\mathcal S_{\zograsp}|$ denotes the cardinality of the coordinate set $\mathcal S_{\zograsp}$. 
+There may exist two direct methods
+for integrating \eqref{eq: CGE_sparsity} into ZO optimization. 
+$\mathcal M_1$: This method involves \textit{alternating} between {\zograsp} and {\CGE}-based ZO optimization. 
+At each iteration, $\mathcal S_{\zograsp}$ is updated based on the model weights from the previous iteration and then used to construct \eqref{eq: CGE_sparsity} for updating $\btheta$ at the current iteration. 
+$\mathcal M_2$: This method involves performing \textit{pruning before ZO training}. 
+That is, {\zograsp} is conducted at model initialization, and the resulting $\mathcal S_{\zograsp}$ is applied to \eqref{eq: CGE_sparsity} and kept fixed during training.
+\textbf{Both $\mathcal M_1$ and $\mathcal M_2$ have limitations.} 
+$\mathcal M_1$ requires repeated calls to {\zograsp} to update $\mathcal S_{\zograsp}$, leading to a higher query cost for ZO model training. 
+$\mathcal M_2$ addresses the query complexity by performing {\zograsp} before training, but it can only produce a smaller model after training. It is known that heavily-pruned models suffers from performance degradation (\textit{e.g.}, 95\% sparse model in 
+Tab.\,\ref{tab: pruning_com_rn20} in 
+Appx.\,\ref{app: pruning}).
+Thus, it is nontrivial to
+integrate {\zograsp} with ZO training due to the requirement of balancing query efficiency and training effectiveness. To address this, we propose 
+\textbf{{\zograsp}-oriented dynamic sparsity pattern}, which leverages  {\zograsp}  to determine layer-wise pruning ratios (LPRs) that can capture DNN compressibility. 
+This approach shares a similar essence with smart ratio introduced in \citep{su2020sanity}.
+Specifically, 
+we acquire LPRs from {\zograsp} at randomly initialized weights prior to ZO training, which is query-efficient like $\mathcal M_2$. 
+However, unlike $\mathcal M_2$, LPRs allow for random shuffling of sparse gradient positions in $\btheta$ only if these LPRs are obeyed. 
+This allows us to mimic $\mathcal M_1$ to alternate between model weight updates and $\mathcal S_{\zograsp}$ updates, with the latter achieved by LPR-guided randomly updated sparsity patterns. 
+Thus, ZO optimization can train the dense model using iteratively-updated {\eqref{eq: CGE_sparsity}} with   LPRs-guided dynamic sparsity patterns. 
+Overall, our proposal has the query efficiency of $\mathcal M_2$ with the training effectiveness of $\mathcal M_1$, resulting in a balanced integration of {\zograsp} into ZO training. 
+We summarize the algorithmic pipeline in \textbf{Algorithm\,\ref{alg: lpr_zo}} in Appx.\,\ref{app: alg_details}, where CGE and {\zograsp}-oriented dynamic sparsity pattern are clearly described in a unified framework. We also refer readers to Appx.\,\ref{app: alg_details} for more explanation and comparisons with $\mathcal M_1$ and $\mathcal M_2$.
+We provide a convergence rate analysis in Appx.\,\ref{app: convergence_rate}.
+
+
+
+
+
+\vspace*{-2mm}
+
+
+\section{Improving Scalability: Feature Reuse \& Forward Parallel}
+
+\label{sec: acceleration}
+\vspace*{-2mm}
+
+\begin{wrapfigure}{r}{.3\textwidth}
+\vspace*{-3mm}
+\centerline{
+\includegraphics[width=0.3\textwidth,height=!]{figs/feature_reuse_oneY.pdf}
+}
+\vspace*{-4mm}
+\caption{\footnotesize{Computation cost   of {\CGE}-based ZO training w/ feature reuse vs. w/o feature reuse. The  setup follows Fig.\,\ref{fig: Time_CGE_RGE}.}}
+\label{fig: feature_reuse}
+\vspace*{-3mm}
+\end{wrapfigure}%
+
+We investigate two characteristics of ZO training that can further enhance implementation scalability: \textit{feature reuse} and \textit{forward parallelization}. 
+The former disentangles intermediate features from weight perturbations, while the latter uses the finite-difference nature in {\CGE} to enable scalable distributed implementation. 
+
+\textbf{Reusing intermediate features.} 
+As shown in \eqref{eq: RGE_CGE}, {\CGE} perturbs each parameter element-wise. 
+Thus, 
+one can reuse the feature immediately preceding the perturbed layer and carry out the remaining forward pass operations instead of starting from the input layer, as illustrated in \textbf{Fig.\,\ref{fig: overview}}. 
+ The above characteristic of {\CGE}-based model training  is referred to as `\textbf{feature reuse}'.
+ More concretely, let $f_{\btheta}(\mathbf x)$ be  a deep model with parameters $\btheta$   and   input $\mathbf x$. We can express $f_{\btheta}(\mathbf x)$ as a multi-layer composite function  
+
+\vspace*{-5mm}
+{\small{
+\begin{align}
+ \hspace*{-2mm}   f_{\btheta}(\mathbf x) = f_{\btheta_{>l}}(\mathbf z_l) = \underbrace{f_{\btheta_L} \circ f_{\btheta_{L-1}} \circ \cdots \circ f_{\btheta_{l+1}}}_\text{$f_{\btheta > l}(\cdot)$}  \circ \underbrace{ f_{\btheta_l} \circ \cdots \circ f_{\btheta_1}(\mathbf x)}_\text{$\mathbf z_l = f_{\btheta_{1:l}}(\mathbf x)$},
+  \hspace*{-2mm}     \label{eq: f_network_layers}
+\end{align}
+}}%
+where $f_{\btheta_l}$ denotes the model's $l$th layer, $L$ is the total number of model layers,  and 
+$\circ$ is the function composition operation.
+Based on \eqref{eq: f_network_layers}, 
+if coordinate-wise weight perturbations are applied to the $(l+1)$th layer  and its subsequent layers (\textit{i.e.}, $\btheta_{> l}$), 
+the model's outputs corresponding to these perturbed weights can be efficiently obtained by keeping the intermediate features up to the $l$th layer (\textit{i.e.}, $\mathbf z_l$) intact. This efficiency becomes more pronounced when perturbing the parameters of deeper 
+layers (\textit{i.e.}, for a larger $l$). \textbf{Fig.\,\ref{fig: feature_reuse}} compares the runtime of {\CGE}-based ZO training with and without feature reuse. 
+Empirically, CGE with feature reuse exhibits a $2\times$ reduction in training time.
+
+\textbf{Parallelization of coordinate-wise finite differences.} 
+{\CGE} enables parallelization of model training due to its alignment of parameter perturbations with forward passes.
+If there exist $M$ processes (across multiple GPUs), we can decompose {\CGE} \eqref{eq: RGE_CGE} based on its parameter coordinates 
+yielding
+
+\vspace*{-5mm}
+{\small{
+\begin{align}
+ \hat{\nabla}_{\btheta} \ell(\btheta) = \sum_{i=1}^M  \hat{\mathbf g}_i, ~~ \hat{\mathbf g}_i \Def  
+ \sum_{j \in \mathcal S_i } \left [ \frac{\ell(\btheta + \mu \mathbf e_j) - \ell(\btheta)}{\mu}  \mathbf e_j \right ],
+    \label{eq: Parallel_CGE}
+\end{align}}}%
+where $\mathcal S_i$ is the  set of active parameters assigned to process $1 \leq i \leq M$. 
+Hence, each process can take $|\mathcal S_i|$ forward passes.
+This decoupling property enables scaling forward passes via distributed machines, which can significantly improve training speed. 
+We refer to this parallelization for finite differences as `\textbf{forward parallelization}'. 
+It is worth noting that forward parallelization is different from the conventional data parallelization used for FO distributed training \citep{goyal2017accurate,you2018imagenet}. 
+Our method avoids any performance loss that may result from data parallelization using an overly large batch size, which can cause the optimizer to get stuck in suboptimal local minima due to a lack of stochasticity.
+
+\vspace*{-3mm}
+
+
+\section{Experiments}
+
+\label{sec: experiments}
+\vspace*{-3mm}
+In this section,
+we first train \textit{ResNet-20} for standard image classification on \textit{CIFAR-10}, demonstrating scalability and generalization capability over existing gradient-free learning methods. 
+Second, we apply DeepZero to enhance the robustness of a \textit{black-box} DNN against adversarial attacks, where limited access to the  model is available on the defender's end. 
+Lastly, we leverage DeepZero to design a \textit{physics-informed ML} system by incorporating a scientific PDE solver into the training loop for reducing numerical errors, highlighting its capability to address complex scientific problems.
+
+\vspace*{-4mm}
+\subsection{Image classification task}
+\vspace*{-3mm}
+
+\begin{wrapfigure}{r}{52mm}
+\vspace*{-5mm}
+\centerline{
+\includegraphics[width=52mm,height=!]{figs/fo_zo_ds.pdf}
+}
+\vspace*{-3.3mm}
+\caption{\footnotesize{
+Comparison between {\DeepZero} and FO training baselines on a ResNet-20 for CIFAR-10. We report the mean and standard deviation of 3 independent runs for each experiment.
+}}
+\label{fig: sg_sw}
+\end{wrapfigure}%%
+\textbf{Experiment setup.}
+This study focuses on training ResNet-20 (with 270K parameters) on CIFAR-10 for image classification. We adopt SGD (stochastic gradient descent) as the FO training recipe, with a weight decay of $5\times10^{-4}$ and a momentum of $0.9$. The learning rate is $0.1$, governed by a cosine decay scheduler. In the ZO training scenario,  we replace the FO gradient by \eqref{eq: CGE_sparsity} with a smoothing parameter $\mu = 5 \times 10^{-3}$. When implementing ZO-GraSP \eqref{eq: grad_vec_product_approx1},  we set the query budget $q = 192$ and use the same $\mu$ as {\CGE}. 
+Unless specified otherwise, the weight sparsity ratio is chosen to be 90\% and the specific sparsity patterns are determined by {\SR} (Smart Ratio). 
+When implementing DeepZero (\textbf{Algorithm\,\ref{alg: deepzo}}), we choose the number of epochs $T = 50$. Experiments are run on 4 NVIDIA V100 GPUs if not specified otherwise. We compare DeepZero with FO training and two SOTA BP-free training: Pattern Search \citep{chiang2023loss} and Input-Weight Alignment (Align-ada) \citep{boopathy2022train}.
+
+\begin{wrapfigure}{r}{59mm}
+\vspace*{-5mm}
+\centerline{
+\includegraphics[width=53mm,height=!]{figs/pattern_search_bar.pdf}
+}
+\caption{\footnotesize{Comparison of DeepZero and Pattern Search on ResNet-20 for CIFAR-10 with varying dataset sizes. 
+All experiments are done on a single NVIDIA A6000 GPU.
+}}
+  \label{fig: ps}
+\end{wrapfigure}
+\textbf{Comparison with FO training.}
+In \textbf{Fig.\,\ref{fig: sg_sw}}, 
+we compare the accuracy of DeepZero-trained ResNet-20 with two variants trained by FO recipes: (1) a dense ResNet-20 acquired through FO training and (2) a sparse ResNet-20 acquired through FO training under FO-GraSP sparsity pattern.
+As we can see, the accuracy gap still exists between (1) and the model trained with DeepZero in the sparsity regime of 80\% to 99\%. 
+This highlights the challenge of ZO optimization for deep model training, where achieving high sparsity is desired to reduce the number of model queries in   \eqref{eq: CGE_sparsity} for scaling to ResNet-20.
+Notably, in the sparsity regime of 90\% to 99\%, DeepZero outperforms (2), showcasing the superiority of gradient sparsity in DeepZero compared to weight sparsity (\textit{i.e.}, directly training a sparse model).
+In Appx.\,\ref{app: res20_exp}, we provide the DeepZero training trajectory (\textbf{Fig.\,\ref{fig: training_traj}}), performance vs.   data batch   setup (\textbf{Fig.\,\ref{fig: batch_size}}) and training time vs. GPU count (\textbf{Fig.\,\ref{fig: gpu_number}}).
+
+\textbf{Comparison with pattern search \citep{chiang2023loss}.}
+In \textbf{Fig.\,\ref{fig: ps}}, we compare the accuracy and runtime cost of DeepZero with Pattern Search \citep{chiang2023loss} for deep model training. 
+Pattern
+Search has been shown to achieve
+comparable test accuracy to SGD in low 
+sample regimes, however, effectiveness as the number of data samples increases remains unclear. 
+To investigate this, we 
+conducted experiments using DeepZero (with 90\% gradient sparsity) and pattern search on ResNet-20 with CIFAR-10, with varying dataset sizes from 100 to 32K. 
+We maintained a fixed total epoch number of 40 for both methods to ensure a fair comparison. 
+The results demonstrate DeepZero outperforms Pattern Search in all data regimes, except in the case of 100. 
+Further, the improvement of DeepZero over pattern search (in both accuracy and efficiency) expands dramatically with increasing dataset sizes, indicating the superior scalability of DeepZero.
+
+
+\begin{wraptable}{r}{65mm}
+\vspace*{-4mm}
+\centering
+\caption{\footnotesize{Performance of DeepZero vs. BP-free methods on a 8-layer CNN w/ different widths \citep{boopathy2022train}.} }
+\vspace*{-2mm}
+\label{tab: ntk_cnn}
+\resizebox{65mm}{!}{%
+\begin{tabular}{c|c|c|c|c|c|c|c|c}
+\toprule[1pt]
+\midrule
+Method & \multicolumn{2}{c|}{DeepZero} & \multicolumn{2}{c|}{FA} & \multicolumn{2}{c|}{DFA} & \multicolumn{2}{c}{Align-ada}  \\ 
+\midrule
+Width  & 32 & 64 & 64 & 512 & 64 & 512 & 64 & 512 \\
+\midrule
+Accuracy & 57.7 & \textbf{64.1} & 46.5 & 45.4 & 49.9 & 54.1 & 49.9 & 58.0  \\
+\midrule
+Time (h) & 4.34 & 28.15 & 0.36 & 3.79 & 0.42 & 3.52 & 0.48 & 4.59  \\
+\midrule
+\bottomrule[1pt]
+\end{tabular}%
+}
+\vspace*{-4mm}
+\end{wraptable}
+\textbf{Comparison with input-weight alignment \citep{boopathy2022train}.}
+In \textbf{Tab.\,\ref{tab: ntk_cnn}}, we present a comparison between DeepZero 
+and the   \textit{Align-ada} approach
+\citep{boopathy2022train} for training   neural networks without BP on CIFAR-10.
+While other BP-free training methods \citep{lillicrap2014random, nokland2016direct, baydin2022gradients} exist, Align-ada 
+stands out as it applies to training \textit{wide} neural networks
+and achieves state-of-the-art performance on CIFAR-10, \textit{e.g.}, surpassing 
+methods such as feedback alignment (FA) \citep{lillicrap2014random}  and direct feedback alignment (DFA) \citep{nokland2016direct}. 
+To ensure fairness, we apply DeepZero to the 8-layer CNN architecture from \citep{boopathy2022train} and compare performance with Align-ada 
+at varying model widths. 
+We note that the 512-width network was the widest model trained using Align-ada. 
+In contrast, the largest width network we train with DeepZero is 64. 
+Our results clearly show that DeepZero achieves significantly higher testing accuracy compared to Align-ada, even when training with narrower networks. 
+This demonstrates that the improved performance of DeepZero is attributed to its inherent optimization advantages, rather than relying solely on the use of wider networks. 
+Lastly, it is worth noting that Align-ada and other BP-free methods rely on access to computational graphs, making them efficient but unsuitable for black-box applications. 
+
+\vspace*{-3mm}
+\subsection{Other black-box applications}
+\vspace*{-3mm}
+
+\begin{wraptable}{r}{53mm} 
+\centering
+\vspace*{-4.5mm}
+\caption{\footnotesize{CA (\%)  vs.  $\ell_2$-norm based perturbation radius  on ImageNet-10 using FO DS-based defense (FO-DS) \citep{salman2020denoised}, ZO-AE-DS \citep{zhang2022robustify}, and our proposed DeepZero. 
+}}
+\label{tab: zo_ds_r}
+\vspace*{-1mm}
+\resizebox{53mm}{!}{%
+\begin{tabular}{c|c|c|c}
+\toprule[1pt]
+\midrule
+\multicolumn{4}{c}{ImageNet (10 classes)}  \\
+\midrule
+Radius $r$ & FO-DS & ZO-AE-DS & DeepZero\\
+ \midrule
+0.0   & 89.33 & 63.60 & 86.02   \\
+0.25  & 81.67 & 52.80 & 76.61  \\
+0.5 & 68.87 & 43.13 & 61.80    \\
+0.75  & 49.80 & 32.73 & 43.05  \\
+ \midrule
+\bottomrule[1pt]
+\end{tabular}%%
+}
+\vspace*{-5mm}
+\end{wraptable}
+
+\textbf{Black-box defense against adversarial attacks.}
+The black-box defense problem arises when the owner of an ML model is unwilling to share the model details with the defender against adversarial attacks \citep{zhang2022robustify,verma2023certified}. 
+This poses a challenge for existing robustness enhancement algorithms \citep{madry2017towards,cohen2019certified,salman2020denoised} that directly robustify {white-box} ML models using FO training. 
+To overcome this challenge, ZO optimization was introduced in \citep{zhang2022robustify} to design a \textit{white-box} defense operation given a \textit{query-based black-box} image classifier. 
+To address dimensionality challenges with ZO, ZO-AE-DS \citep{zhang2022robustify} introduces an autoencoder (AE) between the \textit{white-box} denoised smoothing (DS) defense operation (to be learned) and the {black-box} image classifier. 
+By merging AE's encoder with the black-box module, the dimension of ZO optimization is reduced;
+see \textbf{Fig.\,\ref{fig: ae_ds}} in Appx.\,\ref{app: black_box_defense}
+for a schematic overview and   \citep{zhang2022robustify} for details. 
+The downside of  ZO-AE-DS is  poor scaling to high-resolution datasets (\textit{e.g.}, ImageNet) due to the use of AE, which compromises the fidelity of the image input to the black-box image classifier and leads to inferior defense performance. 
+In contrast, DeepZero can directly learn the defense operation integrated with the black-box classifier, without needing AE. 
+\textbf{Tab.\,\ref{tab: zo_ds_r}} compares the defense performance of DeepZero with FO defense (DS \citep{salman2020denoised}) and ZO-AE-DS \citep{zhang2022robustify}. 
+To ensure a fair comparison, we used the same number of queries (1152) per gradient estimation. 
+Following \citep{zhang2022robustify}, we selected a 10-class subset of ImageNet as the training set. The AE and black-box classifier are DnCNN \citep{zhang2017beyond} and ResNet-50, respectively. 
+Defense performance is evaluated by certified accuracy (CA), following the setup of \citep{salman2020denoised, zhang2022robustify}. 
+CA is defined using the $\ell_2$ norm-based input perturbation radius $r$, where a larger $r$ indicates a stronger adversarial threat.
+We refer readers to Appx.\,\ref{app: black_box_defense} for more experiment details. 
+\textbf{Tab.\,\ref{tab: zo_ds_r}} highlights that DeepZero consistently outperforms ZO-AE-DS in terms of CA for all values of $r > 0$. 
+It is important to note that when $r = 0$, CA is equivalent to the standard testing accuracy. 
+This indicates that DeepZero excels over ZO-AE-DS not only in adversarial robustness but also in overall generalization performance.
+
+\begin{wrapfigure}{r}{48mm}
+\centerline{
+\includegraphics[width=48mm,height=!]{figs/sitl_performance.pdf}
+}
+\caption{\footnotesize{
+Average MAE of corrected low-fidelity simulations compared to high-fidelity simulations over 5 test simulations using different correction methods. 
+Error bar is variance of MAE across 5 test simulations.
+}}
+  \label{fig: sitl}
+ \vspace*{-4.5mm}
+\end{wrapfigure}%%
+\textbf{Simulation-coupled DL for discretized PDE error correction.}
+Numerical methods, while instrumental in providing physics-informed simulations, come with their own challenge: the discretization unavoidably produces numerical errors. 
+DL has gained significant attention for addressing this error correction problem. 
+The feasibility of training a corrective neural network through looping interactions with the iterative partial differential equation (PDE) solver, coined `solver-in-the-loop' (\textbf{SOL}), has been demonstrated in \citep{um2020solver}.
+While existing work focused on using or developing differentiable simulators for model training, we extend SOL by leveraging {\DeepZero}, enabling its use with non-differentiable or black-box simulators. 
+We name our method \textbf{ZO-SOL} and refer readers to \textbf{Fig.\,\ref{fig: sitl_methods_illustration}} in Appx.\,\ref{app: sitl}
+for a schematic overview.
+In this experimental framework, the goal is to correct the output of a low fidelity (\textit{i.e.}, coarse mesh) simulation using a learned DNN so that the corrected simulation more closely aligns with output of a  high fidelity (\textit{i.e.}, fine mesh) simulation.
+In an effort to reduce the amount of correction required by DNN, this correction is applied at each simulation timestep and the corrected simulation state is provided to the simulator to compute the next timestep.
+For our experiments, we consider 2D unsteady wake flow fluid dynamics benchmark from \citep{um2020solver}, in which there is a static rod around which fluid is flowing, and utilize PhiFlow \citep{holl2020learning} as the simulator.
+Additional details on the PDE, the solver-in-the-loop loss, and the DNN architecture are given in Appx.\,\ref{app: sitl}.
+\textbf{Fig.\,\ref{fig: sitl}} compares the test error correction performance of ZO-SOL (via DeepZero) with three differentiable approaches methods considered in \citep{um2020solver}: SRC (low fidelity simulation without error correction), NON (non-interactive training out of the simulation loop using pre-generated low and high fidelity simulation data), and FO-SOL (FO training for SOL given a differentiable simulator). 
+The simulation error for each method in \textbf{Fig.\,\ref{fig: sitl}} is measured as the average across the five test simulations (with varying Reynold's numbers that were not utilized in the training set of simulation data). 
+The error for each test simulation is computed as the mean absolute error (MAE) of the corrected simulation compared to the high fidelity simulation averaged across all simulation timesteps.
+We implement DeepZero for ZO-SOL following the setup used in the image classification task, except for choosing   a 95\% gradient sparsity. 
+The ZO-SOL and FO-SOL use 16 unrolling steps in the loss function to allow the correction function to interact with the simulator during training.
+The results demonstrate that ZO-SOL achieved by DeepZero outperforms the SRC and NON baselines, and narrows the performance gap with FO-SOL, despite only having query-based access to the simulator. 
+Comparing ZO-SOL with NON 
+highlights the promise of ZO-SOL even when integrated with black-box simulators.
+
+\vspace*{-5mm}
+
+
+\section{Conclusion}
+
+\vspace*{-6mm}
+
+This paper introduces {\DeepZero}, a framework designed to enhance the scalability of ZO optimization for deep network training. Specifically, {\DeepZero} integrates coordinate-wise gradient estimation, ZO pruning-enabled gradient sparsity, feature reuse, and forward parallelization into a unified training pipeline. 
+Leveraging these innovations, {\DeepZero} showcases both efficiency and effectiveness in a wide range of applications, including image classification tasks and various practical black-box DL scenarios. 
+While {\DeepZero} has made remarkable progress in training DL models on datasets like ResNet-20 and CIFAR-10, it is important to acknowledge that scalability remains a significant challenge when dealing with even larger models and more extensive datasets. 
+Future studies to accelerate ZO optimization for DL are necessary.  
+Additionally, it is worthwhile to explore the applicability of {\DeepZero} in other domains, such as digital twin applications that  involve non-differentiable physical entities, and on-device training  where the computational overhead of establishing computational graphs and backpropagation is not feasible. 
+Lastly, we refer readers to Appx.\,\ref{app: broader_impact} for a discussion of the broader impact of this paper.
+
+
+
+\section{Acknowledgement}
+
+This work was performed under the auspices of the U.S. Department of Energy by Lawrence Livermore National Laboratory under Contract DE-AC52-07NA27344 and was supported by the LLNL-LDRD Program under Project No. 23-ER-030 (LLNL-CONF-849161).
+
+
+
+

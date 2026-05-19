@@ -1,0 +1,330 @@
+\title{PETRA: Parallel End-to-end Training with Reversible Architectures}
+
+\begin{abstract}
+Reversible architectures have been shown to be capable of performing on par with their non-reversible architectures, being applied in deep learning for memory savings and generative modeling. In this work, we show how reversible architectures can solve challenges in parallelizing deep model training. We introduce PETRA, a novel alternative to backpropagation for parallelizing gradient computations. PETRA facilitates effective model parallelism by enabling stages (i.e., a set of layers) to compute independently on different devices, while only needing to communicate activations and gradients between each other. By decoupling the forward and backward passes and keeping a single updated version of the parameters, the need for weight stashing is also removed. We develop a custom autograd-like training framework for PETRA, and we demonstrate its effectiveness on CIFAR-10, ImageNet32, and ImageNet, achieving competitive accuracies comparable to backpropagation using ResNet-18, ResNet-34, and ResNet-50 models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+First-order methods using stochastic gradients computed via backpropagation on mini-batches are the de-facto standard for computing parameter updates in Deep Neural Networks~\citep{lecun2015deep}. As datasets and models continue to grow~\citep{alabdulmohsin2022revisitingscalinglaw} there is an urgent need for memory-efficient and scalable parallelization of deep learning training across multiple workers. Data parallelism via mini-batches~\citep{lecun2015deep} has been widely adopted in deep learning frameworks~\citep{li2020pytorch}. This approach computes gradients across model replicas distributed among workers, yet it requires frequent synchronization to aggregate gradients, leading to high communication costs, as well as substantial memory redundancy. Furthermore, with the increasing size and scale of models exceeding that of the growth of on-device memory, the forward and backward passes now often exceed a single device's memory capacity~\citep{ren2021zero}. To further address these issues, methods have attempted to mitigate this memory overhead and to parallelize the sequential backpropagation steps themselves across devices, while computing exact gradients. Techniques like optimizer sharding~\citep{rajbhandari2020zero}, tensor parallelism~\citep{shoeybi2019megatron},  activation checkpointing~\citep{chen2016training}, or pipelining~\citep{huang2019gpipe}, have been deployed individually or combined, leading for instance to the development of 3D parallelism~\citep{smith2022using}, a popular methodology which improves the efficiency of the backpropagation implementation. On the other hand, the fundamental inefficiency underlying the parallelization of backpropagation has not been addressed by these methods.  
+
+ 
+ However, the use of exact gradient restricts algorithmic choices and parallel implementations, as highlighted by \cite{jaderberg2017decoupled}. For instance, backpropagation is \textit{backward locked}: the inputs of each layer must be propagated through the network and preserved until an error signal is retropropagated to the layer of origin. This requirement enforces a synchronous dependency among subsequent layers and requires them to systematically store intermediary activations, potentially impeding overall resource efficiency as workers must wait for each other to continue their computations and release memory used for activations. To unlock the potential of backpropagation, inexact backpropagation procedures have been proposed. These procedures are generally conceptualized within the context of model parallelism, where a neural network is split into stages that can process their activations in parallel, potentially on multiple devices. For example, some methods use outdated parameters or activations, such as double-buffered pipelining~\citep{harlap2018pipedream} or delayed gradient approaches~\citep{zhuang2021accumulated}. However, these methods introduce significant memory overhead due to the use of ad hoc buffers for activations, parameters, or both. Following an opposite direction, local learning methods~\citep{nokland2019training,belilovsky2020decoupled}, which estimate inexact gradients via a local auxiliary neural network, pave the way to parallel gradient computations but often lead to unrecoverable performance drops~\citep{fournier2023can}. This underscores the need for a robust alternative to backpropagation, with limited memory overhead.
+
+\begin{figure}
+\centering
+\includegraphics[width=.85\columnwidth]{main_fig.pdf}
+\caption{\textbf{Comparison of PETRA with standard backpropagation.} This approach splits the stages of a model and decouples their forward and backward passes, resulting in a sixfold increase in parallelization speed in this example.}
+
+\label{fig:execution}
+\end{figure}
+
+In this work, we introduce PETRA (Parallel End-to-End Training with Reversible Architectures), a novel method designed to parallelize gradient computations within reversible architectures with minimal computational overhead. Reversible architectures are an ideal candidate for this task, as they can significantly reduce memory overhead during standard backpropagation with limited communication costs. Furthermore, reversibility is a minor requirement, as many studies have demonstrated that standard architectures can be adapted into reversible ones without any performance drops \citep{gomez2017reversible,Jacobsen2018iRevNetDI,mangalam2022reversible,kitaev2020reformer}.  By allowing parameters to evolve in parallel and by computing an approximate inversion during backward, we propose an effective alternative to backpropagation which allows high model parallelism with a constant communication overhead and \textbf{no additional buffers}. In fact, for a constant increase in communication overhead, PETRA achieves a linear speedup compared to standard backpropagation with respect to the number $J$ of stages the network is split into. We illustrate our approach in Fig.~\ref{fig:execution}, by contrasting the evolution of PETRA with a standard backpropagation pass.
+\paragraph{Contributions.} Our contributions are as follows: \textbf{(1)} We introduce PETRA, a streamlined approach for parallelizing the training of reversible architectures. This method leverages a delayed, approximate inversion of activations during the backward pass, allowing for enhanced computational efficiency. \textbf{(2)} Our technique significantly reduces memory overhead by minimizing the necessity to store extensive computational graphs. \textbf{(3)} It enables the parallelization of forward and backward pass computations across multiple devices, effectively distributing the workload and reducing training time. \textbf{(4)} We validate the efficacy of PETRA through rigorous testing on benchmark datasets such as CIFAR-10, ImageNet-32, and ImageNet, where it demonstrates robust performance with minimal impact on accuracy.
+
+
+
+\section{Related work}
+
+\label{sec:related_work} %nv = fully inversible, dans reversible, il y a des downsapling pour reduire la resolution
+
+\paragraph{Reversible architectures.} Reversible DNNs are composed of layers that are invertible, meaning that the input of a layer can be computed from its output. This approach allows to avoid the need to store intermediary activations during the forward pass by reconstructing them progressively during the backward pass~\cite{gomez2017reversible}, at the cost of an extra computation per layer. Invertible networks further improve this method by removing dimensionality reduction steps such as downsamplings, making the networks fully invertible~\cite{jacobsen2018revnet}. Reversibility is not restricted to a type of architecture or tasks and has been extensively used for generative models~\cite{dinh2014nice}, for ResNets~\cite{gomez2017reversible}, and Transformers~\cite{mangalam2022reversible}. However, as far as we know, reversible architectures have never been used to enhance parallelization capabilities.
+\paragraph{Alternatives to backpropagation.} Multiple alternatives to backpropagation have been proposed previously to improve over its computational efficiency. For instance, DNI~\citep{jaderberg2017decoupled} is the first to mention the backpropagation inefficiency and its inherent synchronization locks. However, they address those locks with a method non-competitive with simple baselines. Local (or greedy) learning \cite{nokland2019training, belilovsky2019greedy} propose to use layerwise losses to decouple the training of layers, allowing them to train in parallel \cite{belilovsky2021decoupled}. Local learning in videos \cite{malinowski2021gradient} notably uses the similarity between successive temporal features to remove buffer memory. However, the difference in training dynamics between local training and backpropagation still limits such approaches \cite{fournier2023can, wang2021revisiting}. 
+
+\paragraph{Pipeline parallelism.} Pipelining encompasses a range of model parallel techniques that divide the components of a network into stages that compute in parallel, while avoiding idle workers. Initially popularized by~\cite{huang2019gpipe}, a batch of data is divided into micro-batches that are processed independently at each stage. Although more efficient pipelining schedules have been proposed~\cite{fan2021dapple}, notably to mitigate the peak memory overhead, keeping an exact batch gradient computation requires leaving a bubble of idle workers. By alternating one forward and one backward pass for each worker, PipeDream \cite{narayanan2019pipedream} can allow to get rid of idleness bubbles, but at the expense of introducing staleness in the gradients used. \cite{narayanan2021memory} mitigates this staleness to only one optimization step by accumulating gradients, thus also reducing the parameter memory overhead to only two versions of the parameters. Nevertheless, these approaches still suffer from a quadratic activation memory overhead with regard to the number of stages, as micro-batch activations pile up in buffers, especially for early layers. Some implementations propose to limit this overhead by combining activation checkpointing \cite{chen2016training} with pipelining \cite{kim2020torchgpipe, liu2023colossalauto}, although the memory overhead still scales with the number of stages.
+
+\paragraph{Delayed gradient.} By allowing stale gradients in the update process, these previous methods provide the context for our approach. Delayed gradient optimization methods are model parallel techniques that aim to decouple and process layers in parallel during backpropagation. In these approaches, delays occur stage-wise: the backward pass may be computed with outdated parameters or activations compared to the forward pass. For instance,  \cite{huo2018training} proposes a feature replay approach, where a forward pass first stores intermediary activations, which are then "replayed" to compute the backward pass in parallel. This method still requires heavy synchronization between layers, yielding a lock on computations. In~\cite{zhuang2020accumulated} and~\cite{zhuang2021fully}, stale gradients are computed from older parameter versions differing from the parameters used during the update. This staleness can be mitigated:  \cite{zhuang2021fully} 'shrinks' the gradient by the delay value, but more advanced techniques also exist~\cite{yang2021pipemare, kosson2021pipelined}. Still, these methods are limited like previous pipelining methods by their memory overhead as the computational graph is fully stored. A first step to reduce this, as proposed in Diversely Stale Parameters (DSP)~\cite{xu2019dsp}, PipeMare~\cite{yang2021pipemare} and~\cite{kosson2021pipelined}, is to keep a single set of parameters and approximate the gradients computed during the backward pass with the updated parameters, which differ from the ones used in the forward pass. This requires, like in activation checkpointing, an additional reconstruction of the computational graph. Furthermore, the quadratic activation memory overhead still limits the scalability of these methods for a large number of stages.
+\begin{figure}
+\centering
+\includegraphics[width=.45\columnwidth]{resnet_vs_revnet.pdf}
+\caption{\textbf{Differences between the residual block of a ResNet and its reversible counterpart.} \textbf{(a)} Forward of a residual block. \textbf{(b)} Forward and %of a reversible residual block.
+\textbf{(c)} Reverse forward of a reversible residual block. For reversible blocks, similarly to \cite{gomez2017reversible}, the input $x_j$ is doubled in size and split equally into $\{x_j^1, x_j^2\}$ along the channel dimension. % the input $x_j$ is split equally into $\{x_j^1, x_j^2\}$ along the channel dimension. Thus, the features' sizes must be doubled to maintain the same number of parameters between a ResNet and its reversible RevNet counterpart. 
+The function $\mathcal{F}_j$ includes a skip-connection while $\tilde{\mathcal{F}}_j$ does not.}
+\label{fig:reversible-blocks}
+\begin{subfigure}{0\linewidth}
+\phantomsubcaption\label{fig:revblocka}
+\end{subfigure}% <----- get rid of space, for proper centering
+\begin{subfigure}{0\linewidth}
+\phantomsubcaption\label{fig:revblockb}
+\end{subfigure}% <----- get rid of space, for proper centering
+\begin{subfigure}{0\linewidth}
+\phantomsubcaption\label{fig:revblockc}
+\end{subfigure}% <----- get rid of space, for proper centering
+\end{figure}
+
+
+\section{Method}
+
+\subsection{Standard backpropagation}\label{sec:std-bp}
+We consider a DNN composed of $J$ stages (e.g., a layer or a set of layers). An input $x_0$ is propagated through the network, recursively defined by 
+\begin{equation}
+     x_j\triangleq F_j(x_{j-1},\theta_j)\,, \label{eq:fwdx}
+\end{equation}
+where $F_j$ is the $j$-th stage parameterized by $\theta_j$. The backpropagation algorithm is the ubiquitous algorithm to compute parameter gradients. First, an input is propagated through the network with a forward pass, while storing its intermediate activations. A scalar loss $\mathcal{L}$ is then deduced from the corresponding output $x_J$. Parameter gradients are then computed during the backward pass by taking advantage of the chain rule: starting from the last stage with $\delta_J = \nabla_{x_{J}} \mathcal{L}$, the gradients with regard to the activations are given by 
+\begin{equation}
+\delta_j \triangleq \nabla_{x_{j-1}} \mathcal{L}=\partial_{x} F_j(x_{j-1},\theta_j)^{\mathrm{T}}\delta_{j+1}\,,
+\label{eq:bwdx}
+\end{equation}
+and the gradients with regard to the parameters are defined as
+\begin{equation}
+\Delta_{j}\triangleq\nabla_{\theta_j} \mathcal{L} = \partial_{\theta} F_j(x_{j-1},\theta_j)^{\mathrm{T}}\delta_{j+1}\,.
+\label{eq:bwdtheta}
+\end{equation}
+Note that these computations follow a synchronous and sequential order.
+The parameters $\theta_j$ can then be updated given their gradient estimate $\Delta_j$, using any optimizer.
+\subsection{Reversible architectures}\label{sec:std-rev}
+We focus on the reversible neural networks presented in \cite{gomez2017reversible}, although our method is not dependent on this architecture. In practice, only a few stages which do not preserve feature dimensionality are not reversible and correspond to the downsampling blocks in the ResNet. Fig.~\ref{fig:reversible-blocks} highlights how reversible residual blocks $F_j$ differ from their standard counterpart. The input is split into two equal-size inputs, along the channel dimension, that are propagated forward according to Fig.~\ref{fig:revblockb} using an ad-hoc operator  $\tilde{\mathcal{F}}_j$. It can be reconstructed by reverse propagating the output according to Fig.~\ref{fig:revblockc}, by subtracting the output of $\tilde{\mathcal{F}}_j$ rather than adding it like in the previous forward.
+
+\paragraph{Reversible stages.} In order to compute the exact gradients during the backpropagation phase, each reversible stage needs to retrieve its output from the stage above. We note $F_j^{-1}$ the reverse stage function, which reconstructs the input from the output. We  recursively apply the reconstruction to the final activation $x_J$, such that
+
+\begin{align}
+    \begin{bmatrix}
+        x_{j-1} \\
+        \delta_j
+    \end{bmatrix}
+    = 
+    \begin{bmatrix}
+        F_j^{-1}(x_j, \theta_j) \\
+        \partial_{x} F_j(F_j^{-1}(x_j, \theta_j), \theta_j)^{\mathrm{T}} \delta_{j+1}
+    \end{bmatrix} \,. \label{eq:true_reconstruct} 
+\end{align}
+
+Note that reconstructing the input in our procedure is computationally equivalent to recomputing the activations in activation checkpointing, meaning it is equivalent to a single forward pass. Thus, this augmented backward procedure is equivalent to one regular forward call and backward call. However, one should observe that since the input $x_{j-1}$ must be sent to the reversible stages, this doubles the cost of backward communications.
+
+\paragraph{Non-reversible stages.} In practice, a reversible architecture includes layers that reduce dimensionality for computational efficiency, which thus correspond to non-invertible functions. For those very few stages, we employ a buffer mechanism to store activations and, like activation checkpointing, we recompute the computational graph with a forward pass during the backward pass. % use activation checkpointing to perform the backward pass.
+Note that this would not be the case for invertible (i.e., bijective) architectures~\cite{jacobsen2018revnet}, which use an invertible downsampling.
+\subsection{A parallelizable approach: PETRA}
+\label{sec:petra}
+\begin{table}
+    \caption{\textbf{Comparisons with other methods in an ideal setting for one stage.} We compare several methods to compute a gradient estimate in a model parallel setting. Here, $J$ is the total number of stages while $j$ is the stage index. For the sake of simplicity, we assume that a backward pass requires approximately 2 times more FLOPs than a forward pass. \textit{Full Graph} indicates that it is required to store the full computational graph of a local forward pass. With a limited increase in communication volume and FLOPs, PETRA requires the least storage of all methods while being linearly faster than backpropagation. We assume that the forward and backward passes can be executed in parallel for PETRA or delayed gradients, making the backward pass responsible for most of the computation time in parallelizable approaches.}
+    \label{tab:comparison}
+    \centering
+    \begin{tabular}{l|lllll}\toprule
+                             & \multicolumn{2}{c}{\textbf{Storage}}                  & \multicolumn{1}{c}{\textbf{Comm.}} & \textbf{FLOPs} & \multicolumn{1}{c}{\textbf{Mean time}}              \\
+\multicolumn{1}{c|}{\textbf{Methods}}                  & \textbf{Activations}               & \textbf{Params.}       &    \textbf{ Volume}     &  & \textbf{per batch } \\  \midrule
+Backpropagation             & Full Graph (FG)       & \boldmath{$1$}       & \boldmath{$1$}                 &\boldmath{$3J$}& $ 3J$           \\
+\midrule
+Reversible backprop. \citep{gomez2017reversible}         & \boldmath{$0$}                 & \boldmath{$1$}         & $4$                    & $4J$ & $4J$             \\  \midrule
+Delayed gradients \citep{zhuang2020accumulated} & $2(J-j)\times$ FG  & $\frac{2(J-j)}{k}$  & \boldmath{$1$}                     & \boldmath{$3J$}       &  \boldmath{$2$}      \\
++ Checkpointing~\citep{xu2019dsp}  &     $2(J-j)$   & \boldmath{$1$}    & \boldmath{$1$}          & $4J$           & $3$   \\\midrule
+PETRA (ours)                 & \boldmath{$0$}                 & \boldmath{$1$}       & 4               & $4J$   &$3$     \\\bottomrule   
+\end{tabular}
+\end{table}
+
+As with any model parallel training technique, PETRA requires to partition the network architecture into stages $F_j$ that are distributed across distinct devices. Each device $j$ needs only to communicate with its neighboring devices $j-1$ and $j+1$. The pseudo-code in Alg. \ref{alg:parallel_functions} details the operations performed by each device, and the whole algorithm execution can be summarized as follows. The first device sequentially accesses mini-batches, initiating the data propagation process. When receiving its input $x^{t}_{j-1}$ from the previous stage, each stage processes it in forward mode and passes it to the next stage, until the final stage is reached. The final stage evaluates the loss and computes the gradients with regard to its input and parameters, thus initiating the backward process, which is performed in parallel of the forward process. In it, each stage processes the input and its associated gradient from the next stage. This means first reconstructing the computational graph, either while reconstructing the input $\tilde x^{t}_{j-1}$ for reversible stages or with a forward pass as in activation checkpointing otherwise. Then, the parameter gradient approximation $\Delta^{t+1}_j$ and the input gradient are computed before passing the latter to the previous stage. For intermediary reversible stages, this translates into the following equations, where $t$ corresponds to the current time step of the training,
+\begin{align}
+    \left\{
+    \begin{aligned}
+    x_{j}^{t+1} &= F_j(x_{j-1}^{t}, \theta_j^{t}) \\
+    \tilde{x}^{t+1}_{j-1} &= F_j^{-1}(\tilde{x}^{t}_{j}, \theta_j^{t}) \\
+    \delta_{j}^{t+1} &= \partial_x F_j(\tilde{x}_{j-1}^{t+1}, \theta_j^{t})^{\mathrm{T}} \delta^{t}_{j+1} \\
+    \Delta^{t+1}_{j} &= \partial_{\theta} F_j(\tilde{x}_{j-1}^{t+1},\theta_j^{t})^{\mathrm{T}}\delta^{t}_{j+1} \\
+    \theta^{t+1}_j & = \text{Optimizer}^t_j(\theta^t_j,\Delta_j^{t+1})\,.
+    \end{aligned}\right.
+\end{align}
+
+Note that this complete set of equations effectively decouples communications, computations, and parameter updates between independent devices. Indeed, reversible stages are able to operate without maintaining any state between the forward and corresponding backward phase by simply avoiding weight stashing, similarly to~\cite{xu2019dsp}, and by reversing the output into the input during the backward phase, removing the need for an input buffer. As parameters are updated between the forward and backward phases, the reversible stage produces an approximate input reconstruction, thus evaluating gradients with an approximate set of inputs and parameters during the backward phase. We illustrate in Fig. \ref{fig:petra_vs_dg} the mechanism of PETRA compared to standard delayed gradient approaches that rely on additional buffers \cite{zhuang2021accumulated,zhuang2020accumulated}.
+
+\begin{figure}
+\centering
+\includegraphics[width=.65\columnwidth]{algo_comparison_4.pdf}
+\caption{\textbf{Comparison of our PETRA method to a standard Delayed Gradient method \citep{zhuang2020accumulated}.} By avoiding weight stashing and reversing the output into the input during the backward phase, we are able to fully decouple the forward and backward phases in all reversible stages, with no memory overhead, compared to standard delayed gradient approaches.}
+\label{fig:petra_vs_dg}
+\end{figure}
+
+\paragraph{Complexity analysis.} We now discuss the benefits of our method, which are summarized in Tab. \ref{tab:comparison}. In this discussion, we assume a homogeneous setting in which almost identical stages are distributed across $J$ devices uniformly. First, we consider the backpropagation setting, assuming a model parallelism strategy: a standard backpropagation pass requires storing locally both the parameters and the computational graph and due to the update lock of backpropagation \cite{jaderberg2017decoupled}, requires synchronization between subsequent layers which impede the speed of computations. Standard Delayed Gradients strategies as implemented in \cite{zhuang2021accumulated,zhuang2020accumulated} allow to unlock this barrier, but they require buffers for storing both the computational graph and parameters which can become impractical when using large models. In \cite{xu2019dsp}, an activation checkpointing strategy removes the need for storing parameters, yet it requires a small computational overhead of $33\%$ (assuming a backward pass is approximatively two times slower than a forward pass, see Fig. 6 of~\cite{huo2018decoupled} and \cite{939044}). To avoid storing activations, we rely on reversible architectures \cite{gomez2017reversible} which increases the amount of forward communications by a factor of 2 and backward communication by a factor of 4 -- activations sizes double and one has to pass both activations and gradients at the same time during backward. None of the aforementioned methods scale with the depth $J$: PETRA combines all the advantages of the previous methods, allowing an efficient parallelization, while leading to a limited overhead in computations and communications.
+
+
+\if False
+\begin{algorithm}[t]
+\begin{algorithmic}[1]
+\STATE \textit{In parallel on the $j$-stage, $0<j<J$, perform:}
+\STATE \hspace{\algorithmicindent} \textbf{Forward Communications and Computations:}
+\STATE \hspace{2\algorithmicindent} \textbf{Wait until} features from node $j-1$ are received:
+\STATE \hspace{3\algorithmicindent} $x_{j-1} \leftarrow \textbf{Receive }_{\text{from } j-1}$
+\STATE \hspace{3\algorithmicindent} $x_{j} \leftarrow F_j(x_{j-1}, \theta_j)$
+\STATE \hspace{3\algorithmicindent} $\textbf{Send }_{\text{to } j+1}(x_{j})$
+\STATE \hspace{\algorithmicindent} \textbf{Backward Communications and Computations:}
+\STATE \hspace{2\algorithmicindent} \textbf{Wait until}  features from node $j+1$ are received
+\STATE \hspace{3\algorithmicindent} $(\tilde x_{j},\delta_{j+1}) \leftarrow \textbf{Receive }_{\text{from } j+1}$
+\STATE \hspace{3\algorithmicindent}  $\tilde{x}_{j-1} \leftarrow F^{-1}_j(\tilde{x}_{j}, \theta_j)$ \COMMENT{and keep the corresponding computational graph}
+\STATE\hspace{3\algorithmicindent}  \textbf{Using} the computational graph as a checkpoint:
+\STATE \hspace{4\algorithmicindent} $\delta_{j} \leftarrow \partial_{x} F_j(\tilde{x}_{j-1}, \theta_j)^T \delta_{j+1}$
+\STATE \hspace{4\algorithmicindent}  $\Delta \theta_j \leftarrow \partial_\theta F_j(\tilde{x}_{j-1}, \theta_j)^T \delta_{j+1}$
+\STATE \hspace{3\algorithmicindent} \textbf{Update} parameters $\theta_j$ with $\Delta \theta_j$
+\STATE \hspace{3\algorithmicindent} $\textbf{Send }_{\text{to } j-1}(\tilde x_{j-1},\delta_j)$
+\STATE 
+\STATE \textit{In parallel on a non-reversible stage,  perform:}
+\STATE\hspace{\algorithmicindent} \textbf{Forward Communications and Computations:}
+\STATE \hspace{2\algorithmicindent}\textbf{If }$j=0$\textbf{ then }
+    \STATE \hspace{3\algorithmicindent}$x_{0} \leftarrow \textbf{Read}_{\text{dataset}}$
+\STATE \hspace{2\algorithmicindent}\textbf{Else}
+\STATE \hspace{3\algorithmicindent} \textbf{Wait until} features from node $j-1$ are received:
+\STATE \hspace{4\algorithmicindent} $x_{j-1} \leftarrow \textbf{Receive }_{\text{from } j-1}$
+\STATE \hspace{2\algorithmicindent}$\textbf{Buffer}_j \leftarrow x_{j-1}$
+\STATE \hspace{2\algorithmicindent} $x_{j} \leftarrow F_j(x_{j-1}, \theta_j)$
+\STATE \hspace{2\algorithmicindent} $\textbf{Send }_{\text{to } j+1}(x_{j})$
+\STATE \hspace{\algorithmicindent} \textbf{Backward Communications and Computations:}
+\STATE \hspace{2\algorithmicindent} \textbf{Wait until}  features from node $j+1$ are received
+\STATE \hspace{3\algorithmicindent} $(\tilde x_j,\delta_{j+1}) \leftarrow \textbf{Receive }_{\text{from } j+1}$ \COMMENT{discard $\tilde x_{j}$}
+\STATE \hspace{3\algorithmicindent}  $x_{j-1} \leftarrow \textbf{Buffer}_j$
+\STATE\hspace{3\algorithmicindent}  \textbf{By} recomputing the computational graph:
+\STATE \hspace{4\algorithmicindent} $\delta_{j} \leftarrow \partial_x F_j(x_{j-1}, \theta_j)^T \delta_{j+1}$
+\STATE \hspace{4\algorithmicindent}  $\Delta_j \leftarrow \partial_\theta F_j(x_{j-1}, \theta_j)^T \delta_{j+1}$
+\STATE \hspace{3\algorithmicindent} \textbf{Update} parameters $\theta_j$ with $\Delta_j$
+\STATE \hspace{3\algorithmicindent} $\textbf{Send }_{\text{to } j-1}( x_{j-1},\delta_j)$\STATE
+\STATE \textit{On the final stage,  perform:}
+\STATE \hspace{\algorithmicindent} \textbf{Wait until} features from node $J-1$ are received:
+\STATE \hspace{2\algorithmicindent} $x_{J-1} \leftarrow \textbf{Receive }_{\text{from } J-1}$
+\STATE \hspace{2\algorithmicindent} $\delta_J \leftarrow \nabla_{x_{J-1}} \mathcal{L}$
+\STATE \hspace{2\algorithmicindent} $\textbf{Send }_{\text{to } J-1}(x_{J-1},\delta_J)$
+\end{algorithmic}
+\caption{Worker perspective using PETRA and the detailed scheduling. Note that this implementation is completely distributed.}
+\label{alg:parallel_functions}
+\end{algorithm}
+\fi
+
+\begin{algorithm}[t]
+\caption{Worker perspective for training in parallel with PETRA, on a stage $j$, assuming initialized parameters $\theta_j$ and time step $t$, as well as an accumulation factor $k>1$.}
+\label{alg:parallel_functions}
+\begin{algorithmic}[1]
+\STATE \textit{\textbf{In parallel} on the $j$-th stage, $1\leq j < J$, perform:}
+\STATE \hspace{\algorithmicindent} \textbf{Forward Communications and Computations:}
+\STATE \hspace{2\algorithmicindent}\textbf{If }$j=1$\textbf{ then }
+    \STATE \hspace{3\algorithmicindent}$x_{0} \leftarrow \textbf{Read}_{\text{dataset}}$
+\STATE \hspace{2\algorithmicindent}\textbf{Else}
+\STATE \hspace{3\algorithmicindent}$x_{j-1} \leftarrow \textbf{Wait and Receive }_{\text{from } j-1}$ 
+\STATE \hspace{2\algorithmicindent}$\textbf{If}$ stage $j$ is not reversible :  
+\STATE \hspace{3\algorithmicindent}$\textbf{Buffer}_j \leftarrow x_j$
+\STATE \hspace{2\algorithmicindent}$x_{j} \leftarrow F_j(x_{j-1}, \theta_j)$
+\STATE \hspace{2\algorithmicindent}$\textbf{Send }_{\text{to } j+1}(x_{j})$
+\STATE \hspace{\algorithmicindent} \textbf{Backward Communications and Computations:}
+\STATE \hspace{2\algorithmicindent}$( \tilde x_{j},\delta_{j+1}) \leftarrow \textbf{Wait and Receive }_{\text{from } j+1}$
+\STATE \hspace{2\algorithmicindent}$\textbf{If}$ stage $j$ is reversible: 
+\STATE \hspace{3\algorithmicindent}${\tilde x}_{j-1} \leftarrow F^{-1}_j({\tilde x}_{j}, \theta_j)$  \textit{ and keep computational graph in memory}
+\STATE \hspace{2\algorithmicindent}$\textbf{Else}$ : 
+\STATE \hspace{3\algorithmicindent}$\tilde x_{j-1}  \leftarrow \textbf{Buffer}_j$
+\STATE \hspace{3\algorithmicindent}$x_{j} \leftarrow F_j(\tilde x_{j-1}, \theta_j)$  \textit{ to recompute the computational graph} 
+\STATE \hspace{2\algorithmicindent}$\delta_{j} \leftarrow \partial_{x} F_j(\tilde x_{j-1}, \theta_j)^T \delta_{j+1}$
+\STATE \hspace{2\algorithmicindent}$\Delta_j \leftarrow  \Delta_{j} + \frac{1}{k}\partial_{\theta} F_j(\tilde x_{j-1}, \theta_j)^T \delta_{j+1}$
+\STATE \hspace{2\algorithmicindent}$\textbf{If }  t \text{ mod } k=0$\textbf{ then}:
+\STATE \hspace{3\algorithmicindent}\textbf{Update} parameters $\theta_j$ with $\Delta_j$
+\STATE \hspace{3\algorithmicindent}$\Delta_{j} \leftarrow 0$
+\STATE \hspace{2\algorithmicindent} $t\leftarrow t+1$
+\STATE \hspace{2\algorithmicindent}$\textbf{Send }_{\text{to } j-1}( x_{j},\delta_j)$
+\STATE 
+\STATE \textit{\textbf{In parallel} on the final stage $J$,  perform:}
+\STATE \hspace{2\algorithmicindent}$x_{J-1} \leftarrow \textbf{Wait and Receive }_{\text{from } J-1}$
+\STATE \hspace{2\algorithmicindent}$\mathcal{L} \leftarrow F_J(x_{J-1}, \theta_J)$
+\STATE \hspace{2\algorithmicindent}$\delta_{J} \leftarrow \nabla_{x_{J}} \mathcal{L}$
+\STATE \hspace{2\algorithmicindent}$\Delta_{J} \leftarrow \Delta_{J} + \frac{1}{k}\nabla_{\theta_{J}} \mathcal{L}$
+\STATE \hspace{2\algorithmicindent}$\textbf{If }  t \text{ mod } k=0$\textbf{ then}:
+\STATE \hspace{3\algorithmicindent}\textbf{Update} parameters $\theta_J$ with $\Delta_J$
+\STATE \hspace{3\algorithmicindent}$\Delta_{J} \leftarrow 0$
+\STATE \hspace{2\algorithmicindent} $t\leftarrow t+1$
+\STATE \hspace{2\algorithmicindent}$\textbf{Send }_{\text{to } J-1}(x_{J-1},\delta_{J})$
+\end{algorithmic}
+\end{algorithm}
+
+
+
+
+\section{Numerical experiments}
+
+
+\subsection{Classification accuracy}\label{sec:numerics}
+We now describe our experimental setup on CIFAR-10~\cite{Krizhevsky2009LearningMLcifar10}, ImageNet-32~\cite{chrabaszcz2017downsampledimagenet}, and ImageNet~\cite{deng2009imagenet}.
+
+\paragraph{Experimental setup.} 
+
+All our experiments use a standard SGD optimizer with a Nesterov momentum factor of 0.9. We train all models for 300 epochs on CIFAR-10 and 90 epochs on ImageNet32 and ImageNet. We apply standard data augmentation, including horizontal flip, random cropping, and standard normalization but we do not follow the more involved training settings of \citep{wightman2021resnet}, which potentially leads to higher accuracy. We perform a warm-up of 5 epochs where the learning rate linearly increases from $0$ to $0.1$, following ~\cite{goyal2017accurate}. Then, the learning rate is decayed by a factor of $0.1$ at epochs 30, 60, and 80 for ImageNet32 and ImageNet -- it is decayed at epochs 150 and 225 for CIFAR-10. We use a weight decay of 5e-4 for CIFAR-10 and 1e-4 for ImageNet32 and ImageNet. As suggested in~\cite{goyal2017accurate}, we do not apply weight decay on the batch norm learnable parameters and biases of affine and convolutional layers. For our standard backpropagation experiments, we follow the standard practice and use a batch size of 128 on ImageNet32 and CIFAR-10, and 256 on ImageNet32.  However, we made a few adaptations to train our models with PETRA. As suggested by \cite{zhuang2020accumulated,zhuang2021fully}, we employ an accumulation factor $k$ and a batch size of 64, which allows to reduce the effective staleness during training: in this case, $k$ batches of data must be successively processed before updating the parameters of a stage (see Alg. \ref{alg:parallel_functions}).  Such gradient accumulation however also increases the effective batch size, and we apply the training recipe used in~\cite{goyal2017accurate} to adjust the learning rate; note that we use the average of the accumulated gradients instead of the sum. The base learning rate is thus given by the formula $\texttt{lr} = 0.1 \frac{64k}{256}$, with $k$ the accumulation factor.  
+
+\paragraph{Model adaptations.}
+For designing our RevNet architectures, we adopt a methodology similar to \cite{gomez2017reversible}: the number of channels in each stage is multiplied by 2 to account for the second data stream according to Fig.~\ref{fig:reversible-blocks}. However, as the stage function $\tilde{\mathcal{F}}_j$ operates only on one of the two streams, the number of parameters stays almost the same between a residual block and its revertible counterpart. Consequently, the DNNs are split to preserve each residual block, resulting in 10 stages for RevNet18, and 18 stages for RevNet34 and RevNet50; thus varying the level of staleness between configurations. On CIFAR-10, the input layer uses 3x3 convolutions instead of 7x7 convolutions and does not perform max-pooling. The running statistics of batch normalization layers are updated when recomputing the activations during the backward pass and are then used during model evaluation -- the running statistics are not updated during the forward pass. %In the following, we consider the standard ResNet18, ResNet34 and ResNet50, for the sake of simplicity, maintaining all other hyper-parameters identical, as well as their reversible counterpart.
+
+\paragraph{Performance comparison.}
+Tab.~\ref{tab:backprop_vs_async} reports our numerical accuracy on several vision datasets, comparing a backpropagation performance from an official PyTorch implementation of ResNets (the numbers can be found as v1 of  \url{https://pytorch.org/hub/pytorch_vision_resnet/}), for our own implementation of ResNets and RevNets in our custom computational framework, and our proposed method, PETRA. For PETRA, we report the best classification accuracy after the last learning rate drop, using the best value (picked on the training set) of accumulation steps within $\{1,2,4,8,16,32\}$. Our CIFAR-10 accuracies are averaged over 3 runs, with a variance smaller than 0.1. We observe that while our reversible models have about the same parameter count, they all perform in the same range of accuracy as their non-reversible counterparts. Only the RevNet-50 leads to a small drop in accuracy on ImageNet of about 0.6\%: using different downsampling layers removes this gap at the expense of a substantial increase in the parameter count ($30.4$M to $50$M). However, we decided not to include this result for the sake of comparison with respect to the original ResNets.
+\begin{table}
+    \caption{\textbf{Classification accuracies using our PETRA method with RevNets, compared to standard backpropagation on ResNets and RevNets} on CIFAR-10, ImageNet32, and ImageNet. Our method delivers competitive results with backpropagation, even on ImageNet.}
+    \label{tab:backprop_vs_async}
+    \centering
+    \begin{tabular}{llcccr}
+        \toprule
+        \textbf{Method}              &  \multicolumn{1}{c}{\textbf{Model}}     & \textbf{Param. count}  & \textbf{CIFAR-10}   & \textbf{ImNet32}   & \textbf{ImNet}  \\
+        \midrule
+        Backprop       & ResNet18 (PyTorch) & 11.7M   & -         & -         & 69.8    \\
+        Backprop        & ResNet18 (Ours) & 11.7M    & $95.0$      & 54.0     & 70.8 \\
+        Backprop        & \textbf{Rev}Net18 (Ours) & 12.2M      & 94.9      & $54.6$     & 70.8\\
+        PETRA                   & \textbf{Rev}Net18 (Ours)   & 12.2M     & 94.9      & $54.6$    & $71.0$ \\
+        \midrule
+        Backprop      & ResNet34  (PyTorch)   & 21.8M     & -         & -         & 73.3\\
+        Backprop          & ResNet34 (Ours) & 21.8M   &$95.5$      & 56.5      & $74.0$\\
+        Backprop        &\textbf{Rev}Net34 (Ours)   & 22.3M    & 95.3      &$56.4$      & 73.2 \\
+        PETRA                      & \textbf{Rev}Net34 (Ours) & 22.3M   & 94.8      & 56.1      & 73.5 \\
+        \midrule
+        Backprop        & ResNet50  (PyTorch)   & 25.6M    & -         & -         & 76.1 \\
+        Backprop         & ResNet50 (Ours)  & 25.6M  & $94.8$     & 58.8      & $75.6$ \\
+        Backprop       & \textbf{Rev}Net50 (Ours)  & 30.4M      & $95.2$      & $59.7$      & 75.4\\
+        PETRA              & \textbf{Rev}Net50  (Ours)    & 30.4M       & 94.5      & 59.6      & 74.8\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.8\linewidth]{acc_steps.pdf}
+    \caption{\textbf{Validation accuracy of PETRA and backpropagation for a various number of accumulation steps}, for a RevNet18 trained on ImageNet with $k \in \{1, 2, 4, 8, 16, 32\}$. The validation accuracies are averaged over the last 10 epochs. As the number of accumulation steps increases, the effective staleness in PETRA decreases, closing the gap with standard backpropagation.}
+    \label{fig:accumulation}
+\end{figure}
+\paragraph{Impact of the accumulation $k$.} We test the impact of the accumulation on a RevNet-18 trained via PETRA for various values of accumulations with $k$ spanning $\{1,2,4,8,16,32\}$ on the ImageNet dataset. Fig. \ref{fig:accumulation} indicates that our method can benefit from large accumulation factors, with the well-known trade-off of large batches mentioned in \cite{goyal2017accurate}. Increasing the accumulation factor reduces the effective staleness during training, and closes the performance gap with standard backpropagation with perfect matching for $k=32$. This confirms that this large-batch training recipe derived for synchronous data parallelism is also particularly suited for our model parallel approach.
+
+\subsection{Technical details}
+\label{sec:details}
+
+\paragraph{A note on the implementation.}
+We shortly describe our implementation details. We base our method on  PyTorch \cite{pytroch-v2}, although we require significant modifications to the Autograd framework in order to manage delayed first-order quantities consistently with PETRA. We rely heavily on the \emph{Vector Jacobian Product} of PyTorch to compute gradients during the backward pass of each stage, but other backends could be used. The backward pass for reversible stages only necessitates a reconstruction step and a backward step -- a naive implementation would use a reconstruction step, followed by a forward and a backward step. This is because we only need the output gradient as well as the computational graph of $\tilde{\mathcal{F}}_j$ to compute the input and parameter gradients at line 12 and 13 of Alg.~\ref{alg:parallel_functions}, which can be obtained during the input reconstruction phase. For non-reversible stages, we reconstruct the computational graph with a forward pass on the input retrieved from the buffer during the backward pass. Our models can run on a single A100, 80GB.
+\begin{table}
+    \caption{\textbf{Memory savings for RevNet50 on ImageNet with our method for different configurations.} We indicate the use of memory buffers for inputs or parameters. %The peak memory corresponds to the maximum memory needed across workers, with the index of the corresponding block given in parenthesis. 
+    The savings are computed with respect to the first configuration, where inputs and buffers are stored. Our method achieves 54.3\% memory reduction over the base configuration of Delayed Gradients.}
+    \label{tab:memory_savings}
+    \centering
+    \begin{tabular}{cc|c|c}
+        \toprule
+        \multicolumn{2}{c|}{\textbf{Buffer}} & \textbf{Memory (GB)} &  \textbf{Saving (\%)} \\
+        \textbf{Input} & \textbf{Params.} &  &  \\
+        \midrule
+        $\surd$     & $\surd$   & 44.5          & 0.0 \\
+        $\surd$     & $\times$  & 43.6          & 2.0 \\
+        $\times$    & $\surd$   & 21.2          & 52.3 \\
+        $\times$    & $\times$  & \textbf{20.3} & \textbf{54.3}\\
+        \bottomrule
+    \end{tabular}
+\end{table}
+\paragraph{Memory benefits and training time.}
+To better understand the advantage of our method compared to other delayed gradient approaches~\cite{harlap2018pipedream, xu2019dsp, kosson2021pipelined}, we emphasize the practical memory savings associated with different methods in Tab.~\ref{tab:memory_savings}. We estimate the memory needed in gigabytes, as the sum of the model size, the input buffer size, and the parameter buffer size, while excluding the input buffer size of the first stage, which corresponds to retrievable dataset inputs. 
+We do not include the effect of gradient accumulation since it depends on the value of $k$ and only affects the length of the parameter buffer, which is small in our case, i.e., we use $k=1$. Note that the batch size also affects the memory savings, and we set it to 64 for consistency with Tab.~\ref{tab:backprop_vs_async}. Storing both inputs and parameters into a buffer corresponds to the PipeDream approach~\cite{harlap2018pipedream}. Only storing inputs into buffers would correspond to the approach in \cite{xu2019dsp, kosson2021pipelined}. The third and fourth lines are only applicable to reversible architectures as they do not store the input into buffers. As can be seen, the input buffer has the biggest impact on the total memory needed, being responsible for 52.3\% of the memory footprint. Dropping the parameter buffer in PETRA pushes the memory savings further to 54.3\% for a RevNet50 on ImageNet. Note that non-reversible stages account for the majority of total memory use, meaning that savings would be much higher for fully invertible architectures.
+
+
+        
+
+
+
+\section{Conclusion}
+
+In this work, we introduce PETRA, a novel model parallel training technique for reversible architectures which is a novel promising alternative to backpropagation. It achieves a significant parallelization with a limited overhead compared to standard backpropagation or other competitive alternatives to end-to-end training, like delayed gradients approaches. Our method has the potential to achieve linear speedup compared to standard backpropagation and allows reversible layers to operate without any parameter or activation buffers, effectively decoupling the forward and backward phases. Despite using an approximate delayed gradient estimate, our method delivers competitive performances compared to standard backpropagation on standard computer vision datasets.
+
+
+In future work, we aim to implement and optimize PETRA for Large Language Models (LLMs), with a first baseline being Reformers~\cite{kitaev2020reformer}, invertible transformers that have been shown to scale. This will validate PETRA's effectiveness and robustness, solidifying its potential as a cutting-edge training technique. 
+
+\begin{ack}
+    This work was supported by Project ANR-21-CE23-0030 ADONIS, EMERG-ADONIS from Alliance SU, and Sorbonne Center for Artificial Intelligence (SCAI) of Sorbonne University (IDEX SUPER 11-IDEX-0004). This work was granted access to the AI resources of IDRIS under the allocations 2023-A0151014526 made by GENCI. We thank polymathic-ai for the relevant discussions.
+\end{ack}
+
+
+
+
+
+

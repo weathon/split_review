@@ -36,6 +36,7 @@ If after round 2 you still cannot decide between, say, 5.5 and 6.5 because all y
 - Score distribution: extreme scores are rare but valid. If the paper is truly exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
 - Do NOT cluster scores around 5. The score should be relative to retrieval samples, calibrated to where the paper actually sits.
 - The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
+- The nice to have SHOULD be considered as weakness in comparsion
 
 ## Reporting
 

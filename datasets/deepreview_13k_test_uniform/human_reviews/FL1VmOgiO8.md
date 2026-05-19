@@ -1,0 +1,127 @@
+# Sentiment-Enhanced Stock Price Prediction: A Novel Ensemble Model Approach
+
+- Decision: Reject
+- Scores: 3, 1, 3
+
+## Abstract
+Stock price prediction remains a formidable challenge within the realm of financial markets, wherein a multitude of models and methodologies have been under exploration to prognosticate the dynamic behaviour of equities. This research endeavour encompasses an exhaustive examination of extant stock prediction systems, entailing a meticulous assessment of their merits and demerits, concurrently pinpointing discernible lacunae and avenues for enhancement. Subsequently, we harnessed the capabilities of BERT, an exemplar in the domain of natural language processing, to conduct sentiment analysis across a heterogeneous corpus of news articles pertinent to the subject stocks. Additionally, an ancillary sub-experiment was conducted to ascertain the relative impact of three distinct categories of news articles, namely headlines, summaries, and a composite amalgamation of the two, on the efficacy of stock price prediction.
+
+The outcome of this investigative pursuit was the generation of sentiment scores for each trading date, which were subsequently integrated as input features in the training of a neural network. Through a comparative analysis of various neural network models, including but not limited to RNN, LSTM, GAN, and WGAN-GP, we discerned that the WGAN-GP model exhibited the most favourable predictive performance. Building upon these findings, we introduced the FB-GAN model, an ensemble architecture comprising WGAN-GP, which capitalizes on the fusion of historical stock price data and market sentiment scores for enhanced stock price prediction.
+
+Subsequently, a comprehensive evaluation of our approach was undertaken vis-à-vis established models, gauging its performance against five prominent equities, namely Amazon, Apple, Microsoft, Nvidia, and Adobe. In summation, this research makes a compelling case for the integration of BERT-based sentiment analysis within the ambit of stock price prediction. Our initial hypothesis regarding the significant influence of market sentiment on stock price prediction was validated, and our proposed FB-GAN model outperformed all other models. Furthermore, incorporating both the headline and summary of the news article contributed to enhanced stock price prediction compared to utilizing either the headline or summary in isolation.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper studies the incorporation of sentiment analysis into stock prediction. The paper shows the RMSE between the actual stock price and the predicted stock price is lowered when the sentiment score is added on top of the previous stock price.
+
+### Strengths
+The paper presents the idea of leveraging sentiments from news articles for stock price prediction. Every component of the model is explained and the readers can easily understand the structure of the model.
+
+### Weaknesses
+1. The science/engineering contribution of paper is very limited. The paper did not propose new methods of obtaining stock-related news articles, new approaches of de-noising the news articles, new models that are developed to study sentiment-score-augmented stock price prediction etc. The paper gave the reviewer an impression that it is a concatenation of the existing models and data without much deep analysis. 
+
+2. The paper is lack of scientific rigor. 
+* There is no guardrail for the accuracy of the sentiment analysis. That means we don't know the accuracy of the sentiment scores that are fed into the prediction model. 
+* The authors claimed in the model that "a strong correlation between the market sentiments on the stock price movement". But there is no  statistical analysis to back the statement up.
+* We need variable control in the comparison between WGAN-GP and FB-GAN. For example, the model WGAN-GP should have the same input dimension as FB-GAN with the sentiment score set to neural.
+
+3. RMSE is not a good metric overall. It does not translate well to trading strategies because large RMSE does not necessarily mean losing money.
+
+### Questions
+No further questions.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 2
+
+### Rating
+1
+
+### Rating Number
+1
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+The authors tried to enhance the accuracy of stock price prediction via news sentiment.
+
+### Strengths
+N/A
+
+### Weaknesses
+1. Lack of technical contribution.
+2. The overall presentation is in a bad shape.
+3. Weak experiments.
+
+### Questions
+This paper lacks a significant technical contribution, and the overall representation is unclear. I don't think it's a good fit for ICLR.
+
+### Soundness
+1 poor
+
+### Presentation
+1 poor
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper presents FB-GAN, a stock price prediction model based on sentiment analysis. The authors tested the model on historical price data for 5 stocks, and found FB-GAN to outperform a number of baseline models in average. My main concern about this paper is its novelty. The proposed FB-GAN model appears to be a simple extension of WGAN-GP, and the intuition behind the extra modules is not well justified. In addition, the stock universe is too small, which makes the reported results unreliable. I would encourage the authors to explain in more details the design choice of FB-GAN, and to expand the dataset.
+
+### Strengths
+- This paper presents an extensive study of a number of methods on their performance in stock price prediction.
+- The effect of sentiment analysis to stock price prediction is validated in the paper.
+- The paper is well-written and easy to follow.
+
+### Weaknesses
+- The stock universe in the experiments consists of only 5 stocks, which raises concern about whether the proposed approach would generalize to other stocks.
+- FB-GAN appears to be a naive extension of WGAN-GP. The authors fail to explain the intuition behind the module designs.
+- FB-GAN is worse than WGAN-GP on 60% of the stocks tested.
+
+### Questions
+- Have the authors tested WGAN-GP with sentiment scores as the input features?
+- Have the authors studied the relative improvement after incorporating sentiment scores. An ablation study would let interested readers know the effectiveness of sentiment analysis in stock price prediction.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

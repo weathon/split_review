@@ -1,0 +1,301 @@
+\title{LoRC: Low-Rank Compression for LLMs KV Cache with a Progressive Compression Strategy}
+
+\begin{abstract}
+The Key-Value (KV) cache is a crucial component in serving transformer-based autoregressive large language models (LLMs), enabling faster inference by storing previously computed KV vectors. However, its memory consumption scales linearly with sequence length and batch size, posing a significant bottleneck in LLM deployment.
+Existing approaches to mitigate this issue include: (1) efficient attention variants integrated in upcycling stages, which requires extensive parameter tuning thus unsuitable for pre-trained LLMs; (2) KV cache compression at test time, primarily through token eviction policies, which often overlook inter-layer dependencies and can be task-specific.
+
+This paper introduces an orthogonal approach to KV cache compression. 
+We propose a \textit{low-rank approximation} of  KV weight matrices, allowing for plug-in integration with existing transformer-based LLMs without model retraining.
+To effectively compress KV cache at the weight level, we adjust for layerwise sensitivity and introduce a \textit{progressive compression} strategy, which is supported by our theoretical analysis on how compression errors accumulate in deep networks. Our method is designed to function without model tuning in upcycling stages or task-specific profiling in test stages.
+Extensive experiments with LLaMA models ranging from 8B to 70B parameters across various tasks show that our approach significantly reduces the GPU memory footprint while maintaining performance.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+Autoregressive large language models (LLMs) such as GPT \citep{achiam2023gpt}, PaLM \citep{chowdhery2023palm}, and LLaMA \citep{touvron2023llama}, built upon transformer architectures \citep{vaswani2017attention}, have shown remarkable capabilities across a wide range of tasks. 
+However, the attention mechanism underpinning those models poses significant challenges to the efficiency of their deployment, particularly the management of the Key-Value (KV) cache.
+The KV cache is originally designed to accelerate the generation process by storing intermediate attention KV vectors, thus avoiding recomputation of shared prefixes for each autoregressively generated token.
+Despite reducing computational overhead, the KV cache significantly increases memory footprints, as its size scales
+linearly with both sequence length and batch size.
+This drives the need for KV cache compression to enable cost-effective deployment of LLMs across various devices and platforms.
+
+To address the overhead of the original attention mechanism, one prominent line of work aims to design more efficient attention variants, such as multi-query attention (MQA)~\citep{shazeer2019fast} and group-query attention (GQA) \citep{ainslie2023gqa}, which inherently reduce the corresponding KV cache.
+Nevertheless, those techniques typically require upcycling existing models. Without proper training, their direct application often results in degraded performance \citep{ribar2023sparq, ainslie2023gqa, liu2024scissorhands}, thereby making them unsuitable for deployment in resource-constrained environments. Recently, \cite{liu2024deepseek} design a multi-head latent attention (MLA) for efficient inference, utilizing low-rank key-value union compression to reduce KV cache. However, similar to MQA and GQA, MLA is also integrated during the model's training cycle, thus not directly applicable to pre-trained LLMs. 
+
+In contrast, another line of work focuses on KV cache compression at test time, primarily achieved by dropping tokens while leaving the backbone model intact. Several works design the token eviction policy based on accumulated attention scores \citep{sheng2023flexgen,zhang2024h2o, liu2024scissorhands},  or heuristics such as special tokens or and relative distance between tokens~\citep{ge2023model}
+However, these methods either ignore inter-layer dependencies or require attention pattern analysis, and the resulting eviction policy can be task-specific. 
+
+In this paper, we propose to compress KV cache from an orthogonal perspective, \textit{i.e.,} the KV weight matrices. As the KV weight matrices are typically characterized by low-rank properties, we perform a \textit{low-rank approximation} to reduce their dimension and thus compress the resulting KV cache.  
+Recognizing that compressed KV caches inevitably introduce information loss to subsequent layers, and that sensitivity to input changes varies across layers, we introduce a 
+\textit{progressive} compression strategy.
+This approach is grounded in the calculation of cumulative condition numbers for KV weight matrices across different layers, reflecting their sensitivity and guiding the compression strategy. 
+Theoretically, we derive error bounds for both individual layer compression and error propagation through the network. These theoretical results reveal that errors introduced in earlier (shallower) layers are amplified more significantly than those in deeper layers, and  informs our progressive compression strategy.
+
+Our method is designed for straightforward implementation, requiring neither model profiling nor detailed inspection of the attention structure.
+ It can be directly applied to pre-trained LLMs by extracting weight matrices and leveraging their inherent properties to swiftly determine optimal layer-wise compression. This approach offers a practical and efficient solution for enhancing LLM inference performance in memory-constrained deployment scenarios, without the need for model retraining or complex eviction strategy composition.
+
+We evaluate our method on 8B, 13B, and 70B LLaMA models that built upon multi-query attention or group-query attention. 
+Experiments across tasks such as commonsense reasoning, reading comprehension, text summarization, and mathematical reasoning, demonstrate that our approach can reduce substantial GPU memory footprint while maintaining minimal impact on performance.
+
+
+
+\section{Related Works}
+
+\subsection{Attention Mechanism}
+Attention mechanisms in Transformer models have evolved to enhance efficiency and effectiveness \citep{vaswani2017attention}. Multi-Query Attention (MQA) \citep{shazeer2019fast} reduces memory requirements during decoding, while Grouped-Query Attention (GQA) \citep{ainslie2023gqa} balances efficiency and performance by sharing key and value heads among query groups. Recently, \cite{liu2024deepseek} introduced Multi-head Latent Attention (MLA), using low-rank key-value union compression to optimize inference. However, these approaches are typically integrated during model training, limiting their applicability to pre-trained LLMs.
+Parallel research efforts have targeted inference efficiency improvements. For example, \cite{pope2023efficiently} developed multi-dimensional partitioning techniques, and \cite{de2022fido} optimized the Fusion-in-Decoder (FiD) approach \citep{izacard2020leveraging} for more efficient inference.
+\cite{holmes2024deepspeed} introduces SplitFuse which leverages dynamic prompt and generation decomposition and unification to further improve continuous batching and system throughput. 
+In this paper, we contribute to this line of research by improving inference efficiency through the compression of KV cache. Our approach leverages the low-rank property of the attention weight matrices, offering a plug-and-play method to reduce the memory footprint of LLMs during inference without requiring model retraining.
+
+\subsection{KV Cache Compression} 
+As Large Language Models (LLMs) continue to grow in size and complexity, efficient management of their memory usage during inference has become a critical challenge. 
+Early efforts to compress token hidden states \citep{guan2022transkimmer, sun2022simple, zhou2020bert} are limited to non-autoregressive models and require retraining, thus motivating research into pruning tokens in the KV cache of auto-regressive LLMs. For instance, \cite{mu2024learning} learns to compress prompts into a few special tokens to reduce memory pressure during caching, but this token prediction requires model retraining and could be an expensive overhead during inference. 
+ Several methods design token eviction policies based on accumulated attention scores \citep{sheng2023flexgen, zhang2024h2o, liu2024scissorhands}, or heuristics such as special tokens and relative distance between tokens \citep{ge2023model}. However, these approaches often overlook inter-layer dependencies, potentially resulting in task-specific eviction policies that may not generalize well across different applications.
+In contrast to token-dropping methods, our study takes a different tack. We focus on compressing the KV cache from the perspective of weight matrix dimension reduction. Importantly, our progressive compression strategy carefully addresses the issue of error propagation across compressed layers, a consideration often ignored in previous methods. 
+
+A few studies have explored customized cache budgets across different layers in the context of token dropping, yet no definitive consensus has been reached on the most effective strategies. \cite{zhang2024pyramidkv} suggest increasing compression intensity in higher layers based on the assumption that these layers contain less critical information. Conversely, \cite{liu2024scissorhands} argue that significant tokens exhibit greater variability at higher layers, thus larger caches are required to reduce cache misses. While these approaches demonstrate understanding of layer-specific requirements, they depend heavily on task-specific attention patterns.
+Our approach diverges fundamentally by adopting an orthogonal perspective to compression, focusing on weight matrix dimension reduction rather than token eviction. This approach enables us to establish error propagation bounds across the network and to guide our progressive compression strategy effectively. It eliminates the need to analyze attention patterns for eviction policy design, simplifying implementation and enhancing general applicability across different LLMs.
+
+Concurrently, \cite{liu2024deepseek} and \cite{yu2024effectively} modify attention mechanisms to manage KV caches more efficiently during inference. While these methods align with our philosophy of altering attention dynamics, they require either pretraining adjustments or extensive model finetuning to accommodate the modified attention schemas, limiting their practicality in deployed systems. In contrast, our method requires no such training or fine-tuning, offering a plug-and-play solution that seamlessly integrates with pre-trained models to deliver efficient compression without compromising the model's integrity or performance.
+
+
+
+
+
+\section{Preliminary: Attention Mechanism and KV Cache}
+
+Transformer-based language models use self-attention to weigh the importance of different tokens, thus allowing for the model to focus on different parts of the input sequence.
+Given an input \(X\in\mathbb{R}^{N\times D}\), where \(N\) is the sequence length and \(D\) is the dimensionality of each token's embedding, we compute the Query (\(Q\)), Key (\(K\)), and Value (\(V\)) matrices by multiplying \(X\) with their respective weight matrices: {\small$Q = XW_q, K = XW_k, V = XW_v$.}
+
+Then the attention mechanism is as follows:
+ \begin{equation}
+        \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V.
+\end{equation}
+Multi-head attention allows the model to jointly attend to information from different representation
+subspaces at different positions
+\begin{equation}
+\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}^1, \ldots, \text{head}^h)W_o,
+\end{equation}
+where 
+\begin{equation}
+\text{head}^i = \text{Attention}(X(W^i_q)^T, X(W^i_k)^T, X(W^i_v)^T).\footnote{This formulation with transposed weight matrices aligns with the implementation found in the models examined in our study. Mathematically, this is equivalent to the standard formulation without transpose. The choice of which form to use depends on implementation details and computational optimizations.}
+\end{equation}
+Here, \(W^i_q\), \(W^i_k\), and \(W^i_v\) are the weight matrices for the \(i\)-th attention head, and \(W_o\) is the weight matrix for the output linear transformation.
+
+In autoregressive transformers, the computation of attention scales quadratically (\textit{i.e.,} $\mathcal{O}(N^2)$) with the sequence length \(N\), as every token in the sequence computes interactions with every other token. Such scaling is impractical for very large inputs or real-time applications, where speed and efficiency are crucial.
+
+To address this computational bottleneck, KV caches store the results of previous computations of the KV matrices. When processing subsequent tokens, the model can retrieve keys and values from the cache rather than recomputing them, thereby reducing the number of operations to a linear scale with respect to the sequence length. This method trades off increased memory usage for a reduction in computational overhead. The size of KV cache per layer is defined as below:
+\begin{equation}
+    C_{k,v} = b \times N \times h \times d,
+\end{equation}
+where $b$ is the batch size, $N$ is the max sequence length in the batch, $h$ is the number of K/V head and $d$ is the head dimension. 
+This linear relationship between cache size and sequence length, as well as batch size, underscores the critical need for efficient compression methods. 
+As described, existing works that can reduce KV cache consumption either require expensive model training in upcycling stages or empirical token eviction policy design at test time. In the following section, we present a novel method for KV cache compression from the perspective of low-rank weight approximation. 
+
+
+\section{Method}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.99\linewidth]{figure/overview.png}
+  \caption{\ours compresses KV-cache by decomposing the KV weight matrices in attention heads. The progressive compression strategy retains more dimension for KV weights in shallow layers and compresses the KV weights in deep layers more aggressively.}
+  \label{fig:overview}
+\end{figure}
+We structure this section as follows. In Section~\ref{sec:svd}, we detail the process of compressing the KV cache for a single layer using Singular Value Decomposition (SVD) on weight matrices. Section~\ref{sec:strategy} introduces our progressive compression strategy, which determines adaptive compression dimensions for each layer. 
+Finally, Section~\ref{sec:attn} covers additional considerations for handling various attention mechanisms, and Section~\ref{sec:rope} addresses the implementation details specific to the rotary position embedding. Figure~\ref{fig:overview} presents an overview of our method, illustrating the low-rank approximation of the weight matrix and the progressive compression strategy across layers.
+
+\subsection{KV Cache Compression via Low-rank Approximation of Weight Matrices}\label{sec:svd}
+Unlike previous approaches that focus on token-level eviction strategies or require model retraining, we propose a novel method that operates at the weight matrix level in the attention mechanism. By applying a low-rank approximation to the weight matrices, we effectively reduce the dimensionality of the KV cache while preserving the essential information flow through the network. 
+
+\textbf{Key Matrix Compression:} 
+Figure~\ref{fig:overview} presents how we implement SVD on the key weight matrices. Specifically, for the $i$-th head in the MHA attention, we decompose its key matrix \(W^i_k \in \mathbb{R}^{D\times d}\) to:
+
+\begin{equation}
+    \text{SVD}(W^i_k)_{D\times d} = U_{D \times d_c}  \Sigma_{d_c \times d_c}  V^{T}_{d_c \times d}  =  U_{D \times d_c} (\Sigma V^{T})_{d_c \times d}. 
+\end{equation}
+For MHA, there are $h$ attention heads, then the decomposition becomes:
+
+\begin{equation}
+    \text{SVD}(W^H_k)_{D\times hd}  = U_{D \times d_c}  (\Sigma V^T)_{d_c \times hd} 
+    = U_{D \times d_c} \left[ \begin{array}{cccc}  (A^1)_{d_c \times d} &  (A^2)_{d_c \times d} & \cdots &  (A^h)_{d_c \times d} \end{array} \right],
+\end{equation}
+where $(A^i)_{d_c \times d}$ is the $i$-th block in the matrix $(\Sigma V^T)_{d_c \times hd}$.
+
+We have now decomposed the key matrix $W^i_k$ to the multiplication of  $U_{D \times d_c}$ and $(\Sigma V^T)_{d_c \times hd}$. We will multiply $X$ with  $(\Sigma V^T)^T_{hd \times d_c}$ as the compressed key, which is stored in the KV cache. Through this implementation, we effectively update the size of key cache from $hd$ to $d_c$, where $d_c$ is smaller than $hd$, reducing the memory footprint while keeping the essential information intact.
+
+For $U_{D \times d_c}$, we incorporate it to the query calculation by updating the original query matrix \(W^H_q \in \mathbb{R}^{D\times hd}\) as follows:
+\begin{equation}
+    W^H_{q^{\prime}} = (W^H_q)_{D\times hd} U_{D \times d_c}.
+\end{equation}
+Note that the embedding dimension $D$ is equal to the product of the number of attention heads $h$ and the dimension per head $d$, i.e., $D = hd$. Consequently, the updated query matrix $W^H_{q^{\prime}} \in \mathbb{R}^{D\times d_c}$.
+
+\textbf{Value Matrix Compression:} 
+The decomposition for the value matrix follows a similar structure to that of the key matrix, with the difference that we integrate its left singular vectors to the output matrix $W_o$. Specifically, the value matrix is decomposed as:
+
+\begin{equation}
+    \text{SVD}(W^H_v)_{D\times hd}  = U_{D \times d_c}  (\Sigma V^T)_{d_c \times hd} 
+    = U_{D \times d_c} \left[ \begin{array}{cccc}  (B^1)_{d_c \times d} &  (B^2)_{d_c \times d} & \cdots &  (B^h)_{d_c \times d} \end{array} \right]
+\end{equation}
+where $(B^i)_{d_c \times d}$ is the $i$-th block in the matrix $(\Sigma V^T)_{d_c \times hd}$. After multiplication with $X$, the dimension of the value cache shrinks from $hd$ to $d_c$, thus reducing memory consumption. 
+
+In contrast to the key matrix operation, we incorporate $U_{D \times d_c}$ to the output matrix. To achieve this, we update the output matrix $W_o \in \mathbb{R}^{D\times D}$ as follows:
+\begin{equation}
+    W_{o^{\prime}} = (U^\top)_{d_c \times D} (W_o)_{D\times D} ,
+\end{equation}
+resulting in an updated output matrix $W_{o^{\prime}} \in \mathbb{R}^{d_c\times D}$.
+
+\textbf{Compression Ratio:}
+The compression strategy effectively reduces the dimensions from $N \times d \times h$ for both keys and values to $N \times d_c$, ensuring data integrity and minimizing overhead. This results in a layer compression ratio $\rho = \frac{d_c}{h \times d}$, which quantifies the extent of the reduction.
+
+
+
+\input{layer_anneal}
+
+\subsection{Multi-head Attention and Group-query Attention}\label{sec:attn}
+The above derivation in Section~\ref{sec:svd} holds for standard MHA, where the model dimension $D$ equals to the multiplication of number of head and head dimension $h \times d$. For GQA, the number of KV heads is reduced as shown in Table~\ref{tab:model_sepcs}. To adapt such implementation, we can still follow the above procedure for cache compression. After fetching the key and value from cache, we just need to repeat them according to the number of the total attention heads.
+
+
+
+
+
+\section{Error Bounds for KV Cache Compression}
+
+
+In this section, we derive error bounds for our KV cache compression method, considering both individual layer errors and their propagation through a deep network. These theoretical results provide insights into how the matrix decomposition-based compression affects the network's performance and guide the progressive compression strategy to balance model efficiency and performance. 
+
+\subsection{Error Bound for Key/Value Matrix Approximation}
+
+\begin{theorem}
+\label{theorem_matrix}
+    Let \( W \in \mathbb{R}^{m \times n} \) be a weight matrix (either key or value), and let \( \tilde{W} \in \mathbb{R}^{m \times n} \) be its rank-\( k \) approximation obtained via truncated singular value decomposition (SVD). For any input vector \( x \in \mathbb{R}^n \), the error introduced by the approximation is bounded by:
+\begin{equation}
+\| W x - \tilde{W} x \|_2 \leq \sigma_{k+1} \| x \|_2,
+\end{equation}
+
+where \( \sigma_{k+1} \) is the \( (k+1) \)-th singular value of \( W \).
+\end{theorem}
+
+This theorem quantifies the error introduced at a single layer due to compressing the weight matrix. The bound indicates that the error is directly proportional to the \( (k+1) \)-th singular value of \( W \) and the norm of the input vector \( x \). Larger singular values correspond to directions of significant variance in the data, so truncating smaller singular values (which represent less significant features) minimizes the error introduced by compression.
+
+\subsection{Single Layer Error Bound Including Nonlinearities}
+We now extend the analysis to include the effect of nonlinearities within a single layer. We derive an error bound that accounts for both the approximation of the weight matrix and the layer's nonlinear activation function. For simplicity, we analyze the error introduced by compressing each weight matrix (key or value) individually. 
+
+\begin{theorem}
+\label{theorem_layer}
+Consider a single layer applying a linear transformation \( W \) followed by a nonlinearity \( \phi \) with Lipschitz constant \( L_\phi \). Let \( \tilde{W} \) be the compressed version of \( W \) obtained via truncated SVD with rank \( k \). For any input vector \( x \in \mathbb{R}^n \), the error at the output of the layer is bounded by:
+\begin{equation}
+\left| \phi(Wx) - \phi(\tilde{W}x) \right| \leq L_\phi \sigma_{k+1} \| x \|_2.
+\end{equation}
+\end{theorem}
+This theorem shows that the error introduced by the compressed weight matrix propagates through the nonlinearity, scaled by the Lipschitz constant of the activation function.
+While considering both matrices simultaneously complicates the bounds due to their interactions within the attention mechanism, it is still feasible to derive combined error bounds because the attention mechanism allows us to mathematically bound these interactions. The total error due to simultaneous compression can be bounded by the sum of their individual approximation errors, scaled by a constant. However, for simplicity and clarity in the following derivation, we use the simplified version that considers each matrix individually.
+\subsection{Error Propagation Bound}
+\begin{theorem}
+\label{theorem_network}
+    Consider an \( L \)-layer network where each layer \( i \) applies a linear transformation \( W_i \) followed by a nonlinearity \( \phi \) with Lipschitz constant \( L_{\phi} \). Let \( \tilde{W}_i \) be the compressed version of \( W_i \) obtained via truncated SVD with rank \( k_i \). The error at the output of the network is bounded by:
+
+\begin{equation}
+\| x_L - \tilde{x}_L \|_2 \leq \sum_{i=1}^L \left( \sigma_{k_i+1}^{(i)} L_{\phi}^{L - i} \prod_{j=i+1}^L \| W_j \|_2 \right),
+\end{equation}
+
+where \( x_L \) and \( \tilde{x}_L \) are the outputs of the original and compressed networks, respectively; \( \sigma_{k_i+1}^{(i)} \) is the \( (k_i+1) \)-th singular value of \( W_i \); \( \| W_j \|_2 \) denotes the spectral norm of \( W_j \); and \( L_{\phi} \) is the Lipschitz constant of the activation function \( \phi \).
+
+\end{theorem}
+
+Until now, we have established an upper bound on the cumulative error at the network's output due to compression of weight matrices across multiple layers. It is important to note that the nonlinearities characterized by the Lipschitz constant 
+ \( L_{\phi} \) represent a simplification. 
+ In practice, transformer models like LLaMA incorporate complex nonlinear components, so the exact error propagation may deviate from this simplified bound due to intricate nonlinearities.
+ Despite these complexities, the theorem still offers insights into how compression errors may accumulate in deep networks.
+Specifically, it reveals that errors introduced in earlier (shallower) layers are amplified more significantly than those in deeper layers because they pass through more subsequent transformations and nonlinearities.
+This understanding supports our design of a progressive compression strategy, where we compress shallow layers less aggressively than deeper ones. By preserving more information in the early layers (i.e., retaining more singular values), we minimize the initial errors that could be significantly amplified throughout the network. This approach helps maintain overall model performance while still achieving substantial compression in deeper layers, where the impact on the final output is less pronounced due to reduced error amplification.
+
+
+
+
+
+
+
+\section{Experiment}
+
+
+\subsection{Models}
+We conduct experiments using two attention mechanisms, Multi-Head Attention (MHA) \citep{vaswani2017attention} and Graph Query Attention (GQA) \citep{ainslie2023gqa}, across three models: LLaMA-2-13B, LLaMA-3-Instruct-8B, and LLaMA-3-Instruct-70B. The LLaMA-2 family incorporates the MHA mechanism, while the LLaMA-3 family is based on the GQA framework. We list the model specifications in Table ~\ref{tab:model_sepcs}. Note that for the models based on MHA, the number of KV heads is equal to the number of attention heads, so the weight matrices of KV are square matrices. The models based on GQA use an intermediate number of key-value heads to group the query heads, with an adjustment on the shape of KV weight matrices.
+
+\subsection{Implementation Details}
+In practice, we set thresholds to exclude compression on layers with high cumulative condition numbers: 30 for LLaMA-3-Instruct-8B, and 90 for LLaMA-2-13B and LLaMA-3-Instruct-70B. The $d_{max}$ equals to the original head dimension, while $d_{min}$ varies based on the target compression ratio. For baseline methods, we have the same refrained layers while applying the uniform compression ratios across compressed layers instead of using a progressive compression strategy. 
+
+\subsection{Dataset}
+We follow \cite{touvron2023llama} to evaluate our methods on the following tasks:
+\textbf{BoolQ}~\citep{clark2019boolq} for reading comprehension, \textbf{XSum}~\citep{Narayan2018DontGM} for text summarization. \textbf{Openbook QA}~\citep{mihaylov2018can} for commonsense reasoning, and \textbf{GSM8K}~\citep{cobbe2021training} for mathematical reasoning.
+We use ROUGE score~\citep{lin-2004-rouge} as the evaluation metric for XSum and accuracy for the other tasks. 
+We report 2-shot results for LLaMA-2 models on BoolQ, and 0-shot results for other settings.
+
+\subsection{Main Results}
+    
+
+\begin{figure}[ht]
+    \centering
+    \begin{subfigure}{\textwidth}
+        \includegraphics[width=\linewidth]{figure/kvc_8b_anneal.pdf}
+        \label{fig:subfigure3}
+    \end{subfigure}
+    
+
+    \begin{subfigure}{\textwidth}
+        \includegraphics[width=\linewidth]{figure/kvc_13b_70b_anneal.pdf}
+        \label{fig:subfigure4}
+    \end{subfigure}
+
+    \caption{Performance of KV cache compression on LLaMA models. \ours compresses the KV weights with a progressive strategy, while the baselines compress each layer with the same ratio.  The horizontal dashed line indicates the performance with a full-cache model.}
+    \label{fig:main-res}
+\end{figure}
+
+Figure~\ref{fig:main-res} presents our main results on four datasets with different KV cache budgets. Compared to the full-cache model, \ours achieves on-par performance with a significant compression ratio, and the performance degradation is still nearly negligible with a $60\%$ compression ratio on most datasets. When slightly compressed, \ours could even enhance model performance in some cases. Note that our method requires no model training or model profiling, the only efforts are SVD on weight matrices which requires minimal computational cost compared to the LLM inference. Such plug-and-play merits make our method easily integrable in resource-constrained environments, enabling efficient model deployment with limited KV cache budgets.
+
+ In Figure~\ref{fig:main-res}, one interesting observation is that in some cases the model with a compressed KV cache leads to better performance. 
+Particularly, on the GSM8K dataset, performing KV cache compression leads to more than 10\% performance improvement. 
+This phenomenon aligns with findings reported in the literature~\citep{ge2023model}.
+Also, similar effects have been documented in the context of improving reasoning by applying low-rank decomposition on the MLP layers~\citep{Sharma2023TheTI}. 
+We believe this phenomenon demonstrates the feasibility of conducting task-specific profiling for better performance, or adapting our proposed method in model finetuning. 
+
+
+
+\subsection{Single Layer Profiling}
+\begin{wrapfigure}{l}{0.6\textwidth}  % Adjusts the position (l = left side) and width (e.g., 0.5\textwidth)
+    \centering
+    \includegraphics[width=1.1\linewidth]{figure/slp.pdf}
+     \caption{Single-layer compression results.  This experiment uses LLaMA-3-Instruct-8B on the OpenBookQA dataset.}
+    \label{fig:single-layer-profiling}
+\end{wrapfigure}
+To investigate the impact of compression at different layers, we conduct experiments on single-layer compression as shown in Fig.~\ref{fig:single-layer-profiling}. We use LLaMA-3-Instruct-8B on OpenBook QA for this experiment. The original dimension of the KV head is 1024, and we select compression dimensions from $[256, 384, 512]$ to compress each single layer while keeping all other layers untouched.
+
+Figure~\ref{fig:single-layer-profiling} shows clear layer-specific variability, indicating that some layers are more susceptible to compression than others, particularly in the shallow layers. 
+It is observed that the deep layers (\textit{i.e.,} layers 15--31 of the 32-layer LLaMA-3-Instruct 8B model), despite the reduction in dimensions, maintain performance closely approaching the full KV Cache baseline. This suggests that these layers can sustain robust performance even when subjected to significant parameter reduction. This finding supports our progressive compression strategy  for optimizing model efficiency without significantly compromising the model's  effectiveness.
+
+\subsection{Curse of shallow layers}
+\input{table/shallow}
+To validate the intuition of the progressive compression strategy that the noise caused by shallow compressed layers will be amplified more after propagation, we compare it to compressing the first layer and the shallow blocks (i.e., the first 1/8 layers in a model) on 3 LLaMA models.
+
+Table~\ref{tab:shallow} shows how the compressed shallow layers impact the model performance, taking the baseline full-cache model and our method as reference. The results indicate that compressing only the first layer can lead to a performance decline, with reductions ranging from minimal to moderate. For instance, the LLaMA-3-70B gives a $7.0\%$ decrease, while the LLaMA-3-Instruct-8b shows a more substantial drop of $10.8\%$.
+When compressing the shallow blocks, the impact is more pronounced. The LLaMA-3-Instruct-8B suffers a $16.6\%$ reduction. Notably, the LLaMA-3-Instruct-70b model shows a drastic $68.0\%$ decline, highlighting a significant sensitivity to shallow layer compression.
+
+These findings underscore the importance of careful layer selection in compression strategies and validate the effectiveness of our progressive compression method, as the choice of layer to compress can have a substantial impact on model performance, particularly in larger or more complex models.
+ 
+
+\subsection{Memory footprint reduction analysis}
+\input{table/cache}
+We report the memory footprint reduction in Table~\ref{tab:memory}. By controlling the performance drop averaged on the four tasks less than 1\%, we can achieve a considerable compression ratio from 55\%-60\%. For the LLaMA-3 models in which the GQA has already been employed to save the KV cache, we further achieve a significant compression ratio. Note that we have excluded the GSM8k results for the performance drop calculation for a fair comparison. 
+
+
+
+\section{Conclusions}
+
+
+In conclusion, we proposed \ours, a novel approach to KV cache compression that capitalizes on the inherent low-rank properties of weight matrices. Our method employs a progressive layer-wise compression strategy, implementing a post-hoc low-rank approximation to circumvent the complexities and limitations associated with token-level eviction strategies and model retraining. Moreover, we provide theoretical analysis, deriving error bounds for layer compression and error propagation in deep networks, supporting our design of progressive compression strategy. 
+This theoretically grounded and universally applicable approach  preserves model integrity and performance across diverse tasks, attention mechanisms, and model scales.
+Our comprehensive experimental results demonstrate that \ours significantly reduces GPU memory requirements while minimally impacting performance. This approach offers a robust and efficient solution of KV cache compression, without requiring attention pattern analysis or model tuning.
+
+
+

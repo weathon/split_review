@@ -1,0 +1,466 @@
+\title{Data Shapley in One Training Run}
+
+\begin{abstract}
+Data Shapley provides a principled framework for attributing data's contribution within machine learning contexts. However, existing approaches require re-training models on different data subsets, which is computationally intensive, foreclosing their application to large-scale models. Furthermore, they produce the same attribution score for any models produced by running the learning algorithm, meaning they cannot perform targeted attribution towards a specific model obtained from a single run of the algorithm. This paper introduces \emph{In-Run Data Shapley}, which addresses these limitations by offering scalable data attribution for a target model of interest. In its most efficient implementation, our technique incurs negligible additional runtime compared to standard model training. This dramatic efficiency improvement makes it possible to perform data attribution for the foundation model pretraining stage for the first time. We present several case studies that offer fresh insights into pretraining data's contribution and discuss their implications for copyright in generative AI and pretraining data curation.\blfootnote{$^\mathbf{\star}$Correspondence to \textbf{Jiachen T. Wang} and \textbf{Ruoxi Jia} (email: \texttt{tianhaowang@princeton.edu}, \texttt{ruoxijia@vt.edu}).}
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+In today's data-driven world, understanding the contribution of each data point is crucial, especially with the advent of foundation models that rely on vast amounts of training data from various sources. 
+The lack of reliable data attribution mechanisms can lead to significant legal and societal issues, resulting in a growing backlash against the broader use of data for model training \cite{backlash}. 
+For instance, there is a risk of violating intellectual property rights, failing to fairly compensate data creators, and disincentivizing them from producing new, high-quality content \cite{henderson2023foundation}. 
+This has already resulted in legal disputes, such as the New York Times' lawsuit against Microsoft/OpenAI~\cite{grynbaum2023times}. 
+Moreover, foundation models are often trained on massive datasets scraped from the internet, which can include low-quality and harmful content \citep{gao2020pile,raffel2020exploring,touvron2023llama}. 
+Problematic data not only wastes computational resources but also skews model outputs, potentially leading to biased or inaccurate results. By understanding the contribution of each data source, we can identify and mitigate the influence of low-quality data, thereby improving the efficiency and quality of model training.
+
+
+\add{Since the training data of foundation models comes from multiple stakeholders, it is essential to have an algorithm that can \emph{fairly} attribute data contributions.} 
+In recent years, significant progress has been made in understanding what it means to fairly \add{quantify and} attribute data source contributions, with \emph{the Shapley value} \citep{shapley1953value} emerging as a widely adopted framework \cite{ghorbani2019data, jia2019towards}. 
+Originating from cooperative game theory, the Shapley value uniquely satisfies several desirable properties: 
+(1) It assigns equal scores to equally impactful data points, ensuring fairness; (2) the sum of contribution scores equals the total utility, meaning the scores always represent a share of the total utility; (3) it supports additive decomposition across multiple utility functions, allowing for the calculation of contributions to the entire test set by summing the scores of individual test points. 
+As the Shapley value uniquely satisfies these properties, it eliminates the uncertainty and ambiguity surrounding which attribution frameworks should be used conceptually. While there are other non-Shapley data attribution frameworks, such as Datamodels~\cite{park2023trak,ilyas2022datamodels} and influence functions \cite{koh2017understanding}, they lack the clear theoretical foundation and uniqueness provided by the Shapley value.
+
+However, Data Shapley, i.e., the application of the Shapley value to attribute training data's contribution, has been limited to very small-scale models. 
+Existing methods~\cite{ghorbani2019data,jia2019efficient} to estimate the Shapley value require retraining the model numerous times using different subsets of data to evaluate the contribution of each data source, making them computationally infeasible for foundation models. While past literature \cite{jia2019efficient, wang2023threshold, wang2024efficient} has adopted proxy models in place of the original model to make Data Shapley calculation more efficient, they analyze the data's contribution towards a different learning process, which may not reflect the data's actual contribution to the target model. 
+On the other hand, retraining-based methods suffer from a conceptual issue often overlooked in the literature: they do not differentiate between models produced by the same stochastic learning algorithm, and only measure the average contribution to the learning algorithm. This limitation prevents targeted attribution for a specific model obtained from a single training run, which is often of practical interest.
+
+
+
+
+This paper introduces \emph{In-Run Data Shapley}, a novel approach that makes fair data attribution applicable to large-scale foundation models. 
+Unlike previous methods, In-Run Data Shapley quantifies the contribution of each data source to the specific target model of interest.
+
+
+\textbf{Technical contributions.} 
+\add{The key insight enabling our technique is that foundation models are trained using iterative algorithms, where the model performance change in each iteration is sufficiently small to be accurately approximated by first- or second-order Taylor expansions.}
+We show that Data Shapley values for these linear and quadratic approximation forms can be derived analytically via gradient dot-products or gradient-Hessian-gradient products between training and validation data. 
+This allows for the calculation of Data Shapley values for the specific model produced by a particular training run, provided that one can monitor the intermediate model parameters throughout the training process and compute the gradient dot-products or gradient-Hessian-gradient products. 
+However, leveraging off-the-shelf auto-differentiation tools to calculate these quantities introduces significant overhead due to per-sample gradient calculation.
+To address this challenge, we develop a series of technical tools that enable the exact calculation of gradient dot-products and gradient-Hessian-gradient products in one and two backward passes, respectively, without the need to instantiate any additional gradient vectors or Hessian matrices. Collectively, these tools allow for the efficient computation of In-Run Data Shapley. 
+\add{In particular, with sufficient GPU memory, its most efficient implementation is as fast as regular training.} 
+
+\textbf{Empirical implications.} Given the efficient algorithms developed in this paper, for the first time, one can perform data attribution on the scale of foundation model pretraining. 
+While in this paper, we focus on the GPT2 model as a pilot study, our approach is applicable to larger-scale industrial models with sufficient computing resources. We performed various case studies that provide fresh insights into training data's contribution to the foundation model pretraining.
+
+\textbf{(1) Rethinking copyright in generative AI: contribution beyond memorization (Section \ref{sec:eval-copyright}).} 
+We studied training data's contribution to validation points of varying similarity levels. We found that even when the validation data is a complete rewrite of the training data while maintaining the topic, the training data still contributes significantly. This finding has implications for the current dialogue around what constitutes a copyright violation in generative AI \citep{mulligan2024generative}. 
+While the unfair use of copyrighted content is generally only considered when the generated data is an almost verbatim replication of the training data, our contribution analysis shows that some data owners should receive a certain royalty share for generated content, even if the output does not closely resemble the copyrighted material.
+
+
+\textbf{(2) Data's contribution is stage-dependent (Section \ref{sec:eval-stage}).}
+In-Run Data Shapley can capture the dynamics of contribution through the course of training, a nuance that cannot be captured by Retraining-based Data Shapley \cite{ghorbani2019data,jia2019efficient}, nor by methods that only use the final model for attribution such as influence function \cite{koh2017understanding}. Specifically, in the early stages of training, a general corpus tends to have a relatively large contribution regardless of the downstream tasks. This is because general corpora help the model learn basic language patterns, grammar, and common knowledge. However, in the later stages of training, the training corpus more relevant to the downstream task becomes dominant, and the contribution of the general corpus phases out.
+
+\textbf{(3) There is considerable room for improvement in data curation for pretraining (Section \ref{sec:eval-dataquality}).} Even well-curated pretraining corpora contain data points that negatively impact the training process. We demonstrate the effectiveness of In-Run Data Shapley in identifying these low-quality data points. By computing In-Run Data Shapley values during training and removing negatively valued data points, we show that the cleaned dataset leads to significantly faster model convergence and improved performance compared to the original dataset. 
+\add{Interestingly, despite the Pile dataset \citep{gao2020pile} already undergoing multiple layers of curation, In-Run Data Shapley assigns negative values to approximately 16\% of the corpora. We found a significant amount of noisy data among these negatively valued corpora.} 
+This finding indicates considerable room for improvement in data curation for foundation model pretraining.
+
+
+
+
+
+
+\section{Background}
+
+
+In this section, we formalize the setup of data attribution for ML and revisit Data Shapley's definition. 
+
+\textbf{Setup \& Goal.} 
+Given a dataset $\trainset := \{ z_i \}_{i=1}^N$, data attribution or valuation aims to assign a score to each training data point $z_i$, reflecting its importance for the trained ML model's performance on a certain task. Formally, we seek a score vector $(\phi_{z_i})_{i=1}^N$ where each $\phi_{z_i} \in \R$ reflects the \emph{value} of $z_i$.
+
+\subsection{Data Shapley}
+
+The Shapley value (SV) \citep{shapley1953value}, originating from game theory, stands out as a distinguished method for equitably distributing total profit among all participating players. Before diving into its definition, we first discuss a fundamental concept: the \emph{utility function}.
+
+\textbf{Utility function.}
+A \emph{utility function} maps an input dataset to a score indicating the utility of the dataset for model training. In most of the existing literature \citep{ghorbani2019data,jia2019towards}, the utility function $U$ is chosen as the performance (e.g., accuracy or loss) of the trained models on a hold-out validation set. That is, given a training set $S$, the utility function $\U(S) := \metric(\A(S))$, where $\A$ represents a learning algorithm that trains a model on dataset $S$, and $\metric(\cdot)$ is a function assessing the model's performance. For example, $\metric(\cdot)$ can be the accuracy for a classification task or the perplexity for a language completion task, evaluated on a (set of) hold-out validation data point(s). 
+
+\begin{definition}[Shapley value \citep{shapley1953value}]
+\label{def:shapley-value}
+Let $\U(\cdot)$ denote a utility function and $D$ represent a training set of $N$ data points. The Shapley value, $\phi_z\left( \U \right)$, assigned to a data point $z \in D$ is defined as 
+$
+\phi_z\left( \U \right) := \frac{1}{N} \sum_{k=1}^{N} {N-1 \choose k-1}^{-1} \sum_{S \subseteq D_{-z}, |S|=k-1} \left[ \U(S \cup \{z\}) - \U(S) \right]
+$ 
+where $D_{-z} = D \setminus \{z\}$. 
+\end{definition}
+
+In simple terms, the Shapley value is a weighted average of the \emph{marginal contribution} $\U(S \cup \{z\}) - \U(S)$, i.e., the utility change when the point $z$ is added to different $S$s. For simplicity, we often write $\phi_z$ when the utility function is clear from the context. The popularity of the Shapley value is attributable to the fact that it is the \emph{unique} data value notion satisfying four axioms: Null player, Symmetry, Linearity, and Efficiency. 
+ 
+Here, we introduce the \emph{linearity} axiom which will be used later.
+
+\begin{theorem}[Linearity of the Shapley value \cite{shapley1953value}]
+\label{thm:linearity}
+For any of two utility functions $\U_1, \U_2$ and any $\alpha_1, \alpha_2 \in \R$, we have $\phi_{z} \left( \alpha_{1} \U_{1}+\alpha_{2} \U_{2}\right)=\alpha_{1} \phi_z\left(\U_{1}\right)+$ $\alpha_{2} \phi_z\left( \U_{2}\right)$.
+\end{theorem}
+
+\textbf{Retraining-based Data Shapley.} 
+The convention of defining the utility function for Data Shapley as $\U(S) = \metric(\A(S))$ was introduced in the seminal works of \cite{ghorbani2019data} and \cite{jia2019towards}, where $\A$ is a learning algorithm such as a neural network trained by stochastic gradient descent (SGD) or its variants. With this choice of utility function, the precise calculation of the Shapley value requires retraining models on various subsets of the data. This is because the marginal contribution of a data point, $\U(S \cup \{z\}) - \U(S)$, can only be obtained by training models on both $S$ and $S \cup \{z\}$ and comparing their performance. As a result, we refer to this method as "\emph{Retraining-based Data Shapley}". 
+ These limitations further restrict its practical applications in real-world scenarios.
+
+
+
+\section{In-Run Data Shapley}
+
+\label{sec:Shapley-for-one-run}
+
+\add{To address the issues associated with Retraining-based Data Shapley such as high computational costs, value instability, and the inability to assess the contribution towards a specific trained model, we propose a novel data attribution method specifically tailored for a single training run. Our key idea is to leverage the iterative nature of model training and employ a "divide and conquer" approach: breaking down the problem of valuing data contributions for the entire training process into subproblems of valuing data contributions for individual iterations.}
+\textbf{Utility function for a single gradient update.} Traditionally, the utility function $U(S) = \metric(\A(S))$ encapsulates the overall impact of a training set $S$ across the complete training process. 
+Here, we instead consider a "local utility function" that evaluates the impact of data subsets within a single iteration. 
+Specifically, given a training dataset $\trainset = \{z_i\}_{i=1}^N$, a deep learning model is usually being trained to minimize the training loss $\sum_{i=1}^N \ell(w, z_i)$ via an iterative optimization procedure such as SGD. 
+The performance of the model is typically being measured through a set of validation points $\{\zval\}$. 
+During an iteration $t$, a batch $\batch \subseteq \trainset$ of the training points is used to update the model parameters from $w_t$ to $w_{t+1}$ with 
+$
+w_{t+1} := w_t - \eta_t \sum_{z \in \batch} \g \ell(w_t, z)
+$, 
+where $\eta_t$ is the learning rate at iteration $t$.\footnote{Note that in practice, we take the gradient average for the update, but here we incorporate the normalization term $|\batch|$ into the learning rate $\eta_t$ for a clean presentation.}
+A complete run of neural network training thus consists of model checkpoints $\{w_0, w_1, \ldots, w_T\}$. For a given validation data point $\zval$, we can define the "local utility function'' at a single iteration $t$ as 
+\begin{align}
+\label{eq:local-utility-func}
+U^{(t)}(S; \zval)
+:= \ell(\wtil_{t+1}(S), \zval) - \ell(w_{t}, \zval) 
+\end{align}
+where $\wtil_{t+1}(S) := w_t - \eta_t \sum_{z \in S} \g \ell(w_t, z)$ and $S \subseteq \batch$ is a subset of the batch being selected in $t$-th iteration in the original training. \textbf{Interpretation:} The local utility function $U^{(t)}$ represents the loss change at iteration $t$ when only the subset $S$ is used for the gradient update. This approach incorporates the realization of random batch selection at $t$-th iteration into the utility function. It can also encode other forms of training randomness (e.g., dropout) at iteration $t$. 
+By accounting for the specific realization of training randomness, we obtain a deterministic utility function for each iteration, effectively enabling the targeted attribution to the specific training run. 
+
+
+\textbf{Data Shapley for a single gradient update.} 
+While the utility $\Ut$ is defined over $\batch$ instead of the full training set $\trainset$, it is easy to augment it to $\trainset$.
+More formally, in the augmented utility function we have $\wtil_{t+1}(S) := w_t - \eta_t \sum_{z \in S \cap \batch} \g \ell(w_t, z)$, $S \subseteq \trainset$. 
+The Shapley value $\phi_z(\Ut)$ will be exactly the same as the Shapley value corresponds to the augmented utility function for any $z \in \batch$, and $\phi_z(\Ut)$ for any $z \in \trainset \setminus \batch$ (see Theorem 5 in \cite{wang2023notegroup}). Therefore, for the sake of clean presentation, we slightly abuse the notation, and the definition of $\Ut$ depends on the context. 
+\textbf{Data Shapley for the entire training run.}  Building on the concept of a "local" utility function for a single gradient update iteration, we naturally extend this to a "global" utility function for the entire training process, defined as $ U(S) = \sum_{t=0}^{T-1} U^{(t)}(S)$. \textbf{Interpretation:} This global utility function can be interpreted as the cumulative loss change of the entire training run, but under the counterfactual scenario where only a subset of the training data $S$ is used. In other words, it aggregates the total impact of the subset $S$ on the model's performance throughout the entire training process.
+Due to the linearity property of the Shapley value (Theorem \ref{thm:linearity}), we have $\phi_z(U) = \sum_{t=0}^{T-1} \phi_z(U^{(t)})$. 
+This new Data Shapley value, which we call \emph{In-Run Data Shapley}, represents the cumulative contribution of the data point $z$ across all gradient update iterations within a single training run.
+This approach breaks down the broader utility into more manageable, step-by-step assessments that capture the immediate effects of data points on model updates, and provide a more fine-grained view of how individual data points contribute to the model's performance at each step of the training process. This provides a meaningful and interpretable measure of data importance. 
+
+
+\begin{remark}[\textbf{Multiple validation points}]
+In practice, the model performance is often being assessed based on a validation set $\Dval = \{\zval\}$. 
+After computing $\phi_{z} \left(\U(\cdot; \zval) \right)$ for each $\zval \in \Dval$, one can compute the Shapley value corresponding to the utility function on the full validation set $\U(S; \Dval) := \sum_{\zval \in \Dval} \U(S; \zval)$ by simply taking the sum $\phi_{z} \left(\U(\cdot; \Dval) \right) = \sum_{\zval \in \Dval} \phi_{z} \left(\U(\cdot; \zval) \right)$ due to the \emph{linearity} property of the Shapley value (Theorem \ref{thm:linearity}). 
+Hence, for a clean presentation, we consider only a single $\zval$ in this paper. However, all the techniques we developed can be extended to multiple validation points.
+\end{remark}
+
+
+
+
+
+\section{Efficient Computation of In-Run Data Shapley}
+
+\label{sec:efficient-comp}
+The newly proposed In-Run Data Shapley does not require retraining models from scratch on different data subsets. However, calculating $ \phi_z(U^{(t)}) $ for each training iteration remains computationally intensive, as it involves evaluating the performance impact of all possible combinations within the sampled data batch. In this section, we introduce an efficient method for approximating In-Run Data Shapley scores during a specific training run. 
+Our approach, distinct from Monte Carlo methods, is deterministic and optimized to minimize additional runtime to regular training. In particular, in its most efficient implementation, our approximation technique incurs negligible extra runtime beyond what is required for standard model training, making it highly practical for real-world applications.
+
+\subsection{Approximating $U^{(t)}$ with Taylor Expansion}
+\label{sec:efficiency-taylor}
+
+To derive a more tractable structure for the local utility function $U^{(t)}$, we propose using first and second-order Taylor approximations. The advantage of this approach is that the approximated utility function exhibits a form where closed-form Data Shapley formulas can be derived. 
+The second-order Taylor approximation to the local utility function is as follows:
+\begin{equation*}
+\resizebox{\columnwidth}{!}{
+$\begin{aligned}
+U^{(t)}(S)
+&= 
+\ell(\wtil_{t+1}(S), \zval) - \ell(w_{t}, \zval) \\
+&= 
+\underbrace{
+\g \ell(w_t, \zval) \cdot (\wtil_{t+1}(S)-w_t)}_{ \Uone(S) } + 
+\frac{1}{2} 
+\underbrace{
+(\wtil_{t+1}(S)-w_t)^{\tp} \hessian_t (\wtil_{t+1}(S)-w_t) }_{ \Utwo(S) }
++~\text{higher order terms}
+\end{aligned}$
+}
+\end{equation*}
+where the Hessian matrix $\hessian_t := \g^2 \ell(w_t, \zval)$. We label the first-order term as $\Uone(S)$ and the second-order term as $\Utwo(S)$. Note that the gradient update $\wtil_{t+1}(S) - w_t = - \eta_t \sum_{z \in S} \g \ell(w_t, z)$. 
+Given that the learning rate $\eta_t$ in model training is typically small, a lower-order Taylor expansion often provides an accurate approximation for the change in loss during a single gradient update, with approximation errors of $O(\eta_t^2)$ and $O(\eta_t^3)$ for first and second-order approximations, respectively. 
+ In particular, the first-order approximation generally achieves a relative error of $<10\%$, while the second-order approximation achieves $<4\%$ error rate. 
+
+
+\textbf{First-order In-Run Data Shapley.} 
+Using the first-order approximation \( \Ut \approx \Uone \), and substituting the gradient update expression, we have $\Uone(S) = - \eta_t \sum_{z \in S} \g \ell(w_t, \zval) \cdot \g \ell(w_t, z)$. This shows that \( \Uone \) is an \emph{additive} utility function with a closed-form Shapley calculation as follows:
+\begin{theorem}%[First-order Approximation]
+In-Run Data Shapley considering the first-order approximation has closed-form 
+\begin{align*}
+\phi_{z}\left( U \right) \approx \sum_{t=0}^{T-1} \phi_{z}\left( \Uone \right)
+\end{align*}
+where 
+\begin{align*}
+\phi_{z}\left( \Uone \right) = - \eta_t \g \ell(w_t, \zval) \cdot \g \ell(w_t, z),~~~t = 0, \ldots, T-1
+\end{align*}
+\label{thm:firstorder}
+\end{theorem}
+Thus, the first-order approximation of In-Run Data Shapley for a training point accumulates its gradient dot products with the validation data point each time the training point is sampled in the training batch. 
+The gradient dot product between the training point $z_i$ and the validation point $\zval$ represents the direct influence of $z_i$ on the validation loss at the current model parameters $w_t$, which essentially measures the alignment between the two gradient vectors in the parameter space.
+Notably, \( \phi_z\left(\Uone\right) \) is equivalent to the TracIN-Ideal score proposed by \cite{pruthi2020estimating}. That is, the TracIN-Ideal score can be interpreted as the Shapley value when we use first-order Taylor approximation for $\U^{(t)}$. 
+
+\textbf{Second-order In-Run Data Shapley.} 
+We further improve the approximation of $\Ut$ using a second-order Taylor expansion, i.e., $\Ut \approx \Uone + \frac{1}{2} \Utwo$. 
+Fortunately, the approximated utility function maintains a tractable structure that allows a closed-form expression for the Shapley value calculation without combinatorial enumeration. 
+\begin{theorem}% [Second-order Approximation]
+\label{thm:secondorder}
+In-Run Data Shapley considering the second-order approximation has closed-form 
+\begin{align}
+\phi_{z}\left( U \right) \approx \sum_{t=0}^{T-1} \left( \phi_z\left(\Uone\right) + \frac{1}{2} \phi_z\left(\Utwo\right) \right)
+\end{align} 
+where 
+\begin{align}
+\phi_z\left(\Uone\right) + \frac{1}{2} \phi_z\left(\Utwo\right) 
+= 
+\underbrace{
+- \eta_t \g \ell(w_t, \zval) \cdot \g \ell(w_t, z)}_{ \text{\circled{1} influence of } z \text{ on the loss of }\zval } 
++ 
+\underbrace{
+\frac{\eta_t^2}{2} 
+\g \ell(w_t, z)^{\tp} \hessian_t  \left(\sum_{z_j \in \batch } \g \ell(w_t, z_j) \right) }_{ \text{\circled{2} interaction between }z\text{ and other training points} }
+\end{align}
+for any $t = 0, \ldots, T-1$. 
+\end{theorem}
+Compared to the first-order In-Run Data Shapley, the second-order In-Run Data Shapley includes an additional gradient-Hessian-gradient product term that captures the interaction between the training point of interest $z$ and the rest of the training set. The Hessian matrix represents the curvature of the validation loss function at the current model parameters $w_t$. This interaction term measures the alignment between the gradient of $z$ and the gradients of the other points in the training batch, adjusted by the Hessian. If this term is large, it indicates that the presence of other points in the batch significantly impacts the value attributed to $z$. For example, if there are many identical or similar copies of $z$ in the training set, the contribution of $z$ will decrease, as the interaction term will be large, effectively distributing the value among the similar points. By incorporating this interaction term, the second-order In-Run Data Shapley provides a more fine-grained contribution measure \add{that takes into account both the relevance of a data point towards a validation set and its uniqueness within the population.}
+
+
+
+
+
+
+
+
+
+
+
+\subsection{Efficient Computation of Gradient Dot-product and Gradient-Hessian-Gradient Product}
+\label{sec:efficiency-ghost}
+
+Although we have derived closed-form formulas for In-Run Data Shapley using first- or second-order Taylor approximation of the local utility functions, efficiently computing these values remains a challenge. Specifically, for the first-order In-Run Data Shapley, it requires computing \circled{1} the pairwise gradient dot products between each $z \in \batch$ and the validation point. For the second-order In-Run Data Shapley, it additionally requires computing \circled{2} the gradient-Hessian-gradient products for each $z \in \batch$. A direct implementation to compute \circled{1} involves calculating the individual gradient for each data point in $\batch$, which cannot benefit from fast batch processing in GPUs and necessitates running backpropagation $|\batch|$ times with a mini-batch size of 1. Consequently, this approach would be at least $|\batch|$ times slower than regular training, making it computationally prohibitive for practical applications. Furthermore, computing \circled{2} requires either computing each individual gradient again or storing all individual gradients, which incurs significant time or memory overhead.
+\textbf{Computing pair-wise gradient dot-products in 1 backpropagation.} 
+Our technique for efficiently computing pairwise gradient dot products is inspired by the "ghost clipping" technique from the differential privacy (DP) literature \citep{lee2021scaling}. "Ghost clipping" enables computing \emph{all} of the per-sample gradient norms within one backpropagation without explicitly forming any individual gradient vectors, which enhances the efficiency of DP model training. Here, we propose a "ghost dot-product" technique that shares the idea of exploiting the computation that has been done in the backpropagation.
+Specifically, denote a sample batch as $\batch = \{z_1, \ldots, z_B\}$. We demonstrate this technique using a simple linear layer $\bs = \ba \bW$, where $\bW \in \R^{d_1 \times d_2}$ is the weight matrix, $\ba = (\ba^{(1)}, \ldots, \ba^{(B)})^\tp$ is the mini-batch input, and $\bs = (\bs^{(1)}, \ldots, \bs^{(B)})^{\tp}$ is the output (i.e., the pre-activation tensor).
+For (non-sequential) data, $\ba \in \R^{B \times d_1}, \bs \in \R^{B \times d_2}$. 
+By applying the chain rule, we can express the gradient of an individual loss $\ell^{(i)} := \ell(w, z_i)$ with respect to $\bW$ as
+\begin{equation}
+\begin{aligned}
+\frac{\del \ell^{(i)}}{\del \bW} =
+\frac{\del \ell^{(i)}}{\del \bs^{(i)}} \outerprod
+\frac{\del \bs^{(i)}}{\del \bW}
+= \frac{\del \ell^{(i)}}{\del \bs^{(i)}} \outerprod \ba^{(i)} 
+= \frac{\del \ell }{\del \bs^{(i)}} \outerprod \ba^{(i)}
+\label{eq:linear-decompose-main}
+\end{aligned}
+\end{equation}
+where $\ell := \sum_{j=1}^B \ell^{(j)}$ is the aggregated loss, and the last step is because other data points' losses have no dependency on $\bs_i$. Note that the individual's output gradient $\frac{\partial \ell^{(i)}}{\partial \bs^{(i)}} = \frac{\partial \ell}{\partial \bs^{(i)}}$ is readily available during the backpropagation pass in terms of $\ell$. 
+Suppose we are interested in computing the gradient dot-product $\frac{\del \ell^{(1)}}{\del \bW} \odot \frac{\del \ell^{(2)}}{\del \bW}$ between two data points $z_1, z_2$ in the same batch in the backpropagation. 
+For non-sequential data, we have each $\ba^{(i)} \in \R^{d_1 \times 1}$ and $ \frac{\del \ell^{(i)}}{\del \bs^{(i)}} \in \R^{1 \times d_2}$. 
+By (\ref{eq:linear-decompose-main}), we have 
+\begin{equation}
+\begin{aligned}
+\frac{\del \ell^{(1)}}{\del \bW}
+\odot \frac{\del \ell^{(2)}}{\del \bW}
+= 
+\left( \ba^{(1)} \outerprod \frac{\del \ell^{(1)}}{\del \bs^{(1)}} \right) \odot 
+\left( \ba^{(2)} \outerprod \frac{\del \ell^{(2)}}{\del \bs^{(2)}} \right)
+= 
+\left( \left( \ba^{(1)} \right)^\tp \ba^{(2)} \right) 
+\left(\left( \frac{\del \ell^{(1)}}{\del \bs^{(1)}} \right)^{\tp} \left( \frac{\del \ell^{(2)}}{\del \bs^{(2)}} \right) \right)
+\label{eq:non-seq}
+\end{aligned}
+\end{equation}
+Hence, we can first take the two inner products, and then multiply the results together. 
+All of the quantities $\ba^{(1)}, \ba^{(2)}, \frac{\del \ell^{(1)}}{\del \bs^{(1)}}, \frac{\del \ell^{(2)}}{\del \bs^{(2)}}$ in (\ref{eq:non-seq}) that are required for computation are all already available in the backpropagation. Hence, within a \emph{single} backpropagation, we can efficiently compute the gradient dot-product between \emph{every} pair of $z_i, z_j \in \batch$. 
+Since we are interested in computing the gradient dot-product between $\zval$ and $z$ for all $z \in \batch$, we can backpropagate on \(\sum_{z \in \batch} \ell^{(i)} + \ell^{(\zval)}\) to save another backpropagation for $\zval$. 
+We call this technique the \emph{"ghost dot-product"}, as no gradient vectors are instantiated during the computation. 
+Overall, we only need \emph{one} backpropagation to compute \circled{1} for \emph{all} data points in $\batch$, a significant improvement over the direct method requiring $\ge |\batch|$ backpropagations. 
+ 
+\begin{remark}
+While we illustrate our "ghost dot-product" technique using linear layers, it can be easily extended to other types of layers by leveraging similar decompositions as in Equation (\ref{eq:linear-decompose-main}) that have been developed in differential privacy literature \citep{rochette2020efficient, bu2022scalable, li2021large, bu2023differentially, kong2024unified}. 
+\end{remark}
+} 
+For second-order In-Run Data Shapley, an outstanding challenge is how to efficiently compute the pairwise interaction term among training points. This technique leverages several properties of neural network gradients across different layers, and its derivation is complex. 
+
+} 
+With the "ghost" techniques developed, the computation of first- and second-order In-Run Data Shapley requires one and two backpropagations in each gradient update iteration respectively. 
+Although we still need to compute the gradient of the aggregated loss $\sum_{z_i \in \batch} \ell_i $ for the training batch to perform parameter updates, we do \emph{not} need an additional backpropagation. By reusing the activations and output gradients from the previous backpropagation on \(\sum_{z \in \batch} \ell^{(i)} + \ell^{(\zval)}\), we can easily compute this quantity \emph{without} incurring the cost of an extra backpropagation pass. Consequently, training while computing first-order In-Run Data Shapley will have minimal additional runtime overhead, as it still requires only one backpropagation per iteration. The second-order In-Run Data Shapley necessitates one extra backpropagation per iteration. Nevertheless, both methods provide significant advantages over the direct approach of instantiating per-sample gradients and Hessian-vector products. 
+
+
+
+
+\section{Experiments}
+
+\label{sec:eval}
+
+In this section, we evaluate In-Run Data Shapley in terms of its computational efficiency as well as its effectiveness in data attribution through a case study on GPT2 pretraining. 
+\textbf{Model and Dataset Setting.} 
+Due to computational resource constraints, our experiments focus on one representative and relevant setting: training a GPT2-small model\footnote{https://huggingface.co/openai-community/gpt2} on the Pile dataset \citep{gao2020pile} with all copyrighted content removed.\footnote{https://huggingface.co/datasets/monology/pile-uncopyrighted.} 
+The uncopyrighted Pile consists of data from 16 domains. 
+The full training process takes approximately 4 days to achieve reasonable convergence on an A100 GPU. 
+\subsection{Runtime Analysis}
+\label{sec:eval-runtime}
+\begin{wrapfigure}{r}{0.34\textwidth}
+    \centering
+    \setlength\intextsep{0pt}
+    \setlength\abovecaptionskip{0pt}
+    \setlength\belowcaptionskip{-40pt}
+    \includegraphics[width=0.34\textwidth]{images/runtime_5.png}
+    \caption{
+    Runtime comparison between regular model training and training while computing for In-Run Data Shapley. 
+    The plot shows the average runtime based on 5 independent runs. 
+    Experiments were conducted on a single NVIDIA A100 GPU with 80GB memory. 
+    }
+    \label{fig:runtime}
+\end{wrapfigure}
+We empirically assess the computational efficiency of In-Run Data Shapley with "ghost dot-product" and "ghost vector-Hessian-vector product" techniques developed in Section \ref{sec:efficiency-ghost}. 
+We compare this to the direct implementation of In-Run Data Shapley, which requires computing per-sample gradients, as well as to regular training without Data Shapley computations. 
+As illustrated in Figure \ref{sec:eval-runtime}, the runtime of first-order In-Run Data Shapley is very close to that of regular training when using the ghost dot-product algorithms developed in Section \ref{sec:efficiency-ghost}. The second order In-Run Data Shapley is approximately $2\times$ slower than regular training due to the additional backpropagation. However, both the first- and second-order In-Run Data Shapley are significantly faster ($>30\times$) compared to the naive implementation. These results showcase the substantial improvements achieved by our techniques, making In-Run Data Shapley computationally feasible for practical applications. 
+
+
+
+
+\subsection{\add{Case Study: Data Attribution for GPT2 on Pile Dataset}}
+\label{sec:eval-effectiveness}
+
+In this section, we conduct a case study to demonstrate the use cases of In-Run Data Shapley by training a GPT2 model on the Pile dataset. We consider the use case of relevant corpus detection, study data contribution in different training stages, and data curation.
+\textbf{Baseline.} 
+We mainly compare In-Run Data Shapley with \textbf{influence function} \citep{koh2017understanding}, which approximates the change in the model's loss on the test example when the training example is removed from the training set (i.e., the leave-one-out score). We omit TRAK \citep{park2023trak} and other data attribution techniques such as Datamodel \citep{ilyas2022datamodels} as they are not scalable to our setting. 
+
+\subsubsection{Does Contribution Require Memorization?}
+\label{sec:eval-copyright}
+
+In this experiment, we evaluate the robustness of different data attribution techniques in identifying relevant individual corpora that have been paraphrased. These paraphrased versions form our validation set. We then calculate the average value rank of the original training corpus for each of its paraphrased versions. 
+\add{In addition to In-Run Data Shapley and influence function, we include the ranking result based on BM25 distance. \textbf{BM25} \citep{robertson2009probabilistic} featurizes examples by their word frequency statistics (i.e., TF-IDF) to rank the training instances. We use BM25 distance as an oracle for assessing the verbatim or lexical similarity between the validation corpus (query) and the training corpus, as opposed to semantic similarity.}
+
+
+As shown in Table \ref{tb:data-contamination}, even for a validation corpus that is a complete rewrite (with a low BM25 distance) but covers relevant topics, the original training corpus still ranks very high according to both In-Run Data Shapley and influence function. Influence function ranks the original training corpus lower than In-Run Data Shapley, which may be attributed to the inherent noisy nature of the leave-one-out error estimation. 
+The results of this experiment have important implications for the current discussion of the copyright of generative AI. 
+\add{
+The results of this experiment have important implications for the ongoing discussion about the copyright of generative AI. Specifically, the table presents a compelling example where the original Wikipedia training corpus related to a musician's experience can significantly contribute to generating a story about a musician, even when the generated story shares no token-wise resemblance to the original training data. This finding supports that training data profoundly influences the capabilities of generative AI models and should be compensated accordingly \citep{deng2023computational, deng2024economic}, even when the output does not closely resemble the original copyrighted material or when the model applies output filters to avoid generating verbatim replicates of the training data. This discovery expands the conventional focus on copyright violations, which typically addresses instances of near-verbatim replication, as seen in the dispute between New York Times and OpenAI, to also include cases where the generated content is significantly influenced by copyrighted material without directly replicating it.
+}
+
+
+
+
+
+
+\begin{table}[t]
+\centering
+    \begin{minipage}{0.49\textwidth}
+        \begin{tcolorbox}[title=\textbf{Original Wikipedia Corpus}, fontupper=\small, left=2pt, right=2pt, bottom=1pt, top=1pt, validationbox]
+In 2012, Radhi recruited new 'musicians' for OAG, who were selected from among the students of Akademi Seni Budaya dan Warisan Kebangsaan (). The new line-up consists of Qi Razali (drums/backing vocals - original drummer back to ...
+        \end{tcolorbox}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.5\textwidth}
+        \begin{tcolorbox}[title=\textbf{Synthetic "Similar topic" corpus}, fontupper=\small, left=2pt, right=2pt, bottom=1pt, top=1pt, highvaluebox]
+\#\#\# Instruction: Write a short story about a classical violinist who decides to explore jazz music, detailing her first encounter with a jazz band. \#\#\# Answer: Elena, a classically trained violinist known for her precise and emotive performances ...
+        \end{tcolorbox}
+    \end{minipage}
+\begin{tabular}{@{}cccc:c@{}}
+\toprule
+\textbf{Similarity Category}      & \textbf{In-Run Data Shapley (1st order)} & \textbf{In-Run Data Shapley (2nd order)} & \textbf{Influence Function} & \textbf{BM25} \\ \midrule
+\textbf{Partial exactly the same} & 1                                        & 1                                        & 1                            & 1             \\
+\textbf{Paraphrase}               & 1                                        & 1                                        & 1                            & 1             \\
+\textbf{Significant paraphrase}   & 32.3                                     & 32                                       & 39.3                          & 1.6           \\
+\textbf{Similar topic}            & 145.6                                    & 141.6                                    & 292                          & 20917.3       \\ \bottomrule
+\end{tabular}
+
+\caption{
+Top: (left) An original training corpus from Wikipedia. (right) A synthetic corpus falls in the category of "Similar topic" to the Wikipedia corpus on the left
+ 
+Bottom: the (average) value rank of the original corpus among all training corpora for validation corpora that are of varying similarity to the original corpus. \textbf{The rank is out of $\approx$320k corpora.}} 
+\label{tb:data-contamination}
+\end{table}
+\begin{figure}[t]
+    \centering
+    \setlength\intextsep{0pt}
+    \centering
+    \begin{minipage}{0.6\textwidth}
+        \includegraphics[width=\textwidth]{images/domain_composition_2.png}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.38\textwidth}
+        \begin{tcolorbox}[title=\textbf{Validation Corpus}, fontupper=\small, left=2pt, right=2pt, bottom=1pt, top=1pt, validationbox]
+In several applications, the matrix coefficients of the nonlinear valued function $G(\lambda)$ in are usually of low rank ... 
+        \end{tcolorbox}
+        \begin{tcolorbox}[title=\textbf{$\mathbf{(+)}$ High-valued Corpus}, fontupper=\small, left=2pt, right=2pt, bottom=1pt, top=1pt, highvaluebox]
+ [@Gallas]. After ...
+        \end{tcolorbox}
+        \begin{tcolorbox}[title=\textbf{$\mathbf{(-)}$ Low-valued Corpus}, fontupper=\small, left=2pt, right=2pt, bottom=1pt, top=1pt, lowvaluebox]
+Coronavirus Testing in San Diego County$\backslash$n How San Diego Is Getting Ready for Self-Driving Cars ...
+    
+    
+    
+        \end{tcolorbox}
+    \end{minipage}
+    \caption{
+    Left: Domain value composition for a corpus of math text. 
+    Right: The math corpus we use as the validation data for attribution, and examples of high- and low-valued training corpus for it.}
+    \label{fig:domain-value-composition}
+\end{figure}
+In 2012, Radhi recruited new 'musicians' for OAG, who were selected from among the students of Akademi Seni Budaya dan Warisan Kebangsaan (). The new line-up consists of Qi Razali (drums/backing vocals - original drummer back to ...
+\#\#\# Instruction: Write a short story about a classical violinist who decides to explore jazz music, detailing her first encounter with a jazz band. \#\#\# Answer: Elena, a classically trained violinist known for her precise and emotive performances ...
+
+\subsubsection{How Do Data Values Change during Training?}
+\label{sec:eval-stage}
+
+As In-Run Data Shapley tracks the cumulative data values across different training steps, we can assess the contribution of training points at various stages of training, providing a more fine-grained perspective on data attribution. We evaluate the data attribution results for a math-related validation corpus using second-order In-Run Data Shapley. 
+In Figure \ref{fig:domain-value-composition}, we present the value composition of training corpora by their domains over the first 10,000 training iterations, summing the values of all corpora from the same domain. We then calculate the percentage of the total value attributed to each domain, excluding domains with a total value $<0$. 
+As illustrated in the figure, the corpora from ArXiv achieve a significantly higher value compared to other domain corpora, far exceeding its size proportion within the full Pile dataset. This is expected, as ArXiv papers predominantly cover fields like Math, Computer Science, and Physics, which contain extensive math-related content. Furthermore, the value composition changes rapidly at the beginning of training and stabilizes as training progresses. We hypothesize that this initial fluctuation is due to the presence of relevant paragraphs in corpora from other domains. The stable value proportion observed in later stages likely reflects the relative abundance of math content in each domain. 
+\add{Interestingly, we observe that Pile-CC domain, which contains general website crawls, initially shows positive contributions during the first few iterations. However, its value quickly drops to negative and eventually converges to zero. This implies that \textbf{general corpora tend to have a large contribution in the beginning of training}, as they help the model learn the basics of languages, such as grammar and common knowledge. However, as training progresses and the model focuses on more specialized topics, the relevance of general domains diminishes. 
+ 
+}
+
+
+
+
+
+
+
+\subsubsection{Is Well-curated Dataset Actually Clean?}
+\label{sec:eval-dataquality}
+
+\begin{figure}[h]
+    \centering
+    \setlength\intextsep{0pt}
+    \centering
+    \includegraphics[width=0.5\textwidth]{images/new_data_selection.png}
+    \caption{
+    Test loss comparison between the original training run and the model trained on the cleaned subset according to different data attribution techniques.
+    }
+    \label{fig:dataselection}
+\end{figure}
+
+Carefully curated pretraining corpora still contain data points that can adversely affect the training process. 
+Identifying and removing these data points can accelerate model convergence and enhance overall performance, thereby saving computational resources. In this experiment, we demonstrate the effectiveness of In-Run Data Shapley in assessing the data quality of a subset of the Pile dataset. We uniformly select a random subset of Pile with around 10B tokens and train a GPT2 model on this subset. We compute the data attribution results with Pile's validation set. 
+By filtering out all negatively valued corpora and retraining the GPT2 model on the cleaned subset, we observe significant improvement in model convergence. For both first- and second-order In-Run Data Shapely, we can achieve around 25\% fewer training iterations to reach a test loss of 3.75. 
+\add{
+Surprisingly, our analysis reveals that around 16\% of the training corpora had negative second-order In-Run Data Shapley values.
+While some of the negatively valued corpora may be attributed to the significant domain shift compared to the validation corpora, we still find many low-quality corpora from Pile, a pretraining dataset that has undergone several layers of data curation \citep{gao2020pile}.} 
+ 
+
+Figure \ref{fig:dataselection} shows a performance comparison between the original training run and the model trained on the cleaned subsets. As we can see, influence function can also filter out low-quality data that can accelerate training convergence. However, the performance is slightly worse than In-Run Data Shapley as the influence function only uses information from the final trained models, which can result in highly noisy value scores since the removal of one training data point might have a negligible effect on the final model performance. The results demonstrate that removing lower-quality corpora leads to a significantly faster drop in test loss compared to the original training run. This implies that there is still huge room for data curation for well-curated public datasets such as Pile. 
+
+
+ 
+
+
+\section{Conclusion and Limitations}
+
+\label{sec:conclusion}
+
+In this work, we introduce In-Run Data Shapley, a novel data attribution technique that addresses the limitations of Retraining-based Data Shapley. 
+Extensive experiments demonstrate the effectiveness of In-Run Data Shapley in various applications. Here, we discuss the potential limitations of this work. 
+
+\textbf{Availability of validation data before training.} 
+One potential limitation of In-Run Data Shapley is that it requires the validation data to be available before training, as the data attribution scores are computed during the training process. However, there are many scenarios where validation data is naturally available before training, such as when using publicly available benchmark datasets, participating in machine learning competitions, or adhering to regulatory requirements. For scenarios where validation data arrives after the model has been trained, a potential solution is to save checkpoints of intermediate models during training and approximate In-Run Data Shapley using these checkpoints. 
+
+\textbf{Extension to other optimization algorithms.} 
+The "ghost" family techniques developed in this work are specifically tailored for SGD and do not directly extend to other popular optimizers like Adam due to their normalization terms. Nonetheless, using SGD as a proxy for Adam allows for efficient data attribution, which is the approach adopted in practice and proven to be effective in experiments. Extending these techniques to support Adam and similar optimizers remains an exciting direction for future research.
+
+\textbf{Handling memory constraints.} In scenarios where GPU memory constraints prevent large batch sizes, 
+the "ghost" techniques can be extended by using gradient accumulation. This approach accommodates larger training batch sizes by dividing the batch into smaller sub-batches and accumulating gradients over multiple iterations. While this method may increase runtime due to additional backpropagation steps, it maintains the feasibility of the techniques under memory constraints. Improving computational efficiency for large batch sizes remains an important direction for future research.
+
+
+\clearpage
+
+
+

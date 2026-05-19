@@ -1,0 +1,322 @@
+\title{Multi-Source Diffusion Models for Simultaneous Music Generation and Separation}
+
+\begin{abstract}
+ In this work, we define a diffusion-based generative model capable of both music synthesis and source separation by learning the score of the joint probability density of sources sharing a context. Alongside the classic total inference tasks (i.e., generating a mixture, separating the sources), we also introduce and experiment on the partial generation task of source imputation, where we generate a subset of the sources given the others (e.g., play a piano track that goes well with the drums). Additionally, we introduce a novel inference method for the separation task based on Dirac likelihood functions. We train our model on Slakh2100, a standard dataset for musical source separation, provide qualitative results in the generation settings, and showcase competitive quantitative results in the source separation setting. Our method is the first example of a single model that can handle both generation and separation tasks, thus representing a step toward general audio models.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{introduction}
+
+Generative models have recently gained much attention thanks to their successful application in many fields, such as NLP \citep{openai2023gpt4,touvron2023llama,santilli2023accelerating}, image synthesis \citep{ramesh2022hierarchical,rombach2022high} or protein design \citep{shin2021protein, weiss2023guided, minello2024graph}.
+Audio is no exception to this trend \citep{agostinelli2023musiclm, liu2023audioldm}.
+
+A peculiarity of the audio domain is that an audio sample $\mathbf{y}$ can be seen as the sum of multiple individual sources $\{\mathbf{x}_1, \dots, \mathbf{x}_N\}$, resulting in a mixture $\mathbf{y} = \sum_{n=1}^{N} \mathbf{x}_n$. Unlike in other sub-fields of the audio domain (e.g., speech), sources present in musical mixtures (stems) share a \textit{context} given their strong interdependence. For example, the bass line of a song follows the drum's rhythm and harmonizes with the melody of the guitar. Mathematically, this fact can be expressed by saying that the joint distribution of the sources $p(\mathbf{x}_1, \dots, \mathbf{x}_N)$ does {\em not} factorize into the product of individual source distributions $\{p_n(\mathbf{x}_n)\}_{n = 1, \dots, N}$. Knowing the joint $p(\mathbf{x}_1, \dots, \mathbf{x}_N)$ implies knowing the distribution over the mixtures $p(\mathbf{y})$ since the latter can be obtained through the sum. The converse is more difficult mathematically, being an inverse problem.
+
+\begin{figure}[t]\centering
+\includegraphics[width=0.7\textwidth]{figures/diffusion.pdf}
+     \caption{\textbf{Proposed method.} We leverage a forward Gaussian process (right-to-left) to learn the score over contextual sets (the large boxes) of instrumental sources (the waveforms) across different time steps $t$. During inference, the process is reversed (left-to-right), letting us perform the tasks of total generation, partial generation, or source separation (Figure \ref{fig:msdm}).}
+    \label{fig:diffusion}
+\end{figure}
+
+Nevertheless, humans have developed the ability to process multiple sound sources simultaneously in terms of synthesis (i.e., musical composition or generation) and analysis (i.e., source separation).
+More specifically, composers can invent multiple sources $\{\mathbf{x}_1, \dots, \mathbf{x}_N\}$ that sum to a consistent mixture $\mathbf{y}$ and, extract information about the individual sources $\{\mathbf{x}_1, \dots, \mathbf{x}_N\}$ from a mixture $\mathbf{y}$.
+
+This ability to compose and decompose sound is crucial for a generative music model. A model designed to assist in music composition should be capable of isolating individual sources within a mixture and allow for independent operation on each source. Such a capability would give the composer maximum control over what to modify and retain in a composition. Therefore, we argue that compositional (waveform) music generation is highly connected to music source separation.
+
+To our knowledge, no model in deep learning literature can perform both tasks simultaneously. Models designed for the generation task directly learn the distribution $p(\mathbf{y})$ over mixtures, collapsing the information needed for the separation task. In this case, we have accurate mixture modeling but no information about the individual sources. It is worth noting that approaches that model the distribution of mixtures conditioning on textual data \citep{schneider2023mousai, agostinelli2023musiclm} face the same limitations. Conversely, models for source separation \citep{defossez2019music} either target $p(\mathbf{x}_1, \dots, \mathbf{x}_N \mid \mathbf{y}$), conditioning on the mixture, or learn a single model $p_n(\mathbf{x}_n)$ for each source distribution (e.g., in a weakly-supervised manner) and condition on the mixture during inference \citep{jayaram2020source, postolache2023latent}. In both cases, generating mixtures is impossible. In the first case, the model inputs a mixture, which hinders the possibility of unconditional modeling, not having direct access to $p(\mathbf{x}_1, \dots, \mathbf{x}_N)$ (or equivalently to $p(\mathbf{y})$). In the second case, while we can accurately model each source independently, all essential information about their interdependence is lost, preventing the possibility of generating coherent mixtures. 
+
+\textbf{Contribution.} Our contribution is three-fold. \textit{(i)} First, we bridge the gap between source separation and music generation by learning $p(\mathbf{x}_1, \dots, \mathbf{x}_N)$, the joint (prior) distribution of contextual sources (i.e., those belonging to the same song). For this purpose, we use the denoising score-matching framework to train a  \textit{Multi-Source Diffusion Model (MSDM)}. We can perform both source separation and music generation during inference by training this single model. Specifically, generation is achieved by sampling from the prior, while separation is carried out by conditioning the prior on the mixture and then sampling from the resulting posterior distribution. \textit{(ii)} This new formulation opens the doors to novel tasks in the generative domain, such as \textit{source imputation}, where we create accompaniments by generating a subset of the sources given the others (e.g., play a piano track that goes well with the drums).
+\textit{(iii)} Lastly, to obtain competitive results on source separation with respect to state-of-the-art regressor models \citep{manilow2022improving} on the Slakh2100 \citep{manilow2019cutting} dataset, we propose a new procedure for computing the posterior score based on \textit{Dirac delta functions}, exploiting the functional relationship between the sources and the mixture.
+
+
+
+\section{Related Work}
+
+\subsection{Generative Models for Audio}
+Deep generative models for audio learn, directly or implicitly, the distribution of mixtures, represented in our notation by $p(\mathbf{y})$, possibly conditioning on additional data such as text. Various general-purpose generative models, such as autoregressive models, GANs \citep{donahue2018adversarial}, and diffusion models, have been adapted for use in the audio field.
+
+Autoregressive models are well-established in audio modeling \citep{vandenoord2016wavenet}. Jukebox \citep{dhariwal2020jukebox} proposed to model musical tracks with Scalable Transformers \citep{vaswani2017attention} on hierarchical discrete representations obtained through VQ-VAEs \citep{van2017neural}. Furthermore, using a lyrics conditioner, this method generated tracks with vocals following the text. However, while Jukebox could model longer sequences in latent space, the audio output suffered from quantization artifacts. Newer latent autoregressive models \citep{borsos2023audiolm, kreuk2023audiogen} can handle extended contexts, more coherent generations and, by incorporating residual quantization \citep{zeghidour2021soundstream}, output more naturally sounding samples. State-of-the-art latent autoregressive models for music, such as MusicLM \citep{agostinelli2023musiclm}, can guide generation by conditioning on textual embeddings obtained via large-scale contrastive pre-training \citep{manco2022learning, huang2022mulan}. MusicLM can also input a melody and condition on text for style transfer. A concurrent work, SingSong \citep{donahue2023singsong}, introduces vocal-to-mixture accompaniment generation. Our accompaniment generation procedure differs from the latter since we perform generation at the stem level in a composable way, while the former outputs a single mixture.
+
+DiffWave \citep{kong2021diffwave} and WaveGrad \citep{chen2021wavegrad} were the first diffusion (score) based generative models in audio, tackling speech synthesis. Many subsequent models followed these preliminary works, mainly conditioned to solve particular tasks such as speech enhancement \citep{lu2021study, serra2022universal, sawata2022versatile, saito2023unsupervised}, audio upsampling \citep{lee2021nu, yu2023conditioning}, MIDI-to-waveform  \citep{mittal2021symbolicdiffusion, hawthorne2022multiinstrument}, or spectrogram-to-MIDI generation \citep{cheuk2023diffroll}. The first work in source-specific generation with diffusion models is CRASH \citep{rouard2021crash}. \citep{yang2023diffsound, pascual2023full, liu2023audioldm} proposed text-conditioned diffusion models to generate general sounds, not focusing on restricted classes such as speech or music. Closer to our work, diffusion models targeting the musical domain are Riffusion \citep{forsgren2022riffusion} and Moûsai \citep{schneider2023mousai}. Riffusion fine-tunes Stable Diffusion \citep{rombach2022high}, a large pre-trained text-conditioned vision diffusion model, over STFT magnitude spectrograms. Moûsai performs generation in a latent domain, resulting in context lengths that surpass the minute. Our score network follows the design of the U-Net proposed in Moûsai, albeit using the waveform data representation.
+ 
+\subsection{Audio Source Separation}
+Existing audio source separation models can be broadly classified into deterministic and generative. Deterministic source separators are parametric models that input the mixtures and systematically extract one or all sources.
+These models are typically trained with a regression loss \citep{guso2022loss} on the estimated signal represented as waveform \citep{lluis2019end, luo2019conv, defossez2019music}, STFT \citep{takashi2018mmdenselstm, choi2021lasaft}, or both \citep{defossez2021hybrid}. On the other hand, generative source separation models based on (independent) Bayesian inference learn a prior model for each source, thus targeting the distributions $\{p_n(\mathbf{x}_{n})\}_{n = 1, \dots, N}$.
+The mixture is observed only during inference, where a likelihood function connects it to its constituent sources. The literature has explored different priors, such as GANs \citep{subakan2018generative, kong2019single, narayanaswamy2020unsupervised}, normalizing flows \citep{jayaram2020source, zhu2022music}, and autoregressive models \citep{jayaram2021parallel, postolache2023latent}. 
+
+The separation method closer to ours is NCSN-BASIS \citep{jayaram2020source}. This method was proposed for image source separation, using Langevin Dynamics to separate the mixtures with an NCSN score-based model. It employs a Gaussian likelihood function during inference, which, as we demonstrate experimentally, is sub-optimal compared to our novel Dirac-based likelihood function. The main difference between our method and other generative source separation methods (including NCSN-BASIS) is the modeling of the full joint distribution. As such, we can perform source separation and synthesize mixtures or subsets of stems with a single model.
+
+Contextual information between sources is explicitly modeled in \citep{manilow2022improving} and \citep{postolache2023adversarial}. The first work models the relationship between sources by training an orderless NADE estimator, which predicts a subset of the sources while conditioning on the input mixture and the remaining sources. The subsequent study achieves universal source separation \citep{kavalerov2019universal, wisdom2020unsupervised} through adversarial training, utilizing a context-based discriminator to model the relationship between sources. Both methods are deterministic and conditioned on the mixtures architecturally. The same architectural limitation is present in diffusion-based  \citep{scheibler2023diffusion, lutati2023separate} or diffusion-inspired \citep{plaja2022adiffusion} conditional approaches. Our method sets itself apart as it proposes a model not constrained architecturally by a mixture conditioner, so we can also perform unconditional generation. 
+
+\begin{figure*}[t]
+\includegraphics[width=1.0\textwidth]{figures/msdm.pdf}
+\caption{\textbf{Inference tasks with MSDM.} Oblique lines represent the presence of noise in the signal, decreasing from left to right, with the highest noise level at time $T$ when we start the sampling procedure. \textit{Top-left:} We generate all stems in a mixture, obtaining a total generation. \textit{Bottom-left:} We perform partial generation (source imputation) by fixing the sources $\mathbf{x}_1$ (Bass) and $\mathbf{x}_3$ (Piano) and generating the other two sources $\hat{\mathbf{x}}_2{(0)}$ (Drums) and $\hat{\mathbf{x}}_4{(0)}$ (Guitar). We denote with $\mathbf{x}_1(t)$ and $\mathbf{x}_3(t)$, the noisy stems obtained from $\mathbf{x}_1$ and $\mathbf{x}_3$ via the perturbation kernel in Eq. \eqref{eq:perturbation_kernel}. \textit{Right:} We perform source separation by conditioning the prior with a mixture $\mathbf{y}$, following Algorithm \ref{alg:total_sep}.}
+\label{fig:msdm}
+\end{figure*}
+
+
+
+\section{Background}
+
+The foundation of our model lies in estimating the joint distribution of the sources $p(\mathbf{x}_1, \dots, \mathbf{x}_N)$. Our approach is generative because we model an unconditional distribution (the prior). The different tasks are then solved at inference time, exploiting the prior.
+
+We employ a diffusion-based \citep{dickstein2015deepunsupervised, ho2020denoising}
+generative model trained via denoising score-matching \citep{song2019generativemodeling} to learn the prior. 
+Specifically, we present our formalism by utilizing the notation and assumptions established in \citep{karras2022elucidating}.
+The central idea of score-matching \citep{hyvarinen2005estimation, kingma2010regularized, vincent2011aconnection}  is to approximate the ``score'' function of the target distribution $p(\mathbf{x})$, namely $\nabla_{\mathbf{x}} \log p(\mathbf{x})$, rather than the distribution itself. To effectively approximate the score in sparse data regions, denoising diffusion methods introduce controlled noise to the data and learn to remove it. Formally, the data distribution is perturbed with a Gaussian perturbation kernel:
+\begin{align}\label{eq:perturbation_kernel}
+p(\mathbf{x}(t)\mid\mathbf{x}(0)) = \mathcal{N}(\mathbf{x}(t); \mathbf{x}(0), \sigma^2(t) \mathbf{I})\,,
+\end{align}
+where the parameter $\sigma(t)$ regulates the degree of noise added to the data. Following the authors in \citep{karras2022elucidating}, we consider an optimal schedule given by $\sigma(t) = t$. With that choice of $\sigma(t)$, the forward evolution of a data point $\mathbf{x}(t)$ in time is described by a probability flow ODE \citep{song2021scorebased}:
+\begin{equation} \label{eq:forward_ode}
+    \mathrm{d}\mathbf{x}(t) = -\sigma(t) \nabla_{\mathbf{x}(t)} \log p(\mathbf{x}(t))\, \mathrm{d}t\,.
+\end{equation}
+For $t = T >> 0$, a data point $\mathbf{x}(T)$ is approximately distributed according to a Gaussian distribution $\mathcal{N}(\mathbf{x}(t); \mathbf{0}, \sigma^2(T)\mathbf{I})$, from which sampling is straightforward.
+Eq. \eqref{eq:forward_ode} can be inverted in time, resulting in the following backward ODE that describes the denoising process:
+\begin{equation}
+\label{eq:backward_ode}
+\mathrm{d}\mathbf{x}(t) = \sigma(t) \nabla_{\mathbf{x}(t)} \log p(\mathbf{x}(t))\, \mathrm{d}t\,.
+\end{equation}
+Sampling can be performed integrating Eq. \eqref{eq:backward_ode} with a standard ODE solver, starting from an initial (noisy) sample drawn from $\mathcal{N} (\mathbf{x}(t); \mathbf{0}, \sigma^2(T)\mathbf{I})$. The score function, is approximated by a neural network $S^{\theta}(\mathbf{x}(t), \sigma(t))$, minimizing the following score-matching loss:
+\begin{equation*} \label{eq:song_loss}
+    \mathbb{E}_{t \sim \mathcal{U}([0,T])} \mathbb{E}_{\mathbf{x}(0) \sim p(\mathbf{x}(0))} \mathbb{E}_{ \mathbf{x}(t) \sim p(\mathbf{x}(t)\mid \mathbf{x}(0))}\left\Vert S^{\theta}(\mathbf{x}(t), \sigma(t)) - \nabla_{\mathbf{x}(t)} \log p\left(\mathbf{x}(t)\mid \mathbf{x}(0) \right) \right \Vert ^2_2.
+\end{equation*}
+
+By expanding $p(\mathbf{x}(t)\mid\mathbf{x}(0))$ with Eq. \eqref{eq:perturbation_kernel}, the score-matching loss simplifies to:
+\begin{equation*}
+\mathbb{E}_{t \sim \mathcal{U}([0,T])}
+\mathbb{E}_{
+\mathbf{x}(0) \sim p(\mathbf{x}(0))} \mathbb{E}_{\mathbf{\epsilon} \sim \mathcal{N}(\mathbf{0}, \sigma^2(t) \mathbf{I})} \left \Vert D^{\theta}(\mathbf{x}(0)+\mathbf{\epsilon}, \sigma(t)) - \mathbf{x}(0) \right \Vert_2^2\,,
+\end{equation*}
+where we define $S^{\theta}(\mathbf{x}(t), \sigma(t)) =: (D^{\theta}(\mathbf{x}(t), \sigma(t)) - \mathbf{x}(t)) / \sigma^2(t)$.
+
+
+
+\section{Method}
+
+\label{method}
+
+\subsection{Multi-Source Audio Diffusion Models}
+
+In our setup, we have $N$ distinct source waveforms $\{\mathbf{x}_1, \dots ,\mathbf{x}_N\}$ with $\mathbf{x}_n \in \mathbb{R}^D$ for each $n$.
+The sources coherently sum to a mixture $\mathbf{y}=\sum_{n=1}^N \mathbf{x}_n$. We also use the aggregated form $\mathbf{x} = (\mathbf{x}_1, \dots, \mathbf{x}_N) \in \mathbb{R}^{N \times D}$. In this setting, multiple tasks can be performed: one may generate a consistent mixture $\mathbf{y}$ or separate the individual sources $\mathbf{x}$ from a given mixture $\mathbf{y}$. We refer to the first task as \textit{generation} and the second as \textit{source separation}. A subset of sources can also be fixed in the generation task, and the others can be generated consistently. We call this task \textit{partial generation} or \textit{source imputation}. Our key contribution is the ability to perform all these tasks simultaneously by training a single multi-source diffusion model (MSDM), capturing the prior $p(\mathbf{x}_1, \dots, \mathbf{x}_N)$. The model, illustrated in Figure \ref{fig:diffusion}, approximates the noisy score function:
+\begin{align*}
+\nabla_{\mathbf{x}(t)} \log p(\mathbf{x}(t)) = \nabla_{(\mathbf{x}_1(t), \dots, \mathbf{x}_N(t))} &\log p(\mathbf{x}_1(t), \dots, \mathbf{x}_N(t))\,,
+\end{align*}
+with a neural network:
+\begin{equation} \label{eq:prior_score}
+    S^{\theta}(\mathbf{x}(t), \sigma(t)): \mathbb{R}^{N \times D} \times \mathbb{R} \rightarrow  \mathbb{R}^{N \times D}\,,
+\end{equation}
+ where $\mathbf{x}(t) = (\mathbf{x}_1(t), \dots, \mathbf{x}_N(t))$ denotes the sources perturbed with the Gaussian kernel in Eq. \eqref{eq:perturbation_kernel}.
+We describe the three tasks (illustrated in Figure \ref{fig:msdm}) using the prior distribution:
+\begin{itemize}
+    \item{\textit{Total Generation.}} This task requires generating a plausible mixture $\mathbf{y}$. It can be achieved by sampling the sources $\{\mathbf{x}_1, ..., \mathbf{x}_N\}$ from the prior distribution and summing them to obtain the mixture $\mathbf{y}$.
+    \item{\textit{Partial Generation.}} Given a subset of sources, this task requires generating a plausible accompaniment. We define the subset of fixed sources as $\mathbf{x}_{\mathcal{I}}$ and generate the remaining sources $\mathbf{x}_{\mathcal{\overline{I}}}$ by sampling from the conditional distribution $p(\mathbf{x}_{\overline{\mathcal{I}}} \mid \mathbf{x}_{\mathcal{I}})$.
+    \item{\textit{Source Separation.}} Given a mixture $\mathbf{y}$, this task requires isolating the individual sources that compose it. It can be achieved by sampling from the posterior distribution $p(\mathbf{x}\mid\mathbf{y})$.
+\end{itemize}
+
+\subsection{Inference}
+The three tasks of our method are solved during inference by discretizing the backward Eq. \eqref{eq:backward_ode}. Although different tasks require distinct score functions, they all originate directly from the prior score function in Eq. \eqref{eq:prior_score}. We analyze each of these score functions in detail. 
+For more details on the discretization method, refer to Section \ref{sec:sampler}.
+
+\subsubsection{Total Generation}
+The total generation task is performed by sampling from Eq. \eqref{eq:backward_ode} using the score function in Eq. \eqref{eq:prior_score}. The mixture is then obtained by summing over all the generated sources.
+
+\subsubsection{Partial Generation}
+In the partial generation task, we fix a subset of source indices $\mathcal{I}\subset \{1, \dots, N\}$ and the relative sources $\mathbf{x}_\mathcal{I} := \{\mathbf{x}_n\}_{n \in \mathcal{I}}$. The goal is to generate the remaining sources $\mathbf{x}_{\overline{\mathcal{I}}} := \{\mathbf{x}_n\}_{n \in \overline{\mathcal{I}}}$ consistently, where ${\overline{\mathcal{I}}} = \{1, \dots, N\} - \mathcal{I}$. To do so, we estimate the gradient of the conditional distribution:
+\begin{equation} \label{eq:grad_partial}
+    \nabla_{\mathbf{x}_{\overline{\mathcal{I}}}(t)} \log p(\mathbf{x}_{\overline{\mathcal{I}}}(t)\mid\mathbf{x}_{\mathcal{I}}(t)).
+\end{equation}
+ This falls into the setting of imputation or, as it is more widely known in the image domain, inpainting. We approach imputation using the method in \citep{song2021scorebased}.
+The gradient in Eq. \eqref{eq:grad_partial} is approximated as follows:
+\begin{align*}
+    \nabla_{\mathbf{x}_{\overline{\mathcal{I}}}(t)} \log p([\mathbf{x}_{\overline{\mathcal{I}}}(t),\hat{\mathbf{x}}_{\mathcal{I}}(t)])\,,
+\end{align*}
+where $\hat{\mathbf{x}}_{\mathcal{I}}$ is a sample from the forward process: $\hat{\mathbf{x}}_{\mathcal{I}}(t) \sim \mathcal{N}(\mathbf{x}_{\mathcal{I}}(t); \mathbf{x}_{\mathcal{I}}(0), \sigma(t)^2 \mathbf{I})$.
+The square bracket operator denotes concatenation.
+Approximating the score function, we write:
+\begin{equation*}
+\nabla_{\mathbf{x}_{\overline{\mathcal{I}}}(t)} \log p(\mathbf{x}_{\overline{\mathcal{I}}}(t)\mid\mathbf{x}_{\mathcal{I}}(t)) \approx S^{\theta}_{\overline{\mathcal{I}}}([\mathbf{x}_{\overline{\mathcal{I}}}(t), \hat{\mathbf{x}}_{\mathcal{I}}(t)], \sigma(t))\,,
+\end{equation*}
+where $S^{\theta}_{\overline{\mathcal{I}}}$ denotes the entries of the score network corresponding to the sources indexed by $\overline{\mathcal{I}}$. 
+\begin{algorithm}[!t]
+\captionsetup{font=small}
+\caption{
+`MSDM Dirac' sampler for source separation.}
+\label{alg:total_sep}
+\small
+\begin{algorithmic}[1]
+\REQUIRE $I$ number of discretization steps for the ODE, $R$ number of corrector steps, $\{\sigma_{i}\}_{i \in \{0, \dots, I\}}$ noise schedule, $S_{\text{churn}}$
+\STATE Initialize $\hat{\mathbf{x}} \sim \mathcal{N}(0, \sigma^2_I\mathbf{I})$
+\STATE $\alpha \gets \min(S_{\text{churn}} / I, \sqrt{2}-1)$
+\FOR{$i \gets  I$ \textbf{to} $1$}
+    \FOR{$r \gets R$ \textbf{to} $0$}
+        \STATE $\hat{\sigma} \gets \sigma_i \cdot (\alpha + 1)$
+        \STATE $\mathbf{\epsilon} \sim \mathcal{N}(0, \mathbf{I})$
+        \STATE $\hat{\mathbf{x}} \gets \hat{\mathbf{x}} + \sqrt{\hat{\sigma}^2 - \sigma_i^2} \mathbf{\epsilon}$
+        \STATE $\mathbf{z} \gets  [\hat{\mathbf{x}}_{1:N-1}, \mathbf{y} -  \sum_{n=1}^{N-1} \hat{\mathbf{x}}_{n}]$
+\FOR {$n \gets 1$ \textbf{to} $N-1$}
+    \STATE $\mathbf{g}_n \gets S^{\theta}_{n}(\mathbf{z}, \hat{\sigma}) - S^{\theta}_{N}(\mathbf{z}, \hat{\sigma})$
+\ENDFOR
+\STATE $\mathbf{g} \gets [\mathbf{g}_1, \dots, \mathbf{g}_{N-1}]$
+\STATE $\hat{\mathbf{x}}_{1:N-1} \gets  \hat{\mathbf{x}}_{1:N-1} + (\sigma_{i-1} - \hat{\sigma})\mathbf{g}$
+        \STATE $\hat{\mathbf{x}} \gets [\hat{\mathbf{x}}_{1:N-1}, \mathbf{y} - \sum_{n=1}^{N-1} \hat{\mathbf{x}}_{n}]$
+        \IF{$r > 0$}
+        \STATE $\mathbf{\epsilon} \sim \mathcal{N}(0, \mathbf{I})$
+        \STATE $\hat{\mathbf{x}} \gets \hat{\mathbf{x}} + \sqrt{\sigma_i^2 - \sigma_{i-1}^2} \mathbf{\epsilon}$
+        \ENDIF
+    \ENDFOR
+\ENDFOR
+\STATE \bf{return} $\hat{\mathbf{x}}$
+\end{algorithmic}
+\end{algorithm}
+\subsubsection{Source Separation}
+\label{subsubsection:source_separation}
+We view source separation as a specific instance of conditional generation, where we condition the generation process on the given mixture $\mathbf{y} = \mathbf{y}(0)$. This requires computing the score function of the posterior distribution:
+\begin{equation} \label{eq:posterior_separation}
+    \nabla_{\mathbf{x}(t)} \log p(\mathbf{x}(t)\mid\mathbf{y}(0))\,.
+\end{equation}
+Standard methods for implementing conditional generation for diffusion models involve directly estimating the posterior score in Eq. \eqref{eq:posterior_separation} at training time (i.e., Classifier Free Guidance  \citep{ho2021classifierfree}) or estimating the likelihood function $p(\mathbf{y}(0)\mid\mathbf{x}(t))$ and using the Bayes formula to derive the posterior.
+The second approach typically involves training a separate model, often a classifier, for the likelihood score (i.e., Classifier Guidance \citep{dariwal2021class_guidance}).
+
+In diffusion-based generative source separation, learning a likelihood model is typically unnecessary because the relationship between $\mathbf{x}(t)$ and $\mathbf{y}(t)$ is represented by a simple function, namely the sum. A natural approach is to model the likelihood function based on such functional dependency.
+This is the approach taken by \citep{jayaram2020source}, where they use a Gaussian likelihood function:
+\begin{equation}
+\label{eq:gaussian_likelihood}
+p(\mathbf{y}(t)\mid \mathbf{x}(t)) = \mathcal{N}(\mathbf{y}(t) \mid \sum_{n=1}^{N}\mathbf{x}_n(t), \gamma^2(t) \mathbf{I}),
+\end{equation} with the standard deviation given by a hyperparameter $\gamma(t)$.  
+The authors argue that aligning the $\gamma(t)$ value to be proportionate to $\sigma(t)$ optimizes the outcomes of their NCSN-BASIS separator. 
+
+We present a novel approximation of the posterior score function in Eq. \eqref{eq:posterior_separation} by modeling $p(\mathbf{y}(t)\mid \mathbf{x}(t))$ as a  Dirac delta function centered in $\sum_{n=1}^N\mathbf{x}_n(t)$:
+\begin{equation}
+\label{eq:dirac_likelihood}
+p(\mathbf{y}(t)\mid \mathbf{x}(t)) = \mathbbm{1}_{\mathbf{y}(t)=\sum_{n=1}^N \mathbf{x}_n(t)}\,.
+\end{equation}
+
+and we present only the final formulation, which we call `MSDM Dirac'. The method constrains a source, without loss of generality $\mathbf{x}_N$, by setting $\mathbf{x}_N(t) = \mathbf{y}(0) - \sum_{n=1}^{N-1}\mathbf{x}_n(t)$ and estimates:
+\begin{align*}
+    \nabla_{\mathbf{x}_m(t)} \log p(\mathbf{x}(t)\mid\mathbf{y}(0)) 
+    &\approx S^{\theta}_{m}((\mathbf{x}_1(t), \dots, \mathbf{x}_{N-1}(t), \mathbf{y}(0) -  \sum_{n=1}^{N-1} \mathbf{x}_n(t)), \sigma(t)) \\ &-  S^{\theta}_{N}((\mathbf{x}_1(t), \dots, \mathbf{x}_{N-1}(t), \mathbf{y}(0) - \sum_{n=1}^{N-1} \mathbf{x}_n(t)), \sigma(t))\,,
+\end{align*}
+where $1 \leq m \leq  N-1$ and $S_m^{\theta}, S_N^{\theta}$ denote the entries of the score network corresponding to the $m$-th and $N$-th sources. Our approach models the limiting case wherein $\gamma(t) \to 0$ in the Gaussian likelihood function. This represents a scenario where the functional dependence between $\mathbf{x}(t)$ and $\mathbf{y}(t)$ becomes increasingly tight, thereby sharpening the conditioning on the given mixture during the generation process. The pseudo-code for the `MSDM Dirac' source separation sampler, using the Euler ODE integrator of \citep{karras2022elucidating}, is provided in Algorithm \ref{alg:total_sep}. The Euler ODE discretization logic uses the $S_{\text{churn}}$ mechanism of \citep{karras2022elucidating} and optional correction steps \citep{song2021scorebased} (see Section \ref{sec:sampler} for more details). 
+
+The separation procedure can be additionally employed in the weakly-supervised source separation scenario, typically encountered in generative source separation \citep{jayaram2020source, zhu2022music, postolache2023latent}. This scenario pertains to cases where we know that specific audio data belongs to a particular instrument class while not having access to sets of sources sharing a context. To adapt to this scenario, we assume independence between sources $p(\mathbf{x}_1, \dots, \mathbf{x}_N) = \prod_{n=1}^N p_n(\mathbf{x}_n)$ and train a separate model for each source class. We call the resulting model `Independent Source Diffusion Model with Dirac Likelihood' (`ISDM Dirac').
+
+
+
+\section{Experimental Results}
+
+We experiment on Slakh2100 \citep{manilow2019cutting}, a standard dataset for music source separation. We chose Slakh2100 because it has a significantly larger quantity of data (145h) than other multi-source waveform datasets like MUSDB18-HQ \citep{rafii2019musdb18} (10h). The amount of data plays a decisive role in determining the quality of a generative model, making Slakh2100 a preferable choice. Nevertheless,
+ 
+
+\subsection{Music Generation}
+The performance of MSDM on the generative tasks is tested through subjective and objective evaluation.
+Concisely, we produce two forms, one for total generation and one for partial generation. In the first, subjects are asked to rate, from 1 to 10, the \textit{quality} and instrument \textit{coherence}  (i.e., how the instruments sound plausible together) of 30 generated chunks, of which 15 are generated by MSDM and 15 by a model trained on mixtures (using the same diffusion architecture as MSDM). In the second one, knowing the fixed instruments, subjects are asked to rate, from 1 to 10,  the \textit{quality} and the \textit{density} of the generated accompaniment. Namely, `quality' tests how the full chunk sounds plausible with respect to the ground truth data, and `density' tests how much the generated instruments are present in the chunk. We also provide examples of music and accompaniment generation\footnote{\small\url{https://gladia-research-group.io/multi-source-diffusion-models/}}.
+
+For the objective evaluation of the generative tasks, we generalize the FAD protocol in \cite{donahue2023singsong} to our total and partial generation tasks with more than one source. 
+Given $D_\text{real}$ a dataset of ground truth mixtures chunks and $\mathcal{I}$ a set indexing conditioning sources ($\emptyset$ for total generation), we build a dataset $D_{\text{gen}}$ whose elements are the sum between conditioning sources (indexed by ${\mathcal{I}}$) and the respective generated sources. We define the \textit{sub-FAD} as $FAD(D_\text{real}, D_{\text{gen}})$. We use VGGish embeddings \citep{hershey2017cnn} for computing the metric.
+
+\begin{table}[t]
+\centering
+\caption{
+\small\textbf{Comparison between total generation capabilities of MSDM (Slakh2100) and an equivalent architecture trained on Slakh2100 mixtures.} Both subjective (quality and coherence, higher is better) and objective (FAD, lower is better) evaluations are shown. The quality and coherence columns refer to the average scores of the listening tests, with respective variances.}\label{tab:results_sep_musdb}
+{
+\small
+ \begin{tabular}{l | c | c c c} 
+ \toprule
+ \textbf{Model}  &\textbf{FAD}  $\downarrow$ \ & \textbf{Quality} $\uparrow$ & \textbf{Coherence} $\uparrow$\\ 
+ \midrule
+ MSDM & $6.55$ & $6.51 \pm 2.19$ & $6.35 \pm 2.36$  \\ 
+ Mixture Model & $6.67$ & $6.15 \pm 2.47$ & $5.67 \pm 2.60$ \\
+ \bottomrule
+\end{tabular}
+}%
+\label{tab:tot_gen_eval}
+\end{table}
+
+\begin{table}[t!]
+\centering
+\caption{\small\textbf{Quantitative and qualitative results for the partial generation task on Slakh2100.} We use both subjective (quality and density, higher is better) and objective (sub-FAD, lower is better) evaluation metrics. The sub-FAD metric is reported for all combinations of generated sources (\textbf{B}: Bass, \textbf{D}: Drums, \textbf{G}: Guitar, \textbf{P}: Piano). The quality and density columns refer to the average scores of the listening tests, with respective variances.}
+\label{tab:results_gen}
+\resizebox{\textwidth}{!}{\begin{tabular}{l | c c c c c c c c c c c c c c | c c } 
+ \toprule
+ \textbf{Slakh2100} &\textbf{B} & \textbf{D} & \textbf{G} & \textbf{P} &
+  \textbf{BD} & 
+  \textbf{BG} &
+  \textbf{BP} &
+  \textbf{DG} & \textbf{DP} &
+  \textbf{GP} &
+  \textbf{BDG} &
+  \textbf{BDP} &
+  \textbf{BGP} &
+  \textbf{DGP} & 
+  \textbf{Quality} $\uparrow$ &
+  \textbf{Density} $\uparrow$
+  \\ 
+ \midrule
+  MSDM & 0.45 & 1.09 & 0.11 & 0.76 & 2.09 & 1.00 & 2.32 & 1.45 & 1.82 & 1.65 & 2.93 & 3.30 & 4.90 & 3.10 & $6.3 \pm 2.7$ & $6.1 \pm 2.6$ \\
+  \bottomrule
+ \end{tabular}}
+\end{table}
+Results for total and partial generations are reported in Tables \ref{tab:tot_gen_eval} and \ref{tab:results_gen} respectively, both for subjective and objective evaluations. Results in Table \ref{tab:tot_gen_eval} show a minimal difference between the model trained on mixtures and MSDM. This suggests that, given the same dataset and architecture, the generative power of MSDM is the same as the model trained on mixtures while being able to perform separation and partial generation.
+Table \ref{tab:results_gen} shows via the subjective results that the task of partial generation can be performed with non-trivial quality. Our method being the first able to generate any combination of partial sources, does not have a competitor baseline for the objective metrics. We thus report the sub-FAD results of our method as baseline metrics for future research.
+
+\begin{table}[t]
+\centering
+\caption{ \small\textbf{Quantitative results for source separation on the Slakh2100 test set.} We use the $\text{SI-SDR}_\text{I}$ as our evaluation metric (dB -- higher is better). 
+We present both the supervised (`MSDM Dirac', `MSDM Gaussian') and weakly-supervised (`ISDM Dirac', `ISDM Gaussian') separators and specify if a correction step is used. `All'  reports the average over the four stems.}
+\label{tab:results_sep}
+{%
+\small
+ \begin{tabular}{l  c c c c  c} 
+ \toprule
+ \textbf{Model}  &\textbf{Bass} & \textbf{Drums} & \textbf{Guitar} & \textbf{Piano} & \textbf{All}\\ 
+ \midrule
+  Demucs \citep{defossez2019music, manilow2022improving}& 15.77 & 19.44 & 15.30 & 13.92 & 16.11 \\ 
+  Demucs + Gibbs (512 steps) \citep{ manilow2022improving}& 17.16 & 19.61 & \textbf{17.82} & \textbf{16.32} & \textbf{17.73} \\ 
+ \midrule 
+ \textbf{Dirac Likelihood} & \\
+ISDM &  18.44 & 20.19 & 13.34 & 13.25 & 16.30 \\ 
+  ISDM (correction) & \textbf{19.36} & \textbf{20.90} & 14.70 & 14.13 & 17.27 \\ 
+     MSDM & 16.21 & 17.47 & 12.71 & 13.29 & 14.92 \\ 
+  MSDM (correction) & 17.12 & 18.68 & 15.38 & 14.73 & 16.48 \\ \midrule
+   \textbf{Gaussian Likelihood} \citep{jayaram2020source} &
+   \\ 
+    ISDM & 13.48 & 18.09 & 11.93 & 11.17 & 13.67 \\ 
+    ISDM (correction) & 14.27 & 19.10 & 12.74 & 12.20 & 14.58 \\ 
+    MSDM   & 12.53 & 16.82 & 12.98 & 9.29 & 12.90 \\ 
+   MSDM (correction) & 13.93 & 17.92 & 14.19 & 12.11 & 14.54 \\ 
+ \bottomrule
+\end{tabular}
+}%
+\end{table}
+\subsection{Source Separation}
+\label{sec:experimental_results_separation}
+In order to evaluate source separation, we use the scale-invariant SDR improvement ($\text{SI-SDR}_\text{I}$) metric \citep{roux2019sdr}.
+The SI-SDR between a ground-truth source $\mathbf{x}_n$ and an estimate $\hat{\mathbf{x}}_n$ is defined as:
+\begin{equation*}
+    \text{SI-SDR}(\mathbf{x}_n, \hat{\mathbf{x}}_n) = 10 \log_{10}\frac{\Vert \alpha \mathbf{x}_n \Vert^2 + \epsilon}{\Vert \alpha \mathbf{x}_n - \hat{\mathbf{x}}_n \Vert^2 + \epsilon}\,,
+\end{equation*}
+where $\alpha= \frac{\mathbf{x}^\top_n\hat{\mathbf{x}}_n + \epsilon}{\Vert \mathbf{x}_n \Vert^2 + \epsilon}$ and $ \epsilon = 10^{-8}$. The improvement with respect to the mixture baseline is defined as $\text{SI-SDR}_\text{I} = \text{SI-SDR}(\mathbf{x}_n, \hat{\mathbf{x}}_n) - \text{SI-SDR}(\mathbf{x}_n, \mathbf{y})$. 
+
+On Slakh2100, we compare our supervised MSDM and weakly-supervised MSDM with the `Demucs' \citep{defossez2019music} and `Demucs + Gibbs (512 steps)' regressor baselines from \citep{manilow2022improving}, the state-of-the-art for supervised music source separation on Slakh2100, aligning with the evaluation procedure of \citep{manilow2022improving}. We evaluate over the test set of Slakh2100, using chunks of 4 seconds in length (with an overlap of two seconds) and filtering out silent chunks and chunks consisting of only one source, given the poor performance of SI-SDR$_\text{I}$ on such segments.
+Results are reported in Table \ref{tab:results_sep} and show that: \textit{(i)} The Dirac likelihood improves overall results, even outperforming the state of the art when applied to ISDM on Bass and Drums \textit{(ii)} adding a correction step is beneficial \textit{(iii)} MSDM with Dirac likelihood and one step of correction gives results comparable with the state of the art and superior to standard Demucs overall. We stress again that, while the baselines can perform the separation task alone, MSDM can also perform generative tasks.
+
+
+
+\section{Conclusions}
+
+We have presented a general method, based on denoising score-matching, for source separation, mixture generation, and accompaniment generation in the musical domain. Our approach utilizes a single neural network trained once, with tasks differentiated during inference. Moreover, we have defined a new sampling method for source separation. We quantitatively tested the model on source separation, obtaining results comparable to state-of-the-art regressor models. We qualitatively and quantitatively tested the model on total and partial generation.
+Our model's ability to handle both total and partial generation and source separation positions it as a significant step toward the development of general audio models. This flexibility paves the way for more advanced music composition tools, where users can easily control and manipulate individual sources within a mixture.
+
+\subsection{Limitations and Future Work}\label{limitations}
+The amount of available contextual data constrains the performance of our model. To address this, pre-separating mixtures and training on the separations, as demonstrated in \citep{donahue2023singsong}, may prove beneficial.
+Additionally, it would be intriguing to explore the possibility of extending our method to situations where the sub-signals are not related by addition but rather by a known but different function.
+Finally, future work could adapt the model to jointly model MIDI information (for example, extracted from sources \citep{lin2021unified}) for further control.
+
+
+

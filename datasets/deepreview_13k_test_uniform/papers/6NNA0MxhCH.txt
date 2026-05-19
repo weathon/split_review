@@ -1,0 +1,476 @@
+\title{Answer, Assemble, Ace: Understanding How LMs Answer Multiple Choice Questions}
+
+\begin{abstract}
+Multiple-choice question answering (MCQA) is a key competence of performant transformer language models that is tested by mainstream benchmarks. However, recent evidence shows that models can have quite a range of performance, particularly when the task format is diversified slightly (such as by shuffling answer choice order). 
+In this work we ask: \emph{how do successful models perform formatted MCQA?} We employ vocabulary projection and activation patching methods to localize key hidden states that encode relevant information for predicting the correct answer. We find that prediction of a specific answer symbol 
+is causally attributed to a single middle layer, and specifically its multi-head self-attention mechanism. 
+We show that subsequent layers increase the probability of the predicted answer symbol in vocabulary space, and that this probability increase is associated with a sparse set of attention heads with unique roles. We additionally uncover differences in how different models adjust to alternative symbols. Finally, we demonstrate that a synthetic task can disentangle sources of model error to pinpoint when a model has learned formatted MCQA, and show that an inability to separate answer symbol tokens in vocabulary space is a property of models unable to perform formatted MCQA tasks.} 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+
+Multiple-choice question answering (MCQA) is a mainstay of language model (LM) evaluation \citep{helm, eval-harness, openllmleaderboard}, not in the least because it avoids the challenges of open-ended text evaluation. One prominent example is the MMLU benchmark \cite{hendrycks2021measuring}, which is considered a meaningful signal for new model releases \cite{nathan-blogpost-1,nathan-blogpost-2}.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures_png/fig1.png}
+    \caption{
+    We investigate the ability of transformer language models to answer formatted multiple-choice questions, which involves
+    producing an answer choice symbol (here, \atoken or \btoken). 
+    We discover a single middle layer at the last token position, and particularly, its multi-head self-attention function, responsible for answer selection. Hidden states output by later layers continue to assign higher and higher probability to the symbol of interest in the model's vocabulary space, for which a sparse set of attention heads are responsible. Finally, when we switch to more unusual answer choice symbols, one behavior by which models adjust is to continue operating in the space of \atoken and \btoken, before aligning probability to the correct symbols at a late layer.
+    }
+    \label{fig:1}
+\end{figure}
+While early LMs were evaluated on MCQA questions by treating the task as next-token-prediction and scoring each answer choice appended to the input independently,
+many benchmarks and datasets now evaluate models on their ability to produce the correct answer choice symbol in a single inference run when given the answer choices in the prompt (\emph{formatted MCQA}; \cref{fig:1,ssec:formatted_mcqa}). Indeed, it has been shown that capable models, and particularly those that have been instruction-tuned, perform well on formatted MCQA tasks \cite{helm, robinson2023leveraging, wiegreffe-etal-2023-increasing}. 
+At the same time, despite their strong end-task performance, some models
+are not robust to seemingly inconsequential format changes, such as shuffling the position of the correct answer choice, changing letters that answers are mapped to, or using different symbols \citep{pezeshkpour2023large, alzahrani2024benchmarks, khatun2024study}.
+
+Understanding how LMs form their predictions, particularly on real-world benchmarks and task formats such as MCQA, is important for reliability reasons. Motivated by this, we ask: \emph{How do successful models perform formatted MCQA?}
+
+
+
+
+In this paper, we set out to interpret internal components to uncover how models promote the prediction of specific specific answer choice symbols. 
+We perform vocabulary projection and activation patching analyses on various model families---Llama 2 \citep{llama2} and Olmo v1 \citep{groeneveld2024olmo} and v1.7 \cite{olmo-v1.7})---and on three datasets (MMLU \cite{hendrycks2021measuring}, HellaSwag \cite{zellers-etal-2019-hellaswag}, and a copying task we create). We find:
+\begin{compactenum}  %
+    \item Models both encode information needed to predict the correct answer symbol and promote  answer symbols in the vocabulary space in a very similar fashion across tasks, even when their overall task performance varies.
+    
+    \item Answer symbol production is driven by a sparse portion of the network, dominated by a few attention heads, which specialize in promoting specific answer symbols.
+    
+    \item The process for correctly answering more unnatural prompt formats is in some cases more complex -- a finetuned Olmo 7B model only begins producing the correct symbols for these prompts in later layers. We observe evidence the model may be making predictions first in the space of \emph{expected} answer symbols (\atoken, \btoken) before switching to the symbols provided in the prompt (\ctoken, \dtoken).
+    
+    \item A simple synthetic task is able to disentangle formatted MCQA performance from performance on a specific dataset, and allows us to narrow down a point during training at which Olmo v1.7 learns formatted MCQA.
+    \item Poorly performing models cannot separate answer choice symbols in vocabulary space.
+
+\end{compactenum} 
+
+
+\section{Related Work}
+
+
+Behavioral analyses of LM abilities to answer formatted MCQA questions prompt models in a black-box manner by constructing different input prompts and observing how they affect models' predictions \citep{wiegreffe-etal-2023-increasing, pezeshkpour2023large, sun2024evaluating, zheng2024large, alzahrani2024benchmarks, khatun2024study, balepur2024artifacts, wang2024my}. These methods and findings are complementary to ours.
+
+Efforts to interpret transformer LMs for MCQA are limited. Most similar to ours is \citet{lieberum2023does}, who 
+study what attention heads at the final token position are doing, and isolate a subset they coin ``correct letter heads''. They demonstrate how these heads attend to answer symbol representations at earlier token positions and promote the correct symbol based on its position in the symbol order, though they show this behavior does not hold entirely for answer choices other than \{\atoken, \btoken, \ctoken, \dtoken.\} Their experiments are limited to one task (MMLU) and one closed-source model (Chinchilla-70B). Unlike us, they
+do not inspect model behavior when it is poor, nor do they put forth a hypothesis for model behavior when other answer choice symbols are used. We additionally find diverse roles of important attention heads, with some always promoting specific symbols.
+
+\citet{li2024anchored} use vocabulary projection and study the norms of weighted value vectors in multi-layer perceptrons of GPT-2 models in order to localize the production of \atoken, which GPT-2 models are biased towards producing when prompted 0-shot. %
+They find that updating a single value vector can substantially reduce this label bias. Unlike that work, we investigate how models do symbol binding when they are performant at formatted MCQA; label bias is \emph{one} reason why a model may not be correctly performing symbol binding.%
+
+Outside of MCQA, many 
+works investigate
+how models internally build up representations that lead to their predictions, such as on factual recall 
+\cite{geva-etal-2021-transformer, dai-etal-2022-knowledge, geva-etal-2022-transformer, meng2022locating, geva-etal-2023-dissecting, yu-etal-2023-characterizing, merullo2023language} or basic linguistic \cite{vig2020investigating, wang2023interpretability, merullo2024circuit, prakash2024finetuning, todd2024function} or arithmetic \cite{stolfo-etal-2023-mechanistic, hanna2023how, wu2023interpretability} tasks. %
+MCQA differs because it is both directly represented in real benchmarks and a more challenging task.
+
+
+
+
+
+\section{Formatted MCQA}
+
+
+
+We first introduce task notation, datasets, and our protocol for selecting strong models to analyze. %
+
+Formatted MCQA is a prompt format in which possible answer choices are presented %
+to the model as an enumerated list, each associated with an \textbf{answer choice symbol}. All of our dataset instances are formatted as follows, unless otherwise noted:
+
+\begin{small}
+\begin{Verbatim}[frame=single]
+For each of the following phrases, select the
+best completion (A or B).
+
+<in-context examples>
+
+Phrase: <question>
+Choices:
+A: <correct answer>
+B: <incorrect answer>
+The correct answer is:
+\end{Verbatim}
+\end{small}
+where $y=$ \atoken.\footnote{The actual token is \texttt{`` A''} in the tokenizers of the models we study, but we leave out preceding spaces for simplicity.} We include 3 in-context examples for each instance with labels \atoken, \btoken, \btoken.
+
+Models are evaluated on their ability to assign higher probability to the symbol associated with the correct answer choice (here, \atoken) as opposed to the alternative symbol (here, \btoken). We compute $\hat y$ as \atoken if $p(\text{\atoken}|x) > p(\text{\btoken}|x)$, else \btoken.
+
+We convert datasets with $>2$ answer choices per instance to \textbf{binary} multiple-choice by pairing a randomly-selected 
+incorrect answer choice with the correct answer choice. We restrict instances to two options because the quantity we will plot when measuring discriminativity of model components (\cref{ssec:late_layer_attn_heads}) only takes $1$ value for $2$ choices, but $n$ values for $n>2$ (see App.
+
+\subsection{Datasets}\label{ssec:tasks}
+
+We experiment
+on two challenging real-world multiple-choice datasets from LLM benchmarks: \textbf{HellaSwag} \citep{zellers-etal-2019-hellaswag} and \textbf{MMLU} \cite{hendrycks2021measuring}. We additionally use a prototypical colors dataset \citep{norlund-etal-2021-transferring} to create a synthetic MCQA task that disentangles dataset-specific knowledge from the ability to perform symbol binding: \textbf{Copying Colors from Context (`Colors')}. The dataset consists of instances such as $x=$\texttt{``Corn is''}, $y=$\texttt{``yellow''}. We include $y$ in the context, so the model's only task is to produce the symbol associated with that answer choice, given one distractor answer randomly selected from the ten colors present in the dataset. We use 3 instances as in-context examples and the remaining 105 as our test set. An example formatted instance is as follows: \texttt{\footnotesize ``Phrase: Corn is yellow. What color is corn?\textbackslash nChoices:\textbackslash nA: yellow\textbackslash nB: grey\textbackslash nThe correct answer is:''}
+
+
+\subsection{Models}\label{ssec:models}
+
+\paragraph{Olmo.} We experiment on both the base (\textbf{Olmo-7B-Base}) and instruction-tuned (\textbf{Olmo-7B-SFT}) versions of the Olmo model \cite{groeneveld2024olmo}.
+We also experiment on the \textbf{Olmo-v1.7-Base} model of the same size, which achieves better performance on a 4-way 0-shot formatted MCQA version of MMLU by making 0.01\% of the pretraining data multiple-choice \cite{olmo-v1.7}. This performance gain is reported to occur at \textasciitilde500B tokens of training \cite{guetal2024olmes}--- to investigate how model representations change once the formatted MCQA task is learned, we investigate one checkpoint before this point (\textbf{350B} training tokens), one checkpoint after (\textbf{1T} tokens), and the \textbf{final checkpoint} (\textasciitilde2T tokens). %
+
+\paragraph{Llama2.} We experiment with two sizes of base models from the Llama2 family \cite{llama2}: \textbf{7B} and \textbf{13B}, as well as the instruction-tuned $+$ RLHF-aligned \textbf{7B-Chat} and \textbf{13B-Chat} models.
+
+All 7B (13B) models investigated have 32 (40) layers with 32 (40) attention heads per layer.
+
+
+\subsection{Identifying Consistent MCQA Models}\label{ssec:eval_criteria}\label{ssec:mcqa_performance}
+
+We next isolate models capable of performing formatted MCQA.
+We design a set of 4 prompts to test whether models answer formatted MCQA prompts \emph{consistently}, i.e., they are robust to the position and symbol of the correct answer choice.
+
+We define consistency as always selecting one semantic answer for a dataset instance regardless of how the prompt for that instance is constructed. For example, for the two prompts \abpromptacorrect and \abpromptbcorrect, where bold denotes the location of the correct answer, 
+the model is consistent if its two predictions are \atoken followed by \btoken (consistently correct)
+or \btoken followed by \atoken (consistently incorrect).
+Conversely, if the model always predicts the same token for both prompts, this indicates a preference towards that specific token or that specific position. We refer to this as being inconsistent (always \atoken or always \btoken, depending on the model's preference).
+Henceforth, since we are interested in consistent models, we will always average over \abpromptacorrect and \abpromptbcorrect prompts when reporting accuracy, and refer to these as \abprompt prompts.\footnote{Always predicting \atoken or \btoken will result in 50\% accuracy.} Lastly, to understand what behaviors we localize are specific to the letters used, we additionally include prompts \cdpromptccorrect and \cdpromptdcorrect.\footnote{When this prompt format is used, we format our context examples with labels \ctoken, \dtoken, \dtoken.}  %
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\linewidth]{figures_png/performance-hella-mmlu.pdf}
+    \caption{
+    Results for each model on Hellaswag and MMLU datasets. Plotted is the minimum accuracy across \abprompt and \cdprompt prompts. Only Olmo-7B-SFT and Llama2-13B-Chat achieve $\geq20$\% above random performance ($50$\%), passing our consistency test.
+    }
+    \label{fig:performance-hellaswag-mmlu}
+\end{figure}
+We are interested in models that demonstrate learned ability to do the task of formatted MCQA with consistent symbol binding. We define such models as those that achieve
+\textbf{at least 20\% above random accuracy}, i.e., $\geq70\%$ average accuracy, on both \abprompt and \cdprompt. 
+As \cref{fig:performance-hellaswag-mmlu} shows, only Olmo-7B-SFT and Llama2-13B-Chat achieve this criterion on all considered datasets. We focus on them in subsequent analysis.   
+
+
+    \textbf{(\RomanNumeralCaps{1})} Models that are consistently correct on \abprompt also maintain this level of performance on \cdprompt, despite the latter prompt being less likely to occur in the training data. 
+    \textbf{(\RomanNumeralCaps{2})} 
+    Models exhibit differing performance on the 3 datasets, indicating the datasets capture a meaningful range of difficulty.
+
+
+\section{Localizing Answer Symbol Production}
+
+
+
+\subsection{Activation Patching}\label{ssec:causal_tracing}
+
+Activation patching, sometimes referred to as causal tracing \cite{meng2022locating}, causal mediation analysis  \cite{vig2020investigating}, or interchange intervention \cite{geiger-etal-2020-neural},
+is a method for performing mediation on neural network hidden states to localize which network components have a causal effect on a model's prediction. The method involves performing the following steps:
+\begin{compactenum} %
+    \item Run inference on a dataset instance that the model predicts correctly, say, one formatted as \abpromptacorrect ($x_A$). This will produce probabilities $p(\text{\atoken}|x_A)$ (high) and $p(\text{\btoken}|x_A)$ (low). 
+    \item Run inference on the same dataset instance, but in a different format, such as \abpromptbcorrect, that the model still predicts correctly ($x_B$). This will produce a second set of probabilities, $p(\text{\atoken}|x_B)$ (low) and $p(\text{\btoken}|x_B)$ (high). We store hidden state activations of interest. %
+    \item While running inference on $x_A$,
+    replace the output hidden state at the final token position $T$ and layer $\ell$, $\mathbf{h}_{\ell,T}^{(A)}$, with the hidden state from the same layer and token position, but from the inference run of $x_B$, $\mathbf{h}_{\ell,T}^{(B)}$. We measure $p(\text{\atoken}|x_A, \mathbf{h}_{\ell,T}^{(B)})$ and $p(\text{\btoken}|x_A, \mathbf{h}_{\ell,T}^{(B)})$.
+    \item Repeat step 3 for each layer ($\ell \in [1,L]$).
+\end{compactenum}
+
+We will use the notation $x_B \rightarrow x_A$ to indicate patching a hidden state from $x_B$ into $x_A$.
+\citet{meng2022locating} proposed performing activation patching on the outputs of multi-layer perceptron (MLP) and multi-head self-attention (MHSA) functions; \cite{todd2024function} on the outputs of each weighted attention head.\footnote{MHSA output is a weighted sum of individual attention heads. See \cref{ssec:transformer_background} for background on Transformers.} We also perform activation patching on these granularities (positions A and B in \cref{fig:block_structure}). Note two preliminary conditions for activation patching: the model predicts the correct answer for both $x_A$ and $x_B$, 
+and $x_A$ and $x_B$ do not have the same answer.
+
+\subsection{Vocabulary Projection}\label{ssec:vp}
+\begin{figure*}[ht]
+     \centering
+     \begin{subfigure}[t]{0.27\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/colors/olmo-7b-sft_prototypical_colors_coarse_next_token_3ICE_ABBlabels_Nonecorrect_all_prob_new.png} 
+         \caption{Olmo; generative}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/colors/llama2-13b-chat_prototypical_colors_coarse_next_token_3ICE_ABBlabels_Nonecorrect_all_prob_new.png}
+         \caption{Llama2; generative}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/colors/olmo-7b-sft_prototypical_colors_coarse_3ICE_ABBlabels_Acorrect_all_10k_prob_new.png} 
+         \caption{Olmo; formatted MCQA}
+         \label{fig:vp_olmo_all}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/colors/llama2-13b-chat_prototypical_colors_coarse_3ICE_ABBlabels_Acorrect_all_10k_prob_new.png}
+         \caption{Llama2; formatted MCQA}
+     \end{subfigure}
+\caption{Average projected probability of answer tokens 
+on Colors for Olmo-7B-SFT and Llama2-13B-Chat. \textbf{Left:} generative task. \textbf{Right:} formatted MCQA on \abprompt, where predicted and 2nd choice token are \atoken or \btoken. See \cref{sec:preliminaries} for more details. 
+} 
+\label{fig:greedy_vs_mcqa}
+\end{figure*}
+
+Residual connections have been shown to allow for the iterative refinement of features in neural networks \cite{jastrzebski2018residual, simoulin-crabbe-2021-many}.
+In addition to understanding which hidden states have the largest causal effect on predictions, it is useful to understand how predictions form in the vocabulary space defined by 
+the dot product between the hidden state output by the LM, $\mathbf{h}_{L,T}$, and 
+the unembedding matrix, $W_U$. Recall that for an $L$-layer autoregressive LM, model predictions are a probability distribution over each item in the vocabulary $\mathcal{V}$, $\mathbf{p} \in \mathbb{R}^{|\mathcal{V}|}$, given by:
+    $\mathbf{p} = \text{Softmax}(W_U \cdot \text{LN}(\mathbf{h}_{L,T})) $
+where 
+LN is layer normalization, and $\mathbf{h}_{L,T}$
+is the hidden state output by the final layer at the last token position. 
+Prior work \cite[][\emph{i.a.}]{logit_lens, geva-etal-2021-transformer, geva-etal-2022-lm, geva-etal-2022-transformer, dar-etal-2023-analyzing, katz-belinkov-2023-visit, yu-etal-2023-characterizing, merullo2023language} has proposed to project \emph{any} hidden state in the Transformer block of dimensionality $d$ to the vocabulary space, in order to inspect when and how models build up to $\mathbf{p}$ via their internal representations. 
+This technique, ``vocabulary projection'', is equivalent to early exiting on the Transformer block at inference time \cite[][\emph{i.a.}]{dehghani2018universal, Elbayad2020Depth-Adaptive, schuster-etal-2021-consistent, NEURIPS2022_6fac9e31}. We plot the probability assigned to the two answer symbol tokens (\atoken and \btoken or \ctoken and \dtoken) as well as the maximum probability value in $\mathbf{p}$ at various model states at final token position $T$. 
+
+
+\subsection{Initial Observations}\label{ssec:initial_obs}
+
+\paragraph{Vocabulary projection reveals patterns distinct to MCQA.}
+Since vocabulary projection can produce small values in earlier layers of a network simply because hidden states have not yet been transformed into a space 
+mappable 
+to high probabilities on individual tokens, we first compare results on output hidden states of individual layers between the formatted MCQA task on Colors, and a greedy generation version, where we provide instances in the format \texttt{``Corn is yellow. What color is corn?''} and take the first greedy-decoded token as the prediction (i.e., we expect the model to produce\texttt{`` yellow''}).\footnote{All models investigated achieve 100\% accuracy on this task given 3 in-context examples.} Results are shown in \cref{fig:greedy_vs_mcqa}. 
+\begin{figure*}
+     \centering
+    \begin{subfigure}{.335\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/colors/olmo-7b-sft_prototypical_colors_coarse_3ICE_ABBlabels_Acorrect_all_correct_prob_new.png}
+        \caption{Colors}
+    \end{subfigure}
+    \begin{subfigure}{.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_coarse_3ICE_ABBlabels_Acorrect_all_correct_prob_new.png}
+        \caption{HellaSwag}
+        \label{fig:hs_full_probs}
+    \end{subfigure}
+    \begin{subfigure}{.3\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/mmlu/olmo-7b-sft_mmlu_coarse_3ICE_ABBlabels_Acorrect_all_correct_prob_new.png}
+        \caption{MMLU}
+    \end{subfigure}
+\caption{Average projected probability of answer tokens at each layer for Olmo-7B-SFT, for correct predictions on \abprompt. See \cref{fig:across_tasks_llama} for Llama2-13B-Chat.
+}
+\label{fig:across_tasks}
+\end{figure*}
+\begin{figure*}
+     \centering
+     \begin{subfigure}[t]{0.27\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_coarse_3ICE_ABBlabels_Acorrect_correct_only_prob_new.png} 
+         \caption{\abpromptacorrect}
+         \label{fig:bolda_b_correct}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+         \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_coarse_3ICE_ABBlabels_inverse_Bcorrect_correct_only_prob_new.png} 
+         \caption{\abpromptbcorrect}
+         \label{fig:a_boldb_correct}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_coarse_3ICE_ABBlabels_Ccorrect_correct_only_prob_new.png}
+        \caption{\cdpromptccorrect}
+        \label{fig:boldc_d_correct}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_coarse_3ICE_ABBlabels_inverse_Dcorrect_correct_only_prob_new.png}
+        \caption{\cdpromptdcorrect}
+        \label{fig:c_boldd_correct}
+    \end{subfigure}
+\caption{Average projected probability of answer tokens at each layer for correct predictions by Olmo-7B-SFT on HellaSwag. 
+See \cref{fig:b_a_c_d_llama2} for Llama2-13B-Chat. 
+}
+\label{fig:b_a_c_d}
+\end{figure*}
+
+We observe, notably, that while the greedy version of the task and the ``top token'' line demonstrate that hidden states \emph{can} be transformed by the unembedding matrix into non-negligible probabilities as early as the output of layer 22 (for Olmo; layer 18 for Llama2), non-negligible probabilities on answer symbols emerge a couple of layers later (layer 23 for both models). Additionally, from these noted layers onward, the relative difference between the predicted token and the second choice is much smaller than in the greedy version. We conclude that it takes some extra layers of processing before output hidden states decisively predict an answer choice symbol (\textasciitilde layer 30 for Olmo and layer 32 for Llama2), even though updates to hidden state representations after layer 22/18 (Olmo/Llama2) are generally not changing models' greedy-generated color predictions.
+
+
+\paragraph{Correctness does not dictate predictive patterns.}
+
+We next investigate a dataset where a model performing consistent MCQA (Olmo-7B-SFT) does not achieve perfect performance: HellaSwag. We separate predictions by two attributes: \emph{correctness of the prediction}, and \emph{which letter is predicted} (\atoken or \btoken). Thus, as we are most interested in correct predictions, we will only include correctly-predicted instances in subsequent plots (i.e., \cref{fig:bolda_b_correct,fig:a_boldb_correct} for vocabulary projection and \cref{fig:ct_aba_correct_hs} for activation patching).
+
+\paragraph{Activation patching and vocabulary projection are complementary.} 
+As elucidated in \cref{fig:ct_aba_correct_hs}, activation patching highlights the key causal role that layer 21 plays in encoding the answer choice that Olmo-7B-SFT will predict. While layers prior to 21 may promote or demote a specific token choice, 
+their contributions to the residual stream are overridden by layer 21's, and similarly, later layers
+appear to be 
+carrying forward information contributed to the residual stream by layer 21. In Llama2-13B-Chat (\cref{fig:ct_aba_correct_hs_llama}), we observe a more diffuse window of \textasciitilde6 layers (15-21) at which activation patching is increasingly able to change the model's prediction.
+
+Compared with \cref{fig:ct_aba_correct_hs}, \cref{fig:bolda_b_correct,fig:a_boldb_correct} illustrate the complementary nature of the two methods: activation patching reveals important mechanisms \emph{before} hidden states are projectable to the vocabulary space,
+ while vocabulary projection shows how relevant information in the residual stream appears in the vocabulary space over remaining layers. Indeed, one hypothesis that arises from these results is that it takes a couple of layers of processing for information encoded in a hidden state to become mapped to higher probabilities on those tokens. 
+
+
+\section{Roles of Specific Layers}
+
+
+\begin{figure*}
+     \centering
+    \begin{subfigure}[t]{0.27\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/causal_tracing/olmo-7b-sft_hellaswag_layer_standard_to_inverse_3ICE_ABBlabels_1000insts_consistent_correct_new.png} 
+         \caption{\abpromptbcorrect$\rightarrow$\abpromptacorrect \\ (HellaSwag)}
+        \label{fig:ct_aba_correct_hs}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/causal_tracing/olmo-7b-sft_prototypical_colors_layer_standard_to_inverse_3ICE_ABBlabels_105insts_consistent_correct_new.png} 
+         \caption{\abpromptbcorrect$\rightarrow$\abpromptacorrect (Colors)}
+        \label{fig:ct_aba_correct_pc}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/causal_tracing/olmo-7b-sft_hellaswag_layer_cd_label_mapping_to_standard_3ICE_ABBlabels_1000insts_consistent_correct_new.png}
+        \caption{\abpromptacorrect$\rightarrow$\cdpromptccorrect (HellaSwag)}
+        \label{fig:ct_aba_cdc_hs}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/causal_tracing/olmo-7b-sft_prototypical_colors_layer_cd_label_mapping_to_standard_3ICE_ABBlabels_105insts_consistent_correct_new.png}
+        \caption{\abpromptacorrect$\rightarrow$\cdpromptccorrect (Colors)}
+        \label{fig:ct_aba_cdc_pc}
+    \end{subfigure}
+\caption{Average effect of patching individual output hidden states for Olmo-7B-SFT ($x_B \rightarrow x_A$) on consistently correct predictions. 
+Trends also hold when patching $x_A \rightarrow x_B$ (\cref{fig:inverse_ct}).
+See \cref{fig:ct_bacd_llama2} for Llama2-13B-Chat.
+}
+\label{fig:ct_bacd}
+\end{figure*}
+\paragraph{Key Layers are consistent across datasets.}
+We observe projected token probabilities for Olmo-7B-SFT across all three datasets in \cref{fig:across_tasks}, and activation patches for two datasets in \cref{fig:ct_aba_correct_hs,fig:ct_aba_correct_pc}. %
+Despite Olmo-7B-SFT's varying performance on the datasets, key layers are highly consistent.
+Notably, layer 21 also plays a key causal role in the promotion of answer symbol tokens for Colors. Similar results are found for Llama2-13B-Chat (\cref{fig:across_tasks_llama,fig:ct_aba_correct_hs_llama,fig:ct_aba_correct_pc_llama}). These findings corroborate the hypothesis that the same mechanisms are responsible for promoting answer symbol letters, regardless of task complexity. 
+
+
+\paragraph{Some answer symbols are produced in a two-stage process.}
+When using a different symbol space (i.e., \cdprompt), processing trends are noticeably different for the Olmo model (\cref{fig:boldc_d_correct,fig:c_boldd_correct}). 
+The model first assigns probability to the labels that are \emph{more likely or expected} (\atoken and \btoken), before making an abrupt switch to the correct symbol (\ctoken or \dtoken) at layer 30. Activation patching reveals the same trend (\cref{fig:ct_aba_cdc_hs,fig:ct_aba_cdc_pc}):
+patching in prompts that promote the production of \ctoken and \dtoken causes the relative difference between \atoken and \btoken to close at layers 21-29, before an abrupt change to predicting \ctoken driven by layer 30. This provides evidence that Olmo-7B-SFT solidifies final label predictions for ``OOD'' prompts in later layers, and could explain why some models struggle with OOD formats.\footnote{Note that this is specific to Olmo-7B-SFT. Llama2-13B-Chat immediately promotes \ctoken and \dtoken (\cref{fig:ct_aba_cdc_hs_llama,fig:ct_aba_cdc_pc_llama,fig:boldc_d_correct_llama,fig:c_boldd_correct_llama}).} 
+
+
+
+\section{Roles of Layer Components}
+
+
+\begin{figure*}
+     \centering
+     \begin{subfigure}[t]{0.265\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_attnOutput_3ICE_ABBlabels_Acorrect_all_correct_prob_new.png}
+         \caption{MHSA Projection}
+         \label{fig:attn_output_olmo_vp}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_mlpOutput_3ICE_ABBlabels_Acorrect_all_correct_prob_new.png}
+         \caption{MLP Projection}
+        \label{fig:mlp_output_olmo_vp}
+    \end{subfigure}
+     \begin{subfigure}[t]{0.235\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/causal_tracing/olmo-7b-sft_hellaswag_attn_standard_to_inverse_3ICE_ABBlabels_1000insts_consistent_correct_new.png}
+         \caption{MHSA Patching}
+         \label{fig:attn_output_olmo_ct}
+     \end{subfigure}
+    \begin{subfigure}[t]{0.235\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures_png/causal_tracing/olmo-7b-sft_hellaswag_mlp_standard_to_inverse_3ICE_ABBlabels_1000insts_consistent_correct_new.png}
+        \caption{MLP Patching}
+        \label{fig:mlp_output_olmo_ct}
+    \end{subfigure}
+\caption{Avg. projected probability 
+on \abprompt and avg. probability at the final layer (patching \abpromptbcorrect$\rightarrow$\abpromptacorrect) of hidden states output by different functions. These are function-wise breakdowns of \cref{fig:hs_full_probs,fig:ct_aba_correct_hs}. %
+}
+\label{fig:mlp_vs_attn_olmo}
+\end{figure*}
+
+
+We next investigate the role that MHSA and MLP functions play in the observed behavior. 
+\paragraph{Answer symbol production is driven by a sparse portion of the network.}
+In \cref{fig:attn_output_olmo_vp,fig:mlp_output_olmo_vp}, we directly project the hidden states output by these functions (positions A and B in \cref{fig:block_structure}). %
+Large spikes in probabilities come from \emph{both} MHSA (layers 23, 30, 31) and MLP outputs (layers 28, 30). The breakdown in spiking behavior by attention heads in \cref{fig:total_attn_heatmaps_olmo_7b_sft_hs} (bottom) shows just how sparse the number of attention heads projecting to non-negligible probability values is (\textasciitilde 8 total), even in layers where the MHSA output hidden state assigns large probabilities to \atoken and \btoken (recall that the MHSA output vector is a sum of these weighted attention head vectors).\footnote{It is unclear why vocabulary projections of the two functions are so different from activation patches for the Llama2 model.}
+\paragraph{Individual attention heads dominate the production of answer choice symbols (over MLPs).}
+Plotting all attention heads and MLP layers that assign high probability to the sum of answer choices ($p(\text{\atoken}) + p(\text{\btoken})>0.01$) in \cref{fig:total_attn_heatmaps_olmo_7b_sft_hs} (top; \cref{fig:total_attn_heatmaps_llama_hs} for Llama2-13B-Chat), we see that attention heads generally dominate the distribution, despite the fact that they only contain \textasciitilde half the learnable parameters of MLPs (\textasciitilde 67M vs. \textasciitilde135M per layer). However, attention heads have access to global context which an MLP does not have, making them especially useful for resolving back-references to portions of the input sequence or copying information from one position to another.
+\paragraph{The same network components that promote the production of \emph{any} answer choice promote specific answer choices as well.}
+
+Increasing probability on both answer choices is not the same as being \emph{discriminative}, i.e., promoting one choice at the expense of another. %
+We plot all heads and MLPs that are discriminative ($|p(\text{\atoken}) - p(\text{\btoken})|>0.01$) in \cref{fig:relative_attn_heatmaps_olmo_7b_sft_hs,fig:relative_attn_heatmaps_olmo_7b_sft_hs_2} (top; \cref{fig:relative_attn_heatmaps_llama_hs,fig:relative_attn_heatmaps_llama_hs_2} for Llama2-13B-Chat). 
+There is 100\% overlap: every plotted component also appears in \cref{fig:total_attn_heatmaps_olmo_7b_sft_hs}.
+\begin{figure*}[ht!]
+     \centering
+     \hspace{-4ex}
+     \begin{subfigure}[b]{0.275\linewidth}
+         \centering
+        \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_attnHeads_3ICE_ABBlabels_Acorrect_all_correct_deepmind_prob_barGraph_new_layer0_sum.png}
+     \end{subfigure}
+     \begin{subfigure}[b]{0.287\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_attnHeads_3ICE_ABBlabels_Acorrect_correct_only_deepmind_prob_barGraph_new_layer0_relative_diff.png}
+     \end{subfigure}
+     \hspace{3.8ex}
+     \begin{subfigure}[b]{0.242\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_attnHeads_3ICE_ABBlabels_inverse_Bcorrect_correct_only_deepmind_prob_barGraph_new_layer0_relative_diff.png}
+     \end{subfigure}
+     \hspace*{1ex} \\
+     \hspace{-2ex}
+    \begin{subfigure}[b]{0.285\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_attnHeads_3ICE_ABBlabels_Acorrect_all_correct_probit_heatmap_new_layer0_sum.png}
+         \caption{$p(\text{\atoken})+p(\text{\btoken})$ for \abprompt}
+         \label{fig:total_attn_heatmaps_olmo_7b_sft_hs}
+     \end{subfigure}
+     \hspace{2ex}
+     \begin{subfigure}[b]{0.287\linewidth}
+         \centering
+         \includegraphics[width=0.87\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_attnHeads_3ICE_ABBlabels_Acorrect_correct_only_probit_heatmap_new_layer0_relative_diff.png}
+         \caption{$p(\text{\atoken})-p(\text{\btoken})$ for \abpromptacorrect}
+         \label{fig:relative_attn_heatmaps_olmo_7b_sft_hs}
+     \end{subfigure}
+     \hspace{1.5ex}
+     \begin{subfigure}[b]{0.298\linewidth}
+         \centering
+         \includegraphics[width=\linewidth]{figures_png/hellaswag/olmo-7b-sft_hellaswag_finegrained_attnHeads_3ICE_ABBlabels_inverse_Bcorrect_correct_only_probit_heatmap_new_layer0_relative_diff.png}
+         \caption{$p(\text{\atoken})-p(\text{\btoken})$ for \abpromptbcorrect}
+        \label{fig:relative_attn_heatmaps_olmo_7b_sft_hs_2}
+     \end{subfigure}
+\caption{Average projected probability \emph{sum} (left) vs.\ \emph{difference} (right two; separated by predicted letter) of answer tokens by different model components for correctly-predicted instances by Olmo-7b-SFT on HellaSwag. \textbf{Top:} all components with projected probability $>0.01$. Individual attention heads (\textcolor{blue}{blue bars}) generally dominate the distributions, despite the fact that MLPs (\textcolor{purple}{purple bars}) have more parameters.
+\textbf{Bottom:} all attention heads, demonstrating the sparsity of this effect. 
+We observe high overlap between the left-most and right two plots, indicating that the same components promoting \emph{total} probability on answer choices are also \emph{discriminative} in preferring one choice over the other. 
+See \cref{fig:attn_heatmaps_llama_hs} for Llama2-13B-Chat.
+}
+\label{fig:attn_heatmaps_olmo_7b_sft_hs}
+\label{fig:attn_barplots_olmo_7b_sft_hs}
+\end{figure*}
+
+\paragraph{Model components specialize.}
+
+We observe in \cref{fig:relative_attn_heatmaps_olmo_7b_sft_hs,fig:relative_attn_heatmaps_olmo_7b_sft_hs_2} (bottom) attention heads that take on different roles depending on the predicted symbol. Of the 13 total model components in the two plots, we observe:
+\begin{compactenum} %
+    \item 3 that consistently assign high probability to \atoken. While they are consistently assigning higher probability to \atoken than to \btoken, their average magnitudes drop when \btoken is predicted.
+    
+    \item 4 that consistently assign high probability to \btoken. While they consistently assign higher probability to \btoken than to \atoken, their average magnitudes drop when \atoken is predicted.
+    
+    \item 3 that assign high probability to \emph{whichever} token that is ultimately predicted, analogous to ``correct letter heads'' \cite{lieberum2023does}.
+    
+    \item 3 that only activate when \btoken is predicted, though all assigning probabilities $<0.1$.
+\end{compactenum}
+
+
+\section{Where are poorly-performing models going wrong?}
+
+
+
+\paragraph{Our synthetic task separates formatted MCQA performance from dataset-specific performance.}
+
+In \cref{fig:performance_colors} (\cref{tab:colors_perf_3shot} for other models), our synthetic task confirms that there is a crucial point at which formatted MCQA skill is learned for Olmo-v1.7-7B: between 350B and 1T tokens. Performance goes from near-random to near-100\%, even for checkpoints with poor performance on more challenging datasets.\footnote{As a reminder, \emph{all} models achieve 100\% accuracy on the color string generation version of the task (\cref{ssec:initial_obs}), meaning that low performance can be attributed to formatted MCQA.} This result highlights the value of a synthetic task: it helps to disentangle to what extent poor MCQA performance on a dataset is due to a lack of dataset-specific knowledge vs. an inability to perform formatted MCQA.
+\paragraph{Poorly performing models cannot separate answer choice symbols in vocabulary space.} 
+
+\begin{figure}[ht!]
+    \centering
+    \includegraphics[width=0.8\linewidth]{figures_png/performance-colors.pdf}
+    \caption{
+    Accuracy of various Olmo v1.7 checkpoints. Plotted is the minimum performance between \abprompt and \cdprompt. Performance on Colors demonstrates that MCQA format is learned between 350B and 1T tokens. See \cref{tab:colors_perf_3shot} for results on all models.
+    }
+    \label{fig:performance_colors}
+\end{figure}
+We use vocabulary projection to inspect differences between these checkpoints on the Colors task. \cref{fig:olmo-v1. %
+Indeed, the primary distinction observed between the strong checkpoints (\cref{fig:1T,fig:2T}) and the weak checkpoint (\cref{fig:350B}) is the separability of \atoken and \btoken, particularly on and after layer 29. This is in spite of the fact that the 350B checkpoint model predicts \btoken as the final answer on 99.5\% of instances (\cref{tab:colors_perf_3shot}), and
+may explain why small edits to network parameters can decrease label bias \cite{li2024anchored}.
+Finally, we observe in \cref{fig:olmo-v1.7 7B's ability to do symbol binding as demonstrated on Colors does not alleviate the token separability problem on other datasets on which the model is less performant. Overall, these results demonstrate that an inability to disentangle answer symbol tokens in vocabulary space, \emph{not} an inability to assign high probability to these tokens, is a property of poorly-performing models.
+
+
+\section{Conclusion}
+
+
+
+This work provides novel insights into the mechanisms language models employ when answering formatted multiple-choice questions. Our analysis leverages two complementary techniques: vocabulary projection and activation patching. Using carefully-designed prompts and a synthetic task, we uncover a series of stages, attibutable to a very sparse set of specialized network components, in which transformers select, promote, and align (in the case of OOD prompts) the answer choice symbol they predict. With MCQA datasets such as MMLU routinely used as a performance signal for model development, it is important to disentangle and test formatted MCQA ability in order to build models that operate in more robust and reliable ways. Our work makes an important first step towards this goal.
+
+
+
+

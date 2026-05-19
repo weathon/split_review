@@ -1,0 +1,358 @@
+\title{TreeDQN: Learning to minimize Branch-and-Bound tree}
+
+\begin{abstract}
+Combinatorial optimization problems require an exhaustive search to find the optimal solution. A convenient approach to solving combinatorial optimization tasks in the form of Mixed Integer Linear Programs is \emph{Branch-and-Bound}.  Branch-and-Bound solver splits a task into two parts dividing the domain of an integer variable, then it solves them recursively, producing a tree of nested sub-tasks. The efficiency of the solver depends on the \emph{branchning heuristic} used to select a variable for splitting. In the present work, we propose a reinforcement learning method that can efficiently learn the branching heuristic. We view the variable selection task as a tree Markov Decision Process, prove that the Bellman operator adapted for the tree Markov Decision Process is contracting in mean, and propose a modified learning objective for the reinforcement learning agent. Our agent requires less training data and produces smaller trees compared to previous reinforcement learning methods. 
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Practical applications in multiple areas such as logistics \cite{vrp}, portfolio management \cite{Markowitz1952}, manufacturing \cite{chip_design}, and others share a combinatorial structure. Finding the optimal solution for a combinatorial task requires an exhaustive search over all valid combinations of variables. The optimal solution for a combinatorial problem formulated as a Mixed Integer Linear Program \cite{wolsey1999integer} can be efficiently obtained with \emph{Branch-and-Bound} algorithm (B\&B) \cite{BnB}. B\&B algorithm employs  \emph{divide-and-conquer} approach. At each step, it splits the domain of one of the integer variables and eliminates paths that can not lead to a feasible solution. The performance of the B\&B algorithm depends on two sequential decision-making processes: variable selection and node selection. Node selection picks the next node in the B\&B tree to evaluate, and variable selection chooses the next variable to split on. The variable selection process is the most computationally expensive and crucial for the performance of the whole algorithm. The optimal variable selection method, frequently dubbed as \emph{branching rule}, will lead to smaller trees and a more efficient solver. Although the optimal \emph{branching rule} is not known \cite{lodi2017learning}, all modern solvers implement human-crafted heuristics, which were designed to perform well on a wide range of tasks \cite{gleixner2021miplib}. At the same time, practitioners frequently solve the same task with different parameters, so the branching rule adapted to a specific distribution of tasks may lead to a significant performance boost and business impact. The branching rule is applied sequentially to minimize the resulting tree size, which resembles the reinforcement learning paradigm in which an agent interacts with the environment to maximize the expected return. Recently reinforcement learning achieved state-of-the-art results in a diverse set of tasks, from beating world champions in the games of Go \cite{alphazero} and Dota2 \cite{berner2019dota} to aligning optical interferometer \cite{interferobot}, controlling nuclear fusion reactor \cite{tokomak}, tuning hyperparameters of simulated quantum annealers \cite{rlsimsim} and optimizing output of large language models \cite{OpenAI2023GPT4TR}.
+
+Previous works \cite{etheve_2020, scavuzzo_2022} introduced \emph{tree Markov Decision Process} (tree MDP). In the tree MDP, instead of a single next state agent receives multiple next states --- descendant nodes of the current tree node. The value function of the current node is the sum of reward and value functions in the child nodes. Work \cite{etheve_2020} showed that a reinforcement learning agent trained to minimize each sub-tree minimizes the whole B\&B tree. We follow this approach and develop a sample efficient off-policy reinforcement learning method adapted for a tree MDP. Tree sizes produced by the B\&B algorithm usually have a long-tailed distribution, even for hand-crafted branching heuristics. To overcome this challenge, we adapt the loss function to the distribution of tree sizes. As a result, our agent learns more stable, produces smaller trees, and is more sample efficient than the previous RL methods. Our contribution is the following:
+\begin{enumerate}
+    \item We prove that the Bellman operator in tree MDP is contracting in mean. 
+    \item We modify the learning objective to optimize the geometric mean. 
+    \item We propose a novel reinforcement learning algorithm --- TreeDQN. 
+\end{enumerate}
+
+
+\section{Background}
+
+
+\subsection{Mixed Integer Linear Programming}
+A \emph{Mixed Integer Linear Program} (MILP) is a non-convex optimization problem of the form:
+
+\begin{equation}
+  \min\Bigl\{
+    c^\top x
+    \colon A x \leq b
+    \,, x \in \bigl[l, u\bigr]
+    \,, x \in \mathbb{Z}^m \times \mathbb{R}^{n-m}
+  \Bigr\},
+  \label{eq:milp_setup}
+\end{equation}
+
+where objective coefficient vector $c \in \mathbb{R}^n$, constraint right-hand-side $b \in \mathbb{R}^m$, constraint matrix $A \in \mathbb{R}^{m \times n}$, lower and upper bound vectors $l,u \in \mathbb{R}^n$ and parameter $m \geq 1$. The method of choice to find the optimal solution of a MILP is Branch-and-Bound \cite{BnB}. B\&B algorithm builds a tree of nested MILP sub-problems with non-overlapping feasibility sets. The root of the tree is the original problem. At each node, B\&B splits the domain of one of the integer variables into two halves, which produces two sub-problems. The sub-problems differ in their feasibility sets but share the same objective. For each sub-problem, the algorithm computes \emph{lower bound} as an optimal solution for the relaxed problem with removed integrality constraints and \emph{global upper bound}, which denotes the best integer feasible solution known so far. B\&B uses these bounds to enforce efficiency by pruning the tree. When created, all tree nodes are as marked \emph{open}. The algorithm visits every open node and either marks it as \emph{fathomed} if the corresponding MILP is \emph{infeasible} or the lower bound is higher than the global upper bound or splits it by an integer variable until it finds the optimal solution. Fathoming every open leaf guarantees that the B\&B eventually finds the best integer-feasible solution. An example of a B\&B tree is shown in Fig.~\ref{fig:BnBtree}. The resulting efficiency of the algorithm depends on the \emph{node selection strategy}, which arranges the open leaves for visiting, and the \emph{branching rule}, which selects an integer variable for splitting. 
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.5\linewidth]{imgs/BnBtree.pdf}
+    \caption{Branch-and-Bound tree for Combinatorial Auction task \cite{cauct}. The green node is the root, blue nodes are visited, and red nodes are fathomed. Numbers indicate visiting order. Missing numbers correspond to pruned nodes.}
+    \label{fig:BnBtree}
+\end{figure}
+
+Practical implementations of the Branch-and-Bound algorithm in SCIP \cite{scip} and CPLEX \cite{cplex2009v12} solvers rely on heuristics for node selection and variable selection. Straight forward strategy for node selection is \emph{Depth-First-Search} (DFS), which aims to find any integer feasible solution faster to prune branches that do not contain a better solution. In the SCIP solver, the default node selection heuristic tries to estimate the node with the lowest feasible solution. One of the best-known general heuristics for the variable selection is \emph{Strong Branching}. It is a tree-size efficient and computationally expensive branching rule \citep{achterberg_constraint_2007}. For each fractional variable with integrality constraint, Strong Branching computes the lower bounds for the left and right child nodes and uses them to choose the variable.  
+\subsection{Tree MDP}
+
+The \emph{variable selection} process employed by the Branch-and-Bound algorithm can be considered a tree Markov Decision Process with limitations discussed in \cite{etheve_2020, scavuzzo_2022}. To enforce Markov property, one may either choose \emph{Depth First Search} as node selection strategy \cite{etheve_2020}, or set the \emph{global upper bound} in the root node equal to optimal solution \cite{scavuzzo_2022}. The \emph{state} of tree MDP is the current node of the Branch-and-Bound tree, \emph{action} is the fractional variable chosen for splitting, and \emph{next states} are descendent nodes. The main difference between tree MDP and temporal MDP is that in tree MDP agent receives multiple next states --- children nodes of the current node. Value function $V(s)$ for a tree MDP is defined as follows:
+
+\begin{equation}
+    V^{\pi}(s_t) = r(s_t, a, s_{t+1}^{\pm}) + V^{\pi}(s_{t+1}^+) + V^{\pi}(s_{t+1}^-),
+\label{eq:tmdp_v}
+\end{equation}
+
+where $s_t$ is the current node of the tree, $s_{t+1}^+$ and $s_{t+1}^-$ denotes its left and right child respectively. The goal of the agent is to find a policy $\pi$ which would maximize the expected return. For instance, if the reward equals $-1$, the value function predicts the expected tree size with a negative sign. Hence, the agent maximizing the expected return would minimize the tree size. 
+
+During testing, the optimal solution for the task at hand is unknown and can not be used to set the global upper bound, which leads to a gap between training and testing environments. More efficient heuristics for \emph{node selection} also induce a gap for an agent trained with DFS node selection strategy. This gap is often considered moderate and does not affect performance significantly.
+
+
+
+\section{Related work}
+
+
+For the first time statistical approach to learning a branching rule was applied in \cite{Khalil2016}. Authors used SVM \cite{cortes1995support} to predict the variable ranking of an expert for a single task instance. 
+Later works \cite{khalil_2017} and \cite{selsam_2019} proposed methods based on Graph Convolutional Networks (GCNN) \cite{GCNN} to find an approximate solution of combinatorial tasks. In \cite{gasse_2019}, authors used the same neural network architecture to imitate Strong Branching heuristic in sophisticated SCIP solver \cite{scip}. The imitation learning agent can not produce trees shorter than the expert, however, it solves the variable selection task much faster, especially if running on GPU, thereby speeding up the whole B\&B algorithm significantly. 
+In \cite{hybrid}, authors investigate the choice of the model architecture and propose a hybrid model which combines the expressive power of GCNN with the computational efficiency of multi-layer perceptrons. Despite the time performance increase, imitation learning agents can not lead to better heuristics. 
+A more promising direction is to learn a variable selection rule for the Branch-and-Bound algorithm with reinforcement learning. In this approach, we will keep the guarantees of the B\&B method to find an optimal solution and possibly speed up the algorithm significantly by optimal choices of branching variables. A natural minimization target for an agent in the B\&B algorithm is the size of the resulting tree. One of the main challenges here is to map the variable selection process to the MDP and preserve Markov property. In the B\&B search trees, the local decisions impact previously opened leaves via fathoming due to global upper-bound pruning. Thus the credit assignment in the B\&B is biased upward, which renders the learned policies potentially sub-optimal. In work \cite{etheve_2020}, authors propose Fitting for Minimizing the SubTree Size algorithm to learn the branching rule. In their method agent plays an episode until termination and fits the Q-function to the bootstrapped return. They used the DFS node selection strategy to enforce MDP property during training. Following this idea in work \cite{scavuzzo_2022}, authors introduce the tree MDP framework and prove that setting the global upper bound to the optimal solution for a MILP is an alternative method to enforcing MDP property. They derive policy gradient theorem for a tree MDP and evaluate REINFORCE-based agent on a set of challenging tasks similar to \cite{gasse_2019}. In both works \cite{etheve_2020} and \cite{scavuzzo_2022}, to update an agent, one needs to run an episode until the end to obtain a cumulative return. Our work improves their approaches in terms of sample efficiency and agent performance.
+
+
+
+\section{Our method}
+
+In the present work, we use an open-source implementation of the Branch-and-Bound algorithm in SCIP solver version 8.0.1. Our environment utilizes Ecole \cite{ecole} 0.8.1 package, which provides an interface for learning a variable selection policy. The variable selection environment has three characteristic properties which distinguish it from an ordinary reinforcement learning environment. First of all, finding the optimal solution of a MILP is computationally demanding, which requires sample efficient learning methods. Second, the decision-making process is a tree MDP instead of a temporal MDP. Third, the distribution of tree sizes, even for the Strong Branching heuristic, has a long tail, as shown in Fig.~\ref{fig:tree_distrib}. 
+
+\begin{figure}[ht]
+\begin{minipage}{.33\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{imgs/cauct.pdf}
+    \source{Combinatorial Auction}
+\end{minipage}
+\begin{minipage}{.33\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{imgs/setcover.pdf}
+    \source{Set Cover}
+\end{minipage}
+\begin{minipage}{.33\textwidth}
+    \centering
+    \includegraphics[width=1\linewidth]{imgs/indset.pdf}
+        \source{Maximum Independent Set}
+\end{minipage}
+  \caption{Distributions of tree sizes for Combinatorial Auction \cite{cauct}, Set Cover \cite{setcover}, and Maximum Independent Set \cite{indset} tasks, using Strong Branching heuristic for variable selection.}
+  \label{fig:tree_distrib}
+\end{figure}
+
+To reliably benchmark the average performance of different branching rules, previous works \cite{gasse_2019, scavuzzo_2022} used the geometric mean of the final tree size as a comparison metric. This metric is more stable in the case of long-tailed distributions than the arithmetic mean. Hence, the successful reinforcement learning method should have the following properties:
+
+\begin{enumerate}
+    \item Off-policy. %to enforce sample efficiency.
+    \item Work with tree MDP instead of temporal MDP.
+    \item Optimize geometric mean of expected return.
+\end{enumerate}
+
+\subsection{Contraction in mean}
+From the theoretical point of view, reinforcement learning methods converge to an optimal policy due to the contraction property of the Bellman operator \cite{qlearning_conv}. To apply RL methods for tree MDP, we need to justify the contraction property of the tree Bellman operator. 
+
+\paragraph{Theorem 4.1} Tree Bellman operator is contracting in mean.
+
+Bellman operator for a tree MDP is defined similarly to a temporal MDP:
+
+\begin{equation}
+    T^{\pi}(V(s)) = r(s, \pi(s)) + \gamma \left[ p_+V(s^{+}) + p_-V(s^{-}) \right] \label{eq:bellman_tree}
+\end{equation}
+
+Contraction in mean was discussed, for example, in \cite{Borovkov2013}. Here, we will consider operator $T$ is contracting in mean if:
+
+\begin{align*}
+    & \|TV - TU\|_{\infty} = p \cdot \|V - U\|_{\infty},\\
+    & \ex p < 1,
+\end{align*}
+
+where the infinity norm is defined by:
+\begin{equation}
+    \| V - U\|_{\infty} = \max_{s \in \mathbb{S}}|V(s) - U(s)|
+\label{eq:infty_norm}
+\end{equation}
+We will assume that the probability of having a left ($p_+$) and a right ($p_-$) child does not depend on the state. This assumption is close to the B\&B tree pruning process, where the pruning decision depends on the global upper bound instead of the parent node. Using the definition of tree Bellman operator \eqref{eq:bellman_tree} and the definition of the infinity norm \eqref{eq:infty_norm} we derive the following inequality:
+
+\begin{align*}
+    & \|T^{\pi}V - T^{\pi}U\|_{\infty} = \gamma \| p_+V(s^{+}) + p_-V(s^{-})  - p_+U(s^{+}) + p_-U(s^{-})\|_{\infty} = \\
+    & \gamma \max_{s \in \mathbb{S}}\left[p_+|V(s^{+}) - U(s^{+})| + p_-|V(s^{-} - U(s^{-}))|\right] \leq \\
+    & \gamma (p_+ + p_-)\max_{x \in \mathbb{S}}|V(x) - U(x)|
+\end{align*}
+
+The proof follows from the above inequality and observation that the tree is finite, i.e., $\ex (p_+ + p_-) < 1$.
+
+\subsection{Loss function}
+
+Reinforcement learning methods generally regress the expected return with the mean squared error (MSE) loss function, thereby optimizing the prediction of the arithmetic mean. In the case of vast return distributions, we propose to use mean squared logarithmic error (MSLE) instead. For a variable $y$ and targets $t_i$ loss $L(y, t)$ is defined as follows:
+
+\begin{equation}
+    L(y, t) = \mathrm{MSE}(\log(|y|), \log(|t|)) = \frac{1}{N}\sum_{i}(\log(|y|) - \log(|t_i|))^2
+\label{eq:geoloss}
+\end{equation}
+
+Since $\log(|y|) = 1/N\sum \log(|t_i|)$ minimizes the MSE function, then the optimal value for $y$ equals to geometric mean $ |y| = \exp(1/N \sum_{i = 1}^{N}\log(|t_i|))$. Thus, the agent trained with loss \eqref{eq:geoloss} will be optimized to predict the geometric mean of the expected return. 
+
+In our experiments, we use Graph Convolution Neural Network with activation $f = -\exp(\cdot)$ applied for the output layer, which allows our agent to approximate a wide range of Q-values. For this activation function, we can implement the loss function \eqref{eq:geoloss} numerically stable using logits before activation. 
+Hence, the proposed loss function serves two purposes simultaneously: it optimizes the target value --- geometric mean of expected return and stabilizes the learning process. 
+\subsection{TreeDQN}
+Our method, which we dubbed TreeDQN (\ref{alg:TreeDQN}), is based on Double Dueling DQN \cite{Mnih2015} algorithm adapted for a tree MDP process \eqref{eq:tmdp_v}. According to \emph{Theorem 4.1}, the Bellman operator for a tree MDP process is contracting in mean. Hence, we can adapt DQN to minimize tree difference error instead of temporal difference. By sampling previous observations from experience replay, we significantly improve the sample efficiency of our method in contrast to on-policy methods \cite{scavuzzo_2022}. We also use the loss function \eqref{eq:geoloss}, which highly increases the learning stability.
+
+\paragraph{Observation.} We use state representation in the form of a bipartite graph provided by Ecole \cite{ecole}. In this graph, edges correspond to connections between constraints and variables with weight equal to the coefficient of the variable in the constraint. Each variable and constraint node is represented by a vector of 19 and 5 features, respectively.
+
+\paragraph{Actions.} The agent selects one of the fractional variables for splitting. Since the number of fractional variables decreases during an episode, we apply a mask to choose only among available variables. 
+
+\paragraph{Rewards.} At each step, the agent receives a negative reward $r = -1$. The total cumulative return equals the resulting tree size with a negative sign. 
+
+\paragraph{Episode.} In each episode, the agent solves a single MILP instance. We limit the solving time for one task instance during training to $10$ minutes and terminate the episode if the time is over. 
+ 
+
+\begin{algorithm}[ht]
+\caption{TreeDQN with experience replay}\label{alg:TreeDQN}
+\KwData{Replay buffer capacity $N$, replay buffer minimum capacity $n$, discount factor $\gamma$, number of updates $t$, $\varepsilon$ decay function, batch size $b$, target update frequency $t_{up}$, random number generator R}
+\textbf{Initialize:} $Q_{\mathrm{target}}$, $Q_{\mathrm{net}}$, $\mathcal{D} \gets \varnothing, \varepsilon \gets 1$\\
+\KwResult{$Q_{\mathrm{net}}$}
+$s \gets$ env.reset()\;
+\While{$i \leq t$}{
+  \eIf{R(0, 1) < $\varepsilon$} {
+    a $\gets$ random action\;
+  } {
+    a $\gets \argmax_{a} Q_{\mathrm{net}}(s, a)$\;
+  }
+  $s_{\mathrm{next}}$, r, $s^{+}$, $s^{-}$ = env.step(a)\;
+  $\mathcal{D} \gets \mathcal{D} \cup (s, a, r, s^{\pm})$\;
+  $s \gets s_{\mathrm{next}}$\; 
+  $\varepsilon \gets$ decay($\varepsilon$)\;
+  $i \gets i + 1$\;
+  \If{$i > n$}{
+    sample batch $(s,a,r,s^{\pm}) \sim \mathcal{D}$\;
+    $a^{\pm} \gets \argmax_{a^{\pm}} Q_{\mathrm{net}}(s^{\pm},a^{\pm})$\;
+    target = $\log\left[|r + \gamma (Q_{\mathrm{target}}(s^+,a^+) + Q_{\mathrm{target}}(s^-,a^-))|\right]$\;
+    loss = $\frac{1}{b}\sum(\log(|Q_{\mathrm{net}}(s,a)|) - \mathrm{target})^2$\;
+    $Q_{\mathrm{net}} \gets$ optimize($Q_{\mathrm{net}}$, loss)
+  }
+  \If{$i \mod t_{up}$ = 0} {
+    $Q_{\mathrm{target}} \gets Q_{\mathrm{net}}$
+  }
+}
+\end{algorithm}
+
+\subsection{Training}
+
+In our experiments, we use a set of NP-hard tasks, namely Combinatorial Auction \cite{cauct}, Set Cover \cite{setcover}, Maximum Independent Set \cite{indset}, Facility Location \cite{facilityloc} and Multiple Knapsack \cite{knapsack}. To test the generalization ability of our agent, we evaluate the trained agent twice: (1) on the test instances from the training distribution and (2) on the large instances from the transfer distribution. Tab.~\ref{tab:taskparams} shows the parameters of the test and transfer distributions. 
+
+\begin{table}[ht]
+\caption{Parameters used to generate train, test, and transfer tasks.}
+    \centering
+    \begin{tabular}{cccccc}
+     & Comb.Auct. & Set Cover & Max.Ind.Set. & Facility Loc. & Mult.Knapsack \\
+     & items / bids & rows / cols & nodes & cust. / facil. & items / knapsacks  \\
+    \toprule
+    train / test & 100 / 500 & 400 / 750 & 500 & 35 / 35 & 100 / 6 \\
+    transfer & 200 / 1000 & 500 / 1000 & 1000 & 60 / 35 & 100 /12 \\
+    \bottomrule
+    \end{tabular}
+\label{tab:taskparams}
+\end{table}
+
+We use the same set of hyperparameters (see Tab.~\ref{tab:params}) to train our agent for each task distribution. Total training time did not exceed 28 hours on an Intel Xeon 6326, NVIDIA A100 machine. To select the best checkpoint for testing, we perform validation using 30 fixed task instances every 5000 updates. The validation plot in Fig.~\ref{fig:val} shows the geometric mean of tree sizes as a function of the number of updates. We see that during training agent learns to solve variable selection tasks better, generating smaller B\&B trees. 
+
+\begin{table}[ht]
+\caption{Agent parameters.}
+    \centering
+    \begin{tabular}{ccccccc}
+    parameter & $\gamma$ & buffer size & buffer 
+    min size & batch size & learning rate & optimizer\\
+    \toprule
+    value & 1 & 100'000 & 1'000 & 32 & $10^{-4}$ & adam \\
+    \bottomrule
+    \end{tabular}
+\label{tab:params}
+\end{table}
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\linewidth]{imgs/val_v2.pdf}
+  \caption{The geometric mean of tree size for 30 validation instances. Blue - Combinatorial Auction, orange - Set Cover, green - Maximum Independent Set, red - Facility Location, and violet - Multiple Knapsack.}
+  \label{fig:val}
+\end{figure}
+
+
+
+\section{Evaluation}
+
+In both test and transfer settings, we generate 40 task instances and evaluate our agent with five different seeds. We compare the performance of our TreeDQN agent with the Strong Branching rule, Imitation Learning agent (IL), and REINFORCE agent (tMDP+DFS, \cite{scavuzzo_2022}). Our agent is based on the sample-efficient off-policy algorithm and requires much less training data than the REINFORCE agent. The number of episodes it took to reach the best checkpoint for TreeDQN and REINFORCE agents is shown in Tab.~\ref{tab:numepisodes}.
+
+\begin{table}[ht]
+    \caption{Number of training episodes required to reach the best checkpoint.}
+    \centering
+    \begin{tabular}{cccccc}
+         Model & Comb.Auct & Set Cover & Max.Ind.Set. & Facility Loc. & Mult.Knap  \\
+         \toprule
+         TreeDQN & 536 & 560 & 250 & 32 & 21 \\
+         REINFORCE & 22500 & 3000 & 3500 & 6500 & 9500 \\
+         \bottomrule
+    \end{tabular}
+    \label{tab:numepisodes}
+\end{table}
+The evaluation results are presented in Tab.~\ref{tab:test} and Tab.~\ref{tab:transfer}. We show the geometric mean of the final tree size and standard deviation computed for the same instance with different seeds and averaged over all task instances. Tab.~\ref{tab:test} shows that the TreeDQN agent significantly exceeds the results of the REINFORCE agent in all test tasks. The TreeDQN agent is close to the Imitation Learning agent in the first four tasks and substantially outperforms the Strong Branching in the Multiple Knapsack task. 
+
+\begin{table}[ht]
+    \caption{Geometric mean with std averaged over five seeds for test tasks.}
+    \centering
+    \begin{tabular}{cccccc}
+         Model & Comb.Auct & Set Cover & Max.Ind.Set. & Facility Loc. & Mult.Knap  \\
+         \toprule
+         Strong Branching & 48 $\pm$ 14\% & 43 $\pm$ 8\% & 40 $\pm$ 36\% & 294 $\pm$ 53\% & 700 $\pm$ 116\% \\
+         IL & 56 $\pm$ 12\% & 53 $\pm$ 9\% & 42 $\pm$ 32\% & 323 $\pm$ 46\% & 670 $\pm$ 120\% \\
+         \midrule
+         TreeDQN & \textbf{62 $\pm$ 15\%} & \textbf{57 $\pm$ 11\%} & \textbf{47 $\pm$ 41\%} & \textbf{392 $\pm$ 49\%} & \textbf{303 $\pm$ 88\%} \\
+         REINFORCE & 93 $\pm$ 18\% & 249 $\pm$ 23\% & 75 $\pm$ 39\% & 521 $\pm$ 50\% & 308 $\pm$ 103\% \\
+
+         \bottomrule
+    \end{tabular}
+    \label{tab:test}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\begin{minipage}{0.3\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/pp_plots/cauct_100_500.pdf}
+    \source{Comb.Auct.}
+\end{minipage}
+\begin{minipage}{0.3\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/pp_plots/mis_500.pdf}
+    \source{Max.Ind.Set.}
+\end{minipage}
+\begin{minipage}{0.3\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{imgs/pp_plots/knapsack_6.pdf}
+    \source{Mult.Knapsack}
+\end{minipage}
+    \caption{P-P plots of tree size distributions for test instances. Blue - Strong Branching, red - Imitation Learning, orange - TreeDQN, green - REINFORCE.}
+    \label{fig:pp_test_part}
+\end{figure}
+
+The geometric mean is a decent metric to compare the performance of different agents. Despite that, it loses information about the shape of the distributions. To further analyze the performance of our agent, we present distributions of tree sizes in the form of probability-probability plots (P-P plots) in Fig.~\ref{fig:pp_test_part}. P-P plot allows us to compare different cumulative distribution functions (CDF). For a reference CDF $F$ and a target CDF $G$ P-P plot is constructed similar to the ROC curve: we choose a threshold $x$, move it along the domain of $F$ and draw points $(F(x), G(x))$. To show multiple distributions on the same plot, we use Strong Branching as reference CDF for all of them. If one curve is higher than another, then the corresponding CDF is larger, so the associated agent performs better. Looking at P-P plots in Fig.~\ref{fig:pp_test_part}, we see that in the Combinatorial Auction task, the TreeDQN agent for all task instances performs better than the REINFORCE agent and is close to the Imitation Learning agent. In the Multiple Knapsack task, TreeDQN and REINFORCE agents outperform Strong Branching and Imitation Learning. Maximum Independent Set is a representative example. In this task, TreeDQN is good at solving simple tasks where it performs close to Imitation Learning. When the tasks become more complex, it falls behind Imitation Learning and finally behind REINFORCE. This behavior is the direct consequence of our learning objective. We optimize the geometric mean of expected tree size, so complex task instances may have less influence on the learning process.~\ref{fig:pp_test} and Tab.~\ref{tab:testmean}.
+
+Besides testing the performance of our agent, we also study its abilities to generalize. Table \ref{tab:transfer} presents evaluation results for complex transfer tasks solved with five different seeds. Since solving complicated MILP problems is time-consuming, we limit the maximum number of nodes in a B\&B tree to $200'000$.~\ref{tab:nodelimit}. It is seen from Tab.~\ref{tab:transfer} that in the Set Cover, Facility Location, and Multiple Knapsack tasks, our TreeDQN agent transfers well and performs significantly better than the REINFORCE agent. In the Combinatorial Auction task both RL agents perform similarly, given the standard deviation. In the Maximum Independent Set task, the TreeDQN agent falls behind the REINFORCE agent since it adapted better for simple task instances, as seen from the P-P plot \ref{fig:pp_test_part}. 
+
+\begin{table}[ht]
+    \caption{Geometric mean with std averaged over 5 seeds for transfer tasks.}
+    \centering
+    \begin{tabular}{cccccc}
+         Model & Comb.Auct & Set Cover & Max.Ind.Set. & Facility Loc. & Mult.Knap  \\
+         \toprule
+         Strong Branching & 665 $\pm$ 13\% & 122 $\pm$ 6\% &  845 $\pm$ 27\% &  722 $\pm$ 42\% &  57639 $\pm$ 67\%    \\
+         IL & 867 $\pm$ 10\% & 149 $\pm$ 6\% & 2872 $\pm$ 37\% &  608 $\pm$ 41\% &  60530 $\pm$ 64\% \\
+         \midrule
+         TreeDQN & 2218 $\pm$ 48\% & \textbf{202 $\pm$ 15\%} & 6252 $\pm$ 42\% & \textbf{681 $\pm$ 38\%} & \textbf{25701 $\pm$ 87\%} \\
+         REINFORCE & \textbf{2171 $\pm$ 20\%} & 858 $\pm$ 25\% & \textbf{1713 $\pm$ 39\%} & 847 $\pm$ 67\% & 40316 $\pm$ 81\% \\
+         \bottomrule
+    \end{tabular}
+    \label{tab:transfer}
+\end{table}
+
+
+\section{Ablation study}
+
+
+Our modified learning objective prevents explosions of gradients and significantly stabilizes the training process. In this section, we perform an ablation study and compare the out agent with the TreeDQN agent trained with standard MSE loss. The results are shown in Tab.~\ref{tab:abl}. For the majority of the tasks agent trained with a modified loss function achieves a lower geometric mean of the final tree size.  
+
+\begin{table}[ht]
+    \caption{Geometric mean with std averaged over 5 seeds for test tasks. MSE is TreeDQN agent trained with MSE loss.}
+    \centering
+    \begin{tabular}{cccccc}
+         Model & Comb.Auct & Set Cover & Max.Ind.Set. & Facility Loc. & Mult.Knap  \\
+         \toprule
+         TreeDQN & \textbf{62 $\pm$ 15\%} & \textbf{57 $\pm$ 11\%} & \textbf{47 $\pm$ 41\%} & 392 $\pm$ 49\% & \textbf{303 $\pm$ 88\%} \\
+         MSE  & 64 $\pm$ 17\% & 58 $\pm$ 10\% & 60 $\pm$ 50\% & \textbf{352 $\pm$ 49\%} & 367 $\pm$ 110\% \\
+         \bottomrule
+    \end{tabular}
+    \label{tab:abl}
+\end{table}
+
+
+
+\section{Limitations and social impact}
+
+A data-driven approach to learning a variable selection heuristic for combinatorial optimization tasks is a promising direction. High-quality heuristics will speed up combinatorial solvers significantly while keeping the guarantees to obtain the exact solution. Despite that, there are certain limitations to this approach. First, the learned heuristic depends on a concrete implementation of the Branch-and-Bound algorithm. So if the next version of the solver updates the algorithm, the heuristic will need to be retrained to prevent performance degradation. The second limitation is our learning objective. We designed our method to optimize the geometric mean of the distribution of tree sizes, so for another metric, our approach could be less efficient. The final limitation is common for all data-driven methods. If the testing task distribution is different from the training one, the performance of the whole B\&B algorithm may fall dramatically. 
+
+Combinatorial optimization problems arise in multiple areas of life. A method that could compute an optimal solution faster will have a significant positive impact. However, there can be some side effects. Foremost, learning-based methods are proven to work statistically, but for a concrete task instance, they could fail. Hence, learning-based methods should be used carefully in performance-critical applications. Also, malicious users can apply combinatorial solvers to hack hashes and steal sensitive information. While current hashing algorithms seem to be hard enough, more advanced combinatorial solvers may require the development of stronger hashing algorithms. 
+ 
+
+
+
+\section{Conclusion}
+
+
+This paper presents a novel data-efficient deep reinforcement learning method to learn a branching rule for the Branch-and-Bound algorithm. The synergy of the exact solving algorithm and data-driven heuristic takes advantage of both worlds: guarantees to compute the optimal solution and the ability to adapt to specific tasks. Our method utilizes tree MDP and contraction property of the tree Bellman operator. It maps MILP solving to an episode for our RL agent and trains the agent to optimize the final metric --- the resulting size of the B\&B tree. We have proposed a modified learning objective that stabilizes the learning process in the presence of high variance returns. Our approach surpasses previous RL methods at all test tasks. In the future, we are interested in studying multitask branching agents and the limits of generalization to more complex task instances. 
+
+\begin{ack}
+
+We highly appreciate the help of Ivan Nazarov, who participated during the early stages of the present research. We discussed multiple ideas, some of which further evolved into the present paper. We also thank him for providing the concept of P-P plots. We thank Artyom Sorokin for the fruitful discussion of Bellman operators. 
+\end{ack}
+
+
+\clearpage
+
+
+
+
+

@@ -1,0 +1,461 @@
+\title{HOPE for a Robust Parameterization of Long-memory State Space Models}
+
+\begin{abstract}
+State-space models (SSMs) that utilize linear, time-invariant (LTI) systems are known for their effectiveness in learning long sequences. To achieve state-of-the-art performance, an SSM often needs a specifically designed initialization, and the training of state matrices is on a logarithmic scale with a very small learning rate.
+To understand these choices from a unified perspective, we view SSMs through the lens of Hankel operator theory.
+Building upon it, we develop a new parameterization scheme, called HOPE, for LTI systems that utilizes Markov parameters within Hankel operators.
+Our approach helps improve the initialization and training stability, leading to a more robust parameterization.
+We efficiently implement these innovations by nonuniformly sampling the transfer functions of LTI systems, and they require fewer parameters compared to canonical SSMs. When benchmarked against HiPPO-initialized models such as S4 and S4D, an SSM parameterized by Hankel operators demonstrates improved performance on Long-Range Arena (LRA) tasks. Moreover, our new parameterization endows the SSM with non-decaying memory within a fixed time window, which is empirically corroborated by a sequential CIFAR-10 task with padded noise.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+State-space models (SSMs)~\cite{gu2022efficiently} have gained popularity and success in sequence modeling. 
+Known for its excellent efficiency and capability of handling long sequences, an SSM leverages the continuous-time linear, time-invariant (LTI) systems.
+These systems are often defined by four matrices $\Gamma = (\mathbf{A},\mathbf{B},\mathbf{C},\mathbf{D})$ as
+\begin{equation}
+\label{eq.LTIDS}
+    \begin{aligned}
+        \mathbf{x}'(t) = \mathbf{A} \mathbf{x}(t) + \mathbf{B} \mathbf{u}(t), \qquad \mathbf{y}(t) = \mathbf{C} \mathbf{x}(t) + \mathbf{D} \mathbf{u}(t),
+    \end{aligned}
+\end{equation}
+and they can be used to model the mappings from input time-series $\mathbf{u}(\cdot)$ to the output times-series $\mathbf{y}(\cdot)$, where $\mathbf{u}(t) \in \R^m$ and $\mathbf{y}(t) \in \R^p$ for every $t$.
+The (hidden) states, which capture the latent dynamics, are denoted as $\mathbf{x}=\mathbf{x}(t) \in \mathbb{R}^n$.
+The system matrices are of dimensions $\mathbf{A} \in \C^{n \times n}$, $\mathbf{B} \in \C^{n \times m}$, $\mathbf{C} \in \C^{p \times n}$, and $\mathbf{D} \in \C^{p \times m}$. 
+Often, the size $n$ of the state vector $\mathbf{x}$ is much larger than $m$ and $p$, which allows us to memorize information about the past inputs $\mathbf{u}|_{(-\infty,t]}$ in the state vector $\mathbf{x}(t)$ and retrieve it later to compute $\mathbf{y}$ via $\mathbf{C}$. 
+
+The so-called S4~\cite{gu2022efficiently} and S4D~\cite{gu2022parameterization} models both set $m = p = 1$, and they differ in the structural requirement of $\mathbf{A}$. 
+This framework was later generalized to the case where $m, p > 1$ by the S5 model~\cite{smith2023simplified} via the parallel scans. 
+Another line of research involves making the state transition rule $\mathbf{A}$ depend on the input $\mathbf{u}$, along which the two most notable models are Liquid-S4~\cite{hasani2022liquid} and Mamba~\cite{gu2023mamba}, where the latter model achieves the state-of-the-art performance on large-scale real-world datasets.
+
+However, SSMs typically need to be \textit{initialized} and \textit{trained} (very) carefully. 
+A randomly initialized SSM has suboptimal performance, but the so-called high-order polynomial projection operators (HiPPOs)~\cite{voelker2019legendre,gu2020hippo,gu2022train} can be used to empirically improve it. 
+On the other hand, even a properly initialized SSM needs to be trained with care. 
+One often needs to set a smaller learning rate for the matrix $\mathbf{A}$~\cite{gu2022efficiently}, and the LTI systems require reparameterization to be trained stably~\cite{wang2023stablessm}. To better understand these initialization and reparameterization efforts from a unified perspective, we analyze SSMs through the lens of Henkel Operator theory. 
+Specifically, we use the Hankel singular value decomposition (HSVD) to analyze an operator defined by $\Gamma$. 
+The decay of the Hankel singular values tells how ``expressive'' the LTI system is. 
+If the Hankel singular values of $\Gamma$ decay fast, then it informally means that our $\Gamma$ cannot capture the complex patterns in the input space $\{\mathbf{u}(\cdot)\}$; in fact, the theory of reduced-order modeling (ROM) says that $\Gamma$ can be well-approximated by a reduced system with a much smaller state-space dimension $k 
+\ll n$~\cite{glover1984all}.
+
+We find that the decay of the Hankel singular values can be used for predicting the performance of an SSM, and that every previous effort in proposing a good initialization and training scheme can be viewed as an effort to avoid fast-decaying Hankel singular values. 
+This is reminiscent of the works by~\cite{martin2021implicit} and~\cite{martin2021predicting} that connect the singular values of the weight matrices to a deep neural network's performance. Using the Hankel singular values as heuristics, we show that an S4D model is vulnerable to losing expressiveness during training. Moreover, even with a reparameterization, an LTI system is very sensitive to a perturbation of its parameters, $\mathbf{A}$, $\mathbf{B}$, and $\mathbf{C}$, impairing the training stability of an S4D model.
+
+\begin{figure}
+  \begin{center}
+      \includegraphics[width=0.8\textwidth]{./figures/illustrate3.pdf}
+  \end{center}
+  \caption{There are many equivalent ways to represent an LTI system. While most of the canonical SSMs use continuous LTI systems as their parameters, we propose to parameterize an SSM by the Markov parameters in its Hankel operator. The feedthrough matrix $\mathbf{D}$ is not shown in the diagram, but it is also a parameter of the LTI layers in both the canonical SSMs and our HOPE-SSM.}
+  \label{fig:illustrate}
+\end{figure}
+
+Based on these insights, we propose a completely different parameterization of the LTI systems. Instead of parameterizing the continuous-time systems by matrices $\mathbf{A}$, $\mathbf{B}$ and $\mathbf{C}$, we parameterize our LTI systems by the Markov parameters of the so-called discrete \textbf{H}ankel \textbf{ope}rator (\textbf{HOPE}). 
+A discrete Hankel operator is defined by a doubly infinite Hankel matrix, and is naturally associated with a discrete LTI system, and with a continuous-time system via the bilinear transform with $\Delta t = 1$~\cite{glover1984all}. 
+While this continuous-time LTI system acts on our sequential data, the optimization algorithms are applied to the Markov parameters of the Hankel matrix. (See~\Cref{fig:illustrate}.)
+We prove that unlike an LTI system parameterized by $(\mathbf{A}, \mathbf{B}, \mathbf{C}, \mathbf{D})$, one parameterized by the Markov parameters almost surely has slowly decaying singular values (see~\Cref{thm.highrank}); moreover, it enjoys a global stability to perturbation (see~\Cref{thm.perturbHankel}). Hence, unlike a canonical SSM, our HOPE-SSM can be stably trained without reparameterization or reducing the learning rate, also reducing the need for hyperparameter tuning. We show that our HOPE-SSM can be implemented by nonuniformly sampling the transfer function, which shares the same computational complexity as the S4D model. 
+Moreover, it requires only $1/3$ the number of parameters of an LTI system in an S4D model to parameterize that in a HOPE-SSM.
+
+The practical benefits of our novel parameterization are improved robustness (with respect to initialization and training stability) and performance (with respect to model quality and parameter count).
+Moreover, we show that the memory of our HOPE-SSM does not decay (see~\cref{eq.hankelmemory}) in a fixed time window, making it possible to solve tasks that involve even longer-range dependency by tuning the sampling period $\Delta t$ at discretization. 
+This partially addresses the well-known issue that the LTI system of a canonical SSM suffers from exponentially decaying memory~\cite{agarwal2023spectral}. 
+
+\textbf{Related Work.} Initially proposed by~\cite{voelker2019legendre}, the general idea of the HiPPO framework is to memorize the input by projecting it onto an orthogonal polynomial basis and storing the coefficients in the state vector $\mathbf{x}(t)$. This was later generalized to some different orthogonal polynomial bases in~\cite{gu2020hippo,gu2022train}. The S4D model uses a slightly perturbed version of the HiPPO-LegS initialization, and the effect of the perturbation was studied in~\cite{yu2024robustifying}. The initialization issue was also studied in~\cite{orvieto2023resurrecting} in the discrete-time setting, which provides an alternative justification of HiPPO based on the spectrum of the state matrix. While a common way to reparameterize a diagonal SSM is by training $\text{Re}(\text{diag}(\mathbf{A}))$ on a logarithmic scale~\cite{gu2022parameterization}, other stable reparameterizations were considered in~\cite{wang2023stablessm}. A method that directly parameterizes the convolutional kernel of the discretized LTI system was presented in~\cite{fu2023simple}. Compared to their work, in this paper, we adopt a compute-then-discretize strategy by still parameterizing the underlying continuous dynamics, making our SSM capable of handling sequences with varying lengths.
+
+The decaying memory of RNNs and SSMs is analyzed and discussed by a wide literature~\cite{hardt2018gradient,gu2020hippo,wang2024state,orvieto2024universality}. Ways to lift the memory capacity of an SSM were considered in~\cite{wang2023stablessm} and~\cite{agarwal2023spectral} via either reparameterizing the state matrix or applying a spectral filter. We remark that while~\cite{agarwal2023spectral} showed that a spectral SSM is exponentially close to an SSM, our HOPE-SSM is an actual SSM containing LTI systems, and it only differs from a canonical SSM in the parameterization.
+
+\textbf{Contributions.} 
+Our main contributions are summarized as follows.
+
+\begin{enumerate}
+    \item 
+    We show that high-degree LTI systems (i.e., those with slow-decaying Hankel singular values) in an SSM lead to a good performance. We justify this causal relationship using ideas in reduced-order modeling (ROM). 
+    We theoretically prove that expressive, high-degree LTI systems are scarce in the parameter space of $(\mathbf{A}$, $\mathbf{B}, \mathbf{C})$.
+    Thus, they need careful designs and are numerically unstable. 
+    This explains difficulties in initializing and training SSMs.
+    
+    \item 
+    We propose a new parameterization of LTI systems using the Hankel operator (HOPE), which can be implemented efficiently by nonuniformly sampling the transfer function and requires $1/3$ the number of parameters in an LTI system from an S4D model. We prove that our new parameter space is full of high-degree LTI systems. 
+    Hence, our HOPE-SSM does not suffer from the lack of expressiveness during initialization and training; moreover, it can be stably trained and has non-decaying long memory.
+
+    \item 
+    We empirically demonstrate that our HOPE-SSM is robust using the sCIFAR-10 task and that it has long-term memory using a noise-padded sCIFAR-10 dataset. 
+    We test the performance of a full-scale HOPE-SSM on the Long-Range Arena and observe that its performance exceeds that of its S4 and S4D counterparts and many other SSMs for most tasks.
+\end{enumerate}
+
+
+
+\section{Preliminaries}
+
+
+Let $\Gamma = (\mathbf{A},\mathbf{B},\mathbf{C},\mathbf{D})$ be a continuous-time LTI system defined in~\cref{eq.LTIDS}. One can take a bilinear transform to obtain a discrete system $\overline{\Gamma} = (\overline{\mathbf{A}}, \overline{\mathbf{B}}, \overline{\mathbf{C}}, \overline{\mathbf{D}})$ so that the underlying dynamics is given by
+\begin{equation}\label{eq.discreteLTIDS}
+    \begin{aligned}
+        {\mathbf{x}}_{k+1} = \overline{\mathbf{A}} {\mathbf{x}}_k + \overline{\mathbf{B}} {\mathbf{u}}_k, \qquad {\mathbf{y}}_k = \overline{\mathbf{C}} {\mathbf{x}}_k + \overline{\mathbf{D}} {\mathbf{u}}_k.
+    \end{aligned}
+\end{equation}
+The transfer functions of $\Gamma$ and $\overline{\Gamma}$ are rational functions on the complex plane $\C$ defined by
+\[
+    G(s) = \mathbf{C} (s\mathbf{I} - \mathbf{A})^{-1} \mathbf{B} + \mathbf{D} \qquad \text{and} \qquad \overline{G}(z) = \overline{\mathbf{C}} (z{\mathbf{I}} - \overline{\mathbf{A}})^{-1} \overline{\mathbf{B}} + \overline{\mathbf{D}},
+\]
+respectively.
+We usually care about the values of $G$ and $\overline{G}$ on the imaginary axis and the unit circle in $\C$, respectively. They ``transfer'' the inputs to the outputs in the frequency domain by multiplication:
+\begin{equation}\label{eq.transferinterp}
+\begin{aligned}
+    \text{(continuous case)}& \qquad \hat{\mathbf{y}}(s) = G(is) \hat{\mathbf{u}}(s), \qquad s \in \R, \\
+    \text{(discrete case)}& \qquad \hat{{\mathbf{y}}}_k = \overline{G}({\boldsymbol{\omega}}_k) \hat{{\mathbf{u}}}_k, \qquad 0 \leq k \leq L-1,
+\end{aligned}
+\end{equation}
+where the hats on a function and on a vector mean the Fourier transform and the Fourier coefficients, respectively, and ${\boldsymbol{\omega}}_k = \text{exp}(i2\pi k/L)$ is the $k$th Fourier node of length $L$. Throughout this paper, we assume that our LTI systems are asymptotically stable, i.e., the eigenvalues of $\mathbf{A}$ have negative real parts, or equivalently, the eigenvalues of $\overline{\mathbf{A}}$ are contained in the open unit disk in the complex plane. In this paper, we also discuss a completely different notion of stability: the numerical stability of an LTI system. This refers to the system's sensitivity to a perturbation of its parameters. We will clearly distinguish these two notions of stability by appending the adjectives ``asymptotic'' or ``numerical''.
+
+Given a discrete LTI system $\overline{\Gamma}$, its Hankel operator is defined by a doubly infinite Hankel matrix
+\begin{equation}\label{eq.Hankelmat}
+    \overline{\mathbf{H}} \in \C^{\infty \times \infty}, \qquad \overline{\mathbf{H}}: \ell^2(\N) \rightarrow \ell^2(\N), \qquad \overline{\mathbf{H}}_{i,j} = \overline{\mathbf{C}} \overline{\mathbf{A}}^{i+j} \overline{\mathbf{B}}, \qquad i, j \geq 0.
+\end{equation}
+This discrete Hankel operator on $\ell^2(\N)$ is a bounded linear operator of rank $\leq n$, the number of latent states. We denote its singular values by $\sigma_1(\overline{\mathbf{H}}) \geq \sigma_2(\overline{\mathbf{H}}) \geq \cdots \geq \sigma_n(\overline{\mathbf{H}}) \geq 0$.
+Analogously, one can define a continuous Hankel operator $\mathbf{H}: L^2([0,\infty)) \rightarrow L^2([0,\infty))$ given a continuous-time LTI system $\Gamma$. If $\overline{\Gamma}$ is discretized from $\Gamma$ using the bilinear transform, then the singular values of $\mathbf{H}$ are equivalent to those of $\overline{\mathbf{H}}$, i.e., $\sigma_j(\mathbf{H}) = \sigma_j(\overline{\mathbf{H}})$. (See~\Cref{sec:moreHSVD} for more details.) In this paper, we consider the decay of the Hankel singular values. To quantitatively measure how ``small'' a singular value is, we introduce the numerical rank of an LTI system. Given a small number $\epsilon \geq 0$, we define the $\epsilon$-rank of $\Gamma$ to be the number of relative Hankel singular values larger than $\epsilon$:
+\[
+    \text{rank}_\epsilon(\Gamma) = \max \{j \mid \sigma_j(\mathbf{H}) / \sigma_1(\mathbf{H}) > \epsilon\}.
+\]
+When $\epsilon = 0$, we reproduce the exact rank of $\mathbf{H}$, which is rarely $< n$ in the floating-point arithmetic. A small positive $\epsilon$ allows us to eliminate the small but perhaps positive singular values.
+
+
+
+\section{Unravel a Mystery: Hankel Singular Values in Initialization and Training}
+
+
+\begin{figure}[!htb]
+    \centering
+    \begin{minipage}{0.49\textwidth}
+        \begin{overpic}[width = 1\textwidth]{./figures/acc_untrained.pdf}
+        \put(29,48){\small \textbf{Frozen LTI Systems}}
+        \put(45,-2){Epochs}
+        \put(3,16){\rotatebox{90}{Accuracy}}
+    \end{overpic}
+    \end{minipage}
+    \begin{minipage}{0.49\textwidth}
+        \begin{overpic}[width = 1\textwidth]{./figures/acc_trained.pdf}
+        \put(27,48){\small \textbf{Trained LTI Systems}}
+        \put(45,-2){Epochs}
+        \put(3,16){\rotatebox{90}{Accuracy}}
+    \end{overpic}
+    \end{minipage}
+    \caption{Test accuracy of the SSMs on the sCIFAR task. The LTI systems are initialized in three different ways and are either trained or untrained. We notice that when the LTI systems are initialized with $\texttt{init}_1$ (red), training the LTI system together with other model parameters is impairing the model accuracy. This is in contrast to SSMs initialized with $\texttt{init}_3$ (blue), where assigning the LTI system a small positive learning rate is helping the performance.}
+    \label{fig:mystery}
+\end{figure}
+
+We begin our exploration by presenting a mystery. We use it to elicit and support the use of the Hankel singular values as protocols for explaining and predicting the success of SSMs, without stressing it as a fine-grained study of different initializations. We train an S4D model to learn the sCIFAR-10 image classification task~\cite{krizhevsky2009learning,tay2020long}. We consider three initialization schemes of the LTI systems in the SSM: $\texttt{init}_1, \texttt{init}_2$, and $\texttt{init}_3$. Instead, we later explain their success or failure by measuring their Hankel singular values. For an SSM initialized using a certain $\texttt{init}_j$ ($1 \leq j \leq 3$), we train it in two different ways: either by freezing $\mathbf{A}, \mathbf{B}$, and $\mathbf{C}$ and only training the other model parameters or by assigning $\mathbf{A}, \mathbf{B}$, and $\mathbf{C}$ a small learning rate. The three initializations and two learning rate assignments comprise a total of six combinations, summarized in~\Cref{fig:mystery}. Besides the natural question of why we see a general difference between models initialized differently, \Cref{fig:mystery} raises a more intriguing mystery:
+\begin{adjustwidth}{15pt}{15pt}
+\textit{For an SSM initialized by }$\texttt{init}_1, \texttt{init}_2$\textit{, or }$\texttt{init}_3$\textit{, why does training the LTI systems impair, level, or improve the performance of the model, respectively?}
+\end{adjustwidth}
+To answer these questions, we study the Hankel singular values of the systems, but why are they relevant? The reason is that the Hankel singular values measure the ``complexity'' of an LTI system. The easiest way to see this is via ROM of the system $\Gamma$~\cite{adamyan1971analytic, glover1984all}:
+\begin{adjustwidth}{15pt}{15pt}
+\textit{For any $k < n$, there exists a reduced-order approximation $\tilde{\Gamma} = (\tilde{\mathbf{A}}, \tilde{\mathbf{B}}, \tilde{\mathbf{C}}, \tilde{\mathbf{D}})$ with $\tilde{\mathbf{A}} \in \C^{k \times k}$, such that $\|G - \tilde{G}\|_\infty \leq \sum_{j=k+1}^n \sigma_j(\mathbf{H}) \leq (n-k)\sigma_{k+1}(\mathbf{H})$, where $\tilde{G}$ is the transfer function of $\tilde{\Gamma}$ and $\|\cdot\|_\infty$ is the $L$-infinity norm over the imaginal axis.}
+\end{adjustwidth}
+In particular, if the sum of the trailing Hankel singular values $
+\sum_{j=k+1}^n \sigma_{j}(\mathbf{H})$ is small, then by~\cref{eq.transferinterp}, $\Gamma$ and $\tilde{\Gamma}$ produce similar outputs on any input.
+Hence, ROM says that if the Hankel singular values decay fast, then we can replace the LTI system with a much smaller one without too much loss; in other words, most states in $\mathbf{x}(t)$ are not properly used to memorize the input.
+\begin{figure}
+\centering
+\begin{minipage}{0.32\textwidth}
+    \begin{overpic}[width = 1.1\textwidth]{./figures/Hankel_init.pdf}
+    \put(-2,5){\rotatebox{90}{\scalebox{0.9}{\footnotesize \textbf{At Initialization}}}}
+    \put(42,50){{{$\texttt{init}_1$}}}
+    \end{overpic}
+    \begin{overpic}[width = 1.1\textwidth]{./figures/Hankel_final.pdf}
+    \put(-2,4){\rotatebox{90}{\scalebox{0.9}{\footnotesize \textbf{After 10 Epochs}}}}
+    \put(35,-5){\scriptsize $\sigma_j({\mathbf{H}})/\sigma_1({\mathbf{H}})$}
+    \end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.32\textwidth}
+    \begin{overpic}[width = 1.1\textwidth]{./figures/random_init.pdf}
+    \put(42,50){{{$\texttt{init}_2$}}}
+    \end{overpic}
+    \vfill
+    \begin{overpic}[width = 1.1\textwidth]{./figures/random_final.pdf}
+    \put(35,-5){\scriptsize $\sigma_j({\mathbf{H}})/\sigma_1({\mathbf{H}})$}
+    \end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.32\textwidth}
+    \begin{overpic}[width = 1.1\textwidth]{./figures/HiPPO_init.pdf}
+    \put(42,50){{{$\texttt{init}_3$}}}
+    \end{overpic}
+    \vfill
+    \begin{overpic}[width = 1.1\textwidth]{./figures/HiPPO_final.pdf}
+    \put(35,-5){\scriptsize $\sigma_j({\mathbf{H}})/\sigma_1({\mathbf{H}})$}
+    \end{overpic}
+\end{minipage}
+\caption{The distribution of all relative Hankel singular values $\sigma_j(\mathbf{H}) / \sigma_1(\mathbf{H})$ of the LTI systems in an SSM. For each initialization, the distribution is shown both at initialization and after the SSM is trained for $10$ epochs. Note that the second row only applies when the LTI systems are not frozen.}
+\label{fig:hsvds}
+\end{figure}
+
+In our experiment, each SSM has $4$ layers and $128$ channels. These comprise $4 \times 128 = 512$ different copies of single-input/single-output LTI systems. 
+Every LTI has $n = 64$ latent states. These make up $512 \times 64 = 32768$ relative Hankel singular values $\sigma_j(\mathbf{H}) / \sigma_1(\mathbf{H})$ to consider. In~\Cref{fig:hsvds}, we show the histograms of all these relative Hankel singular values at two different stages of training. Note that the three histograms on the second row only apply when the LTI systems are trained with a small learning rate; when they are frozen, the distributions always stay the same as those at initialization. We can explain the behaviors of the three SSMs using their Hankel singular values:
+\begin{enumerate}
+    \item The systems in a model initialized by $\texttt{init}_1$ initially have high numerical ranks. Hence, when the systems are untrained, they define random mappings that capture the rich content in the input data, yielding the rest of the work to other model parameters in the SSM. However, when the systems are trained, their Hankel singular values start to decay rapidly with only $27.87\%$ of the singular values satisfying that $\sigma_j(\mathbf{H}) / \sigma_1(\mathbf{H}) > 0.01$, and the systems can no longer handle a variety of distinct inputs. This makes it harder to parse complicated images in the sCIFAR-10 dataset.
+    \item No matter whether trained or not, the Hankel singular values of the systems in the model initialized by $\texttt{init}_2$ decay very fast, which means the systems essentially lack expressiveness and cannot capture the complicated patterns in the input space. Hence, the SSMs with both trained and untrained LTI systems could not learn the task effectively.
+    \item The systems in the model initialized by $\texttt{init}_3$, trained or not, have high numerical ranks. In particular, over $87.82\%$ of the singular values satisfy that $\sigma_j(\mathbf{H}) / \sigma_1(\mathbf{H}) > 0.01$ after $10$ epochs.
+    In this case, training the LTI systems allows us to accelerate the optimization.
+\end{enumerate}
+
+We just established the Hankel singular values as a protocol for evaluating and predicting the performance of an SSM on tasks that involve complicated long-range dependencies. We can further derive theory to explain the patterns we observed in the histograms in~\Cref{fig:hsvds}, which brings out potential weaknesses of the S4D models and motivates the development of our HOPE-SSM.
+\subsection{Many LTI Systems Have Low Ranks}\label{sec:lowrank}
+
+We saw that LTI systems with high numerical ranks make an SSM thrive, but do we have an abundance of them? We approach this question from a random matrix theory perspective. We randomly sample a discrete LTI system. We assume that every diagonal entry $a_j$ of $\overline{\mathbf{A}} = \text{diag}(a_1, \ldots, a_n)$ are sampled i.i.d. from a distribution $F_{{a}}$ with
+\[
+    \mathbb{P}\left(\abs{a_j} > (1-\rho)\right) = \mathcal{O}(\rho^\alpha) \qquad \text{ as } \qquad \rho \rightarrow 0^+
+\]
+for some $\alpha > 0$. For example, if $a_j$ is uniformly distributed on the open unit disk, then we have $\alpha = 1$. Moreover, assume that $\overline{\mathbf{B}} \circ \overline{\mathbf{C}}^\top$ is a random vector with each entry sampled i.i.d. from a normal distribution $\mathcal{N}(0,1)$, where $\circ$ is the Hadamard product. The skip connection matrix $\overline{\mathbf{D}}$ has no effect on the Hankel singular values. With these assumptions, we formally show that the system has a low $\epsilon$-rank with high probability.
+
+\begin{thm}\label{thm.lowrank}
+    Given any $\epsilon > 0$, $0 < \alpha \leq 1$, and $0 < \delta \leq 1$, with probability at least $1 - \delta$, the $\epsilon$-rank of $\overline{\Gamma} = (\overline{\mathbf{A}},\overline{\mathbf{B}},\overline{\mathbf{C}},\overline{\mathbf{D}})$ with $a_j \sim F_a$ i.i.d. and $b_jc_j \sim \mathcal{N}(0,1)$ i.i.d. is $\mathcal{O}(\ln\! \left(\delta^{-3/2}\epsilon^{-1}n\right) n^\beta)$, where 
+    \[
+    \beta \leq \frac{1}{1+\alpha} + \frac{\ln(2 + \sqrt{\ln(1/\delta)/2})}{\ln(n)}
+    \]
+    and the constant in $\mathcal{O}$ is universal.
+\end{thm}
+
+We defer the proof to~\Cref{sec:prooflowrank}. What~\Cref{thm.lowrank} says is that if we ignore the logarithmic factors in the $\mathcal{O}$-notation, then the $\epsilon$-rank of $\overline{\Gamma}$ scales like $n^\beta$ as $n \rightarrow \infty$, where $\beta < 1$. For example, when $a_j$ are uniformly distributed on the unit disk, we have $\beta = 1/2$ plus a small number bounded by $\ln(2 + \sqrt{\ln(1/\delta)/2}) / \ln(n)$. In practice, we find that this term can almost be ignored (see~\Cref{sec:numexps}). The importance of~\Cref{thm.lowrank} is twofold: from an expository point of view, it theoretically verifies, using our Hankel operator framework, that random initializations of LTI systems could lead to poor model performance, as observed in~\cite{gu2020hippo} and~\cite{orvieto2023resurrecting}; from a practical perspective, it suggests high-rank systems are only scarce in the space of S4D model parameters. Hence, even when an LTI system is initialized with slow-decaying Hankel singular values, when $\mathbf{A}$, $\mathbf{B}$, and $\mathbf{C}$ are perturbed during training, it is at risk of losing numerical ranks and thus expressiveness. This is indeed observed in~\Cref{fig:hsvds}, even for $\texttt{init}_3$.
+
+\subsection{LTI Systems are Numerically Unstable under Perturbations}\label{sec:unstable}
+
+In this section, we perform a sensitivity analysis of an S4D model, which suggests a numerical stability issue in training the model.
+
+\begin{thm}\label{thm.perturbS4D}
+    Let $\Gamma = (\mathbf{A},\mathbf{B},\mathbf{C},\mathbf{D})$ be a stable continuous-time LTI system, where $\mathbf{A} = \text{diag}(a_1, \ldots, a_n)$ is diagonal. Let $\tilde{\Gamma} = (\tilde{\mathbf{A}},\tilde{\mathbf{B}},\tilde{\mathbf{C}},{\mathbf{D}})$ be a perturbed stable system with $\tilde{\mathbf{A}} = \text{diag}(\tilde{a}_1, \ldots, \tilde{a}_n)$. Assume there exist $\Delta_{\mathbf{A}}, \Delta_{\mathbf{B}} > 0$ such that $\abs{a_j - \tilde{a}_j} \leq \Delta_{\mathbf{A}} \leq \min_j |\text{Re}(a_j)| / 2$ and $|b_jc_j - \tilde{b}_j\tilde{c}_j| \leq \min(|b_jc_j|, \Delta_\mathbf{B})$ for all $j = 1, \ldots, n$. Let $G$ and $\tilde{G}$ be the transfer functions of $\Gamma$ and $\tilde{\Gamma}$, respectively. Then, the following statements hold.
+    \begin{enumerate}[label=(\alph*)]
+        \item We have
+        \[
+            \|G - \tilde{G}\|_{\infty} \leq 4n\Delta_{\mathbf{A}}\max_j \frac{\abs{b_jc_j}}{\abs{\text{Re}(a_j)}^{2}} + n\Delta_{\mathbf{B}}\max_j \frac{1}{|\text{Re}(a_j)|}.
+        \]
+        \item The upper bound is tight up to a factor of $n$. That is, given \textit{any} $\Gamma$, $\Delta_\mathbf{A} \leq \min_j |\text{Re}(a_j)| / 2$, and $\Delta_\mathbf{B} \leq \min_j |b_jc_j|$, there exist two systems $\tilde{\Gamma}_\mathbf{A}$ and $\tilde{\Gamma}_\mathbf{B}$, with transfer functions $\tilde{G}_\mathbf{A}$ and $\tilde{G}_\mathbf{B}$, respectively, that satisfy the above perturbation conditions and have
+        \[
+            \|G - \tilde{G}_\mathbf{A}\|_{\infty} \geq \Delta_{\mathbf{A}}\max_j\frac{\abs{b_jc_j}}{\abs{\text{Re}(a_j)}^{2}}, \qquad \|G - \tilde{G}_\mathbf{B}\|_{\infty} \geq \Delta_{\mathbf{B}}\max_j \frac{1}{|\text{Re}(a_j)|}.
+        \]
+    \end{enumerate}
+\end{thm}
+
+The proof can be found in~\Cref{sec:proofperturb}. \Cref{thm.perturbS4D} says that when a diagonal LTI system is trained, its numerical stability depends on two things: the proximity of its poles $a_j$ to the imaginary axis and the magnitudes of $\mathbf{B}$ and $\mathbf{C}$. We defer the discussion of $a_j$ to the end of this subsection. One may imagine that $\|G\|_\infty$ is related to $|b_jc_j|$, and hence, $|b_jc_j|$ plays no role in the \textit{relative} numerical stability (i.e., $\|G - \tilde{G}\|_\infty / \|G\|_\infty$) of the system. However, this is not true as a system with a small $\|G\|_\infty$ may have an arbitrarily large $\mathbf{B} \circ \mathbf{C}^\top$ (see~\Cref{fig:svdperturb} (Left)). Working with such a system can be numerically hazardous even at inference time due to the so-called cancellation errors~\cite{yu2024hankel}. Later, we show that our HOPE parameterization does not suffer from these issues.
+
+Combined with the spectral information of the state matrices $\mathbf{A}$,~\Cref{thm.perturbS4D} lets us explain why systems initialized by $\texttt{init}_1$ are much more sensitive to perturbation than those initialized by $\texttt{init}_3$. In~\Cref{fig:svdperturb}, we show the locations of the poles $a_j$ and their associated magnitudes $|b_jc_j|$. Compared to the systems from $\texttt{init}_3$, the poles of the systems from $\texttt{init}_1$ are much closer to the imaginary axis whereas the values of $|b_jc_j|$ are also much larger. Hence, by~\Cref{thm.perturbS4D}, they are much more sensitive to training, and therefore lose numerical ranks easily. This is indeed seen in~\Cref{fig:svdperturb}.
+
+\Cref{thm.perturbS4D} delivers a disturbing message. As stated in~\cite{baker2015fast}, ``[the Hankel singular values] decay more rapidly the farther the $\Lambda(\mathbf{A})$ falls in the left half of the complex plane,'' where $\Lambda(\mathbf{A})$ is the spectrum of $\mathbf{A}$, which is equivalent to $\{a_1, \ldots, a_n\}$ in the diagonal case. Hence, many diagonal LTI systems with a high $\epsilon$-rank, i.e., those that we earlier found necessary for an SSM to capture the long-range dependency, would have eigenvalues $a_j$ close to the imaginary axis, making the system more sensitive to perturbation and thus the training less numerically stable.
+
+\begin{figure}
+\centering
+\begin{minipage}{0.32\textwidth}
+\begin{overpic}[width = 1\textwidth]{./figures/hsvd_random.pdf}
+\put(75,108){\large $\texttt{init}_1$}
+\put(16,97){\footnotesize \textbf{Hankel Singular Values}}
+\put(52,-1){\scriptsize $j$}
+\put(-2,40){\rotatebox{90}{\scriptsize $\sigma_j/\sigma_1$}}
+\end{overpic}
+\end{minipage}
+\begin{minipage}{0.16\textwidth}
+\begin{overpic}[width = 1\textwidth]{./figures/poles_random.pdf}
+\put(9,-1){\scriptsize Real Axis}
+\put(-3,30){\rotatebox{90}{\scriptsize Imaginary Axis}}
+\put(4,98){\footnotesize $\mathbf{a}_{\mathbf{j}}$ \textbf{and $|\mathbf{b}_{\mathbf{j}} \mathbf{c}_{\mathbf{j}}|$}}
+\end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.32\textwidth}
+\begin{overpic}[width = 1\textwidth]{./figures/hsvd_HiPPO.pdf}
+\put(75,108){\large $\texttt{init}_3$}
+\put(16,97){\footnotesize \textbf{Hankel Singular Values}}
+\put(52,-1){\scriptsize $j$}
+\put(-2,40){\rotatebox{90}{\scriptsize $\sigma_j/\sigma_1$}}
+\end{overpic}
+\end{minipage}
+\begin{minipage}{0.16\textwidth}
+\begin{overpic}[width = 1\textwidth]{./figures/poles_HiPPO.pdf}
+\put(4,98){\footnotesize $\mathbf{a}_{\mathbf{j}}$ \textbf{and $|\mathbf{b}_{\mathbf{j}} \mathbf{c}_{\mathbf{j}}|$}}
+\put(9,-1){\scriptsize Real Axis}
+\put(-6,30){\rotatebox{90}{\scriptsize Imaginary Axis}}
+\end{overpic}
+\end{minipage}
+\caption{A random perturbation to the imaginary part of $\mathbf{A}$ is added to a system from $\texttt{init}_1$ and a HiPPO-LegS system from $\texttt{init}_3$. The magnitude of the perturbation is set to $0.1\%$ and $1\%$ of the original matrix $\mathbf{A}$. For each system, on the left, we show the relative Hankel singular values $\sigma_j/\sigma_1$ of the original and perturbed systems; on the right, we plot the location of each $a_j$ in the complex plane and use the color to indicate the magnitude of its associated $|b_jc_j|$.}
+\label{fig:svdperturb}
+\end{figure}
+
+
+\section{HOPE-SSM: A Rankful, Stable, and Long-memory Parameterization}
+
+
+Given the potential issues of an SSM discussed in~\cref{sec:unravelmystery}, we propose an entirely different parameterization of the LTI systems called HOPE. We first describe the details of our HOPE-SSM and then explain how it resolves the low-rank and numerical instability issues of an LTI system. In addition, it also benefits from long-term memory. Our strategy is to use a Hankel matrix defined in~\cref{eq.Hankelmat} to parameterize an LTI system. Instead of having $\mathbf{A}$, $\mathbf{B}$, $\mathbf{C}$, $\mathbf{D}$, and $\Delta t$ as the model parameters, we now have a vector $\mathbf{h}$ of length $n$, the skip connection $\mathbf{D}$, and $\Delta t$ as our model parameters. Hence, we use $n$ complex parameters from $\mathbf{h}$ to replace the $3n$ (resp. $4n$) complex parameters from $\mathbf{A}$, $\mathbf{B}$, and $\mathbf{C}$ in S4D (resp. S4); \footnote{There are different variants of S4D models that combine $\mathbf{B}$ and $\mathbf{C}$ into a single complex vector or use fewer copies of $\mathbf{A}$ than the number of channels. Here, we compare HOPE to a vanilla S4D model.} We remark that, as mentioned in the introduction, our model only modifies the LTI systems in an SSM. That is, it requires $1/3$ the number of parameters in an S4D model \textit{for each LTI system}. Since there are other components in an SSM (e.g., the encoder and the decoder), we do not compress the number of parameters in the entire model by a factor of $1/3$. The finite Hankel matrix $\overline{\mathbf{H}} \in \C^{n \times n}$ is then defined by the Markov parameters in $\mathbf{h}$:
+\begin{equation}\label{eq.hankelvec2mat}
+    \overline{\mathbf{H}}_{i,j} = \mathbbm{1}_{\{i+j < n\}}\mathbf{h}_{i+j}.
+\end{equation}
+In an S4D model, we start with $\mathbf{A}$, $\mathbf{B}$, and $\mathbf{C}$ so that $\mathbf{h}_{i+j} = \overline{\mathbf{C}}\overline{\mathbf{A}}^{i+j}\overline{\mathbf{B}}$; in a HOPE-SSM, we start with $\mathbf{h}_{i+j}$ and the matrix $\overline{\mathbf{H}}$ corresponds to a discrete LTI system $\overline{\Gamma}$, which is further associated with a continuous-time system $\Gamma$ via the bilinear transform with $\Delta t = 1$. Notably, in our HOPE-SSM, it is the continuous system $\Gamma$ that takes the role of $(\mathbf{A}, \mathbf{B}, \mathbf{C})$ in a canonical SSM, e.g., S4 and S4D. In particular, $\Gamma$ is then discretized with a trainable sampling period $\Delta t$ for a discrete sequential input.
+
+If we set $\Delta t = 1$ and discretize $\Gamma$, the convolutional kernel is exactly $\mathbf{h}$ padded with $L - n$ zeros, where $L$ is the length of the sequential input. However, we usually want to discretize with a different $\Delta t$. We can do so via resampling the transfer functions of $\Gamma$ and $\overline{\Gamma}$, which equal~\cite{peller2003introduction}
+\begin{equation}\label{eq.Hankeltransfer}
+    G(s) = \sum_{j=0}^{n-1} \mathbf{h}_j \left((1+s)/(1-s)\right)^{-j-1} \qquad \Leftrightarrow \qquad \overline{G}(z) = \sum_{j=0}^{n-1} \mathbf{h}_j z^{-j-1}.
+\end{equation}
+Let $\boldsymbol{\omega}^{(L)} = \begin{bmatrix}
+    \omega_0^{(L)} & \cdots & \omega_{L-1}^{(L)}
+\end{bmatrix}^\top$ be the vector of the $L$th roots of unity. Given an input $\mathbf{u} \in \C^{L \times 1}$ of length $L$, when $\Delta t = 1$, the outputs can be evaluated as
+\[
+    \mathbf{y} = \texttt{iFFT}(\texttt{FFT}(\mathbf{u}) \circ \overline{G}(\boldsymbol{\omega}^{(L)})), \qquad \overline{G}(\boldsymbol{\omega}^{(L)}) = \begin{bmatrix}
+        \overline{G}(\omega_0^{(L)}) & \cdots & \overline{G}(\omega_{L-1}^{(L)})
+    \end{bmatrix}^\top.
+\]
+For a different $\Delta t$, one way to think of it is that we have compressed or dilated the time domain of $\mathbf{u}$ by a factor of $\Delta t$. Hence, the frequency domain of its Fourier transform $\hat{\mathbf{u}}$ is dilated or compressed by a factor of $1 / \Delta t$. That is, we should relocate our samplers in the frequency domain as
+\[
+    \boldsymbol{\omega}^{(L, \Delta t)} = \begin{bmatrix}
+    \omega_0^{(L, \Delta t)} & \cdots & \omega_{L-1}^{(L, \Delta t)}
+    \end{bmatrix}^\top, \qquad \omega_j^{(L, \Delta t)} = \frac{1+s^{(L)}_j/\Delta_t}{1-s^{(L)}_j/\Delta_t}, \qquad s^{(L)}_j = \frac{\omega_j^{(L)}-1}{\omega_j^{(L)}+1},
+\]
+where $s_j^{(L)}/\Delta t$ and $\omega_j^{(L, \Delta t)}$ are the scaled samplers in the time and angular domain, respectively. Then, the output sequence $\mathbf{y}$ can be computed, from the nonuniform samples $\overline{G}(\boldsymbol{\omega}^{(L,\Delta t)})$, as
+\begin{equation}\label{eq.outputiFFT}
+    \mathbf{y} = \texttt{iFFT}(\texttt{FFT}(\mathbf{u}) \circ \overline{G}(\boldsymbol{\omega}^{(L,\Delta t)})), \qquad \overline{G}(\boldsymbol{\omega}^{(L,\Delta t)}) = \begin{bmatrix}
+        \overline{G}(\omega_0^{(L,\Delta t)}) & \cdots & \overline{G}(\omega_{L-1}^{(L,\Delta t)})
+    \end{bmatrix}^\top.
+\end{equation}
+We provide the pseudocode in~\Cref{alg:HOPESSM} and a detailed derivation of~\cref{eq.outputiFFT} in~\Cref{sec:explainNUFFT}.
+
+\begin{algorithm}[!htb]
+	\caption{Computing the output of an LTI system parameterized by its Hankel matrix.}
+ \label{alg:HOPESSM}
+	$\,$\textbf{\,Input:} an input sequence $\mathbf{u} \!\in\! \R^{L}$, the Markov parameters of a Hankel matrix $\mathbf{h} \!\in\! \C^n$, and a sampling period $\Delta t \!>\! 0$.
+	
+	$\;$\textbf{Output:} the output $\mathbf{y} \!\in\! \R^{L}$ of the LTI system defined by $\mathbf{h}$ given input $\mathbf{u}$ and sampling period $\Delta t$.
+ 
+	\begin{algorithmic}[1]
+	\STATE $\boldsymbol{\omega} \gets \text{exp}\left(2\pi i \frac{0:(L-1)}{L}\right)$ \hfill\COMMENT{create FFT nodes}
+        \STATE $\mathbf{s} \gets (\boldsymbol{\omega} - 1) ./ (\boldsymbol{\omega} + 1)$ \hfill\COMMENT{convert to the $s$-domain, where $./$ is the entrywise division}
+        \STATE $\mathbf{s} \gets \mathbf{s} / \Delta t$ \hfill\COMMENT{scale the frequency domain in the $s$-plane}
+        \STATE $\boldsymbol{\omega} \gets (1 + \mathbf{s}) ./ (1 - \mathbf{s})$ \hfill\COMMENT{convert back to the $z$-plane}
+        \STATE $\mathbf{g} \gets \texttt{zeros}(L)$ \hfill\COMMENT{store samples of the transfer function}
+        \FOR{$i = 0:(n-1)$}
+        \STATE $\mathbf{g} \gets \mathbf{g} + \mathbf{h}_i \cdot (\boldsymbol{\omega}.^\wedge{(-i-1)})$ \hfill\COMMENT{compute the $i$th moment, where $.^\wedge$ is the entrywise power}
+        \ENDFOR
+        \STATE $\mathbf{y} \gets \text{Re}\left(\texttt{iFFT}(\texttt{FFT}(\mathbf{u}) \circ \mathbf{g})\right)$ \hfill\COMMENT{$\circ$ is the entrywise (i.e., Hadamard) product}
+	\end{algorithmic}
+\end{algorithm}
+
+With $L$ processors, we can sample $\overline{G}$ independently at $L$ locations in parallel, each of which takes $\mathcal{O}(n)$ time. Computing the \texttt{FFT} and \texttt{iFFT} takes $\mathcal{O}(L \log L)$. Overall, the evaluation of the Hankel-parameterized LTI system takes $\tilde{\mathcal{O}}(L + n)$ time and $\mathcal{O}(L)$ space, which agree with the complexities of the S4 and S4D models. To make the model recurrent during the inference time, one can either identify a system $(\mathbf{A},\mathbf{B},\mathbf{C})$ whose Hankel operator is $\mathbf{H}$ and compute as if it is an S4D model~\cite{kramer2018system,aumann2023practical}, or directly compute the convolutional kernel using the \texttt{iFFT} of $\mathbf{g}$ in~\Cref{alg:HOPESSM}.
+
+\textbf{Advantage I: A HOPE-SSM has a High Numerical Rank.} The properties of a random Hankel matrix have been studied in~\cite{bryc2006spectral} and~\cite{nekrutkin2013remark}. We can build upon their work to prove the following result.
+
+\begin{thm}\label{thm.highrank}
+    Let $\mathbf{h}_1, \mathbf{h}_2, \ldots$ be a sequence of i.i.d. random variables with mean $0$ and variance $1$ that have finite third moments. We almost surely have that for any $\epsilon > 0$, the $(\epsilon/\sqrt{\ln(n)})$-rank of $\overline{\mathbf{H}}_n$ is $\Omega(n)$, where $\overline{\mathbf{H}}_n$ is the $n \times n$ Hankel matrix defined in~\cref{eq.hankelvec2mat}.
+\end{thm}
+
+Hence, if we ignore the logarithmic factor of $\sqrt{\ln(n)}$, then the numerical rank of a random Hankel matrix should be proportional to $n$ as $n \rightarrow \infty$. That means unlike the S4D model, we can always randomly initialize a high-rank LTI system with HOPE; even better, a system parameterized by HOPE does not lose rank during training (see~\Cref{fig:svdHSSM}), because the low-rank systems are themselves rare in the space of the Markov parameters $\mathbf{h}$ (but not in the space of $(\mathbf{A}, \mathbf{B}, \mathbf{C})$).
+
+\textbf{Advantage II: A HOPE-SSM is Numerically Stable under Perturbation.} Unlike the LTI system, a Hankel matrix $\overline{\mathbf{H}}$ is very numerically stable under perturbation, as shown in the following theorem.
+
+\begin{thm}\label{thm.perturbHankel}
+    Let $\mathbf{h} \in \C^{n \times 1}$ be a vector and $G$ be the transfer function defined in~\cref{eq.Hankeltransfer}. Suppose we perturb $\mathbf{h}$ to $\tilde{\mathbf{h}}$ and let $\tilde{G}$ be its transfer function. Then, we have $\|G - \tilde{G}\|_\infty \leq \sqrt{n} \|\mathbf{h} - \tilde{\mathbf{h}}\|_2$.
+\end{thm}
+
+Therefore, the numerical stability of the HOPE-SSM does not depend on the parameter $\mathbf{h}$ itself. Consequently, our HOPE-SSMs are trained without having to rescale the Markov parameters $\mathbf{h}$ (see~\cite{wang2023stablessm}).
+
+\textbf{Advantage III: A HOPE-SSM's Memory Does Not Fade.} While many LTI systems are tailored for long-term memory~\cite{voelker2019legendre,gu2020hippo}, an asymptotically stable system must inevitably suffer from an exponential decay in its memory~\cite{agarwal2023spectral}. This can be manifested by the Hankel matrix: since $\begin{bmatrix}
+    \mathbf{y}_{0}^\top & \mathbf{y}_{1}^\top & \cdots
+\end{bmatrix}^\top = \overline{\mathbf{H}} \begin{bmatrix}
+    \mathbf{u}_{-1}^\top & \mathbf{u}_{-2}^\top & \cdots
+\end{bmatrix}^\top$, we can write 
+\begin{equation}\label{eq.hankelmemory}
+    \mathbf{y}_j = \sum_{k=1}^{\infty} \overline{\mathbf{H}}_{j,k-1} \mathbf{u}_{-k} = \sum_{k=1}^{\infty} \overline{\mathbf{H}}_{0,k+j-1} \mathbf{u}_{-k}, \qquad j \geq 0.
+\end{equation}
+That means the effect of the input $\mathbf{u}_{-k}$ on the output $\mathbf{y}_j$ depends on the magnitude of $\overline{\mathbf{H}}_{0,k+j-1}$. Hence, the decay of $|\overline{\mathbf{H}}_{0,t}|$ gives us a measurement of the decay of the memory. For a discrete LTI system, we have by definition that $\overline{\mathbf{H}}_{0,t} = \overline{\mathbf{C}} \overline{\mathbf{A}}^{t} \overline{\mathbf{B}}$. Since the spectrum of $\overline{\mathbf{A}}$ for an S4D model, regardless of $\Delta t$, is contained in the open unit disk, $\overline{\mathbf{A}}$ is a contraction operator and the ``memory'' of the system decays as time goes by. Asymptotically in time, this decay of $|\overline{\mathbf{H}}_{0,t}|$ is exponential, and for most systems, it starts at the very beginning when $t$ increases from $0$.\footnote{In particular, this is the case for HiPPO-LegS (see~\Cref{fig:noisycifar}).} However, if we parameterize the LTI system by the Markov parameters in the Hankel matrix, then $|\overline{\mathbf{H}}_{0,t}| = \mathbf{h}_{t}$, which does not have to decay as long as $t < n$. We acknowledge that when $t \geq n$, we have $\overline{\mathbf{H}}_{0,t} = 0$, which means the LTI system has essentially no memory after time $n$. We remark, however, that our HOPE-SSM utilizes the continuous-time LTI system associated with a Hankel matrix $\overline{\mathbf{H}}$. That is, from a continuous-time perspective, unlike S4D, our system's memory does not decay for $t \in [0,n]$ (see~\Cref{fig:noisycifar}). Hence, even with a long sequence whose length is much larger than $n$, by setting the sampling period $\Delta t$ to be small enough, our HOPE-SSM could still enjoy non-decaying memory.
+
+
+
+\section{Experiments and Discussions}
+
+
+\begin{figure}
+\centering
+\begin{minipage}{0.6\textwidth}
+    \hspace{-0.8cm}
+    \begin{overpic}[width = 1.2\textwidth]{./figures/acc_HSSM.pdf}
+    \put(6,18){\rotatebox{90}{Accuracy}}
+    \put(50,-1){Epochs}
+    \put(30,50){\textbf{Test Accuracy of HOPE-SSM}}
+    \end{overpic}
+\end{minipage}
+\hfill
+\begin{minipage}{0.38\textwidth}
+    \hspace{0.5cm}
+    \begin{overpic}[width = 0.95\textwidth]{./figures/HSSM_init.pdf}
+    \put(16,51.5){\textbf{Hankel Singular Values}}
+    \put(-2,3){\rotatebox{90}{\footnotesize \textbf{At Initialization}}}
+    \end{overpic}
+    \vfill
+    \hspace{0.5cm}
+    \begin{overpic}[width = 0.95\textwidth]{./figures/HSSM_final.pdf}
+    \put(-2,2){\rotatebox{90}{\footnotesize \textbf{After 10 Epochs}}}
+    \put(35,-5){\scriptsize $\sigma_j({\mathbf{H}})/\sigma_1({\mathbf{H}})$}
+    \end{overpic}
+\end{minipage}
+\caption{The test accuracy of the HOPE-SSM on the sCIFAR-10 task and the evolution of the Hankel singular values of the model. The plots are to be compared with~\Cref{fig:mystery} and~\Cref{fig:hsvds}.}
+\label{fig:svdHSSM}
+\end{figure}
+
+\textbf{Experiment I: Singular Values of a HOPE-SSM.} In this section, we implement a randomly initialized HOPE-SSM to learn the sCIFAR-10 task. We use the same model hyperparameters as the S4D models in~\cref{sec:unravelmystery}. In particular, the Hankel matrices in this model are $64$-by-$64$. We randomly initialize the Hankel matrix and do not set a smaller learning rate for the Hankel matrix entries $\mathbf{h}$, i.e., all model parameters except for $\Delta t$ have the same learning rate. In~\Cref{fig:svdHSSM}, we show the test accuracy and the Hankel singular values of the HOPE-SSM. Compared to~\Cref{fig:mystery}, a random HOPE-SSM can be trained to a high accuracy. In addition, training does not reduce the numerical rank of a Hankel matrix. This corroborates our findings in~\Cref{thm.highrank} and~\Cref{thm.perturbHankel}.
+
+\begin{figure}
+\centering
+\begin{minipage}{0.4\textwidth}
+    \begin{overpic}[width = 1\textwidth]{./figures/noisycifar.pdf}
+    \put(-4,26){\rotatebox{90}{Accuracy}}
+    \put(43,-4){Epochs}
+    \put(8,74){\small \textbf{Test Accuracy on noisy-sCIFAR}}
+    \end{overpic}
+\end{minipage}
+\hspace{0.3cm}
+\begin{minipage}{0.4\textwidth}
+    \begin{overpic}[width = 1\textwidth]{./figures/memory_decay.pdf}
+    \put(50,-4){$t$}
+    \put(-8,33){\rotatebox{90}{$|\mathbf{y}(t)|$}}
+    \put(15,74){\small \textbf{Memory Decay of Systems}}
+    \end{overpic}
+\end{minipage}
+\caption{Left: the test accuracies of the S4D model and our HOPE-SSM on the noisy-sCIFAR task. Right: a unit impulse at $t = 0$ is acted on the LTI system. The plot shows the decay of $|\mathbf{y}(t)|$ as $t$ increases. Data are collected for all $512$ LTI systems in a trained model. The dark curve shows the median of $|\mathbf{y}(t)|$ over the $512$ numbers. The darkly shaded region is from the first quartile to the third quartile. The lightly shaded region is from the minimum to the maximum.}
+\label{fig:noisycifar}
+\end{figure}
+
+\textbf{Experiment II: HOPE-SSMs Have Long Memory.} In~\cref{sec:HankelSSM}, we claim that a HOPE-SSM benefits from non-decaying memory. We show this experimentally in this section. To do so, for each flattened picture in the sCIFAR-10 dataset, which contains $1024$ vectors of length $3$, we append a random sequence of $1024$ vectors of length $3$ to the end of it. The goal is still to classify an image by its first $1024$ pixels. We call this task noise-padded sCIFAR-10. This task obviously requires a long memory so that the earlier data can still be retrieved after the noises are taken. We train both an S4D model and our HOPE-SSM to learn this task, using a common sampling period of $\Delta t = 0.1$ (see~\Cref{sec:expdetails2} for different values of $\Delta t$). We see in~\Cref{fig:noisycifar} that the HOPE-SSM significantly outperforms the S4D model on this task. To understand this gap, we give a unit impulse at $t = 0$ to the LTI systems in both the trained S4D model and our HOPE-SSM. We watch how the impulse response $\mathbf{y}(t)$ decays as time goes by. In~\Cref{fig:noisycifar}, we see that the memory of the trained S4D model decays exponentially while that of the trained HOPE-SSM does not decay at all for $t \in [0,64]$, where $n = 64$ is the size of the Hankel matrix. This is exactly what we expected in~\cref{eq.hankelmemory}.
+
+\textbf{Experiment III: Performance in the Long-Range Arena.} Finally, we present the performance of HOPE-SSM on large datasets. We use the same model architecture as in the S4D paper~\cite{gu2022parameterization}, except that we replace the LTI blocks with our HOPE blocks. The specific model and training hyperparameters are reported in~\Cref{sec:expdetails}. We show the performance of our model in~\Cref{tab:LRA}, where we see that our HOPE-SSM outperforms most sequential models on many tasks.
+
+\begin{table}[!htbp]
+    \centering
+    \caption{Test accuracies in the Long-Range Arena of our HOPE-SSM and other models. We report the median and the standard deviation of executions with $5$ random seeds. The bold (resp. underlined) numbers indicate the best (resp. second best) performance on a task. An entry is left blank if no result is found. We use the same model sizes as those in the S4D model.}
+    \begin{minipage}{1\textwidth}
+    \resizebox{1\textwidth}{!}{
+    \begin{tabular}{c c c c c c c c}
+         \specialrule{.1em}{.05em}{.05em}
+         {Model} & \!\!\!\texttt{ListOps}\!\!\! & \texttt{Text} & \!\!\!\texttt{Retrieval}\!\!\! & \texttt{Image} & \!\!\!\!\texttt{Pathfinder}\!\!\!\! & \texttt{Path-X} & \!\!\!Avg. \\
+         \hline
+         DSS~\cite{gupta2022diagonal} & $57.60$ & $76.60$ & $87.60$ & $85.80$ & $84.10$ & $85.00$ & $79.45$  \\
+         S4++~\cite{qi2024s4} & $57.30$ & $86.28$ & $84.82$ & $82.91$ & $80.24$ & - & - \\
+         Reg. S4D~\cite{liu2024generalization} & ${61.48}$ & $88.19$ & $91.25$ & $88.12$ & $94.93$ & $95.63$ & $86.60$ \\
+         Spectral SSM~\cite{agarwal2023spectral} & $60.33$ & ${89.60}$ & $90.00$ & - & $\underline{95.60}$ & $90.10$ & - \\
+         Liquid S4~\cite{hasani2022liquid} & $\boldsymbol{62.75}$ & $89.02$ & $91.20$ & $\boldsymbol{89.50}$ & $94.80$ & $96.66$ & $87.32$ \\
+         S5~\cite{smith2023simplified} & $62.15$ & $\underline{89.31}$ & $\underline{91.40}$ & $88.00$ & $95.33$ & $\boldsymbol{98.58}$ & $\underline{87.46}$ \\
+         \hline
+         S4~\cite{gu2022efficiently} & $59.60$ & $86.82$ & $90.90$ & ${{88.65}}$ & $94.20$ & $96.35$ & $86.09$  \\
+         S4D~\cite{gu2022parameterization} & ${{60.47}}$ & $86.18$ & $89.46$ & $88.19$ & $93.06$ & $91.95$ & $84.89$ \\
+         \specialrule{.1em}{.05em}{.05em}
+    \end{tabular}}
+    \end{minipage}
+    \label{tab:LRA}
+    \vspace*{-\baselineskip}
+\end{table}
+
+
+
+\section{Conclusion}
+
+
+In this paper, we presented a new theory based on the Hankel singular values to understand the difficulties in initializing and training an SSM. We proposed a new parameterization scheme, called HOPE, that is based on the Markov parameters in a discrete Hankel operator. We proved that a HOPE-SSM can be robustly initialized and trained and has a long memory.
+
+
+
+

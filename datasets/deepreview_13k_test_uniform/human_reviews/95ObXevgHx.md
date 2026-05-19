@@ -1,0 +1,259 @@
+# The Temporal Structure of Language Processing in the Human Brain Corresponds to The Layered Hierarchy of Deep Language Models
+
+- Decision: Reject
+- Scores: 8, 6, 8, 3, 6
+
+## Abstract
+Deep Language Models (DLMs) provide a novel computational paradigm for understanding the mechanisms of natural language processing in the human brain. Unlike traditional psycholinguistic models, DLMs use layered sequences of continuous numerical vectors to represent words and context, allowing a plethora of emerging applications such as human-like text generation. 
+In this paper we show evidence that the layered hierarchy of DLMs may be used to model the temporal dynamics of language comprehension in the brain by demonstrating a strong correlation between DLM layer depth and 
+the time at which layers are most predictive of the human brain.
+Our ability to temporally resolve individual layers benefits from our use of electrocorticography (ECoG) data, which has a much higher temporal resolution than noninvasive methods like fMRI. Using ECoG, we record neural activity from participants listening to a 30-minute narrative while also feeding the same narrative to a high-performing DLM (GPT2-XL). We then extract contextual embeddings from the different layers of the DLM and use linear encoding models to predict neural activity. We first focus on the Inferior Frontal Gyrus (IFG, or Broca's area) and then extend our model to track the increasing temporal receptive window along the linguistic processing hierarchy from auditory to syntactic and semantic areas. 
+Our results reveal a connection between human language processing and DLMs, with the DLM's layer-by-layer accumulation of contextual information mirroring the timing of neural activity in high-order language areas.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this paper, the authors explore the relationship between the hierarchical structure of Deep Language Models (DLMs) like GPT2-XL and the temporal processing of language in the human brain. The authors use electrocorticography (ECoG) to record neural activity from participants listening to a narrative, while also feeding the same narrative to GPT2-XL. Contextual embeddings from the different layers of the DLM are extracted and used to predict neural activity in the brain. The experiment results suggest that the sequential layer processing in DLMs mirrors the timing of neural activity in human brain language areas.
+
+### Strengths
+The paper is written clearly and coherently, and it is well-structured with a logical chain of thought, making it easy to follow.
+The 
+Extensive experiments show both temporal and spatial alignment between the DLMs and the brain, further enhancing the reliability of the results.
+The finding that the layered hierarchy of DLMs can model the temporal hierarchy of language is innovative and could be a significant contribution to the field of developing brain-inspired LLMs with better alignment.
+
+### Weaknesses
+Lack of comparative baselines: The paper only uses GPT2-XL, and other language models such as BERT, as well as recently released LLMs (e.g., LLaMA, Vicuna) should be considered for comparison.
+
+### Questions
+I do not have additional questions at this stage
+
+### Soundness
+3 good
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+5: You are absolutely certain about your assessment. You are very familiar with the related work and checked the math/other details carefully.
+
+### Summary
+There is a fastly growing literature analyzing how deep language models' representations have predictive power over fMRI brain measurements. These papers typically train a regressor model (typically a linear regressor) to predict the fMRI measurements from the neural language models' representations. Current linguistic encoding models on analyzing deep language model representations have shown that these models learn rich linguistic knowledge within their representations. The work done in neuroscience has shown alignment between language models with layer hierarchy and high-level language brain regions for both fMRI and MEG recordings. They then evaluate predictive power by measuring the correlation between predictions and actual measurements.
+
+This paper contributes to that literature by showing evidence that the layered hierarchy of deep language models (DLM) may be used to model the temporal dynamics of language comprehension in the brain with the help of electrocorticography (ECoG) recordings. Further, the authors demonstrate a strong correlation between DLM layer depth and the time at which it is most predictive of the human brain.
+
+### Strengths
+The paper contains the following key contributions:
+
+* Provide evidence that the layered hierarchy of GPT2-XL can be used to model the temporal hierarchy of language comprehension in high-order human language areas.
+* Like earlier studies, intermediate layers are well aligned with the brain, even in the case of ECoG brain recordings.
+* It also highlights some difference between the brain and transformer model, in that the brain likely relies more on recurrent processing as it does not have space to hold all past word tokens.
+
+Originality: The idea of how contextualized GPT-2 XL model representations are aligned in the Brain and demonstrated the temporal dynamics of the hierarchy of language compression in the Brain with the help of ECoG recordings.
+
+Quality: The paper supports its claims with enough details. The paper is well-written and easy to follow. However, all the Figures are hard to follow based on captions.
+
+Clarity: The paper is written well. The information provided in the submission is sufficient to reproduce the results.
+
+Significance: The idea of using GPT-2 XL model representations to investigate the temporal dynamics of language comprehension using ECoG recordings is interesting.
+
+### Weaknesses
+* Current work focuses more on layer-wise transformations learned by GPT2-XL map onto the temporal sequence of transformations of natural language. However, the current paper lacks in providing fine-grained details as follows: (i) Why are intermediate layers well aligned with the Brain? (ii) It could be interesting if authors could report more fine-grained details like the following study: Subba Reddy Oota, Mariya Toneva. Joint processing of linguistic properties in brains and language models, NeurIPS-2023, https://arxiv.org/pdf/2212.08094.pdf (iii) Supraword meaning analysis and layer-wise hierarchy details.
+
+* Caucheteux et al. 2022 "Brains and algorithms partially converge in natural language processing, shown that both MLM and CLM models yield best alignment with fMRI & MEG in middle layers and reported better performance at predicting next word -> better prediction of fMRI & MEG. How does the current work differ in terms of new findings except for the use of ECoG recordings?
+
+* It could be interesting if authors could report syntax and low-level surface feature analysis across language regions.
+
+### Questions
+* Did authors try the encoding with different context lengths?
+* Did authors try the encoding performance with previous word representations (i.e. using w{t-1} to predict w_{t} ECoG data, similarly w_{t-2}, w_{t-3} ..)?
+* Did authors try the encoding performance with low-level features, including the number of letters, phonemes, word length, word frequency, etc,. to syntax-level features?
+* The authors state that they "are willing to provide our data to those interested in reproducing our experiments". Why not make the data entirely available for future work to build on these results? Is that related to some required privacy clause in the data collection?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 3
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+With the emergence of LLMs the previously popular idea of comparing visual processing in DNNs with human ventral stream has jumped onto the next logical opportunity: comparing progression of representations in LLM with brain responses. However, as it was discovered, spatially the alignment is not that clear, it's not like you can track which brain area corresponds to which "layer" of an LLM.
+
+In this paper the authors argue that the desired alignment can be tracked, but through time, not through space. They use ECoG recordings that provide them with the ability to track neural signal through time, while the previous studies, those that claimed there is no great alignment, could not do that because they were using fMRI recordings that have very poor temporal resolution in comparison to ECoG.
+
+In the rest of the document authors show how the best-correlating layers seem to show a distinctive pattern: early LM layers best predict brain activity at early times, mid LM layers - brain activity at mid times and late LM layers - brain activity at later times. This very much seems to confirm the hypothesis that as the representation of a word evolves thought the layers of a DLM, it matches to representations found in the brain in the later timestamps, perhaps because a word evolves in some regards similarly in out brain.
+
+This highlights an important funding that differently from visual processing, language computation in the brain is temporally hierarchical and is localised in the same area, bringing forward the potential important of recurrent computation for this function.
+
+### Strengths
+This paper presents a strong case for the alignment between temporal evolution of a representation of a word and its evolution through the layers of a DLM. The work is well-structures, presents the material clearly and logically.
+
+In my opinion this is a clear and good contribution to the field of NeuroAI and clearly presents a finding that highlight some truths about how the brain works. I will try to poke some holes in the author's argument in the questions below, but overall I think this result is solid and I find it to be of interest and significance.
+
+### Weaknesses
+(1) Maybe I've missed it, but did you measure the decoding accuracy (Decoder : ECoG -> Words). Before we we ask if we can reconstruct those representations it would be nice to know that they actually carry information about the words and are not just unrelated neural processes. Without this, from Reconstruction : Embeddings -> Signal we know that we can reconstruct and capture the temporal dynamics in the brain signal, but this does not necessarily mean that this dynamics is relevant to language processing (I understand that the area where the signal is from is a language area, but who knows what else it might be doing that is contributing to the signal we are so diligently are trying to reconstruct).
+
+(2) What happens with not-so-much-predictable words? Why?
+
+### Questions
+(1) How well would you be able to classify (using as deep and powerful model as needed) individual words from ECoG signal alone? In my mind (in)ability to do this would be informative in terms of whether the recorded activity actually contains strong enough signal to claim that it carries any bits of language representation in the brain.
+
+(2) What is the canonic path of a word through the brain? Which areas are being activated in which order according to the modern day knowledge on this? The reader would benefit of a figure explaining this, same as we've seen in all the vision papers.
+
+(3) Are there differences between spoken words and written words? Do their brain-paths converge at some point? Where? Do we believe that representations are different depending on whether a word was perceived auditorily and visually? If semantic representation is what we are after, should we only compare representations "after" this point of convergence once the word took its abstract semantic representation form that is divorced the "mechanics" of delivery?
+
+(4) How did you handle multiple subjects: were their data put into one large pot, or each subject was treated separately (by training subject-specific models)?
+
+(5) Figure 2: How would the whole lag-layer-correlation picture look like if you would shuffle the words that are being decoded? I am trying to understand if this picture we are seeing is indeed due to language structure and representational similarities between brains and DLMs, and whether this nice picture would disappear if we carefully and deliberately remove the sought signal from the data?
+
+(6) Figure 2: Also, if we, once again, remove the signal from the data via some sort of permutation test, how all these plots will look like? Some other shape - which one? Just flat - why? The answer to this question will, in turn, lead to a question about why those shapes look like they do in the absence of the true signal.
+
+(7) Figure 2: And one more here: how high the correlation would rise for the data we know should have no correlation? Would it be actually 0 all the way from -4000 to 4000, or because of some general dynamics and the way how to the linear readout models are trained some positive correlation will still be observed? How high?
+
+(8) Could the correlation be explained by, say, non-sparsity of the representation in DLM in the mid layers, or some other technical reason, and not by the actual match between representations?
+
+### Soundness
+4 excellent
+
+### Presentation
+4 excellent
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 4
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper compares recordings from intracranial ECoG electrodes while nine epilepsy patients listened to a twenty minute radio program in which a speaker tells a story to context embeddings across different layers from GPT2-XL.  A model is trained to predict high-frequency power across electrodes at moments before and after onset of each word from the contextual embedding at each of 48 layers of GPT2-XL.  A 200 ms window was slid across the four seconds adjacent to the presentation of each word; given the rate of speech this interval overlaps with an irregular number of adjacent words.  For words that were rated as predictable by GPT2-XL, the time point at which the model was most predictive changed systematically across layers by about 200 ms. Similar results were observed for other regions believed to be important in language processing, but not in mTSG.  Results for words that were not well predicted by the language model were much less consistent.
+
+### Strengths
+People are very interested in the connection between language models and neural signals.  The use of ECoG enables a close examination of temporal response profiles.
+
+### Weaknesses
+There are really important methodological details that are difficult to find or not described.  For instance, the neural signal that is being predicted is high-frequency broad band power (Appendix A2).  This should be mentioned in the main text.  
+
+There is a preselection for electrodes that is not explained beyond this statement: ``We selected electrodes that had significant encoding performance for static embeddings (GloVe) (corrected for multiple comparisons).''  This needs to be explained in much more detail.  What exactly does that mean?  How many electrodes were excluded?  
+
+In addition, the results are not readily interpretable.  It's unclear what to make of the sequential match of different layers to the same neural signal within a region.  Are we to conclude that each electrode samples from 48 functional layers within IFG?  And also within aSTG?  What could that possibly mean?
+
+### Questions
+How much of the variance in the neural response captured by the model can be accounted for via ERPs?   Does HFBB activity correlate with, say, N4 amplitude?  If HFBB activity was averaged *across* electrodes within region, would one still observe the same result?  
+
+How much of the variance can be accounted for by the prosody of the speaker in the radio program?   Presumably the speaker signals many things, including the predictability of words.  How variable is the timing in the rate of speech in this sample? 
+
+In ECoG studies with epilepsy patients, large effects at the population level can be driven by a small number of electrodes within one or two patients.  How consistent are the results across participants?
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 5
+
+### Rating
+6
+
+### Rating Number
+6
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+- The paper investigates how deep language models (DLMs) like GPT-2 map onto the spatiotemporal dynamics of language processing in the human brain.
+- The authors use ECoG to record neural activity during narrative listening and compare embeddings from GPT-2 layers to predict brain activity over time.
+- The main finding is that early layers predict early brain activity while later layers predict later brain activity, suggesting DLM computations mirror the temporal accumulation of linguistic information in the brain.
+
+### Strengths
+1. The use of ECoG provides higher spatiotemporal resolution compared to fMRI, allowing the authors to study language processing dynamics at a more fine-grained level.
+
+2. Analyzing all 48 layers of GPT-2 is more comprehensive than prior work that looked at just the final layer. This enables new findings about how early vs late layers map to brain activity over time.
+
+3. The authors employ rigorous statistical analyses, including permutation testing and linear mixed effects modeling, to validate the layer-timing relationships across electrodes and ROIs.
+
+### Weaknesses
+1. While the authors state they used 10 patients, details are lacking on the specific demographic and clinical characteristics of the patient sample. This could impact the generalizability of the findings.
+
+2. Preprocessing steps for the ECoG data should be described in more detail (e.g. filtering, re-referencing, artifact rejection).
+
+3. The encoding model parameters, such as context length, smoothing windows, regularization, could be optimized more thoroughly. Ablations could be performed to test the effect of these modeling choices.
+
+4. The linear interpolation analysis addresses one type of baseline model, but comparisons to other neural language models (BERT, ELMo etc) would be informative. 
+
+5. The theoretical interpretation relating layers to temporal processing remains somewhat speculative. More discussion of biophysiological mechanisms could help strengthen the proposed framework.
+
+### Questions
+1. Can you provide summary demographic and clinical details for the patient sample?
+
+2. Can you include more specifics on the ECoG preprocessing pipeline?
+
+3. Did you perform any optimization of encoding model parameters and architectures? 
+
+4. Have you compared model performance to any other neural language models besides GPT-2?
+
+5. Can you elaborate on the biophysical mechanisms that could explain the layer-timing relationships observed?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good

@@ -60,7 +60,24 @@ def main():
 
     rng = random.Random(args.seed)
     all_ids = sorted(f.stem for f in REVIEW_DIR.glob("*.md") if f.stem in df.index)
-    paper_ids = rng.sample(all_ids, args.n_steps)
+
+    strata = {}
+    for pid in all_ids:
+        bucket = round(float(df.loc[pid, "avg_score"]) * 2) / 2
+        strata.setdefault(bucket, []).append(pid)
+
+    buckets = sorted(strata.keys())
+    per_bucket = args.n_steps // len(buckets)
+    remainder = args.n_steps - per_bucket * len(buckets)
+    paper_ids = []
+    for b in buckets:
+        ids = strata[b]
+        k = min(per_bucket, len(ids))
+        paper_ids.extend(rng.sample(ids, k))
+    pool = [pid for b in buckets for pid in strata[b] if pid not in set(paper_ids)]
+    if remainder and pool:
+        paper_ids.extend(rng.sample(pool, min(remainder, len(pool))))
+    rng.shuffle(paper_ids)
 
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"))
 

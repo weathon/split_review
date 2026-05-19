@@ -1,0 +1,197 @@
+# SqueezeLLM: Dense and Sparse Quantization
+
+- Decision: Reject
+- Scores: 5, 5, 5, 8
+
+## Abstract
+Generative Large Language Models (LLMs) have demonstrated remarkable results for a wide range of tasks.
+However, deploying these models for inference has been a significant challenge due to their unprecedented resource requirements.
+This has forced existing deployment frameworks to use multi-GPU inference pipelines, which are often complex and costly, or to use smaller and less performant models.
+In this work, we demonstrate that the main bottleneck for generative inference with LLMs is memory bandwidth, rather than compute, specifically for single batch inference.
+While quantization has emerged as a promising solution by representing  weights with reduced precision, previous efforts have often resulted in notable performance degradation.
+To address this, we introduce \OURS, a post-training quantization framework that not only enables lossless compression to ultra-low precisions of up to 3-bit, but also achieves higher quantization performance under the same memory constraint. 
+Our framework incorporates two novel ideas:
+(i) \emph{sensitivity-based non-uniform quantization}, which searches for the optimal bit precision assignment based on second-order information; and
+(ii) the \emph{Dense-and-Sparse decomposition} that stores outliers and sensitive weight values in an efficient sparse format.
+When applied to the LLaMA models, our 3-bit quantization
+significantly reduces the perplexity gap from the FP16 baseline by up to 2.1$\times$ as compared to the state-of-the-art methods with the same memory requirement.
+Furthermore, when deployed on an A6000 GPU, our quantized models achieve up to 2.3$\times$ speedup compared to the baseline.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+To address memory bandwidth constraints of large language models (LLMs), introduced SqueezeLLM, a post-training quantization framework, compresses LLMs to low precisions (to 4-bit or 3-bit range) without compromising performance. Two strategies underpin SqueezeLLM. One is sensitivity-based non-uniform quantization, which optimizes bit precision based on the weight distributions in LLMs. Second is dense-and-sparse decomposition, which stores outliers and simplifies the quantization process for the remaining weights. Extensive evaluations show that SqueezeLLM consistently surpasses existing quantization techniques across various bit precisions and tasks.
+
+### Strengths
+* The paper well explains the "memory wall" problem of LLMs and justifies the need for weight-only non-uniform quantization.
+* The proposed method, SqueezeLLM, considers both the sensitivity and outlier of the weights while compressing using LLM's weight-only non-uniform quantization format. 
+* The proposed method demonstrates competitive performance across different sizes of models and tasks.
+* Provide a latency report for the proposed kernel and compare it with others.
+* The paper is well-structured and the proposed method is clearly elucidated.
+
+### Weaknesses
+* SqueezeLLM uses a small sample of the training dataset to execute end-to-end forward and backward passes for gradient computations. This process appears to be more resource-intensive than other methods like RTN, GPTQ, or AWQ. It would be beneficial to understand the time and resources required for SqueezeLLM's dense-and-sparse quantization.
+* Relatedly, in the discussion about the need to minimize overall perturbations for the final loss term in section 4.1's "Sensitivity-Based K-means Clustering," the paper should also compare its performance with methods like AdaRound [1] or FlexRound [2]. These methods utilize a small calibration set and employ layer-wise or block-wise post-training quantization techniques. Notably, since FlexRound reports results on LLaMA using uniform weight-only quantization, it would strengthen the paper's claim about optimization with the final loss.
+* It would be beneficial to display five-shot performance results on the MMLU benchmark using LLaMA, as this would offer a more comprehensive comparison with other methodologies.
+
+[1]Nagel, Markus, et al. "Up or down? adaptive rounding for post-training quantization." International Conference on Machine Learning. PMLR, 2020.  
+[2]Lee, Jung Hyun, et al. "FlexRound: Learnable Rounding based on Element-wise Division for Post-Training Quantization." International Conference on Machine Learning. PMLR, 2023.
+
+### Questions
+* Is there a relationship between outliers and sensitive weights? Specifically, are most of the sensitive weights outliers?
+* Have you experimented with combining a uniform quantization scheme with the sparse decomposition concept?
+* In Table 1, there's a comparison with AWQ's latency performance. However, such a comparison is missing in Table 3 (section 5.4). Since the AWQ kernel is well showcased, it would be more convincing to show a comparison of the proposed kernel with AWQ.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+3 good
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This study introduces a novel method for compressing memory-limited LLMs by employing two primary techniques: 1) non-uniform quantization, which is based on clustering, and 2) the identification and extraction of outliers within weight parameters. While these strategies have the potential to disrupt acceleration mechanisms in high-performance computing systems, this paper also offers a dedicated kernel tailored for the proposed method. The efficacy of both the method and the kernel is further demonstrated through comprehensive experimental results on contemporary LLMs.
+
+### Strengths
+- This paper is articulately composed and effectively describes the memory challenges associated with LLMs.
+- The study adeptly builds upon existing compression techniques for LLMs. While many papers focus solely on uniform quantization, this one introduces non-uniform quantization.
+- The experimental results encompass a wide range of models and datasets.
+
+### Weaknesses
+*Concerns Regarding Citations:*
+The citation format utilized in the paper is incorrect. I'd recommend adhering to the ICLR latex format for consistency.
+I noticed references to non-uniform quantization, specifically (Chung, 2020) and (Jeon, 2022), in the appendix. These papers employ non-uniform quantization as a structured extension of binary quantization. This differs from the clustering-based vector quantization used in your paper.
+
+*Implementation and Kernel Concerns:*
+I have reservations about the kernel implementation. Introducing such custom kernel, as described in your method, appears to disrupt the established high-performance computing framework. Although an unstructured or non-uniform structure might enhance model performance, it could also negatively impact acceleration performance or complicate it. Hence, a more detailed exposition about the kernel is essential to substantiate the novelty of your method. While your results indicate an improved model performance, the absence of a dedicated kernel might undermine its effectiveness. Additionally, it's worth pondering why there was no effort to implement and optimize the kernel specifically for the A100. Even though the A100/H100 might be a costly choice, they can serve as a foundational hardware for large language models, particularly in tandem with NVIDIA's inference software. It's noteworthy that the memory bandwidth for the RTX series is below 1TB/s.
+
+*Feedback on Model Performance:*
+The majority of the model performance results focus on PPL outcomes. I believe it would be beneficial to include MMLU or CSR results for larger models within the main content, rather than relegating it to the appendix.
+
+In conclusion, due to the aforementioned concerns, I am inclined to assign a score of 5 to this paper. While I perceive this paper as integrating various methodologies, I will defer to other reviewers for their viewpoints on this aspect.
+
+### Questions
+included in weaknesses
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper aims to demonstrate that the main challenge with single-batch inference in generative Large Language Models (LLMs) is memory bandwidth rather than computing. The authors propose SqueezeLLM, a post-training quantization framework that can compress LLMs to 3-bit without losing performance. It uses the following ideas to optimize each weight tensor's bit precision and memory usage.
+
+- **Sensitivity-based non-uniform quantization**: The optimal bit precision assignment for each weight tensor can be determined by its sensitivity to quantization error, approximated by second-order information.
+- **Dense-and-Sparse decomposition**:  The outliers and sensitive weight values that cannot be quantized effectively can be stored in a sparse format with full precision. The remaining weight values correspond to dense components that could be easily quantized.
+
+### Strengths
+The paper is well-written, and the contributions are easy to understand. Figure 1 illustrates the impact of the key approaches of the work. The research community, spanning hardware and ML, has well-acknowledged the memory wall issue for such models. Section 3 provides this line of work justice with supporting illustration in Fig. A.1. 
+
+The paper is well positioned in related works – focus on weight quantization versus activation, following the OBD vs OBC (GPTQ Frantar et al. (2022), AWQ Lin et al. (2023), and SpQR Dettmers et al. (2023)) framework to preserve final output performance. 
+
+For applications such as LLMs, the authors combine two techniques: K-means clustering for quantization of sensitive weights/outliers guided by second-order derivative and dense and sparse decomposition/quantization. Please refer to the Weakness section for further discussion.
+
+The experiments and empirical analysis are extensive, supporting the technical contributions.
+
+### Weaknesses
+Regarding the two approaches, there needs to be more discussion on prior works.
+K-means clustering for Quantization is a popular technique used in signal processing. For neural networks, works such as DeepCompression [Han et al., ICLR 2016], SLQ/MLQ [Xu et al., AAAI 2018], HPTQ [Xu et al., IEEE Signal Processing Letters 2023] employ k-means clustering for quantization. It would be great to acknowledge such and similar works in literature and compare them to justify the novelty claimed in Sec 4.1. Of course, LLMs as a target application is new, but the technique may need to be more novel in its current presentation.
+
+A similar treatment is observed in Dense and Spare Decomposition (Sec 4.2), where similar techniques exist in the literature, not necessarily for LLMs.  The author must acknowledge and discuss the prior works, such as DSD [Han et al., ICLR 2017], Scatterbrain [Chen et al., NeurIPS 2021], Vitality [Dass et al., HPCA 2023], etc to bring out the novelty.
+
+Overall, it seems the LLMs provide opportunities to employ a novel combination of existing techniques. If so, the current presentation of Sec 4 does not paint an accurate picture and needs to be rewritten to acknowledge similar works and present the novelty. In addition, discussing SmoothQuant [Xiao et al., arXiv 2022, ICML 2023] in the context of post-training quantization for LLMs might be worthwhile.
+
+### Questions
+As discussed in the Weakness section, the authors should clarify the novelty by acknowledging and discussing prior works with the techniques presented. Are the techniques novel, or do LLMs provide opportunities for a novel combination of the existing techniques in literature? Sec 4, in its presentation, implies that techniques are novel, which may not be necessarily true.
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 4
+
+### Rating
+8
+
+### Rating Number
+8
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+In this article, the authors propose to address the memory footprint of LLMs. They argue that this represents the main challenge for efficient inference of such models. This claim is well-supported by previous literature in the field. To do so, they propose to combine two main elements: sparse encoding of outliers and hessian-based clustering. The presence of outliers is a well-known challenge regarding LLM quantization. These weights are challenging to encode. Instead of occupying values within the non-uniform quantization codebook. The author decompose the weight tensor in two: a small size (less than 1% of the total) is dedicated to said outliers in high precision and the remainder of the weight values are encoded in a low size LUT. Furthermore, in order to improve the performance of the LUT clustering, the authors propose to adapt the k-means algorithm to the specificity of the weight tensors of a trained model: all weight values are not trained equal. The hessian of the weight values is leveraged as an estimate to weight each weights contribution. 
+The resulting method achieves remarkable results on a variety of challenging benchmarks.
+
+### Strengths
+The paper is well-written, the proposed method performs well and is thoroughly benchmarked on challenging problems. Although the core elements are not completely novel, from the outliers encoding to the use of the Hessian for importance estimation, the combination of the two is well organized and not so trivial. Consequently, this research contains all the necessary element for a paper published at ICLR.
+
+### Weaknesses
+Overall, I have two remarks for improvement. First, here are some missing references. Regarding sparse encoding of the outliers, [1] propose an approach that bears some similarities and would be worth mentioning. Similarly, regarding the measurement of the importance using the Hessian matrix, pruning techniques have previously used similar estimates [2,3] and in particular [4]. I think the paper would benefit from these elements. Second, I think the results are great, so there is no need to not highlight other methods when they perform on par with the proposed SqueezeLLM.
+
+[1] Yvinec, Edouard, et al. "REx: Data-Free Residual Quantization Error Expansion." arXiv preprint arXiv:2203.14645 (2022).
+[2] Molchanov, Pavlo, et al. "Importance estimation for neural network pruning." Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. 2019.
+[3] Li, Mingchen, et al. "Exploring weight importance and hessian bias in model pruning." arXiv preprint arXiv:2006.10903 (2020).
+[4] Yu, Shixing, et al. "Hessian-aware pruning and optimal neural implant." Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision. 2022.
+
+### Questions
+I wonder how would the authors fine-tune such compressed model without losing the benefits of the compression technique, i.e. how to fold a LoRA or else.
+
+### Soundness
+4 excellent
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

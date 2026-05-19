@@ -1,0 +1,736 @@
+\title{YOLOR-Based Multi-Task Learning}
+
+\begin{abstract}
+
+    Multi-task learning (MTL) aims to learn multiple tasks using a single model and jointly improve all of them assuming generalization and shared semantics.
+    Reducing conflicts between tasks during joint learning is difficult and generally requires careful network design and extremely large models.
+    We propose building on You Only Learn One Representation (YOLOR)~\citep{wang2021you}, a network architecture specifically designed for multitasking.
+    YOLOR leverages both explicit and implicit knowledge, from data observations and learned latents, respectively, to improve a shared representation while minimizing the number of training parameters.
+    However, YOLOR and its follow-up, YOLOv7~\citep{wang2022yolov7}, only trained two tasks at once.
+    In this paper, we jointly train object detection, instance segmentation, semantic segmentation, and image captioning.
+    We analyze tradeoffs and attempt to maximize sharing of semantic information.
+    Through our architecture and training strategies, we find that our method achieves competitive performance on all tasks while maintaining a low parameter count and without any pre-training.
+    We will release code soon.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begingroup
+\let\clearpage\relax
+    \label{sec:introduction}
+
+    Multi-Task Learning (MTL) has been one of the most popular research topics in recent years.
+    Its purpose is to simulate the ability of humans to learn multiple tasks at the same time, and to share the learned knowledge with other tasks.
+    Using a single model to perform multiple tasks is one of the core concepts of artificial general intelligence (AGI), but such a model must also have the ability to establish correlations between different tasks, just like the human cognitive system.
+    Therefore, it is well-founded and necessary to use MTL to connect tasks in the field of artificial intelligence~\citep{MTLSurvey, MTLTaskRelationships, MTLTaskrelatedness}.
+
+    Specifically, we focus on combining multiple vision tasks.
+    Visual tasks, such as semantic segmentation and object detection, achieve different purposes, but are similar in that they should semantically have the same definition for the object: ``car,"  so that the correlation between tasks can be described with the correct semantics.
+    When the correlation between tasks is properly defined, the developed system will be robust and easy to use.
+    We intend to find tasks suitable for learning together by analyzing task correlation between object detection, instance segmentation, semantic segmentation, and image captioning, as well as maximize the semantic range that can be shared.
+
+    To demonstrate the power of MTL, we use the MTL network YOLOR~\citep{wang2021you} and the network architecture ELAN~\citep{wang2022designing} that optimizes the transmission of gradient flow.
+    YOLOR leverages both ``explicit" and ``implicit" knowledge. The former is obtained through typical supervised learning and by extracting features from data observations. The latter is stored as latents. The same semantics from different tasks should map to the same latents and allow the model to capture unified representations for MTL.
+    However, the multitasking capabilities of YOLOR and its follow-up, YOLOv7, have not been extensively experimented with. For instance, YOLOv7 only jointly trained object detection and instance segmentation, or object detection and pose estimation. We build on YOLOR and design training strategies to maximizing shared semantic information across tasks.
+
+    The main function of ELAN is to automatically assign different information to different parameters for learning, and thereby optimize the parameter usage efficiency of the backbone.
+    This design allows us to focus on designing a method that enables the prediction head of each task to effectively share information without needing to consider the learning mechanism of the backbone.
+
+    In addition, we observed that different data augmentation methods will damage the semantics of different tasks to varying degrees, so we propose to design the training process from a semantic perspective.
+    We propose an asymmetric data augmentation method to reduce the negative impact caused by semantic inaccuracy, and we found that this significantly assisted MTL of visual-language (VL) and visual tasks.
+    We also analyze and discuss the optimizer of the VL model since it includes a text decoder, which is quite different from the other heads~\citep{xu2022image}.
+
+    The main contributions of this paper are summarized as follows:
+    \begin{itemize}
+        \item From the perspective of human vision, we develop a MTL architecture and method to maximize the shared semantics between multiple visual and VL tasks.
+        \item We analyze data augmentation techniques and design training flow from the perspective of semantic consistency to reduce conflicts between different tasks and make training robust.
+        \item Through extensive experiments, we find that all tasks improve through joint learning, and we achieve competitive results with state-of-the-art while maintaining a low parameter count and without any pre-training.
+    \end{itemize}
+
+
+\section{Related Works}
+
+    \label{sec:related}
+
+    \subsection{Multi-Task Learning}
+        The main purpose of MTL is to use a single model for learning multiple tasks, by learning multiple related tasks at the same time, so that they can assist each other when performing tasks.
+        The learning mechanism can reduce the occurrence of overfitting by sharing parameters and improve the efficiency of learning~\citep{MTL97, MTLSurvey, MTLSurvey2, MTLHierarchicalBayesian}.
+        There are two common MTL models~\citep{overviewMTLDNN}:
+        (1) Hard parameter sharing: This learning architecture allows all tasks to share the entire network architecture and hidden layers, and the only difference is that each task has its own output layer (i.e., decision head).
+        For example, Ranjan et al.~\citep{hyperFace} put all tasks through the same backbone network, make its parameters shared, and design a output head for each task;
+        (2) Soft parameter sharing: This architecture is different from the aforementioned hard parameter sharing. It allows each task to have its own model and normalizes the distance between model parameters, so as to regularize the use of similar parameters for different task models.
+        Studies using this mechanism are as follows. Duong et al.~\citep{duong-etal-2015-low} use $l_{2}$ norm, while Yang and Hospedales~\citep{traceNorm} use trace norm to perform regularization procedures respectively.
+        Pix2Seq v2~\citep{chen2022unified} uses text tokens to output the results of all tasks (e.g., object detection, instance segmentation, pose estimation, and image captioning), and then outputs and visualizes through decoding/detokenizing post-processing.
+        Although this mechanism unifies the output method, it still needs to define the output format of various tasks in advance and convert it back to a visual form through post-processing, so it is not intuitive from a human's point of view.
+        Therefore, in this paper, we use hard parameter sharing and lightweight heads to output semantic features catered to each task.
+
+        The correlation of tasks is also a very important part of MTL~\citep{MTLSurvey, MTLTaskRelationships, MTLTaskrelatedness}, because when the nature of the tasks is different, in addition to causing low training efficiency, it will also cause mutual interference between tasks.
+        The speed and effect of training can be effectively improved by grouping tasks, but the analysis and grouping of tasks are very time consuming and expensive~\citep{MTLSurvey, MTLGroupings}.
+        Thus, we select MTL tasks from the perspective of human vision on the correlation between tasks.
+        At the same time, we maximize shared semantics between tasks.
+
+    \subsection{Image Captioning}
+        \label{sec:sec_image_captioning}
+
+        \begin{figure}
+            \centering
+            \includegraphics[width = 0.3\linewidth]{example_captioning.png}
+            \caption{
+                \textbf{An image captioning example} obtained by using MS COCO dataset~\citep{msCocoDataset}.
+                The five captions describe instances and stuff in the image, as well as the relationship between the objects and background.
+                Purple, blue, and green text correspond to the person (purple bounding box), bicycle (blue bounding box), and segmented background (green mask) in the image respectively, while the yellow text show the relationship between objects.
+            }
+            \label{fig:example_captioning}
+        \end{figure}
+
+        Image captioning mainly uses natural language to describe the contents of images~\citep{msCocoCaption}.
+        The main body of this system is divided into two parts:
+        one is the image encoder which encodes the input image, and the other is the text decoder which ``understands" the image encoded by the image encoder and outputs it in text.
+        Since the text decoder needs to describe the content in the image, it needs to obtain relevant content from the image encoder, such as the objects and backgrounds in the image.
+        In order to obtain the semantics that can be used in image captioning, many methods start with object detection and semantic segmentation as shown in \figureref{example_captioning}.
+        For example,
+            Li et al.~\citep{li2020oscar} use R-CNN~\citep{girshick14CVPR} as the object detector to detect target objects.
+            Zhang et al.~\citep{zhang2021vinvl} use ResNeXt~\citep{Xie2016} to detect objects, backgrounds, and their properties.
+            In~\citep{panopticSegIC}, Cai et al. propose to separate instance and stuff through panoptic segmentation~\citep{panopticSeg}.
+
+        Systems designed to perform image captioning typically train the image encoder first and then the text decoder through fine-tuning~\citep{nic, imgCapAtt}.
+        This approach aims to train the text decoder through a pre-trained image encoder and generate appropriate captions.
+        The existing image captioning system usually puts emphasis on the text decoder during training, and the image encoder is usually trained with a smaller learning rate in order to prevent existing knowledge from being destroyed.
+        However, the above approach will cause a semantic gap~\citep{xu2022image} between the image encoder and text decoder, limiting the learning ability of the text decoder to the image encoder.
+        With the introduction of Transformer~\citep{attIsAllYouNeed}, the encoder and decoder can learn at the same time in the framework, which can reduce the semantic gap between the image encoder and text decoder.
+        In view of the fact that Transformer has achieved many successful results in the field of natural language~\citep{devlin2018bert, radford2019language, brown2020language, 2020t5}, many computer vision tasks have also begun to introduce a large number of Transformer architecture~\citep{dosovitskiy2020vit, liu2021Swin}.
+        Basically, Transformer uses a large structure and a large amount of data to encode information.
+        It also needs to perform multiple attentions to align features, which consumes a lot of computing resources and time.
+
+
+\section{Architecture}
+
+    \label{sec:architecture}
+
+    \subsection{Overview}
+        \begin{figure}
+            \centering
+            \includegraphics[width = 0.4\linewidth]{architecture.png}
+            \caption{
+                \textbf{Network architecture of our model.}
+            }
+            \label{fig:architecture}
+        \end{figure}
+
+        In this paper, we use the ELAN design as the main axis of the network and incorporate the concept of YOLOR as the infrastructure of our system to build the backbone.
+        Then, we adopt the hard parameter sharing mechanism for MTL, design lightweight heads for individual tasks such as object detection, instance segmentation, and semantic segmentation, and merge them into the image encoder for the image captioning task.
+        The outputs of the heads can be used to capture features with sufficient semantics and these features can provide the need of the text encoder.
+        Different vision tasks processed on the encoder side can allow the system to obtain outputs with different semantics.
+        In our proposed system, different foreground objects rely on object detection and instance segmentation to obtain accurate information, while correct background information is provided by semantic segmentation.
+        As for the text decoder of the image captioning task, we directly use the Transformer decoder.
+        Similar to the Transformer, we train the image encoder and text decoder together.
+        This allows the model to be lightweight and efficient in addition to reducing training resource consumption.
+
+        We combine YOLOR and ELAN following YOLOv7~\citep{wang2022yolov7}, a state-of-the-art object detection algorithm. YOLOR~\citep{wang2021you} is a network architecture designed to perform multiple tasks. Intuitively, it mimics human learning -- explicit and subconscious (implicit). Explicit learning comes from data observations and supervised training, while implicit learning comes from encoding previously learned common features and connecting them across tasks. Efficient Layer Aggregation Networks (ELAN)~\citep{wang2022designing} uses gradient path analysis to design network architectures.
+        Its most important design concept is to optimize the gradient path.
+        This design can make the network lighter, and it can also make the network transmit gradient information more efficiently, which can speed up and improve the representation ability of the model. The overall architecture of our model is shown in~\figureref{architecture}.
+
+        Below, we describe the heads used for each task.
+
+    \subsection{Object Detection Head \& Instance Segmentation Head}
+        \label{sec:sec_od_head_and_inst_head}
+
+            We use the same object detection head of YOLOv7~\citep{wang2022yolov7}. YOLOv7 is the state-of-the-art in real-time object detection task, so we retain this head for our object detecion task.
+            YOLACT~\citep{yolact-iccv2019} is an instance segmentation model which adds an instance segmentation head to the YOLO architecture. There is a branch in YOLOv7 that merges YOLACT for the instance segmentation task. We choose this head for our instance segmentation task because it achieves state-of-the-art results in real-time instance segmentation and can be simply merged to the YOLO based architecture. The architecture for the object detection head and instance segmentation head is shown in \figureref{detection_instance_heads}.
+
+    \begin{figure}
+        \centering
+        \includegraphics[width = 1.0\linewidth]{detection_instance.png}
+        \caption{
+            \textbf{Object detection head and instance segmentation head.}
+            Instance segmentation is based on the results of object detection.
+        }
+        \label{fig:detection_instance_heads}
+    \end{figure}
+
+    \subsection{Semantic Segmentation Head}
+        \label{sec:sec_sem_seg_head}
+
+        For the semantic segmentation task, we explore the effect of using a feature combination of single-scale and multi-scale on semantic segmentation.
+        We design two ways to obtain semantic masks for the neck.
+        One is to directly up-sample the feature map to $1\times 1$ resolution from the $8\times 8$ resolution that is closest to the original resolution (single-scale), and the other is to combine the feature maps of three different resolutions ($8\times 8$, $16\times 16$, and $32\times 32$) of the neck and then up-sample to $1\times 1$ (multi-scale).
+        The semantic approaches we designed are shown in \figureref{designed_semantic_approaches}, and the results obtained by the two approaches are shown in \figureref{scale_compare}.
+        It can be seen that the prediction results of multi-scale model in the ``stuff" area are noisy.
+        We believe this is due to the semantic gap between the object detection and semantic segmentation task.
+        Object detection attempts to classify all areas that are non-instance as background, so we can see that whatever background area is in the stuff category—sky, wall, ceiling or ground—is easily classified into the same category.
+        For semantic segmentation, the spatial relationship sensitivity is relatively important, so we choose to design the semantic segmentation head in the single-scale way at the highest resolution (i.e., $8\times 8$).
+        However, it would be inefficient to up-sample the feature map back to its original size, so we up-sample once at the shallowest layer (from $8\times 8$ to $4\times 4$) compared to the instance segmentation head.
+        From this we get the prediction for semantic segmentation (\figureref{sem_seg_head}).
+        The benefits obtained by the above method are shown in~\tabref{compare_semantic_approaches}.
+        In the same case of up-sampling back to the original size ($1\times 1$), single-scale reduces the number of parameters by 94.3\% compared to multi-scale, and reduces the training time by 6.3\%.
+        The up-sampling to $4\times 4$ reduces the training time by 84.4\% compared to the direct up-sampling to $1\times 1$, but it can maintain fewer parameters and obtain the highest accuracy.
+
+
+
+
+
+
+        \begin{table}
+            \caption{
+                Comparison of training time and parameters between various approaches of the semantic segmentation head.
+                This set of experiments uses one A5000 GPU, images are uniformly scaled to $512\times 512$, and the batch size is 4.
+            }
+            \vspace*{-3mm}
+            \begin{center}
+            \begin{tabular}{ll}
+            \scalebox{1.0}
+            {
+                \begin{tabularx}{0.71\columnwidth}{P{0.23\linewidth}|P{0.12\linewidth}P{0.12\linewidth}P{0.12\linewidth}}
+
+                    \toprule  % head
+
+                    \thead{Semantic approaches}  & \thead{\#param of \\ seg. head} & \thead{Training \\ (hr/epoch)} & \thead{FWIOU$ ^{val}$} \\
+
+                    \midrule  % line
+
+                    \thead{Multi-Scale ($1\times 1$)} & \thead{778.8K} & \thead{24} & \thead{19.79} \\
+                    \thead{Single-Scale ($1\times 1$)} & \thead{\textbf{44.5K}} & \thead{22.5} & \thead{55.55} \\
+                    \thead{Single-Scale ($4\times 4$)} & \thead{\textbf{44.5K}} & \thead{\textbf{3.5}} & \thead{\textbf{56.44}} \\
+
+                    \bottomrule % bottom
+
+                \end{tabularx}
+            }
+            \end{tabular}
+            \end{center}
+            \label{tabularx:compare_semantic_approaches}
+        \end{table}
+        \begin{table}
+            \caption{
+                We use the CATR~\citep{catrGit} model as a basis to compare the difference in cost between the full Transformer and Transformer decoder as the text decoder.
+                This set of experiments uses one A5000 GPU, images are uniformly scaled to $512\times 512$, and the batch size is 8.
+            }
+            \vspace*{-3mm}
+            \begin{center}
+            \begin{tabular}{ll}
+            \scalebox{1.0}
+            {
+                \begin{tabularx}{0.71\columnwidth}{P{0.23\linewidth}|P{0.12\linewidth}P{0.12\linewidth}P{0.12\linewidth}}
+
+                    \toprule  % head
+
+                    \thead{Text Decoder} & \#param & \thead{Training \\ (hr/epoch)} & B@4$ ^{val}$ \\
+
+                    \midrule  % line
+
+                    \thead{Full Transformer} & 112.77M & 4.0 & 25.3 \\
+                    \thead{Transformer Decoder} & \textbf{104.88M} & \textbf{3.0} & \textbf{25.6} \\
+
+                    \bottomrule % bottom
+
+                \end{tabularx}
+            }
+            \end{tabular}
+            \end{center}
+            \label{tabularx:compare_transformer}
+        \end{table}
+
+        \begin{figure}
+            \centering
+            \begin{subfigure}[b]{0.4\textwidth}
+                \centering
+                \includegraphics[width=\textwidth]{single_scale.png}
+                \caption{Single-Scale}
+                \label{fig:sem_approaches_single_scale}
+            \end{subfigure}
+            \hspace*{2em}
+            \begin{subfigure}[b]{0.51\textwidth}
+                \centering
+                \includegraphics[width=\textwidth]{multi_scale.png}
+                \caption{Multi-Scale}
+                \label{fig:sem_approaches_multi_scale}
+            \end{subfigure}
+            \caption{
+                \textbf{Our two types of semantic approaches.}
+                Single-scale simply up-samples the highest resolution features, while multi-scale needs to combine all features and then up-sample.
+            }
+            \label{fig:designed_semantic_approaches}
+        \end{figure}
+
+        \begin{figure}
+            \centering
+            \includegraphics[width = 0.9\textwidth]{scale_compare.png}
+            \caption{
+                \textbf{Visual comparison of the results for single-scale and multi-scale semantic segmentation.}
+                Semantic segmentation tends to be more sensitive to spatial relationships. The multi-scale approach combines low-resolution features, which results in noisy mask predictions.
+            }
+            \label{fig:scale_compare}
+        \end{figure}
+
+    \subsection{Image captioning Head}
+        \label{sec:sec_cap_head}
+
+
+
+
+
+
+
+
+
+
+        Following the success of Transformer~\citep{attIsAllYouNeed} in the natural language domain, for the task of image captioning, we implement self-attention in our backbone and use it as our image encoder. Then, we incorporate a Transformer text decoder as our image captioning head.
+        Compared to Transformer, we reduce a significant number of parameters (\figureref{cap_head}).
+        As shown in \tabref{compare_transformer}, we use CATR~\citep{catrGit}, which uses the full Transformer as the text decoder, and compare the results with only using the Transformer decoder. The overall parameter count is reduced by 7.5\%, the training time is reduced by 25\%, and the BLEU-4 score is slightly improved.
+        We hypothesize that the full Transformer has worse performance due to its conflicts with the backbone, as the backbone already performs self-attention, which overlaps with the function of the Transformer encoder.
+
+        Following the results of this experiment, we use a vanilla Transformer text decoder, and again use ELAN+YOLOR for the backbone.
+
+        \begin{figure}
+             \centering
+             \begin{subfigure}[b]{0.4\textwidth}
+                 \centering
+                 \includegraphics[width=\textwidth]{sem_seg_head.png}
+                 \caption{Semantic Segmentation Head}
+                 \label{fig:sem_seg_head}
+             \end{subfigure}
+             \hspace*{2em}
+             \begin{subfigure}[b]{0.5\textwidth}
+                 \centering
+                 \includegraphics[width=\textwidth]{cap_head.png}
+                 \caption{Image Captioning Head}
+                 \label{fig:cap_head}
+             \end{subfigure}
+            \caption{
+                \textbf{Heads designed for different tasks}:
+                (a) The head designed for the semantic segmentation task. We use the feature map with the highest resolution in the neck to obtain the prediction for semantic segmentation.
+                (b) The head that executes the image captioning task. We use the basic Transformer decoder as the text decoder that produces the captions.
+            }
+            \label{fig:heads}
+        \end{figure}
+
+
+\section{Training Strategies}
+
+    \label{sec:training}
+
+    \subsection{{Data augmentation}}
+
+        Data augmentation is used to increase the robustness of the model.
+        However, not all data augmentation methods are necessarily valid, and some of them will cause semantic inconsistency between the data space and label space.
+        For example, combining multiple images using the MixUp or Mosaic technique can enrich the information of the object and the background, and at the same time improve the accuracy of object detection~\citep{bochkovskiy2020yolov4}.
+        However, for these data augmentation techniques applied on image captioning, the additional image samples have nothing to do with the content of the original image and may even confuse the objects and background.
+        This will cause the semantics contained in the augmented image to not correspond to the captions that have been annotated, which will lead to semantic errors.
+        In response to this situation, we designed a very simple and intuitive training flow to learn different tasks.
+        Our designed architecture of data augmentation pipelines is shown in~\figureref{training_flow}.
+        In order to avoid the above-mentioned semantic errors, we follow the principle of ``after changing the content of the original image, will the semantic information of corresponding task also be changed?" for executing data augmentation.
+        We sort out several data augmentation pipelines according to the nature of each task.
+        For the object detection, instance segmentation, and semantic segmentation tasks, we choose to use MixUp~\citep{zhang2018mixup}, Cutout~\citep{devries2017cutout}, Mosaic~\citep{bochkovskiy2020yolov4}, Copy paste, and Random perspective.
+        For the image captioning task, we use resize and padding.
+        We also apply different data augmentation pipelines on the same image simultaneously, and this action allows all tasks to maintain the correctness of the target semantics during the learning process.
+        \begin{table}
+            \caption{
+                \textbf{Comparison between different data augmentation techniques.}
+                All results are obtained by terminating at Epoch 30, training from scratch for 300 epochs.
+            }
+            \vspace*{-3mm}
+            \begin{center}
+            \begin{tabular}{ll}
+            \scalebox{1.0}
+            {
+                \begin{tabularx}{0.68\columnwidth}{P{0.13\linewidth}P{0.1\linewidth}|P{0.05\linewidth}P{0.05\linewidth}P{0.1\linewidth}P{0.05\linewidth}}
+
+                    \toprule  % head
+
+                    \multicolumn{2}{c|}{Augmentation} & OD & IS & StuffS & IC \\
+                    \thead{Vision tasks} & \thead{IC task} & AP$ ^{val}$ & AP$ ^{val}$ & FWIOU$ ^{val}$ & B@4$ ^{val}$ \\
+
+                    \midrule  % line
+
+                    Strong & Strong & 31.4 & 25.3 & 48.1 & 7.0 \\
+                    Strong & Weak & \textbf{35.6} & \textbf{28.8} & \textbf{53.5} & \textbf{16.2} \\
+
+                    \bottomrule % bottom
+                \end{tabularx}
+            }
+            \end{tabular}
+            \label{tabularx:compare_aug}
+
+            \par
+            \small{Note. OD = Object Detection; IS = Instance Segmentation; StuffS = Stuff Segmentation; IC = Image Captioning.}
+            \end{center}
+
+        \end{table}
+        The aforementioned design strategy can take into account the robustness of the model in visual tasks and simultaneously maintain the consistency of data and semantics between different tasks.
+        We show the performance of the overall system in \tabref{compare_aug}.
+        Note that the above design concept can help the model have better multi-task scalability.
+        Future adopters of this design concept must understand that the training time of this system is proportional to the number of data augmentation pipelines due to the shared backbone, but it does not affect the overall inference time.
+
+        \begin{figure}
+                \centering
+            \includegraphics[width = 1.0\textwidth]{training_flow.png}
+            \caption{
+                \textbf{The data augmentation pipelines designed for different tasks.}
+                In order to avoid data augmentation causing the semantic change of the target task, we compose different data augmentation pipelines and use them on the corresponding target tasks respectively (e.g., strong augmentation for visual tasks, and weak augmentation for VL task).
+            }
+            \label{fig:training_flow}
+        \end{figure}
+
+    \subsection{Optimizer Strategy}
+
+
+        \begin{figure}
+            \centering
+            \includegraphics[width = 0.5\linewidth]{compare_encoder_decoder_lr.png}
+            \caption{
+                \textbf{Comparing the learning curves of the image encoder and text decoder on the image captioning task when using different learning rates.}
+                The benchmark of this comparison is to use Karpathy Split validation set~\citep{karpathySplit} for training and validation.
+                Although the shared learning rate mechanism takes more time to converge, because image encoder and text decoder learn together, it can easily surpass other combinations and achieve the best results.
+            }
+            \label{fig:compare_encoder_decoder_lr}
+        \end{figure}
+        An image captioning model often pre-trains an image encoder, then finetunes the encoder while training a new text decoder, so it is common to give the image encoder a smaller learning rate than text decoder, which can avoid excessive interference with the knowledge that image encoder has already learned.
+        However, we hypothesize that since we are training multiple tasks at once, the image encoder needs to be able to adapt to different data types and outputs, and therefore require a larger learning rate.
+        We run a set of experiments to verify this.
+        The settings of these experiments are as follows:
+        we use AdamW and linear decay and we set the larger and the smaller learning rates to 1e-4 and 1e-5, respectively.
+        When both sides need the same learning rate, we set it to 1e-4.
+        We analyzed a total of three different situations, and the corresponding experimental results are shown in \figureref{compare_encoder_decoder_lr}.
+        Let the learning rate of image encoder and text decoder be $l_{ie}$ and $l_{td}$ respectively.
+        We analyze three different situations below:
+        (1) $l_{ie} < l_{td}$: image encoder is more able to maintain pre-trained knowledge, which will lead to faster learning of the text decoder.
+        But when the image encoder learns for a period of time, it will stop learning new knowledge earlier, and this will cause the features passed by the image encoder to the text decoder to no longer change.
+        This situation will cause the text decoder to fail to converge to optimal results;
+        (2) $l_{ie} > l_{td}$: a higher learning rate for the encoder results in rapid changes to its weights, while the decoder has not learned to generate sensible captions. The loss negatively affects the encoder, leading to divergence;
+        (3) $l_{ie} = l_{td}$: although the image encoder will lose some pre-trained knowledge and make learning slow, both the image encoder and text decoder can continue to learn, and the image encoder can adapt to different data inputs and outputs, resulting in a better learning effect than (1) and (2).
+        From the above observation, we found that only when the pre-trained dataset has rich semantic information, the advantages brought by pre-trained knowledge can be maintained.
+
+        We transfer this understanding to our experiments where we train from scratch, and set the same learning rate for our image encoder and text decoder for optimal results.
+
+
+
+\section{Experiments}
+
+    \label{sec:experiments}
+
+    \subsection{Experimental Settings}
+        \begin{table}
+            \caption{
+                \textbf{Comparison with baseline models.}
+                In this experiment, we use COCO-Stuff 164K dataset~\citep{coco-stuff} for comparison in the semantic segmentation task.
+            }
+            \begin{center}
+            \begin{tabular}{ll}
+            \scalebox{1.0}
+            {
+                \begin{tabularx}{0.69\columnwidth}{P{0.28\linewidth}|P{0.05\linewidth}P{0.05\linewidth}P{0.08\linewidth}P{0.08\linewidth}}
+
+                    \toprule  % head
+
+                    & OD & IS & SemS & IC \\
+
+                    model & AP$ ^{val}$ & AP$ ^{val}$ & MIOU$ ^{test}$ & B@4$ ^{val}$ \\
+
+                    \midrule  % line
+
+                    \thead{YOLOv7 with YOLACT} & 52.0 & \textbf{42.4} & - & - \\
+                    \thead{YOLOv7 (Segmentation)} & - & - & 37.4 & - \\
+                    CATR & - & - & - & 26.0 \\
+
+                    \midrule  % line
+
+                    ours &  \textbf{52.1} &  \textbf{42.4} & \textbf{42.5} & \textbf{28.4} \\
+
+                    \bottomrule % bottom
+                \end{tabularx}
+            }
+            \end{tabular}
+            \label{tabularx:baseline}
+
+            \par
+            \small{Note. OD = Object Detection; IS = Instance Segmentation; SemS = Semantic Segmentation; IC = Image Captioning.}
+            \end{center}
+
+        \end{table}
+        We use MS COCO 2017 dataset~\citep{msCocoDataset} for multi-task experiments.
+        We share 118K images for training and 5K images for validation.
+        For each image, captions are annotated by 5 people.
+        The multitasking referred to here includes object detection, instance segmentation, semantic segmentation, and image captioning.
+        For the semantic segmentation task, we combine the MS COCO stuff dataset~\citep{msCocoStuffDataset} and all categories of MS COCO dataset (including 80 instance categories, 91 stuff categories, and 1 unlabeled category) for training.
+        As for verifying the effect of semantic segmentation, we use COCO-Stuff 164K dataset~\citep{coco-stuff} and COCO-Stuff 10K dataset~\citep{coco-stuff} respectively.
+        COCO-Stuff 164K dataset has the same data as MS COCO 2017 dataset, using the same 118K images as the training set and 5K images as the testing set, while COCO-Stuff 10K dataset uses more complex 10K images from the COCO-Stuff 164K dataset, and divides them into 9K training set and 1K testing set.
+
+    \subsection{Baselines to Verify the Efficacy of Multi-Task Learning}
+
+
+
+
+        The following models share similar architectures as ours, but are trained on fewer tasks. We verify whether jointly training our selected tasks leads to improved results.
+        \begin{itemize}
+            \item YOLOv7~\citep{wang2022yolov7} with YOLACT~\citep{yolact-iccv2019}: object detection, instance segmentation
+            \item YOLOv7~\citep{wang2022yolov7} (Segmentation): semantic segmentation (COCO Stuff-164K)
+            \item CATR~\citep{catrGit}: image captioning
+        \end{itemize}
+
+        The version of YOLOv7 combined with YOLACT is currently the state-of-the-art of real-time object detection and real-time instance segmentation.
+        We use this version as the basis for MTL and it is therefore adopted as the baseline for object detection and instance segmentation.
+        In addition, we adopt YOLOv7 with a semantic segmentation head as the baseline for semantic segmentation and use it to verify the performance of semantic segmentation.
+        CATR uses the most basic Transformer to implement image captioning. We adopt CATR, replace its image encoder with ELAN plus YOLOR, and remove its Transformer encoder to serve as the baseline of image captioning.
+        In our experiments, we uniformly convert images to $640\times 640$ for training and use AdamW as the optimizer.
+        \tabref{baseline} shows the experimental results compared to the baseline.
+        From \tabref{baseline}, we know that through semantic sharing, all visual tasks achieve improved performance.
+        It is worth mentioning that for semantic segmentation, our method significantly improves the results by 13.6\% over the baseline, while image captioning improves by 9.2\% compared to the baseline.
+
+    \subsection{Comparison with State-of-the-arts}
+        \begin{table}
+            \caption{
+                \textbf{Comparison with state-of-the-art multi-task models.}
+            }
+            \vspace*{-3mm}
+            \begin{center}
+            \begin{tabular}{ll}
+            \scalebox{1.0}
+            {
+                \begin{tabularx}{1.0\columnwidth}{P{0.2\linewidth}|P{0.08\linewidth}P{0.12\linewidth}P{0.13\linewidth}|P{0.08\linewidth}P{0.08\linewidth}P{0.08\linewidth}}
+
+                    \toprule  % head
+
+                    & & & & OD & IS & IC \\
+
+                    model & \#param & image size & from scratch & AP$ ^{val}$ & AP$ ^{val}$ & B@4$ ^{val}$ \\
+
+                    \midrule  % line
+
+                    YOLOv7 & 34.5M & 640$ ^{2}$ & \faCheck & 51.4 & 41.5 & - \\
+                    YOLOv7-AF & 45.9M & 640$ ^{2}$ & \faCheck & 53.0 & 43.3 & - \\
+                    YOLOv7-AF$ ^{\star}$ & 46.0M & 640$ ^{2}$ & \faCheck & 52.0 & 42.4 & - \\
+
+                    \midrule  % line
+
+                    Pix2Seq v2 & 115.2M & 640$ ^{2}$ & \faTimes & 44.2 & 36.9 & 34.3 \\
+                    Pix2Seq v2 & 115.2M & 1024$ ^{2}$ & \faTimes & 46.5 & 38.7 & 34.9 \\
+
+                    \midrule  % line
+
+                    ours & 80.0M & 640$ ^{2}$ & \faCheck & 52.1 & 42.4 & 28.4 \\
+
+                    \bottomrule % bottom
+                \end{tabularx}
+            }
+            \end{tabular}
+            \label{tabularx:sota0}
+
+            \par
+            \small{Note. OD = Object Detection; IS = Instance Segmentation; IC = Image Captioning.} \\
+            \small{$\star$: YOLOv7 anchor free version, adopts the same settings as our method for training.}
+            \end{center}
+
+        \end{table}
+
+
+
+
+        \begin{table}
+            \caption{
+                \textbf{Comparison with state-of-the-art models.}
+                In this experiment, we use COCO-Stuff 10K dataset~\citep{coco-stuff} for comparison in the semantic segmentation task.
+            }
+            \vspace*{-3mm}
+            \begin{center}
+            \begin{tabular}{ll}
+            \scalebox{1.0}
+            {
+                \begin{tabularx}{1.0\columnwidth}{P{0.2\linewidth}|P{0.08\linewidth}P{0.12\linewidth}P{0.13\linewidth}|P{0.08\linewidth}P{0.08\linewidth}P{0.08\linewidth}}
+
+                    \toprule  % head
+
+                    & & & & OD & IS & SemS \\
+
+                    model & \#param & image size & from scratch & AP$ ^{val}$ & AP$ ^{val}$ & MIOU$ ^{test}$ \\
+
+                    \midrule  % line
+
+                    InternImage-T & 49M & 1280x800 & \faTimes & 49.1 & 43.7 & - \\
+                    InternImage-S & 69M & 1280x800 & \faTimes & 49.7 & 44.5 & - \\
+                    InternImage-B & 115M & 1280x800 & \faTimes & 50.3 & 44.8 & - \\
+                    InternImage-L & 277M & 1280x800 & \faTimes & 56.1 & 48.5 & - \\
+                    InternImage-XL & 387M & 1280x800 & \faTimes & 56.2 & 48.8 & - \\
+                    InternImage-H & 1.31B & 512$ ^{2}$ & \faTimes & - & - & 59.6 \\
+
+                    \midrule  % line
+
+                    ViT-Adapter-T & 28.1M & 192 $ ^{2}$ & \faTimes & 46.0 & 41.0 & - \\
+                    ViT-Adapter-S & 47.8M & 384$ ^{2}$ & \faTimes & 48.2 & 42.8 & - \\
+                    ViT-Adapter-B & 120.2M & 768$ ^{2}$ & \faTimes & 49.6 & 43.6 & - \\
+                    ViT-Adapter-L & 347.9M & 1024$ ^{2}$ & \faTimes & 52.1 & 46.0 & - \\
+                    ViT-Adapter-L & 332.0M & 512$ ^{2}$ & \faTimes & - & - & 54.2 \\
+
+                    \midrule  % line
+
+                    ours & 80.0M & 640$ ^{2}$ & \faCheck & 52.1 & 42.4 & 50.1 \\
+
+                    \bottomrule % bottom
+
+                \end{tabularx}
+            }
+            \end{tabular}
+            \label{tabularx:sota2}
+
+            \par
+            \small{Note. OD = Object Detection; IS = Instance Segmentation; SemS = Semantic Segmentation.}
+            \end{center}
+
+        \end{table}
+
+        We compare our model with the following state-of-the-art multi-task models:
+        \begin{itemize}
+            \item YOLOv7~\citep{wang2022yolov7}: \if 0 real-time \fi object detection, \if 0 real-time \fi instance segmentation
+            \item Pix2Seq v2~\citep{chen2022unified}: object detection, instance segmentation, and image captioning
+            \item InternImage~\citep{wang2022internimage}: object detection, instance segmentation, and semantic segmentation (COCO Stuff-10K)
+            \item ViT-Adapter~\citep{vitAdapter}: object detection, instance segmentation, and semantic segmentation (COCO Stuff-10K)
+        \end{itemize}
+
+        We present the experimental results in \tabref{sota0} and \tabref{sota2}.
+        Experimental results show that our model is much smaller than other multi-task models and can achieve very good performance on various tasks.
+        Among models of the same scale, our object detection result is the best.
+        Our model is not as effective as other large models on the semantic segmentation task, but our model is very lightweight, saving an average of 75\% of the parameter consumption compared to other models while achieving very good results.
+        It is worth mentioning that all our tasks are trained together from scratch.
+        For image captioning, we did not use any pre-trained image classifier or object detector, but let the image encoder and text decoder train together and share the semantics obtained by the tasks.
+
+    \subsection{Ablation Study}
+        \label{sec:sec_ablation_study}
+
+
+
+
+        In this section we report the results of ablation study.
+        We pair each visual task with image captioning individually.
+        The purpose of this is to observe the amount of semantic meaning that each task can provide to image captioning.
+        Because the result of instance segmentation depends on that of object detection, this experiment must combine the results of object detection and instance segmentation, and the overall result is listed in \tabref{ablation_study}.
+        According to \tabref{ablation_study}, semantic segmentation combined with image captioning gave the worst results.
+        This means that the amount of semantic meaning that this combination can provide is significantly less than the combination of object detection, instance segmentation, and image captioning.
+        \begin{table}
+            \caption{
+                \textbf{Comparison between the pairings of image captioning and different visual tasks.}
+                The results produced by this comparison are obtained by terminating at Epoch 20, training from scratch for 60 epochs.
+            }
+            \vspace*{-3mm}
+            \begin{center}
+            \begin{tabular}{ll}
+            \scalebox{1.0}
+            {
+                \begin{tabularx}{0.68\columnwidth}{P{0.15\linewidth}|P{0.08\linewidth}P{0.08\linewidth}P{0.13 \linewidth}P{0.08\linewidth}}
+
+                    \toprule  % head
+
+                    & OD & IS & SemS & IC \\
+
+                    tasks & AP$ ^{val}$ & AP$ ^{val}$ & FWIOU$ ^{val}$ & B@4$ ^{val}$ \\
+
+                    \midrule  % line
+
+                    OD + IC & 45.6 & - & - & 18.5 \\
+                    OD + IS + IC & \textbf{45.8} & \textbf{37.5} & - & 20.6 \\
+                    SemS + IC & - & - & 33.2 & 5.9 \\
+
+                    \midrule  % line
+
+                    All & 45.7 & 37.4 & \textbf{40.8} & \textbf{20.7} \\
+
+                    \bottomrule % bottom
+
+                \end{tabularx}
+            }
+            \end{tabular}
+            \label{tabularx:ablation_study}
+
+            \par
+            \small{Note. OD = Object Detection; IS = Instance Segmentation; SemS = Semantic Segmentation; IC = Image Captioning.}
+            \end{center}
+
+        \end{table}
+        It can be found from the annotation of \figureref{example_captioning} that the captioning task focuses on describing the relationship and interaction of foreground objects.
+        For all captions in MS COCO dataset, stuff accounts for 38.2\% of caption nouns~\citep{msCocoStuffDataset}.
+        From~\figureref{ablation}, we found that semantic segmentation cannot distinguish different objects of the same category, and all foreground objects are treated as the same category for stuff (i.e. other).
+        Thus, semantic segmentation (stuff segmentation) can only provide a small part of the background semantics for the image captioning task.
+        When combining all tasks, since semantic segmentation cannot clearly distinguish different foreground objects, when learned together with object detection and instance segmentation, it is possible that the results of both tasks will deteriorate at the same time.
+        But for semantic segmentation, different objects may belong to the same category.
+        Adding object detection and instance segmentation improves the model's mask prediction and overall performance in the semantic segmentation task.
+
+        \begin{figure}
+            \centering
+            \includegraphics[width = 1.0\textwidth]{ablation.png}
+            \caption{
+                \textbf{Captioning results obtained by combining different visual tasks with the image captioning task.}
+                Although semantic segmentation paired with image captioning has the worst results and cannot distinguish between different individuals of the same category at all, it can provide background semantics.
+            }
+            \label{fig:ablation}
+        \end{figure}
+
+    \subsection{Visualization of Experimental Results}
+        \begin{figure}
+            \centering
+            \includegraphics[width = 1.0\textwidth]{results_example.png}
+            \caption{
+                \textbf{Some results generated from our model.}
+            }
+            \label{fig:results_example}
+        \end{figure}
+
+        We adopt the test set from MS COCO 2017 dataset~\citep{msCocoDataset} to demonstrate our results, as shown in \figureref{results_example}.
+        The image captioning task is easily influenced by the misjudgement of the visual tasks, negatively affecting the content of the caption (e.g., the basket is predicted as a chair, which leads to the word ``chair" in the caption).
+        \figureref{results_0} shows an example for simpler images.
+        Our model performs well on all tasks for this batch of images.
+        \figureref{results_1} shows the results obtained for more complex images, and these experiments are also prone to incorrect results.
+        For example, in the experiments of the combination of object detection and instance segmentation, some objects that are not easy to judge will result in inaccurate predictions,
+        while in the experiment of semantic segmentation, messy masks will be generated due to complex spatial information, such as objects, illumination and shadow.
+        Additionally, from the demonstrated results, most captions start with the article ``a" or ``an", which is a characteristic of the training data of MS COCO 2017 dataset~\citep{msCocoDataset}.
+
+        \begin{figure}
+            \centering
+            \includegraphics[width = 1.0\textwidth]{results_0.png}
+            \caption{
+                \textbf{Some results generated from simple images.}
+            }
+            \label{fig:results_0}
+        \end{figure}
+
+        \begin{figure}
+            \centering
+            \includegraphics[width = 1.0\textwidth]{results_1.png}
+            \caption{
+                \textbf{Some results generated from complex images.}
+            }
+            \label{fig:results_1}
+        \end{figure}
+
+        We use a real video to verify our system, and the video clip used in our experiment is a ten second video taken at a road intersection~\citep{exampleVideo}.
+        We process a frame every second, and the captions reported by the system are shown in \figureref{video_example}.
+        It is obvious that although the content of the video changes over time, the captioning results are quite stable.
+
+        \begin{figure}
+            \centering
+            \includegraphics[width = 1.0\textwidth]{video_example.png}
+            \caption{
+                \textbf{Captioning results from ten second video.}
+                One frame is captioned each second for a total of ten processed frames.
+            }
+            \label{fig:video_example}
+        \end{figure}
+
+
+
+\section{Conclusion}
+
+    \label{sec:conclusion}
+
+    This paper analyzes the semantics required for the image captioning task from the perspective of human learning.
+    We analyze the correlation between different visual tasks, then combine a variety of them and train them together, maximizing the shared semantics between all tasks.
+    In addition, we conduct in-depth discussions on data augmentation techniques and optimizer modes to design training flow from a semantic perspective and reduce the impact of semantic errors.
+    Experimental results show that our model is much lighter than other multi-task models and achieves great results on all tasks.
+    Furthermore, under the multi-task joint learning architecture, by sharing semantics and learning rate, we enable image captioning tasks to achieve competitive performance without using any pre-trained models.
+\endgroup
+
+
+
+
+

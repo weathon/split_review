@@ -1,0 +1,131 @@
+# Learning Rate Re-scheduling for AdaGrad in training Deep Neural Networks
+
+- Decision: Reject
+- Scores: 3, 3, 3
+
+## Abstract
+The adaptive learning rate optimization algorithms have made a great improvement in the training of Deep Neural Networks (DNNs). It has been proved that adaptive learning rate methods can significantly improve training processing and can be adopted into various tasks. AdaGrad, As the first adaptive learning rate optimizer, usually performs worse than the following optimizers, such as Adam, RAdam, Adabelief, etc.  There are mainly two reasons: the first is that the stepsize for these optimizers is bounded so that the training is more stable, and the second is that they can use the decoupled weight decay regularization to improve their generalization performance. However, for AdaGrad, the updating delta constantly decreases to zero. Consequently,  the weights will change very slowly with the number of training iterations increasing. Meanwhile, it also makes the decoupled weight decay regularization perform unfavorably in AdaGrad.  We find that there is a big mistake when using AdaGrad in training DNNs. For other optimizers (e.g.,  Adam), they prove the regret-bound theorem with learning rate schedule $\frac {1}{\sqrt{T}}$, but in practice, they usually use more advanced learning rate schedule for training DNNs, such as step-wise decay schedule and cosine decay schedule. However, for AdaGrad, the algorithm implicitly contains a learning rate schedule $\frac {1}{\sqrt{T}}$, but in practice, most people directly add another learning rate schedule for AdaGrad. Such two learning rate schedules will largely drop its performance in training DNNs. So in this work, we propose a Learning Rate Re-scheduling (LRR) method for AdaGrad to drop the implicit learning rate $\frac {1}{\sqrt{T}}$, which can largely improve AdaGrad and make decoupled weight decay regularization perform well. The proposed LRR method can also be applied to other AdaGrad-type algorithms (ie, Shampoo). Comprehensive experiments indicate the effectiveness of the proposed LRR method. The source code will be made publicly available.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+### Summary
+This paper proposes a learning rate re-scheduling method for AdaGrad. Moreover, the authors also extend the proposed method on another AdaGrad-type optimizer, Shampo. Some experimental results show the performance of the proposed method.
+
+### Strengths
+1. This paper proposes a learning rate re-scheduling method for AdaGrad. 
+2. Moreover, the authors also extend the proposed method on another AdaGrad-type optimizer, Shampo. 
+3. Some experimental results show the performance of the proposed method.
+
+### Weaknesses
+Although the paper is theoretically and experimental sound, there are still some questions need to be discussed in this paper:
+1.	The main contribution of this paper is to propose a learning rate re-scheduling method. But the detail of the proposed learning rate re-scheduling method is missing. 
+In particular, the authors should compare the proposed learning rate re-scheduling method with existing methods. 
+2.	In Eq. (3), where is the element-wise matrix product used? Note that g_t should be a vector.  
+3.	Is \sqrt{T} a constant?
+4.	The convergence analysis of the variants of AdaGrad and Shampo should be provided.
+5.	The experimental results are not convincing. The authors should compare the proposed algorithm with more recently proposed algorithms.
+6.	Both the English language and equations in this paper need to be improved.
+
+### Questions
+Although the paper is theoretically and experimental sound, there are still some questions need to be discussed in this paper:
+1.	The main contribution of this paper is to propose a learning rate re-scheduling method. But the detail of the proposed learning rate re-scheduling method is missing. 
+In particular, the authors should compare the proposed learning rate re-scheduling method with existing methods. 
+2.	In Eq. (3), where is the element-wise matrix product used? Note that g_t should be a vector.  
+3.	Is \sqrt{T} a constant?
+4.	The convergence analysis of the variants of AdaGrad and Shampo should be provided.
+5.	The experimental results are not convincing. The authors should compare the proposed algorithm with more recently proposed algorithms.
+6.	Both the English language and equations in this paper need to be improved.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a learning rate schedule for AdaGrad, which allows it to match the performance of AdamW when the weight decay is decoupled. The same method is also applied to Shampoo, which allows it to surpass the performance of the original Shampoo and also AdamW for ResNet, VGG, and DenseNet on Cifar100.
+
+### Strengths
+This work addresses a major issue with the original AdaGrad method and provides a fix that makes sense. Experiments on five different CNNs show a consistent improvement of 5-10% in test accuracy for both AdaGrad and Shampoo, which is significant. The description of their methods and motivation are clear.
+
+### Weaknesses
+The work by Anil et al. [https://arxiv.org/abs/2002.09018] which the authors cite, actually uses a moving average for  L and R, though this is not clear from the equations in the paper. In the appendix, Algorithm II shows that they use a moving average. This fixes the sqrt(t) issue addressed in the current work. They also use the decoupled weight decay, and should essentially achieve the same performance as the ShampooW proposed in the current work. This paper in 2020 is referenced by some more recent work on Shampoo, which follow the same practice. In light of this previous work, it doesn't seem like the proposed method adds any practical benefit to the existing versions of Shampoo. Also, there is no strong reason to believe that AdaGradW adds any practical benefit over AdamW as well.
+
+### Questions
+What is the authors' position on these version of Shampoo that use a moving average for L and R?
+Why are there no experiments for language tasks, which are known to benefit more from AdamW?
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+1 poor
+
+---
+
+## Human Reviewer 3
+
+### Rating
+3
+
+### Rating Number
+3
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+The paper addresses the challenges faced when using the AdaGrad optimizer in training Deep Neural Networks (DNNs). While adaptive learning rate optimization algorithms have significantly improved DNN training, AdaGrad often underperforms compared to newer optimizers like Adam, RAdam, and Adabelief. The paper identifies two primary reasons for AdaGrad's limitations: the decreasing updating delta and the unfavorable performance of decoupled weight decay regularization. The authors highlight a common mistake in using AdaGrad with an additional learning rate schedule, which negatively impacts its performance. To address this, the paper introduces a Learning Rate Re-scheduling (LRR) method for AdaGrad, aiming to improve its performance and make decoupled weight decay regularization more effective. The LRR method can also be applied to other AdaGrad-type algorithms, and experimental results support its effectiveness.
+
+### Strengths
+1. The paper clearly outlines the challenges of using AdaGrad in DNN training, providing a foundation for their proposed solution. The introduction of the Learning Rate Re-scheduling method offers a fresh perspective on improving AdaGrad's performance.
+2. The LRR method's compatibility with other AdaGrad-type algorithms increases its potential impact in the deep learning community. The performance improvement over the baseline adagrad and shampoo looks impressive.
+
+### Weaknesses
+My major concerns are around the motivation and reproducibility of this work. I would raise the score if all problems are addressed.
+
+1. The paper assumes that most practitioners add an additional learning rate schedule to AdaGrad, which might not be universally true.
+2. The performance over other more popular optimizers (e.g., SGD and ADAM), are not significant. Thus motivation should be more solid, why we need a new adagrad over the other choices.
+3. Reproducibility: There's no code provided in the supplemental materials, which is crucial for evaluating this paper that emphasize "practice" for multiple times and targets for higher performance.
+
+### Questions
+1. Could the authors provide the original code in an anonymous link for reproducibility? It's better to have an easy-to-run toy example for showing the effectiveness of proposed method.
+
+### Soundness
+2 fair
+
+### Presentation
+2 fair
+
+### Contribution
+3 good

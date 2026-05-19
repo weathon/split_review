@@ -1,0 +1,491 @@
+\title{Projected Off-Policy Q-Learning (POP-QL) for Stabilizing Offline Reinforcement Learning}
+
+\begin{abstract}
+A key problem in off-policy Reinforcement Learning (RL) is the mismatch, or \emph{distribution shift}, between the dataset and the distribution over states and actions visited by the learned policy.
+This problem is exacerbated in the fully offline setting.
+The main approach to correct this shift has been through importance sampling, which leads to high-variance gradients. Other approaches, such as conservatism or behavior-regularization, regularize the policy at the cost of performance.
+In this paper, we propose a new approach for stable off-policy Q-Learning.
+Our method, Projected Off-Policy Q-Learning (POP-QL), is a novel actor-critic algorithm that simultaneously reweights off-policy samples and constrains the policy to prevent divergence and reduce value-approximation error.
+In our experiments, POP-QL not only shows competitive performance on standard benchmarks, but also out-performs competing methods in tasks where the data-collection policy is significantly sub-optimal.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Temporal difference (TD) learning is one of the most common techniques for reinforcement learning (RL).
+Compared to policy gradient methods, TD methods tend to be significantly more data-efficient.
+One of the primary reasons for this data-efficiency is the ability to perform updates off-policy, where policy updates are performed using a dataset that was collected using a different policy.
+Unfortunately, due to the differences in distribution between the off-policy and on-policy datasets, TD methods that employ function approximation may diverge or result in arbitrarily poor value approximation when applied in the off-policy setting \citep[p.~260]{sutton2020reinforcement}.
+This issue is exacerbated in the fully offline RL setting, where the training dataset is fixed and the agent must act off-policy in order to achieve high performance.
+\Cref{fig:frozen_lake} illustrates this \textit{distribution shift} issue on the Frozen Lake toy problem.
+In this example, we perform Q-Learning with a linear function approximate on a fixed dataset collected with one policy, the ``data-collection'' policy, to evaluate another policy, the ``evaluation'' policy.
+We can see that vanilla Q-learning diverges as the dataset shifts further off-policy.
+
+\begin{figure*}
+    \centering
+    \begin{subfigure}{.48\textwidth}
+        \centering
+        \includegraphics[trim={7.5cm 7.5cm 8.5cm 8cm}, clip, width=\textwidth]{figures/frozen_lake_map.pdf}
+    \end{subfigure}
+    \hspace{3mm}
+    \begin{subfigure}{.47\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/frozen_lake_q_error}
+    \end{subfigure}
+    \caption{
+        Off-policy evaluation on a simple grid environment, ``Frozen Lake''.
+        The goal of this task is to evaluate a policy ({\color{optimpolicy} \optimpolicyglyph}) from a suboptimal data policy ({\color{datapolicy} \datapolicyglyph}) that is $\epsilon$-dithered for sufficient coverage ($\epsilon = 0.2)$.
+        The right plot shows approximation error from a linear Q-function trained using Vanilla Q-Learning and POP-QL (our method) with a dataset interpolated between off-policy and on-policy.
+        Unlike Vanilla Q-Learning, POP-QL avoids divergence by projecting the sampling distribution $\mu$ onto the convex constraint $\E_{(s, a) \sim \mu} [F^\pi(s,a)] \succeq 0$, which enforced that the contraction mapping condition holds.
+        The shaded region ({\color{cmc} \cmcglyph}), indicates when the dataset approximately satisfies this condition (without reweighting); specifically, where $\lambda_{\text{min}} (\E_{(s, a) \sim \mu} [F^\pi(s,a)]) > -0.005$.
+    }
+    \label{fig:frozen_lake}
+\end{figure*}
+
+Nearly all methods for addressing off-policy distribution shift fall into two categories:
+importance sampling methods that reweight samples from the dataset to approximate the on-policy distribution, or regularization methods that minimize the distribution shift directly or through penalizing the value function in low-support areas. The former may lead to extremely high variance gradient updates, and the latter only works well when the data-collection policy is close to optimal, which is not the case in most real-world datasets.
+
+An alternative approach has been suggested by \citet{kolter2011fixed}, who provide a contraction mapping condition that, when satisfied, guarantees convergence of TD-learning to a unique fixed point. They propose to project the sampling distribution onto this convex condition and thereby significantly reduce approximation error.
+\Cref{fig:frozen_lake} shows that when this contraction mapping condition is (approximately) satisfied, Q-learning converges with low approximation error.
+However, this approach does not scale to modern RL tasks, because it invokes a batch semi-definite programming (SDP) solver to solve the projection for each batch update.
+
+\paragraph{Contribution}
+In this paper, we build on \citet{kolter2011fixed}'s theoretical contribution and propose Projected Off-Policy Q-Learning (POP-QL), which makes two significant improvements over previous work.
+First, we consider a new sampling projection that allows for a more computationally efficient algorithm, since a closed-form solution exists for the inner optimization of the dual problem.
+This computational improvement allows us to extend the technique to high-dimensional deep RL problems.
+Secondly, we extend this projection to the MDP setting and propose a new Q-Learning algorithm that jointly projects the policy and sampling distribution.
+Our proposed algorithm can plug into any Q-learning algorithm (such as Soft Actor Critic \citep{sac}), significantly reducing the approximation error of the Q-function and improving policy performance.
+We evaluate our method on a variety of offline RL tasks and compare its performance to other offline RL approaches.
+Although, in its current iteration, our method struggles to reach state-of-the-art performance on tasks with near-expert data-collection policies, POP-QL is able to outperform many other methods when the data-collection policies are far from optimal (such as the ``random'' D4RL tasks).
+Most importantly, our results illustrate the power of the contraction mapping condition and the potential of this new class of offline RL techniques.
+
+
+
+
+
+
+\section{Background and Related Work}
+
+
+Off-policy TD learning introduces two distinct challenges that can result in divergence, which we refer to as \textit{support mismatch} and \textit{projected-TD instability}.
+Support mismatch, where the support of the data distribution differs from the on-policy distribution, can result in large Q-function errors in low-support regions of the state-action space.
+These Q-function errors can lead to policies that seek out regions of the state-action space for which the Q-function is overly-optimistic, thus leading to an increased support mismatch.
+This positive feedback loop can quickly diverge.
+In the online setting, this problem can be solved by frequently resampling data.
+However, in the fully offline setting, specific techniques are required to avoid such divergences, which we describe below.
+
+The other challenge is instability inherent to off-policy TD learning.
+First described by \citet{tsitsiklis1996analysis}, the use of TD learning, function approximation, and off-policy sampling together, known as the \emph{deadly triad} \citep[p.~264]{sutton2020reinforcement}, can cause severe instability or divergence.
+This instability is caused by projecting TD-updates onto our linear basis\footnote{This challenge remains present in the deep RL setting.}, which can result in TD-updates that increase value error and, in some cases, diverge.
+See \cref{ap:three_state_example} for a three-state example of this divergence.
+
+There are many methods that address the challenges of off-policy RL, most of which fall into two main categories.
+The first is importance sampling (IS).
+First proposed by \citet{precup2000eligibility}, IS methods for RL approximate the on-policy distribution by reweighting samples with the ratio of the on-policy and data distribution densities.
+The challenge with this approach is the high variance in the updates of the re-weighting terms, which grows exponentially with the trajectory length.
+Many approaches have looked at methods for reducing this variance \citep{hallak2017consistent, gelada2019off, nachum2019dualdice, nachum2019algaedice, liu2018breaking, lee2021optidice}.
+Emphatic-TD \citep{sutton2016emphatic, zhang2020provably, jiang2021emphatic} and Gradient-TD \citep{sutton2008convergent} are other importance sampling approaches that are provably stable in the full-support linear case.
+One critical challenge with IS methods is that they do not address support mismatch and, thus, tend to perform poorly on larger scale problems.
+
+The second category of methods involves regularizing the policy towards the data-policy.
+This policy regularization can be done explicitly by ensuring the learned policy remains ``close'' to the data collection policy or implicitly through conservative methods.
+Explicit policy regularization can be achieved by penalizing KL-divergence between the learned policy and data policy \citep{fujimoto2019off, wu2019behavior} or by regularizing the policy parameters \citep{mahadevan2014proximal}.
+However, even in small-scale settings, policy-regularization methods can be shown to diverge \citep{manek2022pitfalls}.
+Conservative methods, on the other hand, involve making a conservative estimate of the value function, thus creating policies that avoid low-support regions of the state-action space.
+In the online learning setting, one of the most common conservative methods is Trust Region Policy Optimization (TRPO) \citep{schulman2015trust}.
+However, TRPO does not extend well to the fully offline setting since the value estimates tend to be overly conservative as the learned policy diverges from the data policy.
+One of the most successful algorithms for offline RL is Conservative Q-Learning (CQL, \citet{kumar2020cql}), which adds a cost to out-of-distribution actions.
+Other methods use conservative value estimates with ensembles \citep{kumar2019stabilizing} or model-based approaches \citep{yu2020mopo, kidambi2020morel}.
+One downside to policy regularized methods (explicit or implicit) is that regularization can reduce policy performance when the data policy is sub-optimal, which we demonstrate in our experiments.
+
+There are a few notable approaches that do not fit into either of these categories.
+\citet{kumar2020discor} present DisCor, which reweights the sampling distribution such that the TD fixed point solution minimizes Q-approximation error. However, approximations are needed to make this approach tractable.
+Additionally, this algorithm does address the support mismatch problem.
+
+Another approach is TD Distribution Optimization (TD-DO) \citep{kolter2011fixed}, which seeks to reweight the sampling distribution such that the TD updates satisfy the contraction mapping condition, thereby ensuring that TD updates converge.
+Unfortunately, the use of this approach has been limited because it does not scale to modern RL tasks.
+This is due to the need to run a batch SDP solver to solve the associated distributional optimization task for each batch update.
+Our method, Projected Off-Policy Q-Learning (POP-QL), builds off this approach.
+In this work, we propose a new projection that easily scales to larger domains and extend our method to policy optimization, creating a novel algorithm that addresses both the \textit{support mismatch} and \textit{projected-TD instability} of off-policy RL.
+
+
+
+\section{Preliminaries and Problem Setting}
+
+\label{sec:background}
+In this work, we consider learning a policy that maximizes the cumulative discounted reward on a Markov Decision Process (MDP) defined as the tuple $(\mathcal{S}, \mathcal{A}, p, r, \gamma)$, where $\mathcal{S}$ and $\mathcal{A}$ are the state and action spaces, $p(\cdot|s,a)$ and $r(s, a)$ represent the transition dynamics and reward functions, and $\gamma \in [0, 1)$ is the discount factor. We approximate the action-value function as $Q(s, a) \approx w^\top \phi(s, a)$, where $\phi : \mathcal S \times \mathcal{A} \to \{x \in \mathbb R^{k} : \|x\|_2 = 1\}$ is a normalized basis function and $w \in \mathbb R^k$ are the parameters of the final, linear layer.
+
+In the off-policy setting, we assume the agent cannot directly interact with the environment and instead only has access to samples of the form $(s, a, r(s, a), s')$, where $s' \sim p(\cdot|s, a)$ and $(s, a) \sim \mu$ for some arbitrary sampling distribution $\mu$.
+Because we can assume a fixed policy for much of our derivations and theory, we can simplify the math significantly by focusing on the finite Markov Reward Process setting instead.
+
+\subsection{Simplified Setting -- Finite Markov Reward Process (MRP)}
+
+Consider the finite $n$-state Markov Reward Process (MRP) $(\mathcal S, p, r, \gamma)$, where $\mathcal S$ is the state space, $p : \mathcal{S} \times \mathcal{S} \to \mathbb{R}_+$ and $r : \mathcal S \to \mathbb R$ are the transition and reward functions, and $\gamma \in (0, 1)$ is the discount factor.
+\footnote{Note that, given a fixed policy, an MDP reduces to an MRP.}
+Because the state-space is finite, it can be indexed as $\mathcal{S} = \{1, \ldots, n\}$, which allows us to use matrix rather than operator notation.
+In matrix notation, we use matrices $P$ and $R$, to represent the functions $p$ and $r$, where each row corresponds to a state.
+The value function associated with the MRP is the expected $\gamma$-discounted future reward of being in each state $V(s) \coloneqq \E \left[\left.\sum_{t=0}^\infty \gamma^\top r(s_t) \right| s_0 = s \right]$.
+The value function is consistent with Bellman's equation in matrix form,
+\begin{align}
+  V = R + \gamma P V .
+\end{align}
+We approximate the value function as $V(s) \approx w^\top \phi(s)$, where $\phi : \mathcal S \to \{x \in \mathbb R^{k} : \|x\|_2 = 1\}$ is a fixed normalized basis function and we estimate parameters $w \in \mathbb R^k$. In matrix notation, we write this as $V \approx \Phi w$.
+In the off-policy setting, the sampling distribution $\mu$ differs from the stationary distribution $\nu$.
+In this setting, the temporal difference (TD) solution is the fixed point of the projected Bellman equation:
+\begin{align}
+  \label{eqn:approx-bellman}
+  \Phi w^\star & = \Pi_{\mu} (R + \gamma P \Phi w^\star) ,
+\end{align}
+where $\Pi_\mu = \Phi(\Phi^\top D_{\mu} \Phi)^{-1}\Phi^\top D_{\mu}$ is the projection onto the column space of $\Phi$ weighted by the data distribution $\mu$ through the matrix $D_{\mu} = \diag(\mu)$.
+This projection may be arbitrarily far from the true solution so that the error may be correspondingly large.
+In practice, $w^\star$ is often computed using TD-learning, a process that starts from some point $w_0 \in \mathbb{R}^k$ and iteratively applies Bellman updates,
+\begin{equation}
+\label{eq:vanilla_td}
+    w_{t+1} = w_t - \lambda \E_\mu \left[ \left(\phi(s)^\top w_t - r - \phi\left(s^{\prime}\right)^\top w_t \right) \phi(s) \right].
+\end{equation}
+Unfortunately, in the off-policy setting, TD-learning is not guaranteed to converge.
+
+\subsection{Contraction Mapping Condition}
+A $\gamma$-contraction mapping\footnote{A contraction mapping can be defined for any metric space, but here we focus on the metric space defined by the Euclidean space and weighted Euclidean metric.} is any function, $f : \mathbb{R}^n \to \mathbb{R}^n$, such that for some distribution $\mu$ and any $x_1, x_2 \in \mathbb{R}^n$:
+\begin{equation}
+    \|f(x_1) - f(x_2) \|_\mu \leq \gamma \|x_1 - x_2\|_\mu ,
+\end{equation}
+where $\gamma \in [0, 1)$ and $\|\cdot\|_\mu$ is the weighted 2-norm.
+A key property of contraction mappings is that iteratively applying this function to any starting point $x_0 \in \mathbb{R}^n$ converges to a unique fixed point $x^* = f(x^*)$.
+This principle is used to prove convergence of on-policy TD-learning.
+
+Under on-policy sampling, $\mu = \nu$, the projected Bellman operator, $\Pi_{\mu} \mathcal{B}(x) = \Pi_{\mu} (R + \gamma P x)$, is a contraction mapping.
+\begin{equation}
+    \|\Pi_{\mu} \mathcal{B}(\Phi w_1) - \Pi_{\mu} \mathcal{B}(\Phi w_2) \|_\mu \leq \gamma \|\Phi w_1 - \Phi w_2 \|_\mu \quad \forall \ w_1, w_2 \in \mathbb{R}^k .
+\end{equation}
+\citet{tsitsiklis1996analysis} use this property to both prove that on-policy TD Q-learning learning converges to a unique point and bound the approximation error of the resulting fixed point \citep[Lemma 6]{tsitsiklis1996analysis}.
+However, in the off-policy setting with $\mu \ne \nu$ this property does not always hold.
+In fact, this condition can be violated even in MRPs with very small state spaces, see \cref{ap:three_state_example} for an example.
+Thus, the TD updates are not guaranteed to converge and can diverge under some off-policy sampling distributions.
+
+To get around this challenge, \citet{kolter2011fixed} proposed a new approach.
+First, they transformed the contraction mapping condition into a linear matrix inequality (LMI) through algebraic manipulation:
+\begin{align}
+\label{eq:cmc}
+   \E_{s\sim \mu}  [F(s)] \succeq 0 \text{, where } 
+   F(s) = \E_{s'\sim p(\cdot|s)}  \left[\begin{bmatrix}
+                                              \phi(s)\phi(s)^\top  & \phi(s)\phi(s')^\top \\
+                                              \phi(s')\phi(s)^\top & \phi(s)\phi(s)^\top
+                                            \end{bmatrix}\right] .
+\end{align}
+We provide a derivation of this LMI in \Cref{ap:cmc_deriv}.
+Using this formulation, they present an algorithm to find a new sampling distribution that satisfies this contraction mapping condition and proves a bound on the approximation error of their approach.
+Unfortunately, this method scales poorly because it requires solving an SDP problem alongside each batch update.
+Thus, the method remains impractical for the deep RL tasks, and has seen virtually no practical usage in the years since.
+
+
+
+\section{Projected Off-Policy Q-Learning (POP-QL)}
+
+
+Our method, Projected Off-Policy Q-Learning (POP-QL), is also centered on the contraction mapping condition (\cref{eq:cmc}).
+However, unlike previous work, we propose a new method that significantly improves the computational cost of the projection, allowing POP-QL to scale to large-scale domains.
+Additionally, we introduce a new policy optimization algorithm that simultaneously projects the policy and  sampling distribution in order to satisfy the contraction mapping condition.
+This policy optimization algorithm allows POP-QL to address both the \textit{support mismatch} and \textit{projected-TD instability} challenges of off-policy Q-learning.
+
+We start by deriving the POP-QL reweighting procedure in the finite MRP setting under a fixed policy and later extend our method to the MDP setting together with policy regularization.
+\subsection{POP-QL on Markov Reward Processes}
+In the MRP setting (or the fixed-policy setting), the goal of POP-QL is to compute a new sampling distribution that satisfies the contraction mapping condition in \cref{eq:cmc} and thus stabilizes off-policy training.
+However, if the target distribution differs significantly from the source distribution $\mu$, this can result in large reweighting factors, which can decrease the stability of the training process.
+Thus, we are looking for the ``closest'' distribution that satisfies \cref{eq:cmc}.
+Unlike \citet{kolter2011fixed}, we propose to use the I-projection instead of the M-projection, which allows us to find an analytical solution to the inner part of the Lagrangian dual and thereby significantly simplifies the problem.
+Additionally, we argue in \cref{ap:i_projections}  that this choice is more suitable for the RL setting.  We first formulate the problem as minimizing the KL divergence between the data distribution $\mu$ and a reweighted distribution $q$ such that TD update is stable under $q$,
+\begin{equation}
+\label{eq:pop_mrp_opt_prob}
+  \underset{q}{\text{minimize}}~\KL(q\,\|\,\mu) \quad \text{s.t.} \quad \E_{s\sim q}[F(s)] \succeq 0 .
+\end{equation}
+The corresponding unconstrained dual problem based on a Lagrange variable $Z \in \mathbb{R}^{2k}$ is given by
+\begin{align}
+\label{eq:mrp_dual}
+    \underset{Z \succeq 0}{\operatorname{maximize}} \ \underset{q}{\operatorname{minimize}} \KL(q \| \mu)-\operatorname{tr} Z^\top \E_q[F(s)] .
+\end{align}
+The solution to this dual problem is equal to the primal problem under strong duality, which holds in practice due to the fact that this corresponds to a convex optimization problem.
+Now, consider the inner optimization problem over $q$ in \cref{eq:mrp_dual}.
+This optimization problem can be rewritten as
+$
+    \operatorname{minimize}_q \ -H(q)-\E_q\left[\log \mu(s)+\operatorname{tr} Z^\top F(s) \right],
+$
+which has a simple analytical solution:
+\begin{equation}
+\label{eq:q_star_mrp}
+q^{\star}(s) \propto \exp \left(\log \mu(s)+\operatorname{tr} Z^\top F(s)\right)=\mu(s) \exp \left(\operatorname{tr} Z^\top F(s)\right) .
+\end{equation}
+Notice that our target distribution $q^{\star}$ is simply a reweighting of the source distribution $\mu$ with weights $\exp \left(\operatorname{tr} Z^\top F(s)\right)$.
+To compute the weights, we need to solve for the Lagrange variable $Z$.
+Plugging the analytical solution for $q^\star$ back into \cref{eq:mrp_dual} yields
+\begin{align}
+\label{eq:dual_obj_z}
+    \underset{Z \succeq 0}{\operatorname{minimize}} \ \E_\mu\left[\exp \left(\operatorname{tr} Z^\top F(s) \right)\right] .
+\end{align}
+In practice, we minimize over the set $Z\succeq 0$ by re-parametrizing $Z$ as
+\begin{equation}
+\label{eq:z_reparam}
+Z=\left[\begin{array}{c} A \\ B\end{array}\right]\left[\begin{array}{c} A \\ B \end{array}\right]^\top 
+\end{equation}
+where $A, B \in \mathbb{R}^{k \times k}$. This formulation ensures that $Z$ is positive semi-definite, $Z \succeq 0$, for any $A$ and $B$.
+Thus, we can directly optimize over $A$ and $B$ and ignore the positive semi-definite condition.
+With this formulation for $Z$ and plugging the definition of $F$ (\cref{eq:cmc}) we can rewrite the dual optimization problem (\cref{eq:dual_obj_z}) as:
+\begin{align}
+\label{eq:dual_obj_ab}
+    \underset{A, B}{\operatorname{minimize}} \ \E_\mu\left[\exp \left(\| A^\top \phi(s) \|_2^2 + \| B^\top \phi(s) \|_2^2 + 2 \E_{s' \sim p(\cdot \mid s)} \left[ \langle B^\top \phi(s),  A^\top \phi(s') \rangle \right] \right)\right]
+\end{align}
+Solving for matrices $A, B$ yields the I-projected sampling distribution $q^*$ according to \cref{eq:q_star_mrp}. 
+
+\subsection{Extension to Markov Decision Processes}
+The theory presented in the previous section can be extended to the MDP setting through a simple reduction to an MRP.
+In a MDP, we also have to consider the action space, $\mathcal{A}$, and the policy, $\pi$.
+In this setting, our contraction mapping LMI becomes
+\begin{equation}
+\label{eq:cmc_mdp}
+    \E_{(s, a)\sim q}  [F^\pi(s, a)] \succeq 0 ,
+\end{equation}
+\begin{equation}
+    \text{ where } 
+F^\pi(s, a) = \E_{s'\sim p(\cdot|s, a), a' \sim \pi(s')}
+\left[\begin{bmatrix}
+    \phi(s, a)\phi(s, a)^\top  & \phi(s, a)\phi(s', a')^\top \\
+    \phi(s', a')\phi(s, a)^\top & \phi(s, a)\phi(s, a)^\top
+\end{bmatrix}\right] .
+\end{equation}
+Using the idea that, given a fixed policy, any MDP reduces to an MRP, we extend Theorem 2 from \citet{kolter2011fixed} to show that the TD-updates converge to a unique fixed point with bounded approximation error for any finite MDP where $\pi$ and $\mu$ satisfy this condition.
+\begin{lemma}
+\label{lem:cmc_bound_mdp}
+  Let $w^\star$ be the least-squares solution to the Bellman equation for a fixed policy $\pi$:
+  \begin{align}
+      w^* = \argmin_w \E_{(s, a) \sim \mu} \left[ (\phi(s, a)^\top w - r(s, a) - \gamma \E_{s' \sim p(\cdot \mid s, a), a' \sim \pi(s')} \phi(s', a')^\top w)^2 \right]
+  \end{align}
+  and let $\mu$ be some distribution satisfying the MDP contraction mapping condition (\cref{eq:cmc_mdp}).
+  Then
+  \begin{align}
+    \E_{\mu} \left[ (\phi(s, a)^\top w^\star - V(s, a))^2 \right] & \leq \frac{1 + \gamma \sqrt{\delta(\nu, \mu)}}{1 - \gamma} \min_w \E_{\mu} \left[ (\phi(s, a)^\top w - V(s, a))^2 \right] ,
+  \end{align} \label{thm:boundTDError}
+  where $\nu$ is the stationary distribution, $\delta(\nu, \mu) = \max_{s, a, \tilde{s}, \tilde{a}} \frac{\nu(s, a)}{\mu(s. a)} \cdot \frac{\mu(\tilde{s}, \tilde{a})}{\nu(\tilde{s}, \tilde{a})}$
+\end{lemma}
+See \cref{ap:proof_lemma_1} for proof.
+As before, we are looking to project our sampling distribution to satisfy this condition.
+With this reduction, we rewrite the analytical solution for the projected sampling distribution from \cref{eq:q_star_mrp} as
+\begin{equation}
+\label{eq:q_star_mdp}
+q^{\star}(s, a) \propto \mu(s, a) \exp \left(\| y_A \|_2^2 + \| y_B \|_2^2 + 2 \E_{s'\sim p(\cdot \mid s), a'\sim \pi(\cdot \mid s'} \left[ \langle y_B,  y_A' \rangle \right] \right)
+\end{equation}
+where $y_A = A^\top \phi(s, a)$, $y_B =  B^\top \phi(s, a)$, and $y_A' =A^\top \phi(s', a')$ and $A$ and $B$ are the solutions to the following optimization problem,
+\begin{align}
+\label{eq:dual_obj_ab_mdp}
+    \underset{A, B}{\operatorname{minimize}} \ \E_\mu\left[\exp \left(\| y_A \|_2^2 + \| y_B \|_2^2 + 2 \E_{s' \sim p(\cdot \mid s)} \left[ \langle y_B,  y_A' \rangle \right] \right)\right]
+\end{align}
+Now, by \Cref{lem:cmc_bound_mdp} and assuming strong duality holds, the fixed point of the projected Bellman equation under the sampling $q^{\star}$ has bounded approximation error.
+\begin{algorithm}[tb]
+  \caption{Projected Off-Policy Q-Learning (POP-QL)}
+  \label{alg:pop_ql}
+  \begin{algorithmic}
+    \State  Initialize: feature function $\phi_{\theta^\phi}$, Q-function parameters $w$, policy $\pi_{\theta^\pi}$,\\
+    \quad \quad \quad \quad {\color{blue} g-function $g_{\theta^g}$, and Lagrange matrices $A$ and $B$}.
+    \For{step $t$ in ${1, \ldots, N}$}
+    \State $(s, a, r, s')_{1, \ldots, m} \sim \mu$ \Comment{Sample minibatch from dataset}
+    \\
+    \State $\tilde{a} \sim \pi_{\theta^\pi}(s)$ $\tilde{a}' \sim \pi_{\theta^\pi}(s')$ \Comment{Sample new actions from policy}
+    \State $q_{\text{target}} \coloneqq r + \gamma w^\top\phi_{\theta^\phi}(s', \tilde{a}')$ \Comment{Compute Q-function target value}
+    \State ${\color{blue} y_A, y_B, y_A' \coloneqq A^\top \phi_{\theta^\phi}(s, a), B^\top \phi_{\theta^\phi}(s, a), A^\top \phi_{\theta^\phi}(s', a')}$ \Comment{Compute dual values}
+    \State ${\color{blue} u \coloneqq \exp \left( \| y_A \|_2^2 + \| y_B \|_2^2 + 2 g_{\theta^g}(s, a) \right) / \bar{u}}$ \Comment{Compute minibatch-normalized weight}
+    \\
+    \State {\color{blue} $A, B \gets [A, B] - \lambda_{A,B} u \nabla_{A,B} \left( \| y_A \|_2^2 + \| y_B \|_2^2 + 2 \langle y_B, y_A' \rangle \right) $}
+    \Comment{Update Lagrange matrices}
+    \State ${\color{blue}  \theta^g \gets \theta^g - \lambda_g \nabla_{\theta^g} \left(g_{\theta^g}(s, a) - \langle y_B, y_A' \rangle  \right)^2 }$
+    \Comment{Update g-function parameters} 
+    \State $[\theta^Q, w] \gets \theta^Q - \lambda_Q {\color{blue} u} \nabla_{\theta^Q, w} \left(w^\top\phi_{\theta^\phi}(s, a) - q_{\text{target}}\right)^2$ 
+    \Comment{Update Q-function parameters} 
+    \State $\theta^\pi \gets \theta^\pi - \lambda_\pi \nabla_{\theta^\pi} \left(\mathcal{L}_{Q} + \alpha \mathcal{L}_{\text{entropy}} - {\color{blue} \beta u \langle y_B, y_A' \rangle} \right)$ 
+    \Comment{Augment SAC policy loss}
+    \EndFor
+  \end{algorithmic}
+\end{algorithm}
+
+\subsection{Practical Implementation}
+\paragraph{Two-Time-Scale Optimization}
+Because there is an expectation inside an exponential, we must perform a two time-scale optimization to be able to use sample-based gradient descent.
+We introduce a new function approximator $g_\theta$ to approximate the inner expectation:
+\begin{align}
+    g_\theta(s, a) &\approx \E_{s^{\prime} \sim p\left(s^{\prime} \mid s\right), a' \sim \pi(\cdot \mid s')} \left[\langle  y_B,  y_A' \rangle \right] ,
+\end{align}
+which can be optimized using gradient descent.
+
+If we assume $g_\theta(s)$ has sufficient expressive power and has converged, we can estimate the gradient of our objective with respect to $A$ and $B$, $\nabla_{A, B} \E_\mu\left[\exp \left(\operatorname{tr} Z^\top F(s)\right)\right]$, using samples from our sampling distribution, $\mu$:
+\begin{align}
+    \E_{s, a \sim \mu, s^{\prime} \sim p\left(s^{\prime} \mid s\right), a' \sim \pi(\cdot \mid s')}\left[ u(s, a) \cdot \nabla_{A, B} \left( \|  y_A \|_2^2 + \|  y_B \|_2^2 + 2 \langle  y_B,  y_A \rangle \right) \right]
+\end{align}
+where $u(s, a)$ are the sample reweighting terms defined as:
+\begin{equation}
+    u(s, a) = \exp \left( \|  y_A \|_2^2 + \|  y_B \|_2^2 + 2 g_\theta(s) \right), \quad q^*(s, a) = u(s, a) \mu(s, a).
+\end{equation}
+
+With this approximation, we can perform two-time-scale gradient descent.
+The gradient updates for $g_{\theta}$ and the Lagrange matrices $A$ and $B$ become
+\begin{equation}
+\begin{aligned}
+    \theta &\gets \theta - \lambda_\theta \nabla_\theta \left( g_\theta(s, a) - \E_{s^{\prime} \sim p\left(s^{\prime} \mid s, a\right), a' \sim \pi(s')} \left[\langle y_B,  y_A' \rangle \right] \right)^2,\\
+    A, B &\gets [A, B] - \lambda_{A,B} \E_{\mu, p}\left[u(s,a) \cdot \nabla_{A, B} \left( \|  y_A \|_2^2 + \|  y_B \|_2^2 + 2 \langle  y_B,  y_A' \rangle \right) \right],
+\end{aligned}
+\end{equation}
+
+We also found it helpful to normalize the g-function by the spectral norm of $A$ and $B$.
+See \Cref{ap:g_normalization} for details.
+
+\paragraph{Low-Rank Approximation}
+Empirically, we found the solution to our Lagrange dual optimization problem is typically a low-rank matrix with rank $r \leq 4$; this is not surprising in hindsight: under the on-policy distribution the matrix $\E_{(s, a)\sim q}  [F^\pi(s, a)]$ is \emph{already} positive definite (a consequence of the fact that TD will converge on-policy), and so it is intuitive that this bound would only need to be enforced on a low-dimensional subspace, corresponding to a low-rank dual solution.
+Thus, we can substantially reduce the computational cost of the method by using Lagrange matrices $A, B \in \mathbb{R}^{k \times r}$, where $r=4$.  This is essentially akin to low-rank semi-definite programming \citep{burer2003nonlinear}, which has proven to be an extremely competitive and scalable approach for certain forms of semi-definite programs.
+Furthermore, while not a primary motivation for the method, we found this low-rank optimization improves convergence of the dual matrices.
+In total, this leads to a set of updates that are fully linear in the dimension of the final-layer features, and which ultimately presents a relatively modest increase in computational cost over standard Q-Learning.
+\begin{figure*}
+    \centering
+    \includegraphics[trim={4cm 1cm 3cm 0cm}, clip, width=0.85\textwidth]{figures/frozen_lake_densities.pdf}
+    \caption{
+    Heat-maps of three state distributions for the ``Frozen Lake'' environment.
+    On the left is the off-policy sampling distribution, on the right is the on-policy sampling distribution, and, in the middle, is the projection of off-policy sampling distribution onto the contraction mapping set (\cref{eq:cmc}) computed by POP-QL.
+    Note that only a minor change to the off-policy sampling distribution is needed to satisfy the contraction mapping condition and, thus, guarantee convergence of TD-learning.
+    }
+    \label{fig:frozen_lake_densitities}
+\end{figure*}
+
+\subsection{Policy Optimization}
+So far, we have assumed a fixed policy in order to compute a sampling distribution and use that sampling distribution to compute a Q-function with low approximation error.
+Next, we need to find a policy that maximizes this Q-function.
+However, we want to avoid policies that result in very large reweighting terms for a couple reasons:
+1) state action pairs with large reweighting terms correspond to low-support regions of the state-space,
+and 2) large reweighting terms increase the variance of the gradient updates of our Lagrange matrices.
+To keep these reweighting terms small, we jointly project $\pi$ and the sampling distribution $\mu$ using a balancing term $\beta \in \mathbb{R}_+$:
+\begin{equation}
+\label{eq:pop_ql_opt_prob}
+  \underset{\pi, q}{\text{maximize}}~ \E_\mu[Q^\pi(s, a)] - \beta \KL(q\,\|\,\mu) \quad \text{s.t.} \quad \E_{(s, a) \sim q}[F^\pi(s, a)] \succeq 0
+\end{equation}
+We can solve this optimization using the technique from the previous section.
+The gradient updates for $A$, $B$, and the g-function stay the same and the gradient updates for the policy become
+\begin{equation}
+    \nabla_\pi \E_\mu[Q^\pi(s, a)] + 2 \beta \E_{q^\pi} \left[ \nabla_{\pi} \E_{\pi} \left[ \langle  y_B,  y_A' \rangle \right] \right].
+\end{equation}
+See \cref{ap:mdp_deriv} for a detailed derivation and \cref{alg:pop_ql} for the pseudocode of our algorithm.
+
+
+\section{Experiments and Discussion}
+
+
+\paragraph{Small Scale -- Frozen Lake}
+Frozen Lake is a small grid navigation task where the objective is to reach the goal state while avoiding the holes in the ice, which are terminal states.
+\Cref{fig:frozen_lake} shows a visualization of the Frozen Lake environment.
+Note, unlike the standard Frozen Lake environment, our Frozen Lake has no terminal states.
+Instead, falling in the ``holes'' moves the agent back to the starting location.
+For tabular Q-learning, this is a very simple task.
+However, using function approximation with a linear function approximator can cause offline Q-Learning to quickly diverge.
+
+We illustrate this divergence first with a policy evaluation task.
+In this task, the goal is to approximate the Q-function for an ``evaluation'' policy with data collected from a separate ``data-collection'' policy.
+We use a random featurize for the state-action space with dimension $k=63$ (the true state-action space has a cardinality of $64$).
+We train a linear function approximator with both vanilla Q-learning and POP-QL as we linearly interpolate the dataset between 100\% offline (meaning collected entirely from the ``data collection'' policy) and 100\% (meaning collected entirely from the ``evaluation'' policy).
+\Cref{fig:frozen_lake} shows a graph of the results.
+When trained offline, vanilla Q-learning quickly diverges, whereas POP-QL remains stable for all the datasets.
+We also note that the datasets for which vanilla Q-learning converges with low approximation error correspond to those that roughly satisfy our contraction mapping condition, exactly as our theory would predict.
+\Cref{fig:frozen_lake_densitities} illustrates how the projection made by POP-QL changes the sampling distribution only slightly compared to exactly projecting onto the on-policy distribution (importance sampling).
+
+We also perform a policy optimization task with the same datasets.
+In this task, the goal is to compute the policy with the highest return using offline data.
+We compare our method against online SAC, offline SAC, and CQL.
+\Cref{ap:experiment_details} discusses the hyper-parameter tuning procedures for these baseline methods.
+\Cref{fig:frozen_lake_return} shows the expected normalized returns of the policies computed using various methods.
+
+\begin{figure*}
+    \centering
+    \includegraphics[trim={0cm 0cm 0cm 0cm}, clip, width=0.7\textwidth]{figures/frozen_lake_return.pdf}
+    \caption{
+    Offline policy optimization performance on the Frozen Lake domain (\cref{fig:frozen_lake}) averaged over $5$ random seeds (shaded area is standard error).
+    As before, we varied the datasets by interpolating between the dataset collected by the ``data-collection policy'' ({\color{datapolicy} \datapolicyglyph}) and the dataset collected by the ``evaluation policy'' ({\color{optimpolicy} \optimpolicyglyph}), both with $\epsilon$-dithering for sufficient coverage ($\epsilon = 0.2)$.
+    Both our POP-QL (our method) and CQL are able to find a policy that outperforms behavior cloning without diverging.
+    }
+    \label{fig:frozen_lake_return}
+\end{figure*}
+
+\newcommand{\dagg}[0]{$\phantom{}^\dag$}
+\begin{table}[t]
+\caption{
+Results on the D4RL MuJoCo offline RL tasks \citep{fu2020d4rl}.
+We ran offline SAC (SAC-off), CQL, and POP-QL for 2.5M gradient steps.
+\dagg Results reported from \citet{fu2020d4rl}.
+We can see our method, POP-QL, outperforms other methods on the very suboptimal datasets (``random''), but falls behind on the others.
+}
+\label{tab:d4rl_mujoco}
+\begin{center}
+\footnotesize
+\include{tables/d4rl_mujoco}
+\end{center}
+\end{table}
+\begin{table}[t]
+\caption{
+Results on the D4RL kitchen offline RL tasks \citep{fu2020d4rl}.
+We ran offline SAC (SAC-off), CQL, and POP-QL for 2.5M gradient steps.
+\dagg Results reported by \citet{fu2020d4rl}.
+Our method, POP-QL, out-performs offline SAC and CQL, but falls behind BEAR and BCQ. 
+}
+\label{tab:d4rl_kitchen}
+\begin{center}
+\footnotesize
+\include{tables/d4rl_kitchen}
+\end{center}
+\end{table}
+
+\paragraph{D4RL Tasks}
+D4RL \citep{fu2020d4rl} is a standardized collection of offline RL tasks.
+Each task consists of an environment and dataset.
+The datasets for each task are collected by using rollouts of a single policy or a mixture of policies.
+The goal of each task is to learn a policy exclusively from these offline datasets that maximizes reward on each environment.
+
+We compare our method against vanilla SAC \citep{sac} run on offline data, Behavior Cloning, and CQL \citep{kumar2020cql} (with the JaxCQL codebase \citep{jaxcql}.
+For each of these methods, we run for 2.5 million gradient steps.
+Using the JaxCQL codebase, we were not able to replicate the results of CQL with the hyper-parameters presented in \citet{kumar2020cql}.
+Instead we performed our own small hyper-parameter sweep (details in \cref{ap:experiment_details}).
+For further comparison, we also include results for bootstrapping error reduction (BEAR) \citep{kumar2019stabilizing},
+batch-constrained Q-learning (BCQ) \citep{fujimoto2019off},
+and AlgaeDICE \citep{nachum2019algaedice} reported in \citet{fu2020d4rl}.
+We looked at 2 categories of environments:
+1) The OpenAI Gym \citep{openaigym} environments Hopper, Half Cheetah, and Walker2D,
+and 3) the Franka Kitchen environments \citep{gupta2019relay}.
+For each method, we used fixed hyper-parameters for environment category.
+
+\Cref{tab:d4rl_mujoco,tab:d4rl_kitchen} show the results on these tasks.
+We can see that our method is competitive or outperforms all other methods on the ``random'' and ``medium'' datasets, but falls behind on the ``medium-expert'' environments.
+This is because our method, unlike most other offline methods, does not perform any regularization towards the data collection policy\footnote{The data collection policy is often called the \emph{behavior policy}.}.
+
+
+
+
+
+\section{Conclusion and Future Directions}
+
+
+In this paper, we present Projected Off-Policy Q-Learning (POP-QL), a new method for reducing approximation errors in off-policy and offline Q-learning.
+POP-QL performs an approximate projection of both the policy and sampling distribution onto a convex set, which guarantees convergence of TD updates and bounds the approximation error.
+
+Unlike most other offline RL methods, POP-QL does not rely on pushing the learned policy towards the data-collection policy.
+Instead POP-QL finds the smallest adjustment to the policy and sampling distribution that ensures convergence.
+This property is exemplified in our experiments, especially when the data-collection policies are significantly sub-optimal.
+In small-scale experiments, we show that our method significantly reduces approximation error of the Q-function.
+We also evaluate our method on standardized Deep RL benchmarks.
+POP-QL outperforms other methods when the datasets are far from the optimal policy distribution, specifically the ``random'' datasets, and is competitive but falls behind the other methods when the dataset distribution gets closer to the on-policy distribution.
+
+This paper illustrates the power of the contraction mapping condition first introduced by \citet{kolter2011fixed} for offline RL and introduces a new class of offline RL techniques.
+While, in its current iteration, this method does not outperform the state-of-the-art methods on every domain, our results suggest the exciting potential of this new technique.
+We think this reduced performance on some the D4RL tasks is primarily due to training instabilities introduced by the min-max optimization of the policy and Lagrange matrices.
+As with many other RL algorithms, finding implementation tricks, such as target Q-networks \citep{dqn} and double Q-networks \citep{hasselt2016doubldqn, fujimoto2018addressing}, is critical to stabilizing learning.
+In future work, we hope to address the instability of the Lagrange matrix optimization, thus providing a method that consistently out-performs competing methods.
+
+\subsubsection*{Acknowledgements}
+This research was sponsored by Robert Bosch GMBH under award number 0087016732PCRPO0087023984.  The views and conclusions contained in this document are those of the author and should not be interpreted as representing the official policies, either expressed or implied, of any sponsoring institution, the U.S. government or any other entity.
+
+
+
+
+

@@ -1,0 +1,160 @@
+# Dataset Distillation via Adversarial Prediction Matching
+
+- Decision: Reject
+- Scores: 5, 5, 5
+
+## Abstract
+Dataset distillation is the technique of synthesizing smaller condensed datasets from large original datasets while retaining necessary information to persist the effect. In this paper, we approach the dataset distillation problem from a novel perspective: we regard minimizing the prediction discrepancy on the real data distribution between models, which are respectively trained on the large original dataset and on the small distilled dataset, as a conduit for condensing information from the raw data into the distilled version. An adversarial framework is proposed to solve the problem efficiently. In contrast to existing distillation methods involving nested optimization or long-range gradient unrolling,  our approach hinges on single-level optimization. 
+This ensures the memory efficiency of our method and provides a flexible tradeoff between time and memory budgets, allowing us to distil ImageNet-1K using a minimum of only 6.5GB of GPU memory. Under the optimal tradeoff strategy, it requires only 2.5$\times$ less memory and 5$\times$ less runtime compared to the state-of-the-art.
+Empirically, our method can produce synthetic datasets just 10\% the size of the original, yet achieve, on average, 94\% of the test accuracy of models trained on the full original datasets including ImageNet-1K, significantly surpassing state-of-the-art. Additionally, extensive tests reveal that our distilled datasets excel in cross-architecture generalization capabilities.
+
+## Human Reviews
+
+## Human Reviewer 1
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper proposes a new dataset distillation technique that can (1) save the computational cost compared to several baselines and (2) improve the test accuracy when training new networks. The framework utilizes the idea of adversarial training that tries to maximize the disagreement of student and teacher networks on the synthetic samples. Several approximation techniques are introduced to make the optimization practical and efficient. Experiments show that the proposed method can outperform baseline methods.
+
+### Strengths
+- The topic is timely as the dataset sizes are getting larger.
+- The authors have conducted a lot of experiments on various tasks and datasets. 
+- The writing quality is high and the presentation is clear.
+
+### Weaknesses
+- Why having a form of Equation (3) to train the synthetic samples?  I understand it might become easier to split the loss into two components if using Equation (3), and also it might have a similar form with Equation (1), but taking the logarithm over the loss values still look uncommon to me. 
+- How to verify that the synthetic samples are really approaching “hard samples”? This is one important assumption but I cannot find a verification for this. Also, it seems that $x_e$ depends on $\theta_e^S$, which means that they could be different samples over time. Therefore, why would a fix single set of $u$ can approach this dynamic set of "hard samples"? This is the main difficulty I have when I try to understand why the proposed method would work. 
+- I noticed that the authors use soft label instead of one-hot label. However, some baseline methods in Table 1 and Table 2 do not apply this. I think it would be beneficial to indicate this point when comparing with other baselines. 
+- Figure 5(b): it seems that the performance will drop when using more checkpoints, which looks counterintuitive to me: the approximation outperforms the original loss objective in terms of the final performance. It would be beneficial to provide more analysis on this point.
+
+### Questions
+See the above section. I am open to change my score based on the authors' responses.
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 2
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces a novel approach to dataset distillation, focusing on synthesizing smaller, condensed datasets while maintaining essential information. 
+
+The authors propose a method that minimizes the prediction discrepancy between models trained on a large original dataset and models trained on a small distilled dataset. 
+
+This is achieved through an adversarial framework, which distinguishes it from existing distillation methods that rely on nested optimization or long-range gradient unrolling.
+
+### Strengths
+Clarity and Readability: The paper is well-written and easy to understand, making it accessible to a wide audience.ch
+
+Novelty: The use of an adversarial framework for dataset distillation is a somewhat new and innovative approach to the problem.
+
+### Weaknesses
+1. Efficiency Comparison: The paper highlights a significantly reduced storage requirement for the proposed method compared to MTT. It would be beneficial to include a comparative analysis of this result with other existing dataset distillation (DD) frameworks to provide a broader context and assess the method's efficiency against a wider range of approaches;
+
+
+2. Scalability of the Proposed Method: While the proposed method offers a more efficient dataset distillation (DD) framework, it raises questions about its scalability. It would be valuable to see DD results using the original resolution of ImageNet, as the resolution setting is not explicitly mentioned in the paper (and it is assumed that the authors present results with reduced resolution). Additionally, it's advisable to include results on training models directly on ResNet rather than transferring to it, as there are existing DD methods that operate in this specific setting. Comparing against these methods would provide a more comprehensive assessment of the proposed method's scalability.
+
+### Questions
+1. Efficiency Comparison:
+
+a. Can you provide a detailed efficiency comparison of your proposed method with other existing dataset distillation (DD) frameworks, particularly in terms of storage requirements?
+
+b. How does your method compare in terms of efficiency when using original ImageNet image resolutions? Is the reduced resolution setting explicitly mentioned in the paper?
+
+c. Could you consider providing results on training models directly on ResNet (without transfer learning), as some DD methods operate in this specific setting? What insights can you offer on the efficiency and performance of your method in this scenario?
+
+2. Scalability of the Proposed Method:
+
+a. Given that your method aims to offer a more efficient DD framework, what scalability challenges or considerations have you encountered when dealing with the original resolution of ImageNet images?
+
+b. Can you elaborate on the choice of not providing results on models trained directly on ResNet, especially when other DD methods operate in this mode? What insights can you provide on the scalability and effectiveness of your approach under this setting?
+
+### Soundness
+2 fair
+
+### Presentation
+3 good
+
+### Contribution
+2 fair
+
+---
+
+## Human Reviewer 3
+
+### Rating
+5
+
+### Rating Number
+5
+
+### Confidence
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+### Summary
+This paper introduces a novel approach to dataset distillation that focuses on minimizing the prediction discrepancy between models trained on original large datasets and their distilled counterparts. The authors propose an adversarial framework that employs single-level optimization, differing from traditional methods that use nested optimization or gradient unrolling. This new method is not only memory-efficient, requiring as little as 6.5GB of GPU memory to distill ImageNet-1K, but also reduces the memory and runtime needed by 2.5 and 5 times, respectively, compared to the latest techniques.
+
+### Strengths
+1. The memory issue and training cost are the two challenges of existing dataset distillation, which prohibit the application of dataset distillation in large-scale datasets. This paper proposes an efficient dataset distillation method for both memory and training costs to address the two challenges. 
+
+2. The improvement of this method is significant. 
+
+3. The paper is well-organized and easy to follow. The mathematical formulation and figures in Section 3 are good.
+
+### Weaknesses
+1. The adersarial prediction matching seems to be close to DD [1]. Could the authors summarize the differences and improvements compared to DD? 
+
+2. If the loss function in line 6 of algorithm 1 is based on batch, then why is the memory complexity in section 3.3 only the graph size? The batch size should be counted as well.  
+
+3. The authors append some visualizations of the distilled images in the appendix. 
+4. The authors should have more experiments on NAS. Because NAS is a practical application of dataset distillation, The experiments on Table 3 are not sufficient.
+
+[1] Tongzhou Wang, Jun-Yan Zhu, Antonio Torralba, and Alexei A. Efros. Dataset distillation. CoRR,
+abs/1811.10959, 2018.
+
+### Questions
+Some questions are stated as weaknesses. The other questions are listed below.
+
+1. The study of memory cost presented in Figure 3 could be more detailed. For instance, a comparison of complexity versus batch size or number of steps relative to the baseline TESLA would be informative.
+
+2. Visualization of the distilled ImageNet dataset.  
+
+3. There seems to be a performance gap between the CNNs and the ViTs. Could authors have the cross-archi experiments on the distilled images trained with ViT.  (Train on ViT and test on CNNs). 
+
+4. The SOTA of imageNet-1k should be [1] instead of TESLA. the claim of SOTA in imagenet-1k is not objective. 
+
+[2] Zeyuan Yin, Eric Xing, and Zhiqiang Shen. Squeeze, recover and relabel: Dataset condensation at
+imagenet scale from a new perspective. In NeurIPS, 2023. 1, 2, 3, 4, 5,
+
+### Soundness
+3 good
+
+### Presentation
+3 good
+
+### Contribution
+2 fair

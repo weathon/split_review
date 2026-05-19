@@ -1,0 +1,326 @@
+\title{Efficient ConvBN Blocks for Transfer Learning and Beyond}
+
+\begin{abstract}
+  Convolution-BatchNorm (ConvBN) blocks are integral components in various computer vision tasks and other domains. A ConvBN block can operate in three modes: Train, Eval, and Deploy. While the Train mode is indispensable for training models from scratch, the Eval mode is suitable for transfer learning and beyond, and the Deploy mode is designed for the deployment of models. This paper focuses on the trade-off between stability and efficiency in ConvBN blocks: Deploy mode is efficient but suffers from training instability; Eval mode is widely used in transfer learning but lacks efficiency. To solve the dilemma, we theoretically reveal the reason behind the diminished training stability observed in the Deploy mode. Subsequently, we propose a novel Tune mode to bridge the gap between Eval mode and Deploy mode. The proposed Tune mode is as stable as Eval mode for transfer learning, and its computational efficiency closely matches that of the Deploy mode. Through extensive experiments in object detection, classification, and adversarial example generation across $5$ datasets and $12$ model architectures, we demonstrate that the proposed Tune mode retains the performance while significantly reducing GPU memory footprint and training time, thereby contributing efficient ConvBN blocks for transfer learning and beyond. Our method has been integrated into both PyTorch (general machine learning framework) and MMCV/MMEngine (computer vision framework). Practitioners just need one line of code to enjoy our efficient ConvBN blocks thanks to PyTorch's builtin machine learning compilers.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Feature normalization~\citep{huang_normalization_2023} is a critical component in deep convolutional neural networks to facilitate the training process by promoting stability, mitigating internal covariate shift, and enhancing network performance. BatchNorm~\citep{ioffe_batch_2015} is a popular and widely adopted normalization module in computer vision. A convolutional layer~\citep{lecun_gradient-based_1998} together with a consecutive BatchNorm layer is often called a ConvBN block, which operates in three modes:
+\begin{itemize}
+    \item Train mode. Mini-batch statistics (mean and standard deviation $\mu, \sigma$) are computed for feature normalization, and running statistics ($\hat{\mu}, \hat{\sigma}$) are tracked by exponential moving averages for testing individual examples when mini-batch statistics are unavailable.
+    \item Eval mode. Running statistics are directly used for feature normalization without update, which is more efficient than Train mode, but requires tracked statistics to remain stable in training. It can also be used to validate models during development.
+    \item Deploy mode. When the model does not require further training, computation in Eval mode can be accelerated~\citep{markus_fusing_nodate} by fusing convolution, normalization, and affine transformations into a single convolutional operator with transformed parameters. This is called Deploy mode, which produces the same output as Eval mode with better efficiency. In Deploy mode, parameters for the convolution are computed once-for-all, removing batch normalization for faster inference during deployment.
+\end{itemize}
+The three modes of ConvBN blocks present a trade-off between computational efficiency and training stability, as shown in Table~\ref{tab:trade-off}. Train mode is applicable for both train from scratch and transfer learning, while Deploy mode optimizes computational efficiency. Consequently, these modes traditionally align with three stages in deep models' lifecycle: Train mode for training, Eval mode for validation, and Deploy mode for deployment.
+\begin{table}[htbp]
+    \centering
+    \caption{Trade-off among modes of ConvBN blocks.}
+      \begin{tabular}{ccccc}
+      \toprule
+         Mode   & Train & Eval & Tune (proposed) & Deploy \\
+            \midrule
+      \textcolor{black!50}{Train From Scratch} &   \textcolor{black!50}{\ding{51}}    &   \textcolor{black!50}{\ding{55}}    &    \textcolor{black!50}{\ding{55}}   & \textcolor{black!50}{\ding{55}} \\
+      \midrule
+      Transfer Learning &   \ding{51}  &   \ding{51}    &      \ding{51} & \ding{55} \\
+      \midrule
+      Training Efficiency &    {\LARGE{$\star$}}   &   {\LARGE{$\star$}} {\LARGE{$\star$}}    &   {\LARGE{$\star$}} {\LARGE{$\star$}} {\LARGE{$\star$}}   & {\LARGE{$\star$}} {\LARGE{$\star$}} 
+ {\LARGE{$\star$}} \\
+      \bottomrule
+      \end{tabular}%
+    \label{tab:trade-off}%
+\end{table}% 
+
+With the rise of transfer learning~\citep{jiang2022transferability}, practitioners usually start with a pre-trained model, and instability of training from scratch is less of a concern. For instance, an object detector typically has one pre-trained backbone to extract features, and a head trained from scratch to predict bounding boxes and categories. Therefore, practitioners have started to explore Eval mode for transfer learning, which is more efficient than Train mode. Figure~\ref{fig:mmdet_statistics} presents the distribution of the normalization layers used in MMDetection~\citep{chen_mmdetection:_2019}, a popular object detection framework. In the context of transfer learning, a majority of detectors (496 out of 634) are trained with ConvBN blocks in Eval mode. Interestingly, our experiments suggest that Eval mode not only improves computational efficiency but also enhances the final performance over Train mode in certain transfer learning scenarios.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=.8\textwidth]{./figs/mmdet_statistics}
+    \caption{Usage of normalization layers in all the 634 object detectors with pre-trained backbones in the MMDetection framework~\citep{chen_mmdetection:_2019}. GN denotes GroupNorm, SyncBN represents synchronized BatchNorm across multiple GPUs and Eval indicates training ConvBN blocks in Eval mode. A majority of detectors (over 78\%) are trained with ConvBN blocks in Eval mode.}
+    \label{fig:mmdet_statistics}
+\end{figure}
+
+Since transfer learning of ConvBN blocks in Eval mode has been a common practice, and forward calculation results between Deploy mode and Eval mode are equivalent, it is natural to ask if we can use Deploy mode for more efficient training. Unfortunately, Section~\ref{sec:compare_eval_and_deploy} shows direct training in Deploy mode can lead to instability, as it is not designed for training.
+
+In quest of efficient ConvBN blocks for transfer learning with pre-trained models, we theoretically uncover the underlying causes of training instability in Deploy mode and subsequently propose a novel Tune mode. It bridges the gap between Eval mode and Deploy mode, preserving functional equivalence with Eval mode in both forward and backward propagation while approaching the computational efficiency of Deploy mode. Our extensive experiments across transfer learning tasks (object detection and classification) and beyond (adversarial example generation) confirm the reduction in memory footprint and wall-clock training time without sacrificing performance.
+
+Our contributions are summarized as follows:
+
+\begin{itemize}
+    \setlength\itemsep{-3pt}
+    \item We theoretically analyze why Deploy mode is unstable for training, and propose efficient ConvBN blocks with a Tune mode to take advantages from both Eval and Deploy modes.
+    \item We present extensive experiments across $12$ models and $5$ datasets to confirm the gain of Tune mode in transfer learning and beyond.
+    \item Our method has been quickly integrated into open-source framework libraries like PyTorch and MMCV/MMEngine because of its evident benefit, improving the efficiency of hundreds of models for everyone using these frameworks.
+\end{itemize}
+
+
+
+\section{Related Work}
+
+
+\subsection{Normalization Layers}
+
+Feature normalization has long been established in machine learning~\citep{bishop_pattern_2006}, \emph{e.g.}, Z-score normalization to standardize input features for smooth and isotropic optimization landscapes~\citep{boyd_convex_2004}. With the emergence of deep learning, normalization methods specifically tailored to intermediate activations, or feature maps, have been developed and gained traction.
+
+Batch normalization (BN), proposed by \citet{ioffe_batch_2015}, demonstrated that normalizing intermediate layer activations could expedite training and mitigate the effects of internal covariate shift. Since then, various normalization techniques have been proposed to address specific needs, such as group normalization~\citep{wu_group_2018} for small batch sizes, and layer normalization~\citep{ba_layer_2016} typically employed in sequence models such as recurrent networks and Transformers. We direct interested readers to the survey by \citet{huang_normalization_2023} for an in-depth exploration of normalization layers.
+
+Among various types of normalization, BatchNorm is a popular choice, partly due to its ability to be fused within convolution operations during deployment. Conversely, other normalization layers exhibit different behaviors compared to BatchNorm and often entail higher computational costs during deployment. The fusion allows ConvBN blocks to be efficiently deployed to massive edge and mobile devices where efficiency and power consumption control are critically important. This paper focuses on improving the efficiency of widely used ConvBN blocks for transfer learning and beyond.
+
+\subsection{Variants of Batch Normalization}
+
+While batch normalization successfully improves training stability and convergence, it presents several limitations. These limitations originate from the different behavior during training and validation (Train mode and Eval mode), which is referred to as train-inference mismatch~\citep{gupta_no-frills_2019} in the literature. \citet{ioffe_batch_2017} proposed batch renormalization to address the normalization issues with small batch sizes. \citet{wang_transferable_2019} introduced TransNorm to tackle the normalization problem when adapting a model to a new domain. Recently, researchers find that train-inference mismatch of BatchNorm plays an important role in test-time domain adaptation~\citep{wang_tent:_2021, wang_continual_2022}. In this paper, we focus on training ConvBN blocks in Eval mode, which is free of train-inference mismatch because its behavior is consistent in both training and inference.
+
+Another challenge posed by BatchNorm is its memory intensiveness. While the computation of BatchNorm is relatively light compared with convolution, it occupies nearly the same memory as convolution because it records the feature map of convolutional output for back-propagation. To address this issue, \citet{bulo_-place_2018} proposed to replace the activation function (ReLU~\citep{nair_rectified_2010}) following BatchNorm with an invertible activation (such as Leaky ReLU~\citep{maas_rectifier_2013}), thereby eliminating the need to store the output of convolution for backpropagation. However, this approach imposes an additional computational burden on backpropagation, as the input of activations must be recomputed by inverting the activation function. Their reduced memory footprint comes with the price of increased running time. In contrast, our proposed Tune mode effectively reduces both computation time and memory footprint for efficient transfer learning without any modification of network activations or any other architecture. % The memory footprint can also be reduced at the expense of recalculating BatchNorm during backpropagation~\citep{pytorch_fusing_nodate}. Nevertheless, these methods introduce additional computational costs, trading 
+
+\subsection{Transfer Learning}
+
+Training deep neural networks used to be difficult and time-consuming. Fortunately, with the advent of advanced network architectures like skip connections~\citep{he_deep_2016}, and the availability of foundation models~\citep{bommasani_opportunities_2022}, practitioners can now start with pre-trained models and fine-tune them for various applications. Pre-trained models offer general representations~\citep{donahue_decaf:_2014} that can accelerate the convergence of fine-tuning in downstream tasks. Consequently, the rule of thumb in computer vision tasks is to start with models pre-trained on large-scale datasets like ImageNet~\citep{deng_imagenet:_2009}, Places~\citep{zhou_places:_2018}, or OpenImages~\citep{kuznetsova_open_2018}. This transfer learning paradigm alleviates the data collection burden required to build a deep model with satisfactory performance and can also expedite training, even if the downstream task has abundant data~\citep{mahajan_exploring_2018}.
+
+Train mode is the only mode for training ConvBN blocks from scratch. However, it is possible to use Eval mode for transfer learning, as we can exploit pre-trained statistics without updating them. Moreover, Eval mode is more computationally efficient than Train mode. Consequently, researchers usually fine-tune pre-trained models in Eval mode~\citep{chen_mmdetection:_2019} (Figure~\ref{fig:mmdet_statistics}), which maintains performance while offering improved computational efficiency. In this paper, we propose a novel Tune mode that further reduces memory footprint and training time while maintaining functional equivalence with the Eval mode during both forward and backward propagation. The Tune mode is a drop-in replacement of Eval mode while making ConvBN blocks more efficient.
+
+\subsection{Machine Learning Compilers}
+
+PyTorch~\citep{paszke_pytorch:_2019}, a widely adopted deep learning framework, uses dynamic computation graphs that are built on-the-fly during computation. This imperative style of computation is user-friendly and leads to PyTorch's rapid rise in popularity. Nevertheless, the dynamic computation graphs complicate the speed optimization. Traditionally, operator analysis and fusion were only applied to models after training. The speed optimization usually involved a separate language or framework such as TensorRT~\citep{vanholder_efficient_2016} or other domain-specific languages, distinct from the Python language commonly employed for training. PyTorch has explored several ways, including symbolic tracing with \texttt{torch.fx}~\citep{reed_torch._2022} and just-in-time tracing with \texttt{torch.jit}, to introduce machine learning compilers into the framework, and all the efforts are consolidated into PyTorch 2.0~\citep{wu_pytorch_2023}. Leveraging PyTorch's pioneering compiler, our proposed Tune mode can automatically identify consecutive Convolution and BatchNorm layers without manual intervention.
+
+
+
+\section{Method}
+
+
+\subsection{Problem Setup}
+
+In this paper, we study ConvBN blocks that are prevalent in various computer vision applications, especially in edge and mobile devices. A ConvBN block consists of two layers: (1) a convolutional layer with weight $\omega$ and bias $b$; (2) a BatchNorm layer with tracked mean $\hat{\mu}$ and standard deviation $\hat{\sigma}$, and weight $\gamma$ and bias $\beta$. We focus on the computation within ConvBN blocks, which is not affected by activation functions or skip connections after ConvBN blocks.
+
+Given an input tensor $X$ with dimensions $[N, C_\text{in}, H_\text{in}, W_\text{in}]$, where $N$ represents the batch size, $C_\text{in}$ the number of input channels, and $H_\text{in}/W_\text{in}$ the spatial height/width of the input, a ConvBN block in Eval mode (the majority choice in transfer learning as shown in Figure~\ref{fig:mmdet_statistics}) operates as follows. First, the convolutional layer computes an intermediate output tensor $Y = \omega \circledast X + b$ (we use $\circledast$ to denote convolution), resulting in dimensions $[N, C_\text{out}, H_\text{out}, W_\text{out}]$. Subsequently, the BN layer normalizes and applies an affine transformation to the intermediate output, producing the final output tensor $Z=\gamma \frac{Y-\hat{\mu}}{\sqrt{\hat{\sigma}^2+\varepsilon}}+\beta$ with the same dimensions as $Y$.
+
+Usually, the training loss consists of two parts: $J = J(Z)$ calculated on the network's output, and regularization loss $R$ calculated on the network's trainable parameters. Training is dominated by the gradient from $J(Z)$, especially at the beginning of training. The influence of $R$ is rather straightforward to analyze, since it directly and independently applies to each parameter. We omit the analysis for simplicity, as it does not change the main conclusion of this paper. Therefore, our primary focus lies in understanding the gradient with respect to the output loss function $J(Z)$ under different modes of ConvBN blocks. Note that $J(Z)$ can represent loss directly calculated on $Z$, as well as loss computed based on the output of subsequent layers operating on $Z$.
+
+\subsection{Preliminary}
+
+\subsubsection{Backward Propagation of Convolution}
+
+To discuss the stability of training, we must examine the details of backward propagation to understand the behavior of the gradient for each parameter. For a convolution layer with forward computation $Y = \omega \circledast X + b$, if the gradient back-propagated to $Y$ is $\pd{J}{Y}$, then the gradients of each input of the convolution layer, as explained in~\citet{bouvrie_notes_2006}, are: $\pd{J}{\omega} = \pd{J}{Y} \odot X ; \pd{J}{X} = \omega_{\text{rot}} \circledast \pd{J}{Y} ; \pd{J}{b} = \pd{J}{Y}$. The $\odot$ represents cross-correlation, and $\omega_{\text{rot}}$ is the rotated version of $\omega$, both are used to compute the gradient of convolution~\citep{rabiner_theory_1975}. Note that these equations potentially contain broadcasting, a technique to allow element-wise arithmetic between two tensors with different shapes.
+
+\subsubsection{Associative Law for Convolution and Affine Transform}
+Convolution can essentially be viewed as a patch-wise matrix-vector multiplication, with the matrix (kernel weight) having a shape of $[C_\text{out}, k^2 C_\text{in}]$, and the vector having a shape of $[k^2 C_\text{in}]$. If an affine transform is applied to the weight along the $C_\text{out}$ dimension, then the affine transform is associative with the convolution operator. Formally speaking, $\gamma \cdot (\omega \circledast X) = (\gamma \cdot \omega) \circledast X$, where $\gamma$ is a $C_\text{out}$-dimensional vector multiplied to each row of the weight $\omega$. This association law lays the foundation of analyses for the Deploy mode and our proposed Tune mode. The associative law also applies to transposed convolution~\citep{zeiler_deconvolutional_2010} and linear layers, therefore \emph{the proposed Tune mode also works for TransposedConv-BN and Linear-BN blocks}.
+
+With the necessary background established, we directly present the forward, backward, and memory footprint details in Table~\ref{tab:conv_bn_details}. Further analyses will be provided in subsequent sections. % Note that intermediate tensors saved for back-propagation can be identified by back-propagation equations: variables (to be specific, $X, Y$ in Eval mode, $X, \omega^\prime, b^\prime$ in Tune mode, and $X$ in Deploy mode) other than the gradient should be saved during forward calculation.
+
+\begin{table}[h]
+    \centering
+    \caption{Computation graph of ConvBN blocks in different modes. We introduce Tune mode to improve the efficiency of ConvBN blocks, alleviating the dilemma between training stability and computational efficiency.}
+        \label{tab:conv_bn_details}
+    
+     \resizebox{\textwidth}{!}{
+    \begin{tabular}{ccl}
+        \toprule
+            Mode & \tabincell{c}{Computation \\ Graph} & \makecell[c]{Backward \\ Propagation} \\
+        \midrule
+        Eval &\begin{minipage}{0.6\columnwidth}
+		\centering
+  {\includegraphics[width=\linewidth]{./figs/eval_mode.pdf}}
+	\end{minipage}& $
+\begin{small}\begin{aligned}
+    &\frac{\partial J}{\partial X} = \frac{\gamma}{\sqrt{\hat{\sigma}^2 + \epsilon}} \omega_{\text{rot}} \circledast \frac{\partial J}{\partial Z} \\[2mm]
+    &\frac{\partial J}{\partial \omega} = \frac{\gamma}{\sqrt{\hat{\sigma}^2 + \epsilon}} \pd{J}{Z} \odot X \\[2mm]
+    &\pd{J}{b} = \frac{\gamma}{\sqrt{\hat{\sigma}^2 + \epsilon}} \pd{J}{Z} \\[2mm]
+    &\pd{J}{\gamma} = \pd{J}{Z} \frac{Y - \hat{\mu}}{\sqrt{\hat{\sigma}^2 + \epsilon}} \\[2mm]
+    &\pd{J}{\beta} = \pd{J}{Z}
+\end{aligned}\end{small}
+$
+        \\
+\midrule
+            \tabincell{c}{Tune \\ (Proposed)} &
+            \begin{minipage}{0.4\columnwidth}
+		\centering
+  {\includegraphics[width=\linewidth]{./figs/tune_mode.pdf}}
+	\end{minipage} &$\begin{small}
+\begin{aligned}
+    &\pd{J}{X} = \omega_{\text{rot}}^\prime \circledast \pd{J}{Z} \\[2mm]
+    &\pd{J}{\omega^\prime} = \pd{J}{Z} \odot X \\[2mm]
+    &\pd{J}{\omega} = \frac{\gamma}{\sqrt{\hat{\sigma}^2 + \epsilon}} \pd{J}{\omega^\prime}\\[2mm]
+    &\pd{J}{b} = \frac{\gamma}{\sqrt{\hat{\sigma}^2 + \epsilon}} \pd{J}{Z} \\[2mm]
+    &\pd{J}{\gamma} = \pd{J}{\omega^\prime}\frac{\omega}{\sqrt{\hat{\sigma}^2 + \epsilon}} + \pd{J}{Z}\frac{b - \hat{\mu}}{\sqrt{\hat{\sigma}^2 + \epsilon}} \\[2mm]
+    &\pd{J}{\beta} = \pd{J}{Z}
+\end{aligned}\end{small}
+$
+\\
+    \midrule
+Deploy & \begin{minipage}{0.4\columnwidth}
+		\centering
+  {\includegraphics[width=\linewidth]{./figs/deploy_mode.pdf}}
+	\end{minipage} & $\begin{small}
+\begin{aligned}
+    &\pd{J}{X} = \omega_{\text{rot}}^\prime \circledast \pd{J}{Z} \\[2mm]
+    &\pd{J}{\omega^\prime} = \pd{J}{Z} \odot X \\[2mm]
+    &\pd{J}{b^\prime} = \pd{J}{Z}
+\end{aligned}\end{small}
+$ 
+ \\
+ \bottomrule \\
+ \multicolumn{3}{c}{\begin{minipage}{\columnwidth}
+		\centering
+  {\includegraphics[width=\linewidth]{./figs/footer.pdf}}
+	\end{minipage}}
+        
+    \end{tabular}
+
+}
+
+\end{table}
+
+\subsection{Analyzing Eval Mode and Deploy Mode}
+\label{sec:compare_eval_and_deploy}
+
+With the help of equations in Table~\ref{tab:conv_bn_details}, the comparison between Eval mode and Deploy mode on efficiency and training stability is as straightforward as follows.
+
+\subsubsection{Forward Computation Efficiency} We first observe that Eval mode and Deploy mode have equivalent results in forward computation, and Deploy mode is more efficient. The equivalence can be proved by the definitions $\omega^{\prime}=\frac{\gamma}{\sqrt{\hat{\sigma}^2+\epsilon}} \cdot \omega$ and $b^{\prime}=\left(b-\hat{\mu}\right) \frac{\gamma}{\sqrt{\hat{\sigma}^2+\epsilon}}+\beta $, together with the associative law for convolution and affine transformations. However, Deploy mode pre-computes the weight $\omega^{\prime}$ and $b^{\prime}$, reducing the forward propagation to a single convolution calculation. Conversely, Eval mode requires a convolution, supplemented by a normalization and an affine transform on the convolutional output. This results in a slower forward propagation process for Eval mode. Moreover, Eval mode requires storing $X, Y$ for backward propagation, while Deploy mode only stores $X$. The memory footprint of Eval mode is nearly double of that in Deploy mode. Therefore, Deploy mode emerges as the more efficient of the two in terms of memory usage and computational time.
+
+\subsubsection{Training Stability} Our analyses suggest that Deploy mode tends to exhibit less training stability than Eval mode. Focusing on the convolutional weight, which constitutes the primary parameters in ConvBN blocks, we observe from Table~\ref{tab:conv_bn_details} that the relationship of values and gradients between Deploy mode and Eval mode is $\omega^{\prime}=\frac{\gamma}{\sqrt{\hat{\sigma}^2+\epsilon}} \omega$ and $\frac{\partial J}{\partial \omega^{\prime}} = \frac{\sqrt{\hat{\sigma}^2+\epsilon}}{\gamma} \frac{\partial J}{\partial \omega}$. The scaling coefficients of the weight ($\frac{\gamma}{\sqrt{\hat{\sigma}^2+\epsilon}}$) are inverse of the scaling coefficients of the gradient ($\frac{\sqrt{\hat{\sigma}^2+\epsilon}}{\gamma}$). This can cause training instability in Deploy mode. For instance, if $\frac{\gamma}{\sqrt{\hat{\sigma}^2+\epsilon}}$ is small (say $0.1$), the weight reduces to one-tenth of its original value, while the gradient increases tenfold. This is a significant concern in real-world applications. As illustrated in Figure~\ref{fig:coeff_distribution}, these scaling coefficients range from as low as $0$ to as high as $30$, leading to unstable training. Figure~\ref{fig:deploy_mode_failure}  further substantiates this point through end-to-end experiments in both object detection and classification using Eval mode and Deploy mode. Training performance in Deploy mode is markedly inferior to that in Eval mode.
+
+\begin{figure}[h]
+    \subfigure[]{\includegraphics[width=0.33\columnwidth]{./figs/coeff_stat.pdf}\label{fig:coeff_distribution}}
+    \subfigure[]{\includegraphics[width=0.64\columnwidth]{./figs/compare_eval_deploy.pdf}\label{fig:deploy_mode_failure}}
+    \caption{(a): Distribution of scaling coefficients for weight $\left(\gamma/\sqrt{\hat{\sigma}^2 + \epsilon}\right)$ in different backbones. (b): Comparison between training with Eval mode and Deploy mode in both object detection and classification. Severe performance degradation is observed for training with Deploy mode.}
+    \label{fig:coeff_distribution_and_deploy_mode_failure}
+\end{figure}
+
+In conclusion, \emph{Deploy mode and Eval mode share the same forward calculation results, but present a dilemma in computation efficiency and training stability.}
+
+\subsection{Tune Mode \emph{v.s.} Deploy Mode and Eval Mode}
+
+Table~\ref{tab:conv_bn_details} describes the detailed computation of the proposed Tune mode specifically designed for efficient transfer learning. This mode leverages the associative law of convolution and affine transformation, optimizing both memory and computation. \emph{The main point is to calculate the transformed parameters dynamically, on-the-fly.} Next, we provide two critical analyses to show how the proposed Tune mode addresses the dilemma between training stability and computational efficiency, and how it bridges the gap between Eval mode and Deploy mode.
+
+\subsubsection{Training Stability}
+
+The associative law between convolution and affine transformation readily implies that the forward calculations between Eval mode and Tune mode are equivalent. The equivalence of backward calculations is less intuitive, particularly when considering the gradient of $\gamma$. To validate this, we employ an alternative approach: let $Z_1, Z_2$ represent the outputs of Eval mode and Tune mode, respectively. We define $Z_1 = Z_1 (\omega, b, \gamma, \beta), Z_2 = Z_2 (\omega, b, \gamma, \beta)$. Given that $Z_1 = Z_2$, and both are functions computed from the same set of parameters ($\omega, b, \gamma, \beta$), we can assert that their Jacobian matrices are the same: $\pd{Z_1}{[\omega, b, \gamma, \beta]} = \pd{Z_2}{[\omega, b, \gamma, \beta]}$. This immediately suggests that both modes share the same backward propagation dynamics. Consequently, we can conclude that \emph{Tune mode is as stable as Eval mode in transfer learning}. % They are equivalent up to the error of floating point calculation (e.g., $0.1 \times (0.3 \times 0.7) - (0.1 \times 0.3) \times 0.7 \approx 3 \times 10^{-18}$ in 64-bit floating point calculation).
+
+\subsubsection{Efficiency}
+
+According to Table~\ref{tab:conv_bn_details}, Eval mode requires saving the input feature map $X$ and the convolutional output $Y$, with total memory footprint $X + Y$ for each ConvBN block. In contrast, Tune mode stores $X$ and the transformed weights $\omega^{\prime}$, with total memory footprint $X + \omega^{\prime}$ for each ConvBN block. Since feature maps $Y$ are usually larger than convolutional weights $\omega^{\prime}$, this difference signifies that Tune mode requires less memory for training. The same applies to the analysis of computation: computation in Eval mode consists of a convolution followed by an affine transformation on the \emph{convolutional feature map} $Y$; Tune mode computation consists of an affine transformation on the original \emph{convolutional weights} $\omega$ succeeded by a convolution with the transformed weights $\omega^\prime$. An affine transformation on convolutional weights executes faster than on feature maps. Therefore, Tune mode outperforms Eval mode both in memory usage and computation speed.
+
+The above conclusion can be empirically validated using a standard ResNet-50~\citep{he_deep_2016} model with variable batch sizes and input sizes. The results, displayed in Figure~\ref{fig:compute_efficiency}, clearly indicate that \emph{Tune mode is more efficient than Eval mode} across all tested settings. The memory footprint of Tune mode consumed by pre-trained backbone in transfer learning can be reduced to one half of that in Eval mode, and the computation time is reduced by about $10\%$.
+
+\begin{figure}[h]
+    \includegraphics[width=\textwidth]{./figs/cost_compare.pdf}
+    \caption{Memory footprint and running time comparison for Eval mode and Tune mode. The base setting is batchsize $=32$ and input dimension $=224 \times 224$, and we vary batchsize and input dimension to test the efficiency.}
+    \label{fig:compute_efficiency}
+\end{figure}
+
+The comparison among Eval/Tune/Deploy can be summarized as follows:
+
+\begin{itemize}
+    \setlength\itemsep{-3pt}
+    \item $\text{Deploy mode} \approx \text{Tune mode} > \text{Eval mode}$, in terms of efficiency.
+    \item $\text{Eval mode} = \text{Tune mode} > \text{Deploy mode}$, in terms of training stability.
+\end{itemize}
+
+Therefore, the proposed Tune mode successfully bridges the gap between Eval mode and Tune mode, improving the efficiency of ConvBN blocks with Eval mode while keeping the stability of training.
+
+
+
+\section{Experiments}
+
+\label{sec:experiments}
+
+ The total computation for results reported in this paper is about $3400$ hours of V100 GPU (32GB) counted by our internal computing infrastructure.
+
+Extensive experiments confirm the benefit of our method, and convince the community of PyTorch and MMCV/MMEngine~\citep{mmcv, mmengine2022} to quickly integrate our method. Consequently, anyone using either library can enjoy the benefit of our algorithm with as simple as a one-line code change.
+
+Since Tune mode improves efficiency over Eval mode, our experiments focus on the efficiency and accuracy comparison between Eval mode and Tune mode. 
+
+\subsection{Object Classification in Transfer Learning}
+\label{sec:classification}
+
+We first show the benefit of Tune mode in object classification in transfer learning. We use a popular open-source TLlib~\citep{jiang2022transferability}, and the datasets include CUB-200~\citep{wah2011caltech} for fine-grained bird classification, Standford Cars~\citep{krause_3d_2013} and Aircrafts~\citep{maji2013fine}. The network backbone is ResNet50 pre-trained on ImageNet. Each experiment is repeated three times with different random seeds to report mean and standard deviation. Compared with Eval mode, the proposed Tune mode \emph{reduces more than $7\%$ computation time and $36\%$ memory footprint}.
+
+\begin{table}[h]
+\caption{Results for Tune mode in classification using TLlib.}
+\centering
+\begin{tabular}{cccll}
+\toprule
+Dataset       & mode  & Accuracy & \tabincell{c}{Memory (GB)}            & \tabincell{c}{Time (second/iteration)} \\
+\midrule
+\multirow{2}{*}{CUB-200} & Eval & 82.62 ($\pm$ 0.14)    & 19.499           & 0.549             \\
+              & Tune  & 83.20 ($\pm$ 0.00)    & 12.323 (\textbf{36.80\%}$\downarrow$) & 0.501 (\textbf{8.74\%}$\downarrow$)   \\
+\midrule
+\multirow{2}{*}{Aircrafts}     & 
+Eval & 85.21 ($\pm$ 0.22)    & 19.497           & 0.548          \\
+              & Tune  & 85.90 ($\pm$ 0.26)    & 12.321 (\textbf{36.81\%}$\downarrow$) & 0.505 (\textbf{7.85\%}$\downarrow$)   \\
+\midrule
+\multirow{2}{*}{Stanford Cars} & Eval & 90.11 ($\pm$ 0.03)    & 19.499           & 0.541            \\
+              & Tune  & 90.13 ($\pm$ 0.12)    & 12.321 (\textbf{36.81\%}$\downarrow$) & 0.491 (\textbf{9.24\%}$\downarrow$)   \\
+\bottomrule
+\end{tabular}
+\label{tbl:tllib_acc}
+\end{table}
+
+\begin{table}[ht]
+\centering
+\caption{Object Detection results on different detectors and backbones. }
+\resizebox{\textwidth}{!}{
+\begin{tabular}{cccccll}
+\toprule
+Detector & Backbone                 & BatchSize & Precision  & mode & mAP    & Memory (GB)        \\
+\midrule
+\multirow{2}{*}{Faster RCNN} & \multirow{2}{*}{ResNet50}   & \multirow{2}{*}{2} & \multirow{2}{*}{FP32} & Eval & 0.3739 & 3.857              \\
+                                                                                                  & & & & Tune & 0.3728 (-0.0011) & 3.003 (\textbf{22.15\%}$\downarrow$)    \\
+\midrule                                        
+\multirow{2}{*}{Mask RCNN}& \multirow{2}{*}{ResNet50}     & \multirow{2}{*}{2} & \multirow{2}{*}{FP32} & Eval & 0.3824 & 4.329          \\
+                                                                                                  & & & & Tune & 0.3825 (+0.0001) & 3.470 (\textbf{19.85\%}$\downarrow$) \\
+\midrule                                        
+\multirow{2}{*}{Mask RCNN}& \multirow{2}{*}{ResNet101}    & \multirow{2}{*}{16} & \multirow{2}{*}{FP16} & Eval & 0.3755 & 13.687  \\
+                                                                                                  & & & & Tune & 0.3756 (+0.0001) & 9.980 (\textbf{27.08\%}$\downarrow$) \\
+\midrule
+\multirow{2}{*}{Retina Net} & \multirow{2}{*}{ResNet50}    & \multirow{2}{*}{2} & \multirow{2}{*}{FP32} & Eval & 0.3675 & 3.631          \\
+                                                                                                  & & & & Tune & 0.3647 (-0.0028) & 2.774 (\textbf{23.59\%}$\downarrow$) \\
+\midrule                                        
+\multirow{2}{*}{Faster RCNN} & \multirow{2}{*}{ResNet101}  & \multirow{2}{*}{2} & \multirow{2}{*}{FP32} & Eval & 0.3944 & 5.781          \\
+                                                                                                  & & & & Tune & 0.3921 (-0.0023) & 4.183 (\textbf{27.65\%}$\downarrow$) \\
+\midrule                                        
+\multirow{2}{*}{Faster RCNN} & \multirow{2}{*}{ResNext101} & \multirow{2}{*}{2} & \multirow{2}{*}{FP32} & Eval & 0.4126 & 6.980          \\
+                                                                                                  & & & & Tune & 0.4131 (+0.0005) & 4.773 (\textbf{31.62\%}$\downarrow$) \\
+\midrule                                        
+\multirow{2}{*}{Faster RCNN} & \multirow{2}{*}{RegNet}     & \multirow{2}{*}{2} & \multirow{2}{*}{FP32} & Eval & 0.3985 & 4.361          \\
+                                                                                                  & & & & Tune & 0.3995 (+0.0010) & 3.138 (\textbf{28.06\%}$\downarrow$) \\
+\midrule                                        
+\multirow{2}{*}{Faster RCNN} & \multirow{2}{*}{HRNet}      & \multirow{2}{*}{2} & \multirow{2}{*}{FP32} & Eval & 0.4017 & 8.504          \\
+                                                                                                  & & & & Tune & 0.4031 (+0.0014) & 5.463 (\textbf{35.76\%}$\downarrow$) \\
+                                                                                                  \midrule                                        
+\multirow{2}{*}{\href{}{Faster RCNN}} & \multirow{2}{*}{RepVGG}      & \multirow{2}{*}{16} & \multirow{2}{*}{FP16} & Eval & 0.3350 & 15.794          \\
+                                                                                                  & & & & Tune & 0.3350 (+0.0000) & 8.996 (\textbf{43.04\%}$\downarrow$) \\
+\bottomrule
+\end{tabular}
+}
+\label{tbl:detector_res}
+\end{table}
+
+\subsection{Object Detection in Transfer Learning}
+\label{sec:detection}
+
+This section presents object detection results on the widely used COCO~\citep{lin_microsoft_2014} dataset. The MMDetection library uses Eval mode by default, and we compare the results by switching models to Tune mode. We test against various mainstream CNN backbones and detection algorithms (including Faster RCNN~\citep{ren_faster_2015}, Mask RCNN~\citep{he_mask_2017}, and Retina Net~\citep{lin_focal_2017}). Object detection experiments are costly, and therefore we do not repeat three times to calculate mean and standard deviation.0005$. The change of mAP in Table \ref{tbl:detector_res} falls into the range of random fluctuation across experiments.
+
+With different architecture, batch size and training precision~\citep{micikevicius_mixed_2018}, \emph{Tune mode has almost the same mAP as Eval mode, while remarkably reducing the memory footprint by about $20\% \sim 40\%$}. Note that detection models typically have a pre-trained backbone for extracting features, and a head trained from scratch for producing bounding boxes and classification. The head consumes the major computation time, and the backbone consumes the major memory footprint. Because ConvBN blocks mainly lie in the backbone, our Tune mode mainly benefits the backbone, therefore reducing only the memory footprint. Computation speedup is not obvious in objection detection, and we only report the reduction of memory footprint here.
+\subsection{Application of Tune Mode Beyond Transfer Learning}
+
+Our method is designed for transfer learning. However, we find that its application can go beyond transfer learning. Any model using Eval mode can benefit from our Tune mode. Adversarial example generation~\citep{szegedy2013intriguing} is a representative application of our method: when generating adversarial examples for adversarial training~\citep{goodfellow_explaining_2015}, an important step is to calculate the gradient $\nabla_{{x}} \mathcal{L}(\theta, x, y)$ with respect to inputs $x$, given inputs, labels $y$, and parameters $\theta$. Common techniques for producing  adversarial samples, such as FGSM~\citep{goodfellow_explaining_2015}, BIM~\citep{kurakin2016adversarial}, and PGD~\citep{madry2017towards}, all perturb the inputs based on the gradients, where the model is in Eval mode. Turning on Tune mode can improve the efficiency of adversarial sample generation. Concretely, we perform forward and backward propagation of samples through the model to compute the gradient of input, and measure the time cost as well as GPU memory footprint. Across different models, Tune mode can \emph{achieve 5\%-8\% speedup and save 30\%-45\% of GPU memory.} These experiments cover widely used network architectures, and also cover UNet that has transposed convolution layers, demonstrating the broad application of our method.
+\begin{figure}[h]
+    \includegraphics[width=0.5\columnwidth]{./figs/time_cost_adv.pdf}
+    \includegraphics[width=0.5\columnwidth]{./figs/memory_cost_adv.pdf}
+    \caption{Tune mode \emph{v.s.} Eval mode in adversarial example generation. }
+    \label{fig:cost_adv}
+\end{figure}
+
+
+
+\section{Conclusion}
+
+
+This paper proposes efficient ConvBN blocks with a novel Tune mode for transfer learning and beyond. Tune Mode is equivalent to Eval mode in both forward and backward calculation while reducing memory footprint and computation time without hurting performance. Our experiments confirm the benefit across dozens of models and tasks, reducing at most $44\%$ memory footprint and $9\%$ computation time. We further bring the proposed method into open-source frameworks the community uses everyday, reducing the cost of training networks with ConvBN blocks.
+
+
+
