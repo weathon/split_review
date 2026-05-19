@@ -1,18 +1,24 @@
-Now let me write the consolidated review.
+Now I have a thorough understanding of the paper and all the claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper studies reinforcement learning under unknown reward perturbations that discretize and shuffle reward space (Generalized Confusion Matrix / GCM perturbations). The authors propose a Distributional Reward Critic (DRC) that treats reward prediction as a classification problem over discretized bins, leveraging state-action information to reduce variance. They provide theoretical guarantees of exact reward recovery under GCM with known discretization (Theorem 1) and a principled method for selecting the number of intervals via cross-entropy (Theorem 2). A variant (GDRC) handles unknown discretization and reward range. Under GCM perturbations, DRC/GDRC win/tie the highest return in 40/57 settings vs. 16/57 for the best baseline. Under continuous (non-GCM) perturbations, GDRC shows a modest edge (27/48 vs. 24/48).
+The paper studies RL under unknown reward perturbations and proposes the Distributional Reward Critic (DRC) — a classifier-based reward model that predicts the distribution of perturbed rewards via cross-entropy loss and recovers the true reward by identifying the mode. The authors define a Generalized Confusion Matrix (GCM) perturbation model that generalizes prior discrete confusion matrices to continuous rewards. Theorem 1 proves exact reward recovery under mode-preserving GCM perturbations in the infinite-sample limit, and Theorem 2 shows that cross-entropy can identify the number of discretization intervals. A General DRC (GDRC) variant handles unknown discretization via an ensemble voting mechanism. Experiments span MuJoCo and discrete control tasks under GCM and continuous perturbations.
+
+---
 
 ## Strengths
 
-- **Theoretical guarantee of exact recovery under GCM (Theorem 1, Sec. 4.1).** The paper proves that with a sufficiently expressive network and GCM perturbations, DRC learns the correct conditional distribution for each state-action pair in the infinite-sample limit, enabling exact reward recovery when the mode-preserving assumption holds. This is a stronger formal guarantee than offered by prior methods (RE, SR).
+1. **Novel theoretical recovery guarantee under GCM (Theorem 1).** The paper proves that with a sufficiently expressive network and mode-preserving GCM perturbations, DRC converges to the perturbed reward distribution and can exactly recover the true reward. This is clean, well-scoped theory that directly supports the method's core motivation.
 
-- **Principled method for unknown discretization via cross-entropy (Theorem 2, Sec. 4.2.1).** The paper shows that the minimum cross-entropy of the reward critic is non-decreasing until n_o = n_r and then constant, providing a theoretically grounded voting mechanism to select the number of intervals without prior knowledge. This meaningfully relaxes a key limitation of prior work (SR).
+2. **Strong win rates under GCM perturbations.** In MuJoCo environments under GCM perturbations (Section 5.3), DRC outperforms/ties all baselines (PPO, RE, SR W) in 35/48 settings and GDRC in 33/48 settings, compared to the best baseline at 12/48. This is a substantial margin and demonstrates the method's effectiveness in the targeted setting.
 
-- **Strong empirical performance under GCM perturbations (Sec. 5.3).** DRC wins/ties the highest return in 40/57 settings across discrete and continuous control tasks (vs. 16/57 for the best baseline). In Mujoco environments, DRC outperforms/ties PPO, RE, and SR W in 35/48 instances. These results are substantial and cover multiple environments, noise levels, and discretization granularities.
+3. **Generalized perturbation model (Proposition 1).** The GCM construction generalizes the discrete confusion matrix of Wang et al. (2020) to continuous rewards, with a bounded approximation error of (r_max−r_min)/n_r for any continuous perturbation. This is a genuinely useful formalization.
 
-- **Empirical validation of cross-entropy selection strategy (Fig. 4, Sec. 5.2).** The experiments confirm that cross-entropy increases rapidly for small n_o and plateaus when n_o = n_r, matching the theoretical prediction of Theorem 2, lending practical credibility to the voting mechanism.
+4. **Principled cross-entropy criterion for interval selection (Theorem 2).** The paper establishes that the minimum cross-entropy is non-decreasing in n_o until n_r, then constant. This provides a theoretically-motivated method for selecting the number of output intervals without prior knowledge of the perturbation — a clever insight.
+
+5. **Lower informational requirements than baselines.** As shown in Table 1, DRC/GDRC require neither known perturbation structure (like SR) nor the optimal-policy-unchanged assumption (like RE), making them applicable to a broader class of reward perturbations.
+
+---
 
 ## Weaknesses
 
@@ -21,57 +27,71 @@ None.
 
 ### Major
 
-- **Critic collapse in HalfCheetah undermines DRC's robustness (Sec. 5.3).** The paper reports that DRC (the variant with known discretization) suffers from a catastrophic failure mode in HalfCheetah where the reward critic "collapses" — predicting the same label for all samples and terminating training early. This causes GDRC (the uninformed variant) to outperform DRC in several settings. The paper identifies this issue transparently but offers only speculative future work (entropy bonus, replay buffer) rather than a concrete fix or diagnostic analysis. For a method presented as the paper's central contribution, this unresolved failure mode is a significant reliability concern.
+1. **Complete absence of statistical reporting.** The paper reports all experimental results as single learning curves with no indication of the number of independent runs (seeds), no error bars, no confidence intervals, and no variance measures. Every figure (Fig. 3–7) and every win/tie count (e.g., "35/48," "40/57") is presented without statistical backing. The paper itself acknowledges a catastrophic collapse failure mode for DRC on HalfCheetah — without multi-seed runs, there is no way to know whether the reported results reflect a reliable improvement or a single favorable run where collapse happened not to occur. This fundamentally undermines the paper's central empirical claims.
 
-- **Theoretical analysis assumes infinite samples per state-action pair (Theorem 1, Sec. 4.1).** Theorem 1's convergence guarantee requires the number of samples from each (s,a) to approach infinity. In continuous/high-dimensional state-action spaces, each pair may be visited only a handful of times. The paper's claimed advantage of DRC over SR — variance reduction via information sharing across (s,a) — is inherently a finite-sample property that receives no theoretical treatment. While the paper acknowledges this assumption and discusses finite-sample tradeoffs empirically (Sec. 5.2), the lack of finite-sample analysis or sample complexity bounds leaves a gap between the theory and practical applicability.
+2. **Known catastrophic collapse failure mode is acknowledged but neither resolved nor experimentally characterized.** Section 5.3 reports that DRC suffers from "critic collapse" on HalfCheetah: the reward critic predicts a single value and training terminates effectively. The explanation offered is post-hoc speculation ("We hypothesize...", "It is possible that the incorrect selection of n_o leads to more random behavior initially..."). No mitigation is tested or proposed beyond a mention in Future Work. The collapse is not quantified (e.g., proportion of runs affected, conditions that trigger it, whether it occurs in other environments). This directly undermines confidence in the method's robustness — the headline win counts lose force if they depend on collapse not occurring.
+
+3. **GDRC's ensemble voting mechanism for n_o selection is critically under-specified.** Section 4.2.1 describes training an ensemble of critics with different n_o and selecting among them via a voting rule. The description includes a "discount factor" that is never defined or explained, a vague winning-critic definition ("arg min_{n_o}{δH^(n_o) > δH^(n_o')}"), and an unspecified threshold for detecting when cross-entropy "stops increasing." The ensemble size N_o is not given, T_vote is not defined, and no ablation study isolates whether the voting mechanism helps or hurts. Consequently, the GDRC results are a black box — the improvements over DRC could come from the ensemble, the dynamic selection, or simply from having a different random seed.
+
+4. **Missing experiment and architecture details needed for reproducibility.** The paper does not report network architectures, hidden sizes, number of layers, learning rates, batch sizes, activation functions, total training timesteps, or any optimizer settings for either the reward critic or the underlying RL algorithms (PPO, DDPG, DQN). This makes it impossible for a third party to reproduce the results independently.
 
 ### Minor
 
-- **Continuous (non-GCM) perturbation results are modest and inconclusive (Sec. 5.4).** Under continuous perturbations where the GCM structure does not apply, GDRC edges RE by only 27/48 vs. 24/48 win/tie. No confidence intervals or significance tests are reported, so this narrow margin could vanish under proper statistical analysis. While the paper honestly reports this, it limits the strength of the claim that the method generalizes beyond GCM.
+1. **The voting rule for selecting the winning critic at line 135 is ambiguous.** The definition "arg min_{n_o}{δH^(n_o) > δH^(n_o')}" is not clearly interpretable as a deterministic rule. Combined with the undefined discount factor, the mechanism as described is not fully reproducible even with goodwill.
 
-- **Voting procedure for GDRC is underspecified (Sec. 4.2.1).** The definition of the winning critic — "arg min_{n_o} {δH^{(n_o)} > δH^{(n_o')}}" — is mathematically confusing (the argmin of a set defined by a condition) and the surrounding description is too vague to be easily reproduced. The ensemble training procedure, vote aggregation, and the role of the discount factor are not clearly specified.
+2. **The continuous-perturbation results (Section 5.4) show only a very small edge.** GDRC achieves 27/48 win/tie compared to RE's 24/48 — a difference of 3 settings out of 48. Without error bars, this margin is essentially noise. The paper's claim of "win an edge" is honest but the evidence for it is weak.
 
-- **No statistical rigor in experimental comparisons.** Win/tie rates are reported without confidence intervals, effect sizes, or significance tests across multiple seeds. This is especially problematic for the narrow continuous-perturbation results (27/48 vs. 24/48) where the reported advantage may not be statistically significant.
+3. **Theorem 1 and 2 assume the infinite-sample limit per state-action pair.** The paper acknowledges this but does not provide a finite-sample analysis or practical guidance on sample requirements. This limits the theoretical results' practical relevance — particularly since many environments have large or continuous state-action spaces where infinite samples per pair is unrealistic.
 
 ### Trivial
 
-- **Abstract bullet has garbled text (line 22).** The phrase "we win/tie $95\%$ of the winning performance) the highest return in 40/57 sets" appears corrupted — the "$95\%$" and stray parenthesis are formatting artifacts that should be cleaned up. The actual result (40/57 ≈ 70%) is correctly stated in the abstract itself.
+- Section 4.1: The input to the reward critic is described as "(s, a, ˜r)" but the critic architecture diagram (Figure image) and text suggest it takes only (s, a). The role of ˜r in the input is unclear from the description.
+- Section 4.2.1 header: "KNOWN REWARD RANGE, UNKNOWN NUMBER OF INTERVALS" — capitalization is inconsistent.
 
-- **Reward clipping/out-of-range handling not discussed (Sec. 3.2).** The GCM perturbation shifts rewards by signed distances that can push values outside [r_min, r_max). The paper does not discuss whether perturbed rewards are clipped or how out-of-range values affect the reconstruction formula.
+---
 
 ## Nice-to-Haves
 
-- An ablation that compares DRC against a regression-based critic that also conditions on (s,a) would help isolate whether the benefit comes from the classification formulation or from the state-action conditioning itself.
-- A simulation study of the cross-entropy voting scheme's success rate across multiple random seeds and n_r values would strengthen the empirical validation of Theorem 2.
-- Pseudo-code for the GDRC ensemble voting procedure would improve reproducibility.
+- An ablation isolating the effect of the ensemble voting mechanism in GDRC, comparing: (a) fixed n_o = n_r (oracle), (b) fixed n_o chosen arbitrarily, (c) the voting procedure.
+- At least 5–10 independent seeds with standard deviation/interquartile ranges for all main experiments.
+- A diagnostic experiment for the collapse failure mode: monitoring critic output entropy over time and comparing collapsed vs. non-collapsed runs.
+- Finite-sample discussion of how many transitions per state-action pair are needed for reliable mode recovery.
+
+---
 
 ## Removed Points
 
-These points were raised by reviewers but are removed for the following reasons:
+- *Harsh critic's claim that the GCM perturbation model is "contrived" and the theoretical guarantee applies only under an artificial model.* The paper clearly scopes Theorem 1 to GCM perturbations and tests continuous perturbations separately (Section 5.4). Proposition 1 shows GCM approximates any continuous perturbation with bounded error. The limitation is honestly stated, not a flaw. *Moved to Removed Points.*
 
-- **"DDPG/DQN listed but only PPO results shown"** — Removed. The paper states these algorithms are used, and any corresponding results may be in the appendix (which is stripped from the extracted text). Speculative.
-- **"Citation error for PER (Krishnamachari et al. vs. Schaul et al.)"** — Removed. Per policy, all cited references are assumed to exist as written. This cannot be verified from the paper alone.
-- **"Proposition 1 is not used in the rest of the paper"** — Removed. The proposition establishes the approximation bound that justifies the method's applicability to continuous perturbations; this is a conceptual use, not an unused statement.
-- **"Missing baselines (e.g., ignore perturbed rewards)"** — Removed. Comparisons to the base algorithm (PPO) with perturbed rewards are already present as a de facto "ignore" baseline.
-- **"GCM model is too restrictive and claims of broad applicability unsupported"** — Weakened to Minor. The paper explicitly provides an approximation bound (Proposition 1) and tests continuous perturbations; the modest results are honestly reported. The restriction is a genuine limitation but the paper does not overclaim beyond what it supports.
-- **Weaknesses questioning the existence of cited models/tools/references** — Removed per policy.
-- **Pure formatting and style nitpicks** — Removed per policy.
+- *Harsh critic's criticism that the paper "does not specify how the perturbed label is derived from ˜r."* The paper describes discretization of rewards into n_r intervals throughout Section 3.2 and 4.1; the derivation is implicit but clear. *Moved to Removed Points.*
+
+- *Strength Finder's strength about the paper "addressing an important problem."* Generic — every paper claims to address an important problem. *Moved to Removed Points.*
+
+- *Criticism about Section 5.2's conclusion that "shooting n_o = n_r" being optimal.* The paper provides experimental support (Fig. 3) and theoretical reasoning for this claim. It is a reasonable conclusion from the presented evidence. *Moved to Removed Points.*
+
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The two reviews largely align on the paper's strengths (theoretical framework, strong GCM results) and weaknesses (critic collapse, infinite-sample assumption). The most notable insight from synthesis is that the critic collapse in HalfCheetah — where the stronger variant (DRC with known discretization) underperforms the weaker variant (GDRC) — is more than a minor bug: it points to a fundamental tension between the method's design (classification over fixed bins) and environments with highly skewed reward distributions, which the paper does not resolve.
+The harsh critic and strength finder together surface an interesting tension: the paper has a clean theoretical contribution (Theorems 1 and 2 with the GCM framework) and genuinely strong empirical wins under the targeted perturbation model, yet the experimental rigor gap — no seeds, no error bars, under-specified mechanism, unaddressed collapse — prevents the reader from assessing whether these wins are real or artifact. Notably, neither reviewer disputes the theory's correctness; the dispute is entirely about experimental substantiation. The collapse failure mode is particularly interesting because it reveals a structural limitation of classification-based critics: when the reward distribution is heavily skewed (HalfCheetah), the cross-entropy objective can converge to a trivial solution (always predicting the majority class), and the discretization mismatch in GDRC provides a serendipitous escape. This suggests the method may be inherently brittle to class imbalance, a question worth investigating directly rather than as post-hoc speculation.
+
+---
 
 ## Suggestions
 
-1. **Address the critic collapse.** At minimum, provide a controlled diagnostic (e.g., tracking class imbalance over time) and test one concrete mitigation (entropy bonus, balanced sampling, or GDRC's own implicit regularization from misaligned intervals).
-2. **Add statistical rigor.** Report means and standard deviations over at least 5 seeds for headline comparisons, and provide a significance test or effect size for the 40/57 vs. 16/57 result.
-3. **Clarify the GDRC voting procedure.** Replace the confusing "arg min_{n_o} {condition}" notation with a clear algorithmic description or pseudo-code.
-4. **Clean up the garbled abstract text.** The stray "$95\%$ of the winning performance)" on line 22 should be removed.
-5. **Acknowledge the infinite-sample gap more directly** and discuss practical guidance (e.g., minimum sample requirements, effect of network capacity) for practitioners.
+1. **Add multi-seed results.** Run all experiments with at least 5–10 random seeds and report mean ± std (or interquartile ranges) in all figures. Re-report the win/tie counts based on statistically meaningful comparisons (e.g., non-overlapping confidence intervals).
+
+2. **Address the collapse failure mode directly.** Either: (a) implement and evaluate one of the proposed mitigations (entropy bonus, reweighting, or delayed critic update), or (b) characterize the conditions under which collapse occurs and provide guidelines for practitioners to avoid it.
+
+3. **Specify the GDRC voting mechanism fully.** Define the discount factor, threshold for detecting cross-entropy plateau, ensemble size N_o, T_vote, and the exact winning-critic selection rule. Include an ablation showing this mechanism's contribution.
+
+4. **Provide implementation details.** Report network architectures, hyperparameters, optimizer settings, and training budgets for all experiments. This is essential for reproducibility.
+
+5. **Add a finite-sample theoretical discussion.** While the infinite-sample analysis is clean, even a qualitative discussion of how sample size interacts with the number of intervals n_r would help practitioners understand when the method is likely to work.
+
+---
 
 ## Score and Decision
 
-The paper makes a genuine contribution: it proposes a novel classification-based approach to reward correction under perturbation, provides theoretical guarantees (under idealized assumptions), and demonstrates strong empirical results under the targeted perturbation model. The critic collapse in HalfCheetah and the infinite-sample assumption are significant limitations, but the paper is transparent about both and the core idea is well-motivated. The experimental results under GCM perturbations (40/57 win/tie) provide clear evidence of practical value within the method's design scope. With the critic collapse addressed and improved statistical reporting, this would be a solid contribution.
-
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

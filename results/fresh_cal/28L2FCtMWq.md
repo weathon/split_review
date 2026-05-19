@@ -1,20 +1,20 @@
-Now I have all the information needed. Let me synthesize the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and can verify all reviewer claims. Let me compose the final consolidated review.
 
 ## Summary
 
-Ground-A-Video proposes a zero-shot, training-free framework for multi-attribute video editing that jointly uses spatially-continuous conditions (depth maps) and spatially-discrete conditions (grounding boxes with captions). The method introduces three key components: Modulated Cross-Attention to handle per-frame optimized null embeddings consistently, Cross-Frame Gated Attention to project grounding information onto latent representations in a temporally coherent way, and optical flow-guided latent smoothing to share static-region information across frames. The approach outperforms several baselines on a 20-video DAVIS subset in both automatic metrics and a user study.
+This paper proposes Ground-A-Video, a training-free, zero-shot framework for multi-attribute video editing that integrates spatially-discrete grounding information (bounding boxes with entity labels) with spatially-continuous structural priors (depth from ControlNet, optical flow for temporal smoothing). The method introduces four technical contributions: Cross-Frame Gated Attention for temporally consistent grounding injection, Modulated Cross-Attention for merging per-frame optimized null-text embeddings, inflated ControlNet for structural guidance, and optical-flow-guided latent smoothing. The approach operates without any video fine-tuning.
 
 ## Strengths
 
-- **First integration of spatially-continuous and discrete conditions for video editing**: The paper correctly identifies that grounding alone produces temporally inconsistent results and that structural guidance (depth/flow) alone cannot disentangle multi-attribute edits. Combining both modalities is well-motivated and, to the paper's stated knowledge, novel (Sec. 3.1, Fig. 1).
+1. **First grounding-driven video editing framework with clear motivation.** The paper identifies a genuine gap — existing video editing methods fail on multi-attribute edits because they entangle all changes in a single text prompt, leading to omitted edits, mixed edits, or unintended modifications. The grounding approach (bounding boxes + per-entity captions) is a well-motivated solution to this spatial-disentanglement problem. The qualitative results (Fig. 3) convincingly show the method applying multiple simultaneous edits (e.g., rabbit→kangaroo + grass→snow) where baselines fail.
 
-- **Cross-Frame Gated Attention is clearly motivated and ablated**: Temporal aggregation of grounding tokens across frames in the gated attention key/value set directly addresses the failure mode of per-frame GLIGEN. The ablation (Fig. 4 right) shows this design outperforms both "no groundings" and "frame-independent gating," with quantitative support in Table 2 (Frame-Con 0.970 vs. 0.956 for w/o Cross-Frame GA).
+2. **Cross-Frame Gated Attention temporally stabilizes grounding injection.** Rather than applying GLIGEN-style gated attention independently per frame (which causes appearance inconsistencies), the proposed cross-frame variant concatenates grounding tokens across all frames so the key/value space spans the full temporal stack. The ablation (Fig. 4 Right) demonstrates that frame-independent gating causes visible artifacts (e.g., inconsistent shoulder appearance on "Iron Man"), while cross-frame gating resolves them.
 
-- **Modulated Cross-Attention solves a concrete problem**: The per-frame null optimization used by the authors causes unconditional embeddings to diverge across frames; the Modulated Cross-Attention mechanism concatenates these embeddings during unconditional CFG prediction, which is a clean fix. The ablation (Fig. 4 left, Table 2: Frame-Con 0.970 vs. 0.967 w/o Modulated CA) validates the approach.
+3. **Modulated Cross-Attention addresses the practical problem of per-frame null-text drift.** Per-frame null-text optimization (needed because the non-inflated SD model operates independently on each frame) produces different unconditional embeddings across frames. The modulation merges these embeddings during unconditional prediction, preventing appearance drift. The ablation (Fig. 4 Left) visually confirms the effect, and Table 2 shows Frame-Consistency improving from 0.967 to 0.970.
 
-- **Training-free framework with competitive performance**: The method operates without any video fine-tuning yet produces qualitatively convincing multi-attribute edits and outperforms trained baselines (Gen-1, CAV) and training-free baselines (ControlVideo) in automatic metrics and the user study (Table 1).
+4. **Optical-flow-guided latent smoothing is simple and effective.** Algorithm 1 describes a clean, training-free approach that uses motion masks from RAFT to copy static-region latents from preceding frames. The paper includes a sensitivity analysis across thresholds (0.2, 0.3, 0.4), reporting Frame-Consistency values (0.970 vs 0.968 vs 0.964) — this is genuine ablation, not an ad hoc choice.
+
+5. **User study shows large, consistent margins across all three criteria.** With 28 participants rating on a 1–5 scale, Ground-A-Video scores 4.13 (Edit-Acc), 4.24 (Preserve-Acc), and 4.01 (Frame-Con), versus the next best baseline at 2.99, 3.13, and 3.05 respectively. The gap is substantial and directionally consistent across all metrics.
 
 ## Weaknesses
 
@@ -23,48 +23,40 @@ None.
 
 ### Major
 
-- **Manual refinement of groundings creates an uncontrolled variable in baseline comparisons**: The pipeline explicitly states that "the groundings and the source prompt are manually refined" (line 144). This means the author(s) provide human-crafted input conditioning — bounding box corrections and rewritten prompts — to their own method, while baselines (TAV, CAV, ControlVideo, Gen-1) do not receive comparable human-crafted structural conditioning. The paper never quantifies how often refinement is needed, how much effort is involved, or whether the same refinement was applied to any baseline adaptation. This does not invalidate the method (the internal ablations remain fair since all grounding-aware variants receive the same refinement), but it undermines the fairness of the *external* comparison to baselines. The claimed "significant lead" in the user study could partially reflect better input quality rather than better attention mechanisms.
+1. **Baseline comparison is structurally uneven.** All baselines (Tune-A-Video, Control-A-Video, ControlVideo, Gen-1) operate from text prompts and optional structural guidance (depth), but none receive per-frame bounding boxes with entity labels. The paper's ablation (w/o Groundings: Text-Align drops from 0.837 to 0.802) confirms that grounding provides a substantial advantage, yet the main comparison table (Table 1) presents the full method against baselines that inherently lack this input modality. The headline numbers conflate the value of having richer input with the value of the proposed attention mechanisms. The paper would benefit from a baseline that also receives grounding information (e.g., via text-encoded box coordinates) to isolate the architectural contribution from the input advantage.
+
+2. **Evaluation scale is narrow.** The quantitative evaluation uses only 20 videos from DAVIS, each edited to 8 frames. For a method claiming general-purpose multi-attribute video editing, this is a small test bed. The CLIP metrics show only marginal advantages over baselines (Text-Align: 0.837 vs 0.833 for Gen-1; Frame-Con: 0.970 vs 0.963 for ControlVideo), and without per-video variance or error bars, these small differences may not be statistically meaningful. The user study gap is much larger, which is encouraging, but it would benefit from statistical validation (confidence intervals or significance tests).
+
+3. **No statistical rigor for the user study.** The user study reports only point estimates (means on a 1–5 scale) with no standard deviations, confidence intervals, inter-rater reliability metrics, or significance tests. While the ∼1.2–1.5 point gaps are large and likely meaningful, their credibility would be substantially strengthened by basic statistical reporting. The paper also does not describe whether the study was blinded or whether video presentation order was randomized.
 
 ### Minor
 
-- **No quantitative ablation for optical flow smoothing on the full evaluation set**: Optical flow smoothing is listed as a core contribution (line 59). Table 2 does not include a "w/o Optical Flow Smoothing" row. The paper provides a qualitative comparison (Fig. 5, thresholds 0, 0.2, 0.6 on one video) and a threshold search (0.2, 0.3, 0.4 giving Frame-Con 0.970, 0.968, 0.964) that does not include threshold 0 (no smoothing). Consequently, the quantitative benefit of this component on the full 20-video benchmark is not established. This is a gap in evidence for a claimed contribution.
+1. **The ControlNet Scale hyperparameter value is not specified.** The paper mentions this hyperparameter and shows qualitative effects at different values (Fig. 5 Right), but does not report the specific value used in the main experiments, making precise reproduction harder.
 
-- **User study lacks statistical characterization**: The user study (28 participants, rating scale 1–5) reports raw means without confidence intervals, p-values, or effect sizes. With only 20 source videos, the user study ratings could be driven by a small number of outlier clips. This weakens the strength of the claim that "our method surpasses the baselines... particularly with a significant lead" (line 432). This concern is common in the field and does not invalidate the results, but the paper would benefit from standard statistical reporting.
-
-- **"w/o Groundings" ablation conflates multiple effects**: Table 2's "w/o Groundings" row removes both the grounding information and the gated attention mechanism entirely. This conflates the effect of having grounding input with the effect of the gating mechanism design. A separate "w/o Cross-Frame GA" row is present (per-frame GLIGEN), but it is not directly comparable to "w/o Groundings" in a clean factorial design. The qualitative figure (Fig. 4 right) shows per-frame gating, which partially addresses this, but it is absent from the quantitative table.
+2. **No runtime or computational cost comparison.** The pipeline involves per-frame DDIM inversion, per-frame null-text optimization, RAFT optical flow estimation, ZoeDepth depth estimation, inflated ControlNet, and multiple attention operations. A runtime comparison against baselines would help practitioners assess practicality.
 
 ### Trivial
-
-- No variance/standard deviation reported for CLIP metrics in Table 1, making it impossible to assess whether the small margins (e.g., Text-Align 0.837 vs. 0.833) are systematic.
-- The notation $c^i_t$ in the Modulated Cross-Attention equations (Eq. 213–232) is used before being formally defined — the reader must infer from context that $c^i_t = \varnothing^i_t$ (the optimized null embedding for frame $i$ at timestep $t$).
+- The user study portion of Table 1 shares the column name "Frame-Con" with the CLIP metrics portion, which is slightly confusing (though the caption clarifies the split).
 
 ## Nice-to-Haves
-
-- A runtime analysis (seconds per frame or per video) would help readers assess practicality, since the pipeline involves per-frame DDIM inversion, per-frame null optimization, optical flow estimation, depth estimation, and inflated attention blocks.
-- A failure case figure (e.g., misleading groundings leading to incorrect edits, or fast motion breaking optical flow masks) would strengthen the limitations discussion.
-- An oracle baseline that uses the same manual groundings but with per-frame GLIGEN + depth (without Cross-Frame Gated Attention) would cleanly isolate the benefit of the cross-frame design from the benefit of grounding itself.
+- A baseline that receives bounding box information through a text-based representation (e.g., "a kangaroo at [x0,y0,x1,y1]") would cleanly separate the value of the grounding *input* from the proposed *attention mechanisms*.
+- A failure analysis showing cases where the method struggles (beyond the acknowledged issue of incorrect groundings) would sharpen understanding of its boundaries.
+- Expanding the evaluation to a larger benchmark (e.g., from Text2Video-Zero, FateZero, or LoveU-TuneAVideo) would strengthen generalizability claims.
 
 ## Removed Points
-
-These points are flagged to be removed, treat them with caution:
-
-- **"Gen-1's lower Frame-Con score may be due to post-processing differences"** — Speculative; not verifiable from the paper. Removed per filtering discipline.
-- **"The Δτ formalization is never actually used in the method"** — The formalization serves to define the problem space; it is not required to appear in the method equations. Removed as a formatting/presentation nitpick.
-- **"Novelty is incremental — essentially GLIGEN with temporal aggregation"** — A judgment about degree of novelty, not a verifiable flaw. The paper clearly explains the cross-frame extension. Removed.
-- **"TAV adapted to use ControlNet is non-standard"** — The authors provide a clear rationale (fair comparison, since TAV lacks structural guidance) and apply the same depth conditioning uniformly. Removed as an unfair criticism of a reasonable experimental design choice.
-- **"No baseline uses groundings, so comparison doesn't separate grounding from attention"** — Table 2 addresses this internally ("w/o Groundings" vs. "w/o Cross-Frame GA" vs. Full). Removed as factually inaccurate.
-- **"The paper would benefit from including a per-frame GLIGEN + depth baseline for external comparison"** — Moved to Nice-to-Haves as a suggestion, not a weakness.
+- **"Optical flow threshold selection is ad hoc with missing sensitivity analysis."** This is factually incorrect. The paper explicitly tests thresholds 0.2, 0.3, and 0.4, reporting Frame-Consistency for each, and selects the best-performing one. This is a proper sensitivity analysis, not an ad hoc choice.
+- **"The 'first groundings-driven video editing framework' claim should be verified more carefully."** This is a speculative doubt without evidence to the contrary; the paper's claim about novelty is reasonable in scope.
+- **"The Modulated Cross-Attention lacks theoretical justification."** The paper provides a clear empirical motivation (individually optimized null-embeddings cause appearance drift) and a concrete mechanism (merging embeddings across frames during unconditional prediction). A theoretical analysis would be nice but is not required for an empirical systems paper.
+- **Strength Finder claim about "comprehensive user study."** The user study is directional and positive, but "comprehensive" overstates it given the absence of statistical rigor. The strength is real but moderated.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective on the work that the paper's own framing fails to capture.
+The two-reviewer synthesis surfaces a tension that is somewhat unusual in ML papers: the automatic CLIP metrics show only tiny advantages (0.837 vs 0.833 Text-Align; 0.970 vs 0.963 Frame-Con), yet the user study shows a massive, consistent gap (∼1.2–1.5 points on a 5-point scale). This discrepancy — rather than being ignored — might point to a genuine phenomenon: CLIP-based metrics may be poor at capturing multi-attribute edit-accuracy because they measure global text-image alignment rather than whether each specific attribute was correctly changed. If true, this is both a weakness of current evaluation practices and an opportunity: the paper's user study design, which separately measures Edit-Accuracy and Preserve-Accuracy, is arguably more informative for multi-attribute editing than CLIP scores. The paper would be strengthened by explicitly discussing this measurement gap.
 
 ## Suggestions
-
-1. **Quantify the human refinement effort**: Report how many of the 20 videos required no correction, minor correction, or major correction of GLIP groundings/prompts. State explicitly whether baselines received any comparable human-crafted conditioning.
-2. **Add an optical flow smoothing ablation row to Table 2** evaluating threshold 0 (no smoothing) vs. the optimal threshold on the full 20-video set, ideally with standard deviations across videos.
-3. **Report per-video standard deviations or bootstrapped confidence intervals for CLIP metrics** to allow readers to assess whether the reported margins over baselines are systematic.
-4. **Add a brief statistical summary for the user study** (e.g., Wilcoxon signed-rank test p-values for pairwise comparisons, or bootstrapped confidence intervals on the mean ratings).
+1. Add per-video breakdowns or bootstrapped confidence intervals to the CLIP metrics, and report standard deviations and a significance test (e.g., paired bootstrap or Wilcoxon) for the user study results.
+2. Include a baseline with text-encoded grounding (e.g., "object at [x,y,w,h]" appended to the prompt) to isolate the contribution of the proposed attention mechanisms from the advantage of having richer input.
+3. Specify the ControlNet Scale value used in the main experiments.
 
 ## Score and Decision
 

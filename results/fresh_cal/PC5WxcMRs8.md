@@ -1,20 +1,20 @@
-Now I have all the information needed to construct the final review. Let me compile it carefully.
+Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
 
 ---
 
 ## Summary
 
-The paper proposes Vision Search Assistant, a framework that connects vision-language models (VLMs) to web agents via three modular components: Visual Content Formulation (object-level captions with cross-object correlations), Chain of Search (iterative/tree-structured web retrieval), and Collaborative Generation (joint decoding with visual features + all retrieved knowledge). The motivation — that VLMs fail on unseen/novel visual content, and that updating them is impractical — is well stated. The closed-set evaluation on LLaVA-W shows a +6.4% overall improvement (+10.8% on reasoning) over the base LLaVA-1.6-7B. The open-set human evaluation reports very large margins over Perplexity.ai Pro and GPT-4-Web (68% vs. 14%/18% factuality), but this headline result has significant reporting gaps that must be addressed.
+This paper proposes Vision Search Assistant, a framework that augments vision-language models (VLMs) with iterative web search. It uses a three-component pipeline: (1) Visual Content Formulation — extracting object-level descriptions and inter-object correlations from an image using an open-vocab detector and VLM; (2) Web Knowledge Search via a "Chain of Search" algorithm — a directed-graph-based iterative process where an LLM generates sub-questions, retrieves web pages, summarizes knowledge, and judges sufficiency; and (3) Collaborative Generation — combining the original image, user prompt, correlated formulations, and accumulated web knowledge to produce the final answer. The paper evaluates on both a closed-set benchmark (LLaVA-W, 60 questions) and an open-set human expert evaluation on 100 news-derived image-text pairs.
 
 ---
 
 ## Strengths
 
-- **Clear problem decomposition and modular framework design.** The paper explicitly formulates three design questions (What to search, How to search, By what to conclude) and proposes specific solutions for each. This modular structure means the approach is principled and could be applied to different base VLMs, which directly supports the paper's central claim of "empowering an arbitrary VLM."
+- **Novel and principled iterative retrieval method (Chain of Search).** The directed-graph formulation with progressive sub-question generation, relevance-based page selection, sufficiency judgment, and iterative refinement (§3.2) is a concrete technical contribution that goes beyond single-shot or naive search. The formalization with nodes representing knowledge states and edges representing search-derived expansions is clearly presented.
 
-- **Quantitative closed-set improvement with controlled comparison in Table 1.** The progressive evaluation is informative: baseline (78.5%) → naive Google image search (+0.4%, to 78.9%) → with Web Knowledge Search / Sec 3.2 (+4.2%, to 82.7%) → full Vision Search Assistant (+6.4%, to 84.9%). The +10.8% gain on the reasoning sub-score (84.2% → 95.0%) is a concrete, sizable improvement. The naive search baseline helps isolate the effect of the proposed search method from any generic benefit of web context.
+- **Meaningful closed-set gains, especially on reasoning.** On the LLaVA-W benchmark, the full system achieves 95.0% on reasoning (a +10.8% improvement over the strongest LLaVA baseline) and an overall +6.4% improvement to 84.9% (Table 1). These are measured improvements on a standard benchmark using GPT-4o evaluation, and include comparisons against naive search (Google image search) and an agent-only variant, providing partial evidence that the framework's components contribute.
 
-- **The Chain of Search algorithm is a well-specified methodological contribution.** The paper formalizes knowledge acquisition as an iteratively expanded directed graph with planning and searching agents (lines 84–149), including how sub-questions generate child nodes, how web pages are selected by relevance to the parent node and sub-question, and how web knowledge is summarized across iterations. This goes beyond a simple one-shot retrieval pipeline and is clearly described.
+- **Clear problem framing and structured design rationale.** The paper organizes its contributions around three concrete design questions (what to search, how to search, by what to conclude), which provides a clean motivation for each methodological choice and helps readers understand the design space.
 
 ---
 
@@ -25,83 +25,64 @@ None.
 
 ### Major
 
-1. **Open-set human evaluation lacks critical protocol details, undermining the headline result.** The reported gap is enormous — Vision Search Assistant scores 68% factuality vs. 14% (Perplexity.ai Pro) and 18% (GPT-4-Web) — but the paper does not specify:
-   - Whether the baselines received the image or only the text prompt. Perplexity.ai Pro and GPT-4-Web have different multimodal capabilities; if they were given text-only queries, the comparison is fundamentally unfair.
-   - Whether human evaluators were blinded to model identity.
-   - How disagreements among the 10 evaluators were resolved.
-   - Any inter-annotator agreement metric.
-   
-   These omissions make the paper's most striking result uninterpretable as evidence. The gap is large enough that even with a fair protocol it could be a very strong result, but as reported the numbers cannot be taken at face value.
+- **Open-set evaluation lacks critical methodological documentation, undermining the strongest claims.** The paper claims to "significantly outperform" Perplexity.ai Pro and GPT-4o-Web by very large margins (68% vs. 14% and 18% on factuality). However, the evaluation description (§4.1) consists of a single sentence: "we performed a comparative assessment by 10 human experts evaluation, which involved questions of 100 image-text pairs collected from the news from July 15th to September 25th covering all fields on both novel images and events." Critically, the paper provides **no information** about: how the baselines were configured (were they given the same image? what prompt? what web-search capability was used?); the human evaluation protocol (were judges blinded to system identity? shown outputs side-by-side or separately? how many judges per item?); how "factuality," "relevance," and "supportiveness" were operationally defined and rated; or any inter-annotator agreement metrics. Without these details, the comparison is unverifiable and the reported margins are uninterpretable. This is the most significant weakness because it directly affects the paper's headline claim.
 
-2. **Ablations of the three design claims are purely qualitative.** Figures 6–8 each show a single cherry-picked example to support claims about (a) object-level vs. full-image descriptions, (b) Chain of Search vs. single-shot search, and (c) correlated vs. independent captions. No quantitative comparisons — not even on a small subset — are provided. The paper therefore offers no statistical evidence that any specific design choice is responsible for the gains in Table 1, as opposed to the general benefit of adding web-derived text to the generation context.
+- **Ablation study is entirely qualitative.** The ablation section (§4.3, Figures 7–9) presents only illustrative examples without any numerical measurements. The claims that object-level descriptions avoid "visual redundancy," that Chain of Search outperforms single-shot retrieval, and that visual correlation helps in multi-object scenarios are each supported only by a single example. There is **no quantitative ablation** on the closed-set benchmark (or any benchmark) that isolates the contributions of Visual Content Formulation (§3.1), the iterative Chain of Search stopping criterion, or Collaborative Generation (§3.3). The closed-set Table 1 does partially ablate the agent component (comparing "w/ §3.2" at 82.7% vs. full system at 84.9%), but this still combines multiple design choices. Readers cannot tell which component contributes what, and the three design questions the paper claims to answer remain unverified by controlled experiments.
 
 ### Minor
 
-1. **The LLaVA-W closed-set benchmark does not specifically test the paper's stated motivation (novel/unseen visual content).** Most LLaVA-W questions are likely answerable from the image content or common VLM knowledge. The paper does not isolate a subset where the base VLM demonstrably errs and show that the framework recovers the correct answer. The closed-set results support a claim of "general VLM improvement with web context" rather than "handling novel images," which is the paper's core thesis.
+- **No statistical significance or variance reported.** For the closed-set evaluation (60 questions, Table 1), all results are point percentages with no confidence intervals, error bars, or significance tests. The open-set human evaluation (100 items) reports no inter-annotator agreement or variance across judges. Given the small sample sizes, some of the reported differences (e.g., +0.4% on conversation) may be noise. While single-run evaluation is common in this field, the absence of any variance information weakens the evidence.
 
-2. **Several implementation details needed for reproducibility are omitted.** The paper does not specify: the prompt templates used for the planning and searching agents, the number of sub-questions generated per node, the breadth/depth strategy for graph expansion, the search API used, the exact termination criterion beyond "the LLM judges if sufficient," or the open-vocabulary detector's identity (referenced only as `\cite{liu2023grounding}`). While code/appendix may address this, the described experimental section alone is incomplete.
+- **Open-vocab detector not named.** The paper cites "liu2023grounding" generically (line 68) without naming the specific model (presumably Grounding DINO). This is a minor reproducibility gap.
 
-3. **The "naive search" baseline in Table 1 is underspecified.** The paper says it "utilizes a simple Google Image search component" (line 198) but does not clarify the pipeline: does it perform reverse image search, extract text from the top-K results, concatenate it with the visual features? Without this, the surprising finding that it yields virtually no improvement (+0.4%) is hard to interpret.
+- **Stopping criterion for Chain of Search unspecified.** §3.2 states "the search agent uses the LLM to judge if the knowledge currently obtained is sufficient to answer the initial question" (line 149), but no details are given about this judgment — what prompt or criteria does the LLM use? How was this calibrated? This is important for reproducibility.
+
+- **No comparison to open-source VLM+RAG baselines.** The closed-set benchmark includes only LLaVA variants and a "naive search" (Google image search) baseline. It does not compare against simple VLM + text retrieval alternatives (e.g., LLaVA + Wikipedia retriever or LLaVA + standard web search with a naive summarizer), which would contextualize the benefit of the proposed iterative approach over simpler retrieval pipelines.
 
 ### Trivial
-
-- The paper alternates between "GPT-4-Web" and "GPT-4o-Web" (lines 107, 195) without clarifying whether these refer to the same system.
+None.
 
 ---
 
 ## Nice-to-Haves
 
-- Including confidence intervals or significance tests on the 60-sample closed-set benchmark would strengthen the quantitative claims.
-- Discussing failure modes (e.g., how the framework handles web misinformation, ambiguous queries, or API cost/latency) would improve completeness.
+- **Cost/latency analysis.** The iterative search process likely incurs significant latency and API costs, which are not discussed. For a practical framework, this is relevant.
+- **Additional closed-set benchmarks.** The paper uses only LLaVA-W (60 questions). Adding MMBench, SEED-Bench, or similar would strengthen generalizability claims.
+- **Ablation of the stopping criterion.** Comparing fixed-iteration vs. LLM-judged sufficiency would clarify whether the dynamic termination adds value.
 
 ---
 
 ## Removed Points
 
-*These points were flagged for removal. Treat with caution.*
-
-- **Criticism that the teaser figure (Fig. 1) compares 7B against 34B/72B/76B models.** This comparison is illustrative, not evidential. The controlled evaluation in Table 1 ablates on the same 7B base model, so the teaser is not misleading about the evidence.
-- **Request to discuss prior multimodal RAG methods (REVEAL, KAT).** Per policy, missing related work citations are not included in this review.
-- **Comment that the "correlated formulation" may be computationally heavy / redundant.** The paper explains its motivation for multi-object scenarios and provides a qualitative comparison (Fig. 8 / ablation-c). A quantitative validation would be stronger, but the design choice itself is justified in the paper.
-- **Complaint about the open-set scores being "suspicious" / "not credible."** This judgmental framing is replaced above with a concrete, verifiable criticism about missing protocol details.
-- **"The RAG section does not discuss prior work on multimodal RAG."** Per policy, I do not fault missing citations.
-- **Strength claim that "ablation studies validate each design choice."** This conflicts with the verified weakness that the ablations are qualitative only. Removed.
-- **Strength claim about "large margin in open-set human evaluation" being compelling evidence.** This conflicts with the verified weakness about missing protocol details. Removed as a strength but retained as a reported result with caveats.
-- **Strength claim about comparisons against "strong web-enabled baselines."** Same issue — the comparison is what's in question.
+- **Strength: "Dominant performance in open-set evaluation."** Removed because it conflicts with the verified major weakness that the open-set evaluation is insufficiently documented to support such claims.
+- **Strength: "Ablations that justify key design choices."** Removed because it conflicts with the verified weakness that the ablations are entirely qualitative with no numerical results.
+- **Criticism about "implausibly large" margins in open-set evaluation being "evidentially worthless."** The core criticism (insufficient documentation of baseline setup and evaluation protocol) is retained. The specific claim about implausibility and the speculation that results "strongly suggest" deliberate disadvantaging of baselines is speculative overreach beyond what the paper's omissions imply. The factual issue — missing methodological details — is sufficient and kept.
+- **General scope-sweep concerns** (e.g., "could the metric be measuring a proxy?") that were raised as hypothetical possibilities without concrete anchoring to the paper's text.
+- **Request for more benchmark diversity** moved to Nice-to-Haves as it is not a core flaw.
 
 ---
 
 ## Novel Insights
 
-The review process reveals a disconnect between the paper's well-structured methodological framing (three clean design questions) and the weak empirical support for those very design choices. The paper claims to answer "What to search, How to search, By what to conclude" but tests these only with qualitative examples, while the quantitative benchmark (Table 1) blends all components together. This means the paper's strongest asset — its modular architecture — is also its least validated claim. Separately, the open-set evaluation gap (68% vs. 14–18%) is so extreme that it demands an explanation beyond "our method is better": either the baselines were disadvantaged by a text-only interface (in which case the comparison should be redesigned), or the human evaluation protocol is inadvertently biased. Neither explanation is ruled out by the paper's current reporting.
+None beyond the paper's own contributions. The reviews add no genuinely novel observations that reshape understanding of the paper.
 
 ---
 
 ## Suggestions
 
-1. **Clarify the open-set evaluation protocol in detail.** State explicitly: (a) Did baselines receive the image or only the text prompt? (b) Were evaluators blinded? (c) What was the inter-annotator agreement? (d) Provide example question-answer triples. If the baselines were disadvantaged, rerun with a multimodal-capable setup or compare against VSA variants with/without image access.
+1. **Document the open-set evaluation protocol in full.** Specify: how each baseline (Perplexity.ai Pro, GPT-4o-Web) was invoked (with or without the image, what prompt, what web-access capabilities), the exact rating instructions given to human experts, whether evaluations were blinded, how many judges assessed each item, and inter-annotator agreement (e.g., Fleiss' κ or percentage agreement). Without this, the results cannot be interpreted and should not be used to support strong claims.
 
-2. **Convert the qualitative ablation studies into quantitative experiments.** At minimum, on a subset of LLaVA-W (or a novelty-focused test set), compare: (a) VSA with full-image caption vs. object-level captions, (b) VSA with single-shot search vs. Chain of Search, (c) VSA with independent vs. correlated captions. Report accuracy for each variant.
+2. **Add quantitative ablations on the closed-set benchmark.** Isolate each component: (a) full system vs. system without Visual Content Formulation (use whole-image caption instead), (b) iterative Chain of Search vs. single-shot search with matched total retrieved pages, (c) Collaborative Generation vs. using only final summarized knowledge. Report results per category.
 
-3. **Construct a novelty-specific test set.** Filter or create questions about events/objects that postdate the base VLM's knowledge cutoff, verify that the base VLM answers incorrectly, and measure whether VSA recovers the correct answer. This directly tests the paper's central motivation.
+3. **Report confidence intervals or error bars** for all quantitative results, especially given the small sample sizes. For the human evaluation, report inter-annotator agreement.
 
-4. **Release the prompts, search API details, and hyperparameters** (number of sub-questions per node, graph expansion strategy, termination prompt) to support reproducibility.
+4. **Name the specific open-vocab detector** and describe the stopping criterion for Chain of Search in more detail.
 
 ---
 
 ## Score and Decision
 
-**Originality:** The framework design — particularly the Chain of Search as an iterative directed-graph retrieval process — is novel. Combining VLM-based visual content formulation with web agents is a natural idea but the specific architecture is new.
+**Originality** — The Chain of Search algorithm and the three-component framework are novel. **Importance of research question** — Enabling VLMs to handle novel visual content through real-time web search is timely and practically relevant. **Claims support** — The closed-set claims are partially supported; the open-set claims are not adequately supported due to missing methodological documentation. **Soundness of experiments** — The closed-set evaluation is reasonable; the open-set evaluation lacks critical procedural detail. **Clarity of writing** — The paper is generally well-structured and the method is clearly described. **Value to community** — The framework is modular and the method description enables reproduction, pending better documentation of the open-set evaluation.
 
-**Importance of research question:** Very important. VLMs' inability to handle novel visual content is a real limitation, and web search is a practical remedy.
-
-**Claims well-supported:** Partially. The closed-set results are adequately supported; the open-set results are not, due to missing protocol details. The design claims are not quantitatively supported.
-
-**Soundness of experiments:** Weak. The closed-set evaluation is reasonable but small (60 questions, no confidence intervals). The open-set evaluation lacks critical reporting. Ablations are qualitative.
-
-**Clarity of writing:** Good. The paper is well-structured and the three design questions provide a clear narrative.
-
-**Value to the community:** Potentially high if the evaluation concerns can be resolved. The framework is modular and the method is clearly described, making it a useful baseline for future multimodal RAG research.
-
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Accept</decision>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

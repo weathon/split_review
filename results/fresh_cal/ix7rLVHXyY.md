@@ -1,18 +1,19 @@
-## Summary
+Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me synthesize the final review.
 
-This paper introduces PIE (Performance-Improving Edits), a dataset of 77,967 C++ competitive programming submission pairs with deterministic execution time annotations from the gem5 full-system simulator. Using this benchmark, the authors systematically evaluate a range of LLM adaptation strategies for program optimization, including prompting variants (instruction, few-shot, chain-of-thought, retrieval-based) and fine-tuning methods (standard, performance-conditioned, self-play data augmentation). The best fine-tuned model (GPT-3.5 with synthetic self-play data) achieves a mean speedup of 6.86× under Best@8, outperforming the average human improvement of 3.66×, and the fastest model generation (9.64×) slightly surpasses the fastest human submissions (9.56×).
+## Summary
+This paper introduces PIE (Performance-Improving Edits), a dataset of 77K+ human C++ program optimization pairs from competitive programming, with deterministic performance measurements using the gem5 full-system simulator. The paper then evaluates a comprehensive suite of LLM adaptation strategies (prompting, retrieval-augmented prompting, fine-tuning, performance-conditioned generation, and self-play synthetic data augmentation) on this benchmark. The best configuration (GPT-3.5 fine-tuned with synthetic data) achieves a mean speedup of 6.86× with Best@8 vs. 3.66× average human optimization, and an aggregate upper-limit speedup of 9.64× vs. 9.56× best human.
 
 ## Strengths
 
-1. **Deterministic performance measurement via gem5 eliminates benchmarking noise.** Section 2 demonstrates that even a state-of-the-art benchmarking tool (Hyperfine) produces spurious speedups up to 1.91× on identical programs. Replacing this with gem5's deterministic simulation (line 88: "Executing deterministic programs in gem5 provides deterministic performance results") is a clear methodological advance over prior work relying on noisy hardware measurements. This was validated by 42.8 million simulations.
+- **Deterministic, reproducible performance measurement via gem5 (Section 2).** The paper demonstrates that real-hardware benchmarking of identical programs can yield spurious mean speedups of 1.12× (std. 0.36), motivating their use of gem5 full-system simulation. This is a genuine methodological advance over prior code optimization work that relied on noisy real-hardware measurements. The 42.8M gem5 simulations provide a reliable foundation for all subsequent experiments.
 
-2. **Performance-conditioned generation yields large, well-documented gains over standard fine-tuning.** Section 4.2 reports that CodeLlama 13B improves from 47.75% optimized (3.43× speedup) to 66.56% optimized (5.65× speedup) under Best@8 with performance-conditioned generation—a substantial 65% relative improvement in speedup. The performance tags (ranked 1–10 per problem) are a clean adaptation of ideas from offline RL and prompt conditioning.
+- **Large-scale curated dataset (Section 2).** PIE provides 77,967 training pairs from 1,474 C++ competitive programming problems, each with deterministic gem5 runtime annotations and extensive unit tests (median 82.5 test cases/problem). This is the first large-scale open benchmark for high-level C++ code optimization, significantly advancing beyond prior work (e.g., DeepPERF on C#) in scale, language, and measurement rigor.
 
-3. **Retrieval-based prompting far surpasses all other prompting baselines.** CodeLlama 34B jumps from 19.63% optimized (1.30× speedup) to 34.25% optimized (2.28× speedup) under Best@8 with dynamic retrieval, and GPT-3.5 improves from 26.23% (1.60×) to 51.64% (2.19×). These gains are far larger than those from instruction-prompting, few-shot, or chain-of-thought, convincingly demonstrating that the PIE dataset enables effective data-driven prompting.
+- **Novel performance-conditioned generation strategy (Section 3.2).** Tagging each fast program with a binned performance percentile (1–10) relative to all solutions for that problem, and prompting with the maximal tag during inference, yields substantial improvements: CodeLlama 13B improves from 47.75% to 66.56% Percent Optimized and from 3.43× to 5.65× speedup (Best@8). This is a technique specifically designed for the optimization task and cleanly validated.
 
-4. **Large-scale, simulator-annotated dataset with careful construction.** The training set contains 77,967 pairs from 1,474 problems with a >10% improvement filter, 42.8M gem5 simulations for annotation, and problem-separated train/validation/test splits. The use of AlphaCode-generated test cases (median 104 per test problem) for broader coverage is a thoughtful addition, and the deterministic annotations are critical for both training and evaluation.
+- **Comprehensive and controlled evaluation of multiple adaptation strategies on a unified benchmark (Tables 2, 3, 5).** The paper systematically compares instruction prompting, few-shot prompting, chain-of-thought, retrieval-based prompting, fine-tuning, performance-conditioned generation, and synthetic data augmentation across both open (CodeLlama 7B/13B/34B) and proprietary (GPT-3.5/4) models — a more thorough evaluation than prior work.
 
-5. **Comprehensive evaluation across model families and budgets.** The paper evaluates CodeLlama (7B/13B/34B), GPT-3.5, and GPT-4 under multiple prompting and fine-tuning strategies, with results for Best@1 and Best@8. It also demonstrates that open models (CodeLlama 13B perf-cond, 5.65×) can be competitive with GPT-3.5 (6.86×) when appropriately adapted.
+- **Synthetic data augmentation via self-play with quantity control (Section 3.2, Footnote 5).** The paper includes an ablation comparing training on 5,793 OURS-only examples vs. 5,570 pairs that include synthetic programs, confirming that the benefit comes from the type of data, not quantity. This is good experimental discipline.
 
 ## Weaknesses
 
@@ -21,54 +22,59 @@ None.
 
 ### Major
 
-1. **No statistical uncertainty reported for stochastic LLM results.** All LLM evaluations use temperature 0.7 sampling with Best@k, yet no confidence intervals, repeated runs, or seed variability are reported for any condition. The paper itself demonstrates (Section 2, Hyperfine experiment) how easily measurement noise can produce spurious speedups. While the deterministic gem5 environment eliminates *measurement* noise, the *generation* process is inherently stochastic. Small differences between methods (e.g., 66.56% vs. 66.65% optimized, or the tight 9.64× vs. 9.56× upper-limit comparison) could shift with different random seeds. The broad qualitative trends (retrieval ≫ static prompting, fine-tuning ≫ prompting, perf-cond > standard fine-tuning) are large enough to be robust, but the lack of variance estimates weakens the precision of quantitative claims. *Verification:* The paper reports all results as point estimates with no error bars (see Section 4). The only variance reported anywhere is in the Hyperfine motivation experiment (lines 84–86).
-
-2. **Human baseline computation is underspecified.** The paper repeatedly states that "the average individual human sampled in our test set achieved an average speedup of 3.66×" (abstract, line 11; introduction, line 38), but never precisely defines how this number is computed. Given that the test set contains 978 pairs from 41 problems (line 72), the 3.66× presumably averages speedups across all human-improvement pairs in the test set. However, the phrasing "average individual human" could also be interpreted as per-programmer best improvement averaged across programmers. This ambiguity matters because one of the paper's headline claims ("beats the average human") depends on this definition. The paper also does not clarify whether this baseline includes pairs near the 10% minimum threshold or whether failures (slower/incorrect submissions) are counted as 1.0× as they are for LLMs. *Verification:* No explicit definition of the 3.66× computation appears in the paper despite its use as a central comparison point (lines 11, 36, 38).
-
-3. **Upper-limit comparison (9.64× vs. 9.56×) is under-described.** The method of aggregation for these critical numbers is unclear. Lines 167 and 199 describe comparing "the fastest human submissions in CodeNet" against "our model's fastest generation per problem," but it is not clear whether 9.56× and 9.64× represent (a) per-problem maximums then averaged across problems, (b) global maximum speedups across all problems, or (c) some other aggregation. The different search budgets (40 model generations vs. up to 118,841 human submissions) are acknowledged but not controlled for, making the comparison informative but not rigorous as a claim about "setting a new upper limit." Per-problem breakdowns would resolve this ambiguity. *Verification:* Lines 167 and 199 state the comparison but do not specify the aggregation function.
+- **No confidence intervals, variance estimates, or statistical testing for any headline metric.** All tables report point estimates (mean speedup, Percent Optimized) without standard errors, confidence intervals, or standard deviations. With only 41 problems in the test set (978 pairs), means could be driven by a handful of large speedups. The paper compares many methods (e.g., 5 fine-tuning variants) and reports rankings (e.g., 6.86× > 5.65×) without any statistical assessment of whether these differences are meaningful. This significantly undermines confidence in the relative method ranking. Adding bootstrap confidence intervals for mean speedup and paired tests (e.g., Wilcoxon signed-rank on per-problem speedups) is necessary.
 
 ### Minor
 
-1. **No ablation verifying that the model actually conditions on performance tags.** The paper introduces performance tags (1/10 to 10/10) and always decodes with the maximal tag "10/10" during inference. There is no experiment decoding with different tags (e.g., "5/10" or "1/10") to verify that the model truly conditions on the tag rather than ignoring it. The tags are assigned by rank within each problem (line 127), so the same absolute speedup could receive different tags on different problems—this is reasonable by design, but the lack of an ablation leaves uncertainty about whether the tag mechanism works as intended.
+- **The claim of surpassing the fastest human speedup (9.64× vs. 9.56×) is not statistically supported.** The 0.08× margin is tiny, no confidence intervals are reported, and the comparison uses asymmetric sampling budgets: the model gets 40 generations per problem (39,129 total) while the human "budget" is the set of accepted submissions that happen to exist in CodeNet (118,841 solutions). The paper acknowledges the asymmetry ("with a higher sampling budget") but does not control for it. This claim should be explicitly caveated as "within experimental uncertainty" or dropped in favor of the stronger, well-supported result that the model can match the best human speedup.
 
-2. **Only mean speedups are reported; no distributional statistics.** The paper reports only the mean speedup across the test set (with 1.0× for failures). Reporting median, quartiles, and the proportion of cases where the model made the program slower or incorrect would provide a more complete picture of robustness. This is particularly relevant given that Best@k evaluation can produce high averages driven by a few very large speedups.
+- **The headline human comparison (6.86× Best@8 vs. 3.66× average human) under-acknowledges sampling budget asymmetry.** The model uses Best@8 (8 generations, pick fastest correct one), while the human baseline is the average of single improvement pairs from individual programmers. Best@1 results are presented in tables, but the abstract and introduction emphasize the Best@8 comparison without sufficient caveat. A human given 8 attempts might also achieve higher average speedup. This is a common issue in LLM evaluation but should be more clearly addressed in framing.
 
-3. **Quality of AlphaCode-generated test cases is not validated.** The paper augments CodeNet's ~4 test cases per problem with AlphaCode-generated tests to reach a median of 104 per problem (line 77). While this increases coverage, there is no analysis of whether these generated tests exercise meaningful program paths or could introduce spurious failures/timeouts. The paper mentions excluding tests causing ~2-minute timeouts but does not further validate test quality.
+- **Timeout handling in gem5 not clarified.** The paper mentions a 2-minute timeout for gem5 simulations (line 88) but does not specify how many of the 42.8M simulations hit this timeout, nor how timeouts are handled in the speedup ratio (if a slow program times out and the fast program does not, the ratio is undefined/infinite). This should be reported for reproducibility.
+
+- **Human baseline construction details incomplete.** The test set has 978 pairs from 41 problems, but the paper does not report how many unique programmers contributed to these pairs. If one programmer contributes many pairs for a single problem, the "average individual human" could be dominated by a few outliers. Clarifying the distribution would strengthen the baseline.
 
 ### Trivial
-None.
+
+- The motivating example (sum from 1 to N, O(N) → O(1)) in Figure 1 is pedagogically useful but sets an expectation of dramatic algorithmic leaps that most test problems do not exhibit. The framing should acknowledge that the actual task involves more incremental optimizations.
 
 ## Nice-to-Haves
 
-- **Per-problem breakdown for the upper-limit comparison.** A table or histogram showing, for each test problem, the fastest human speedup, fastest model speedup, and number of attempts, would resolve the aggregation ambiguity and reveal whether the model's advantage is concentrated on a few problems.
-- **Ablation decoding with different performance tags** (e.g., decode with "5/10") to verify the conditioning mechanism works as intended.
-- **Quantification of CodeNet's timing inconsistency** beyond the Hyperfine experiment (which tests variance of identical runs, not accuracy of CodeNet's original CPU times).
-- **Qualitative case studies** of model-generated optimizations (e.g., algorithmic changes vs. micro-optimizations) to characterize what the model has learned.
+- An ablation conditioning on "1/10" or the full distribution of performance tags (rather than always "10/10") would isolate whether the tag functions as a task prompt or genuinely guides the model toward higher-quality optimizations.
+- A brief analysis of failure cases (problems where the model produces no improvement across 8 samples) would deepen the contribution beyond point estimates.
+- Reporting Best@40 average speedup (not just the aggregate upper limit) would help contextualize the 9.64× figure.
 
 ## Removed Points
 
-These points were raised by reviewers but are not included as weaknesses in the main review for the reasons stated:
+These points are flagged to be removed; treat them with caution.
 
-- *"Why not use the original CodeNet CPU times?"* — The paper already addresses this (line 70: "we found the information to be inconsistent"). The appendix (stripped) was cited for details. This is not a weakness; the authors chose a better method and justified it.
-- *"Performance tags: same absolute speedup could get different tags on different problems"* — This is by design (relative rank within each problem). Different problems have different optimization headroom; ranking within problem is the correct signal. Not a weakness.
-- *"Synthetic data may introduce bias toward patterns already captured by fine-tuned model"* — Purely speculative. The paper demonstrates positive results from synthetic augmentation (lines 195–197). Without evidence of harm, this is not a valid criticism.
-- *"Few-shot examples can bias the model"* — The paper already discusses this (line 176, citing Zhao et al.). Not a weakness; the paper acknowledges and addresses this concern.
-- *"CoT is an emergent capability only for large models"* — This is presented as an observation by the paper, not a flaw.
-- Various formatting/style nitpicks — Removed as parser artifacts.
+1. **"Potential data overlap from synthetic generation may leak optimization strategies"** (Harsh Critic, Issue 1, third bullet). This is speculative. The paper explicitly filters for identical I/O behavior (line 132) and tracks semantic duplicates. No evidence is presented to suggest leakage, and the critic provides no concrete mechanism by which structural similarity without I/O identity would transfer optimization strategies.
+
+2. **"Synthetic data ablation is confounded by data size"** (Harsh Critic, Section 3). The critic claims the ablation uses 5,793 examples vs. 1,485 synthetic examples. This misunderstands the paper: the ablation compares 5,793 OURS-only examples against 5,570 pairs *that include* synthetic programs (Footnote 5, line 197). The datasets are roughly matched in size, directly controlling for the quantity confound. The paper already addresses this concern.
+
+3. **"Missing hyperparameters and training details"** (Harsh Critic, "Missing Parts"). The paper states "We provide training details in \Cref{subsec:addtl_training_details}" (line 152), which was stripped by the PDF parser along with the appendix. Reproducibility details are present in the original submission.
+
+4. **"Performance-conditioned tag might not correlate with absolute speedup"** (Harsh Critic, Section 3). This is speculative and contradicted by the experimental results (Table 5), which show that performance-conditioned generation substantially outperforms standard fine-tuning. Empirical validation is the appropriate measure, not a priori correlation analysis.
+
+5. **"Surpassing the fastest human speedup"** (Strength Finder, Core strength 6). This strength conflicts with the verified weakness about the claim lacking statistical support and using asymmetric budgets. Per the filtering rules, when a strength and weakness disagree on the same evidence, the weakness wins.
 
 ## Novel Insights
 
-The two reviewers' perspectives are largely complementary rather than generating novel cross-insights. The harsh critic correctly identifies imprecision in the human baseline and upper-limit comparisons, while the strength finder correctly identifies the dataset and the large-margin adaptation gains as genuine contributions. The main synthesis is that the paper's qualitative trends (data-driven methods ≫ prompting, perf-cond ≫ standard fine-tuning, open models competitive with closed) are robust and well-supported, but several of the headline quantitative claims would be strengthened by more rigorous reporting practices (variance estimates, explicit aggregation formulas, per-problem breakdowns).
+The two reviews provide complementary perspectives. The Harsh Critic correctly identifies that the paper's strongest contribution is not the narrow claim of "surpassing humans" (which is fragile) but rather the *infrastructure* — the PIE dataset combined with gem5-based deterministic evaluation — and the systematic study of adaptation strategies whose relative rankings would be more trustworthy with uncertainty quantification. The Strength Finder usefully highlights that the performance-conditioned generation technique and the synthetic data quantity-controlled ablation are methodologically solid. Neither reviewer observes that the paper's fine-grained comparison of *retrieval* vs. *fine-tuning* vs. *performance-conditioned* approaches across model sizes constitutes a kind of "optimization strategy taxonomy" that could serve as a roadmap for practitioners — that is, the paper implicitly tells you which technique to use under which resource constraints (e.g., retrieval if you can't fine-tune, perf-cond if you can fine-tune open models, synthetic data if you have API access). This taxonomy aspect is a secondary contribution worth highlighting.
 
 ## Suggestions
 
-1. **Add a "Statistical Considerations" subsection** reporting variance for key numbers: run each evaluation with 3–5 different random seeds and report mean ± std for speedup, percent optimized, and percent correct. This is the single most impactful fix.
-2. **Explicitly define the human baseline computation.** State: "The 3.66× average is the arithmetic mean of speedups across all 978 test-set human-improvement pairs, where speedup = old_time / new_time and failures are excluded since all test pairs are accepted solutions." If a different computation was used, specify it.
-3. **Clarify the upper-limit aggregation.** State explicitly whether 9.56× and 9.64× are arithmetic means of per-problem bests, geometric means, or global maximums. Consider adding a supplementary table with per-problem results.
-4. **Add an ablation with different performance tags** (e.g., "5/10" vs "10/10") to demonstrate that the model genuinely conditions on the tag.
-5. **Report distributional statistics** (median, Q1/Q3, failure rate) alongside means to give a fuller picture of model performance.
+1. **Add bootstrap confidence intervals** for mean speedup and Percent Optimized across all reported methods, and use a paired statistical test (e.g., Wilcoxon signed-rank on per-problem speedups) when comparing methods. This is the single highest-impact improvement.
+
+2. **Reframe the 9.64× vs. 9.56× claim.** Either explicitly state that the two values are within experimental uncertainty (and thus the model matches the best human), or report a more conservative comparison (e.g., matching the model's sampling budget by taking the best-of-40 human submissions).
+
+3. **Report how many gem5 simulations hit the 2-minute timeout** and how timeouts are handled in the speedup computation.
+
+4. **Provide per-problem variance statistics** (e.g., distribution of speedups) to show results are not driven by a handful of outliers.
 
 ## Score and Decision
 
-MY FINAL SCORE: <score>6.5</score>
+**Score:** 7.5 — A solid empirical paper with a valuable dataset and principled evaluation methodology. The core contributions are significant and reproducible. The main weaknesses (lack of statistical confidence estimates, overclaiming on the human upper limit comparison) are fixable without invalidating the paper's central findings.
+
+MY FINAL SCORE: <score>7.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

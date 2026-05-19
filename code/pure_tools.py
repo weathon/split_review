@@ -44,6 +44,11 @@ elif calibration_env in ("2026", "iclr2026"):
     embeddings_path = os.path.expanduser("~/review_agent/new/human_reviews_embeddings_2026.pkl")
     score_index_path = os.path.expanduser("~/review_agent/new/human_review_score_index_2026.pkl")
     calibration_set = "iclr2026"
+elif calibration_env in ("ai_cal", "ai-cal"):
+    CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "ai_review_cal").resolve())
+    embeddings_path = str((DATASETS_DIR / "human_reviews_embeddings_ai_cal.pkl").resolve())
+    score_index_path = str((DATASETS_DIR / "human_review_score_index_ai_cal.pkl").resolve())
+    calibration_set = "ai_cal"
 elif calibration_env in ("", "deepreview"):
     CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "deepreview_13k_calibration").resolve())
     embeddings_path = ensure_hf_file("human_reviews_embeddings_deepreview.pkl")
@@ -52,7 +57,7 @@ elif calibration_env in ("", "deepreview"):
 else:
     raise ValueError(
         f"Unknown CALIBRATION_SET={calibration_env!r}; expected one of "
-        "'deepreview', '2025', '2026' (or unset)."
+        "'deepreview', '2025', '2026', 'ai_cal' (or unset)."
     )
 
 ALLOWED_PATHS = [CALIBRATION_REVIEW_DIR]
@@ -175,27 +180,27 @@ def is_excluded(basename: str) -> bool:
     return pid in EXCLUDED_PAPER_IDS
 
 
-def search_file(query: str, n: int, mode: str, low_score: float = 0.0, high_score: float = 10.0) -> str:
+def search_file(query: str, n: int, mode: str, low_score: float = -1.0, high_score: float = 11.0) -> str:
     """Search human reviews, optionally filtered by the reviewer avg-score range.
 
     Args:
         query: search query.
         n: number of top results.
         mode: 'vector' for semantic similarity, 'bm25' for keyword matching.
-        low_score: include only papers with avg score >= low_score (default 0.0).
-        high_score: include only papers with avg score <= high_score (default 10.0).
+        low_score: include only papers with avg score > low_score (default -1.0).
+        high_score: include only papers with avg score < high_score (default 11.0).
 
     Filtering is applied FIRST by score range, THEN ranking (BM25/vector) runs
     over the filtered subset. Use this to anchor calibration to a specific
     score band (e.g. low_score=7, high_score=10 for strong papers).
     """
-    print(f"  [search_file] query='{query}' mode='{mode}' n={n} score=[{low_score}, {high_score}]")
+    print(f"  [search_file] query='{query}' mode='{mode}' n={n} score=({low_score}, {high_score})")
     if mode == "bm25":
         bm25 = list(database.values())[0]["bm25"]
         files = list(database.values())[0]["files"]
         allowed_idx = [
             i for i, p in enumerate(files)
-            if low_score <= score_index[os.path.basename(p)] <= high_score
+            if low_score < score_index[os.path.basename(p)] < high_score
             and not is_excluded(os.path.basename(p))
         ]
         if not allowed_idx:
@@ -214,7 +219,7 @@ def search_file(query: str, n: int, mode: str, low_score: float = 0.0, high_scor
         return "\n---\n".join(results) if results else "No relevant files found."
     elif mode == "vector":
         allowed_mask = np.array([
-            low_score <= score_index[fn] <= high_score and not is_excluded(fn)
+            low_score < score_index[fn] < high_score and not is_excluded(fn)
             for fn in filenames
         ])
         if not allowed_mask.any():

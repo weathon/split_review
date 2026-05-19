@@ -1,69 +1,70 @@
-Now I have a clear picture of the paper and the reviewer inputs. Let me compose the final consolidated review.
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-G2Sphere proposes a method that maps 3D geometric inputs (meshes, point clouds, keypoints) to continuous spherical signals by combining an equivariant encoder with a spherical harmonic decoder that outputs Fourier coefficients. The approach supports frequency up-sampling up to L=40, zero-shot super-resolution, and fast single-pass inference (9ms). The method is evaluated across three domains: radar response prediction, aerodynamic drag modeling, and policy learning (behavioral cloning for manipulation and navigation), showing consistent improvements over baselines.
+G2Sphere introduces a method for mapping 3D geometric data (meshes, point clouds, keypoints) to continuous spherical signals by operating entirely in Fourier space. It uses an equivariant encoder (Equiformer V2) to produce latent Fourier features, then decodes them into spherical harmonic coefficients that can be evaluated at any resolution via pre-computed basis functions. Frequency up-sampling and trainable spherical non-linearities allow the decoder to reach much higher harmonic frequencies (L=40) than prior equivariant architectures (which are typically limited to low frequencies). The method is evaluated on radar response prediction, aerodynamic drag prediction, and policy learning (robotic manipulation and drone navigation), where it consistently outperforms baselines.
 
 ## Strengths
 
-1. **High-frequency spherical signal modeling via frequency up-sampling.** G2Sphere reaches L=40 through frequency up-sampling with trainable spherical non-linearities (TSNL), far exceeding the L≤10 ceiling of prior equivariant GNN architectures for dense geometric inputs (Section 4.2). This translates into visibly sharper predictions on radar signals (Fig. 3) and the lowest MSE on both radar datasets (Table 1).
+- **Consistent accuracy improvement across all supervised domains** (Table 1): G2Sphere achieves lower MSE on both radar datasets (e.g., Frusta radar: 0.009 ± 0.001 for G2S+TSNL vs. 0.031 ± 0.004 for Transformer, 0.023 ± 0.002 for Equiformer) and the drag dataset. The advantage grows with task complexity (roll-symmetric Frusta → asymmetric Asym), supporting the claim that the Fourier-space representation better captures dense, high-frequency output structure.
 
-2. **Zero-shot super-resolution capability.** Because G2Sphere outputs continuous Fourier coefficients, it can be trained on low-resolution (61×21) radar data and evaluated at higher resolution (180×21) without retraining (Fig. 4). This is a structural advantage over fixed-grid baselines (Transformer, Equiformer) that lack this flexibility.
+- **Faster inference by an order of magnitude** (Table 3): G2Sphere produces an action in 9ms versus 156ms for Diffusion Policy (single forward pass vs. iterative denoising). This is a concrete practical advantage for real-time control tasks.
 
-3. **Fast single-pass inference for control.** G2Sphere evaluates the full spherical signal in 9ms (Nvidia Titan), compared to 156ms/action for Diffusion Policy and 44ms for IBC (Table 3). This is enabled by pre-computing spherical harmonic basis functions and avoiding iterative optimization or denoising — a genuine practical advantage for closed-loop control.
+- **Equivariance demonstrably improves training stability** (Table 2): On PushT fixed-goal, the equivariant G2S achieves a perfect max coverage area of 1.00 while the non-equivariant variant (NE-G2S) achieves only 0.83, and the equivariant model's average-of-last-10-checkpoints is substantially higher (0.93 vs. 0.29). This cleanly isolates the benefit of equivariance in the policy setting.
 
-4. **Consistent performance across diverse domains.** G2Sphere (or G2S+TSNL) achieves the lowest MSE on all radar and drag tasks (Table 1) and strong results on PushT and PyBullet Drones policy tasks (Table 2), including near-perfect coverage on fixed PushT. The breadth of evaluation across dense (radar) and sparse (drag) spherical signals strengthens the claims of generality.
-
-5. **Superior generalization from sparse training data.** On the drag task, trained on only one (θ,φ) coordinate per object, G2Sphere reconstructs the full drag cone over [-20°,20°] while implicit baselines overfit to the training coordinates (Fig. 5). This demonstrates a concrete advantage of the Fourier-space representation over coordinate-conditioned implicit models.
+- **Capability demonstrations with practical significance**: Zero-shot super-resolution (Fig. 4) and generalization to unseen object geometries (Fig. 5) show capabilities that discrete-output baselines fundamentally cannot achieve, and the multimodal N-Paths experiments (Figs. 7–8) demonstrate a principled connection between harmonic frequency and the number of modes the model can represent.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Missing ablation results for the non-equivariant variant (NE-G2S).** Section 5.2 introduces NE-G2S (replacing equivariant MLPs with standard MLPs while retaining the Fourier-space decoder) specifically "to separate the impact of equivariance and representing the output in Fourier space." Yet no quantitative results for NE-G2S appear in the text or are referenced from Table 2. The text then claims that "the addition of equivariance stabilizes training instability leading to more consistent performance" without presenting the comparison that would substantiate this. Since the paper's overall design couples equivariant encoding with Fourier-space decoding, the NE-G2S ablation is critical for attributing improvement to each component. Its absence weakens the core scientific claim.
+- **The radar comparison confounds the SH representation with higher frequency capacity.** In the radar domain, G2Sphere's decoder operates at L=40 while the Equiformer baseline's discrete grid decoder is effectively limited to much lower resolution — the paper explicitly attributes the visual improvement to "the higher maximum frequency" (line 114). The drag domain partly mitigates this concern since G2Sphere uses L=5 (matched to the encoder's L_enc) and still outperforms implicit baselines, but a controlled experiment — G2Sphere with its decoder limited to L=5 (or comparable effective resolution) against Equiformer at the same resolution, in the radar domain where the largest gains appear — would cleanly separate whether the improvement stems from the spherical harmonic parameterization itself or simply from having more representational capacity. This matters because the paper's principal accuracy claims (Table 1) are the headline result, and the current comparison does not fully rule out the simpler explanation that more harmonic degrees yield better approximation.
 
 ### Minor
 
-- **Radar output signal is not specified.** The paper never states whether the predicted radar response is complex-valued (amplitude and phase, as would be standard for radar) or real-valued (e.g., radar cross-section magnitude). The grayscale visualizations (Figs. 3, 4) suggest magnitude, but the loss function (MSE) and the architecture's output dimension depend on this choice. This omission affects interpretability of the reported errors.
+- **Two key capability claims lack quantitative evaluation.** The zero-shot super-resolution (Fig. 4, trained on 61×21 → evaluated at 180×21) and generalization to unseen geometries (Fig. 5, full drag cone prediction) are presented as important advantages of the continuous representation but are supported only by qualitative visualizations. The authors likely have access to ground-truth values at the target resolution and could compute MSE or similar metrics, which would substantially strengthen these claims. Without numbers, these demonstrations remain suggestive rather than conclusive.
 
-- **"Operates entirely in Fourier space" overstates the method.** The abstract and Section 2 claim G2Sphere "operates entirely in Fourier space" and contrast this with FNO which "moves back and forth between real and Fourier spaces." However, Section 4.2 (frequency up-sampling) explicitly describes mapping the signal back to real space via IFT for pointwise non-linearities, then transforming back with higher resolution. The method *represents the output* in Fourier space, but the forward pass alternates domains — the same pattern criticized in FNO. This framing should be adjusted for accuracy.
-
-- **Multimodality claim lacks quantitative evidence.** The paper claims G2Sphere "is equally likely to take any of the N-paths" and can control multimodality via maximum frequency (Section 5.2), but the evidence is entirely qualitative: energy landscape visualizations (Fig. 7) and rollout examples (Fig. 8). No quantitative metric (e.g., path-choice entropy, diversity score, per-path success rate with standard errors) is reported. The observation is interesting but the claim of equal likelihood is unsupported.
+- **The NE-G2S ablation for equivariance is only done in the policy domain.** A non-equivariant G2Sphere variant is introduced to isolate the effect of equivariance (line 142), but it is only evaluated in the policy learning experiments (Table 2), not in the radar or drag domains where equivariance is a primary motivation. Adding NE-G2S results to Table 1 would make the equivariance claim convincing across all domains. (The existing comparisons against non-equivariant Transformer and Spherical CNN baselines partially address this, but those baselines differ in more than just equivariance.)
 
 ### Trivial
 
-- The paper uses "embodied" for "energy-based model" (line 130: "EMBs" instead of "EBMs") — a minor typo.
+- **Equiformer inference speed is omitted from Table 3.** The speed comparison reports G2Sphere (9ms), IBC (314ms), and Diffusion Policy (156ms), but omits the Equiformer baseline. Since Equiformer also uses equivariant operations, including its speed would provide a more complete picture of the practical trade-offs.
+
+- **G2Sphere's decoder architecture described at a high level but some operational details deferred.** The frequency up-sampling via IFT → pointwise nonlinearity → FT and the TSNL from Bonev et al. (2023) are referenced but not fully explained in the main text. This is acceptable for a conference paper but might slow readers unfamiliar with the Spherical FNO literature.
 
 ## Nice-to-Haves
 
-- A quantitative evaluation of zero-shot super-resolution (e.g., MSE vs. output resolution) would strengthen the claim beyond the qualitative comparison in Fig. 4.
-- An ablation on the maximum frequency L for the radar task (e.g., sweeping L=10,20,30,40) would help justify the choice L=40 and characterize the accuracy-computation tradeoff.
-- Confidence intervals or paired significance tests would be informative for the modest improvements on drag (e.g., G2S+TSNL at 0.026 vs. next best at 0.033).
+- A G2Sphere variant with a discrete grid decoder (same encoder, matched output resolution) would further isolate the benefit of the spherical harmonic parameterization itself versus the continuous decoding strategy.
+- A brief statement on statistical significance (e.g., via a paired test for the policy results where multiple seeds are available) would increase confidence, though the margins are already large.
+- The Spherical CNN baseline performs very poorly on radar (MSE >100 on Asym); the paper notes this is because the ray-based mapping loses information (line 114), which is already an adequate acknowledgment.
 
 ## Removed Points
 
-These points were flagged but are removed from the main review with justification:
+These points are flagged to be removed; treat them with caution:
 
-- **Harsh Critic: "Fairness and depth of baseline comparisons in policy learning"** — The claim that Diffusion Policy results "seem low relative to published numbers" is speculative and cannot be verified from the paper text (the actual numerical values are in an image table). The concern about hyperparameter tuning effort is a generic criticism that applies to nearly all experimental comparisons without evidence of specific mistuning. Removed.
-- **Harsh Critic: "Modest improvement on radar/drag"** — The improvements are indeed modest in absolute terms (e.g., Asym: 0.026 vs. 0.033 MSE), but the paper reports standard errors and the improvement is consistent across datasets. This is a fair observation about effect size but not a weakness of the paper — it accurately reflects what was found. Removed as non-actionable.
-- **Harsh Critic: "Generalization to unseen objects is only qualitative"** — The paper explicitly shows a quantitative comparison (the drag cone plots) and discusses the behavior difference between models. The qualitative demonstration is appropriate for illustrating the overfitting pattern. Removed.
-- **Strength Finder: "Controllable multimodality via maximum frequency"** — While the idea is interesting, the evidence is qualitative only. This conflicts with the verified weakness that multimodality claims lack quantitative support. Removed on the weakness-prevails-over-strength rule.
-- **Strength Finder: "Ablation confirms equivariance improves performance"** — If NE-G2S results are not presented in the table (as the text suggests), this claim is unsupported. Removed pending verification.
-- **Strength Finder: Generic strengths about addressing important problems / community value** — These lack specific citations to paper content. Removed.
+- **"Abstract contains a typo ('High-Frequnecy')"**: Parser artifact, not a substantive weakness.
+- **"Baseline descriptions lack hyperparameters/training duration details"**: Per policy, reproducibility nitpicks about undisclosed hyperparameters are removed.
+- **"Spherical CNN inflates G2Sphere's advantage"**: The paper already acknowledges this baseline's limitation ("the Spherical CNN does very poorly, suggesting that the ray-based mapping… does not capture the geometric information required"), so the criticism is already addressed.
+- **"Statistical significance not reported"**: Generic criticism that does not identify a specific problem; the clear performance margins make this a non-issue.
+- **"The decoder ablation can be sharpened"** (from Strengthening the Paper section): Moved to Nice-to-Haves since it is a suggestion, not a weakness.
 
 ## Novel Insights
 
-The most interesting observation from the intersection of the reviews is that the paper presents two genuinely distinct contributions — the equivariant encoder and the Fourier-space decoder — but fails to disentangle their relative contributions experimentally. The NE-G2S ablation was designed to do this, making its absence from the results doubly consequential. A separate observation: the paper's strongest practical advantage (9ms inference) comes from a relatively standard engineering choice (pre-computing harmonic bases), while its most novel technical contribution (frequency up-sampling to L=40) is demonstrated only in the radar domain and without ablation. This suggests the method's impact may depend more on the encoder-decoder architecture choice than on the exact frequency up-sampling mechanism used.
+The harsh critic's framing of the "unfair comparison" as a confound between SH representation and higher capacity is the most structurally interesting observation. This mirrors a common tension in architectural papers: when the method's novelty simultaneously enables a new capability (higher frequency) and produces better results, separating the two requires careful experiment design. The drag results (same L=5 for G2Sphere) partially resolve this, but the critic correctly identifies that the radar results — where the largest gains appear — are the ones that need the cleanest controls. The fact that the paper implicitly relies on this confound (attributing the visual improvement to "the higher maximum frequency" at line 114) while simultaneously claiming the representation itself is the contribution is a tension that the authors should address explicitly.
 
 ## Suggestions
 
-1. **Add NE-G2S results to Table 2** (and ideally to Table 1 as well). This is the single most impactful fix — it would directly quantify how much of G2Sphere's improvement comes from equivariance vs. the Fourier-space decoder, addressing the main evidential gap.
-2. **Clarify whether the radar output is complex or real-valued** and, if real, which physical quantity is being predicted (e.g., RCS magnitude). This takes one sentence.
-3. **Add a quantitative metric for multimodality** on the N-Paths task (e.g., entropy over path choices across rollouts, or per-path success rate with standard errors). This would turn an interesting qualitative observation into a convincing result.
-4. **Adjust the "entirely in Fourier space" language** in the abstract and Section 2 to reflect that the method alternates between Fourier and real space for non-linearities, consistent with Section 4.2.
-5. **For the camera-ready version**, consider adding a brief table showing MSE vs. resolution for the zero-shot super-resolution experiment (to quantify what Fig. 4 shows qualitatively).
+1. In the radar domain, add an ablation limiting G2Sphere's decoder to L=5 or the nearest comparable effective resolution, and compare against Equiformer at that same resolution. Present this alongside the full L=40 result so readers can see the contribution of each.
+2. Compute and report numerical error metrics (MSE or relative error) for the zero-shot super-resolution (super-resolved 180×21 vs. ground truth 180×21) and the full drag cone predictions, using the same test split as Table 1.
+3. Include NE-G2S results in Table 1 (radar/drag) to make the equivariance ablation consistent across all domains.
+4. Add Equiformer's inference speed to Table 3.
 
 ## Score and Decision
+
+**Score:** 7.5 — A well-motivated, technically sound paper with a genuine contribution and strong experimental results across diverse domains. The core accuracy and speed advantages are robust. The main weaknesses are fixable: the radar comparison confound and the lack of quantitative backing for two capability claims. These do not invalidate the contribution but should be addressed to bring the evidence fully in line with the claims.
 
 MY FINAL SCORE: <score>7.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

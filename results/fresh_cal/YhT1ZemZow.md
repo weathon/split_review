@@ -1,24 +1,18 @@
-I have thoroughly read the paper and cross-checked the reviewer claims. Let me now produce the consolidated review.
+I now have a thorough understanding of the paper. Let me produce the consolidated review.
 
 ---
 
 ## Summary
 
-This paper studies Sobolev training—using H¹ or H² loss to incorporate derivative information—and aims to provide a theoretical explanation for why it accelerates convergence in ReLU networks. The authors derive analytical gradient formulas for single-node ReLU and ReLU² networks under spherical Gaussian input, claiming that the gradient flow of the Sobolev loss makes the parameter error decrease faster than under L². Empirically, they demonstrate the acceleration across multiple architectures (MLPs with various activations, Fourier feature networks, SIRENs) and propose Chebyshev spectral differentiation to approximate derivatives when targets are unavailable.
-
----
+This paper provides theoretical and empirical evidence that Sobolev training (using H¹ and H² loss functions that incorporate derivative information) accelerates the convergence of neural networks compared to standard L² training. The theoretical analysis derives analytical population gradients for single-node ReLU (H¹) and ReLU² (H²) networks under gradient flow with spherical Gaussian input, showing that the parameter error decays strictly faster under Sobolev losses. Empirically, the paper demonstrates the acceleration across various activation functions, architectures (Fourier feature networks, SIREN), and tasks including denoising autoencoders, and proposes Chebyshev spectral differentiation as a practical method for approximating target derivatives when exact derivatives are unavailable.
 
 ## Strengths
 
-1. **Broad empirical exploration across architectures.** The paper tests Sobolev training on five activation functions (ReLU, Leaky ReLU, ReLU², Tanh, Sine) and on advanced architectures (Fourier feature networks, SIRENs) with consistent findings that H¹ training yields faster convergence than L² training across the board (Figures 3, 4). This provides genuine evidence that the phenomenon is not an artifact of the simple student–teacher setting.
+1. **First analytical derivation of population gradients for Sobolev losses in the student–teacher framework.** The paper derives closed-form formulas for ∇_wℐ (the H¹ seminorm gradient, Eq. ~97-98) for a single ReLU node and verifies these formulas empirically via Monte Carlo (Figure 2). This goes beyond prior work (Cocola & Hand 2020) that treated labels and derivatives as separate vectors and could not capture the acceleration effect. Evidence: Section 2.2–2.3; Figure 2 showing Monte Carlo error decreasing linearly in log-log scale.
 
-2. **Robustness of acceleration to SGD hyperparameters.** Section 4.2 demonstrates that the acceleration effect persists across learning rates spanning four orders of magnitude (1e-1 to 1e-4) and batch sizes from 64 to 4096 (Figure 2), showing the result is not confined to the gradient-flow regime assumed in the theory.
+2. **Chebyshev spectral differentiation proposal with empirical demonstration of superiority over finite differences.** The paper proposes Chebyshev spectral differentiation as a practical substitute when target derivatives are unavailable. Figure 5 shows that Chebyshev-based H¹ training achieves error levels nearly matching exact derivatives, while finite difference (FDM) converges to a poor constant-solution local minimum (zero H¹ seminorm but large L² loss). The Chebyshev method also reaches error level 1e-5 considerably faster than L² training. Evidence: Section 4.4, Figure 5(a)–(b).
 
-3. **Practical Chebyshev differentiation proposal.** The paper identifies a real limitation of prior work—finite difference schemes causing one loss term to dominate—and proposes Chebyshev spectral differentiation as a remedy. The single experiment in Section 4.4 shows this method avoids the degenerate minimum that FDM falls into, reaching lower error.
-
-4. **Numerical verification of gradient formulas.** Section 4.1 confirms that Monte Carlo estimates of the population gradients match the claimed analytical formulas with error decreasing linearly in log-log scale, validating the core theoretical computation.
-
----
+3. **Verification that the acceleration effect extends beyond the theoretical setting.** The SGD experiments (Section 4.2) for a single ReLU node show Sobolev acceleration persists under mini-batch training with various learning rates and batch sizes. The broader experiments (Section 4.3) show H¹ training accelerates convergence for ReLU, Leaky ReLU, ReLU², Tanh, and Sine activations, and Sobolev training combined with Fourier feature networks or SIREN achieves much smaller errors than L²-trained standard MLPs (100-run average in Figure 4). Evidence: Figures 3 and 4.
 
 ## Weaknesses
 
@@ -27,65 +21,61 @@ None.
 
 ### Major
 
-1. **Theoretical proof sketch is far too sparse for a paper claiming "rigorous theoretical evidence."** The proof of Theorem 2 (lines 94–106) consists of: (i) stating the gradient formula ∇_w ℐ without derivation; (ii) writing an equation involving matrices M₁, M₂ that are **never defined**; and (iii) asserting that M₁, M₂ are positive definite without any argument. The expression `-(‖w*‖)ᵀ(M₁+M₂)(‖w*‖)` is dimensionally unclear—‖w*‖ is a scalar, so the notation makes no sense as written. Theorem 3's proof is described as "nearly identical" and equally incomplete. Because the paper advertises itself as providing "the first rigorous theoretical evidence" (Section 5, line 248), this gap is not minor—it means the paper's central advertised contribution is not supported on the page. *This is verifiable directly from the paper: the formulas are given but the reasoning chain is missing key definitions and steps.*
+1. **The theoretical proof is presented in a sketch too incomplete to verify as a standalone argument.** Theorem 2 is the paper's central theoretical claim, but its proof (lines 94–106) is roughly 10 lines: it states the H¹ gradient formula without derivation, then references matrices M₁ and M₂ that are **never defined**. The result relies on positive definiteness of these unspecified matrices. Theorem 3's proof (lines 127–135) says only "The strategy is nearly identical" with no formulas shown. For a paper that bills itself as providing "the first rigorous theoretical evidence" (abstract, conclusion), this is insufficient. While the full derivation may reside in an appendix stripped by the parser, the main text must at minimum define all quantities used in the argument. As presented, the central theoretical claim cannot be independently evaluated from the paper itself. This is the most significant weakness.
 
-2. **Denoising autoencoder evaluation is purely qualitative with no quantitative metrics.** Section 4.5 shows a handful of reconstructed images (Figure 6) and reports convergence curves, but provides **no PSNR, SSIM, or reconstruction MSE** on a test set. The claim of "improved generalization ability" under amplified noise is unsupported by numerical evidence. Given that the training and test noise distributions differ substantially (σ₁=1/4 → σ₁=1 for training→test; frequency changes from 2π to 20π), the experiment needs quantitative evaluation to be interpretable.
+2. **The autoencoder experiment (Section 4.5) does not specify how Sobolev training is applied.** The Sobolev loss requires ∇_x f(x) — the derivative of the target with respect to the input. For a denoising autoencoder, the target is a clean image and the input is a noisy image; there is no well-defined differentiable function f mapping noisy inputs to clean images in the standard sense. The paper states only that this was "first considered in Yu et al. (2023)" without clarifying whether derivatives are approximated (and if so, via what method) or what ∇_x f means in this context. The reconstruction results (Figure 6) may show genuine improvement, but without explaining the loss formulation, this experiment cannot be interpreted as supporting the paper's thesis on Sobolev acceleration. This section needs either a clear methodological description or removal.
+
+3. **The Chebyshev differentiation vs. FDM comparison lacks crucial experimental details.** The paper reports that "the FDM-based approach converged to an undesired local minimum" (Section 4.4) but never specifies the FDM step size, order of accuracy, or grid resolution used. This makes it impossible to determine whether the failure is an inherent limitation of FDM or a result of poor parameter choice. The paper should report these parameters so readers can evaluate the fairness of the comparison.
 
 ### Minor
 
-3. **No error bars despite averaging 100 networks.** Section 4.3 states that 100 networks were trained and averaged (line 217), yet no standard deviations, confidence intervals, or shaded error bands appear in Figures 3 or 4. Without variance information, the reader cannot assess whether observed differences (e.g., the modest gap between L² and H¹ for Fourier features on f₂) are statistically significant or within run-to-run noise.
+1. **Most experiments lack statistical rigor.** Only the Fourier/SIREN experiment (Figure 4) reports averaged results over multiple runs. The SGD experiments (Section 4.2), the various-activations experiments (Section 4.3, Figure 3), and the Chebyshev comparison (Figure 5) all appear to be single runs with no error bars or confidence intervals. For a paper making claims about a "general phenomenon," this is a notable limitation.
 
-4. **Chebyshev method tested on only one target function.** Section 4.4 evaluates the Chebyshev differentiation approach exclusively on the Ackley function. While the result is promising, it is insufficient to support the general claim that Chebyshev "overcomes the limitations" of FDM. No other functions, dimensions, or regularity conditions are explored.
-
-5. **Notation inconsistencies in Theorem 3.** The loss is defined as 𝒵 = 𝒵₁+𝒵₂+𝒵₃, but the gradient flow is written as ẇ = -∇_w ℒ(w) (using ℒ, which was the L² loss from Theorem 1), and the inequality uses an undefined symbol 𝒯_j. These inconsistencies, while individually small, compound the impression that the theoretical development has not been carefully checked.
-
-6. **Missing experimental details for Section 4.3.** The various-architectures experiments specify architecture (2-64-64-64-1), learning rate (1e-4), and epoch count (50,000), but do **not** specify batch size or training dataset size. This hurts reproducibility.
+2. **The claim that Sobolev training "achieves a better local minimum" in the SGD experiments (Figure 2 caption, lines 184–186) is not supported by loss landscape analysis.** The plots show faster convergence to similar terminal error values, which is better characterized as acceleration rather than achieving a qualitatively different (better) minimum. This is a small over-interpretation of the results.
 
 ### Trivial
-
-7. **Likely typo in learning rate for autoencoders (Section 4.5).** The text states "The Adam optimizer with a learning rate of 5e3 is employed" (line 239). A learning rate of 5000 for Adam on MNIST is implausible and is almost certainly a typo for 5e-3.
-
----
+- The notation is inconsistent in places (e.g., ℐ becomes 𝒥 in line 103; the loss symbol changes between sections without explanation).
+- Some equations contain apparent transcription artifacts (e.g., line 103: `-(||w*||)^T (M1+M2)(||w*||)` has arguable dimensional inconsistency).
 
 ## Nice-to-Haves
-
-- A brief intuitive explanation of *why* Chebyshev spectral differentiation avoids the dominance problem of finite differences, beyond the reference to Trefethen (2000).
-- Testing the Chebyshev method on at least one non-smooth target function to probe its robustness.
-- Reporting final parameter distance or loss values for the single-ReLU SGD experiments (Section 4.2) to substantiate the claim of "better local minimum."
-
----
+- A comparison with Fourier spectral differentiation (used in Yu et al. 2023) for the Chebyshev experiment, to empirically validate the paper's claim that Fourier spectral methods are limited by periodicity assumptions.
+- Quantifying the acceleration in terms of iterations-to-target-error rather than only showing loss curves, which would make the speed comparison more concrete.
+- Reporting whether the Ackley-function experiment (Section 4.4) uses Chebyshev nodes or a uniform grid, and how the Chebyshev differentiation matrix is applied in the latter case.
 
 ## Removed Points
 
-These points from the input reviews are removed (with justification) and should be treated with caution:
+These points were flagged in the reviews but are removed from the main assessment for the following reasons:
 
-- **"Coefficients sum to 1/2, not 1" (Harsh Critic).** The critic claims the formula ∇_w ℐ = (π-θ)/(2π)(w-w*) + (θ/(2π)w is "dimensionally suspicious" because coefficients sum to 1/2. This is incorrect—the formula is a linear combination of vectors, and there is no requirement that the coefficients sum to 1. The sum of coefficients has no special significance here.
-- **"Central comparison conflates architectural and loss-function improvement" (Harsh Critic).** The paper does present L² vs. H¹ comparisons *within* each architecture (e.g., Fourier features L² vs. Fourier features H¹). The text mentions the standard-MLP comparison as an additional reference point. While the text could be clearer, the criticism overstates the problem.
-- **"Cannot independently verify" / "not yet released" (related to reproducibility).** The paper cites standard references (Trefethen 2000, Sitzmann et al. 2020, etc.) and these are assumed to exist per review policy.
-- **Generic scope-gap criticism ("theory does not connect to general empirical claims").** This is a standard tension in papers combining theory and experiments; the paper acknowledges the gap. It is not a specific, actionable weakness beyond what is already captured in Point 1 above.
-- **Pure formatting/notation artifacts** that stem from parser issues rather than author errors.
+- **"Chebyshev spectral differentiation requires Chebyshev nodes; the paper does not state whether the Ackley-function grid satisfies this"** — Partially inaccurate: the paper does state the Chebyshev node requirement in line 151 (Section 3). However, it is true that Section 4.4 does not explicitly confirm the Ackley grid uses Chebyshev nodes. Downgraded from a standalone weakness to a nice-to-have clarification.
 
----
+- **"No comparison with Fourier spectral differentiation"** — The paper explicitly states why Fourier spectral methods are unsuitable (periodicity assumption, line 137). Requesting an empirical comparison against a method the authors argue is inappropriate for the setting is scope creep; this would be a nice addition but not a weakness.
+
+- **"Overclaimed generality relative to proven scope"** — The paper consistently hedges its theoretical claims: the abstract says "may be extended," the conclusion says "Although restricted to a relatively simple architecture." The criticism is exaggerated; the paper's framing is appropriately cautious. Removed as a misreading.
+
+- **"The autoencoder experiment is conceptually invalid"** — Downgraded from "invalid" (which would be fatal) to "lacks methodological clarity" (a major weakness). The paper may be using numerical differentiation following Yu et al. (2023) to approximate derivatives; the issue is missing explanation, not inherent invalidity.
+
+- **"The FDM failure mode is just poor step size, not fundamental"** — Speculative; without the paper's step size we cannot evaluate this claim. The paper's assertion that FDM has this limitation may or may not hold generally, but the criticism depends on information not present in the paper.
+
+- Generic strengths from Strength Finder removed: some strengths (e.g., "application to denoising autoencoders") conflict with verified weaknesses; others (e.g., "demonstrated acceleration across diverse architectures") are kept but acknowledged with caveats about single-run limitations.
 
 ## Novel Insights
-
-The synthesis of the reviews reveals a paper with an interesting core idea—showing analytically that Sobolev loss makes the Lyapunov function V = ‖w−w*‖² decay faster—that is let down by execution. The reviewers agree on the key contradiction: the paper claims "rigorous theoretical evidence" but the presented proof sketch is too sparse to be evaluated, missing derivations for the central gradient formula and leaving key matrices undefined. Meanwhile, the empirical work, which is the paper's actual strongest contribution, lacks the quantitative discipline (error bars, denoising metrics, multi-function Chebyshev testing) needed to carry the paper alone. The most constructive insight is that the paper would be stronger if it either (a) fully develops the theoretical derivation with proper definitions and step-by-step reasoning, or (b) doubles down on the empirical work with rigorous comparisons and quantitative metrics—but currently it does neither adequately.
-
----
+None beyond the paper's own contributions. The reviews did not surface an unexpected angle or observation about Sobolev training dynamics that the paper itself does not articulate.
 
 ## Suggestions
 
-1. **Complete the theoretical derivation.** Write out the analytical gradient formulas explicitly, define M₁ and M₂, and show step-by-step why the inner product is more negative for H¹/H² than for L². At minimum, the main paper should contain a self-contained argument for the single-ReLU H¹ case.
-2. **Add error bars to all averaged curves.** Since 100 networks are trained, standard deviations or confidence bands are essential for the reader to assess the significance of reported differences.
-3. **Quantify the denoising autoencoder results.** Report reconstruction MSE or PSNR on a held-out test set for both noise types, with multiple random seeds.
-4. **Fix the Chebyshev evaluation.** Test on additional functions beyond Ackley, and explain more clearly why Chebyshev avoids the dominance problem.
-5. **Correct the notation inconsistencies in Theorem 3** and the learning rate typo.
+1. **Define M₁ and M₂ explicitly in Theorem 2's proof** and provide a clear derivation of the analytical gradient formula for ∇_wℐ. Even if the full calculation resides in the appendix, the main text should contain a self-contained sketch that defines all quantities and justifies why the error dynamics are strictly faster.
 
----
+2. **Either remove the autoencoder experiment or clearly specify the Sobolev loss formulation** used: state whether ∇_x f comes from numerical approximation (and via what method), or explain how the loss is adapted for the denoising task. Without this, the section is uninterpretable.
+
+3. **Add multiple runs / error bars to all main experiments** (SGD, various activations, Chebyshev comparison). Even 5–10 runs with shaded standard deviations would substantially strengthen the claims.
+
+4. **Report the FDM step size, order, and grid resolution** used in the Chebyshev vs. FDM comparison, so readers can assess the fairness of the baseline.
+
+5. **Tone down or better evidence the "better local minimum" claim** (Figure 2 caption); the data support faster convergence to similar terminal values, not a qualitatively better minimum.
 
 ## Score and Decision
 
-This paper tackles a worthwhile problem and presents a broad empirical survey, but its central claim of providing "rigorous theoretical evidence" is not supported by the incomplete proof sketch presented. The empirical work, while suggestive, lacks the statistical rigor (error bars) and completeness (no quantitative denoising metrics, single-function Chebyshev test) needed to compensate. A substantially revised version—either with a properly developed theoretical proof or a tighter, fully-quantified empirical study—could make a valid contribution, but the current submission falls short.
+The paper addresses a genuinely interesting question and contains valuable elements: the analytical gradient derivation, the Monte Carlo verification, and the Chebyshev differentiation proposal are all useful contributions. However, the theoretical proof — presented as the paper's central contribution — is given only in sketch form with undefined quantities (M₁, M₂), rendering it unverifiable from the main text. The autoencoder experiment lacks a clear methodological description. These are significant weaknesses for a paper that positions itself as providing theoretical understanding. With complete proofs and clarified experiments, the paper could be a solid contribution; in its current form, the gap between the claimed rigor and the presented content is too large.
 
-MY FINAL SCORE: <score>4.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+**MY FINAL SCORE:** <score>5.0</score>
+**MY FINAL DECISION:** <decision>Reject</decision>

@@ -1,16 +1,20 @@
-Now I have thoroughly verified the paper content against the reviewer claims. Let me produce the consolidated review.
+Now I have a thorough understanding of the paper and can cross-check all reviewer claims.
 
 ## Summary
-This paper introduces relative-translation invariant Wasserstein distances (RWₚ), focusing on the quadratic case RW₂. The core contributions are: (1) a decomposition theorem showing that the quadratic ROT problem separates into a classical OT subproblem and a simple mean-difference minimization; (2) a Pythagorean relationship W₂² = ‖μ̄−ν̄‖² + RW₂², enabling a bias-variance interpretation of distribution shift; and (3) an RW₂ Sinkhorn algorithm that pre-centers distributions before computing OT, improving numerical stability and reducing runtime under large translations. Experiments validate the algorithm's efficiency gains and demonstrate robustness to translation in digit recognition and thunderstorm pattern retrieval.
+
+The paper introduces the relative-translation invariant Wasserstein distances ($RW_p$), a family of metrics on the quotient space $\mathcal{P}_p(\mathbb{R}^n)/\!\sim$ under translation equivalence. For the quadratic case ($p=2$), it derives three properties — decomposability of the ROT optimization, translation-invariance of coupling solutions, and a Pythagorean relationship $W_2^2 = \|\bar{\mu}-\bar{\nu}\|_2^2 + RW_2^2$ — and leverages them to propose an $RW_2$ Sinkhorn algorithm that centers the source distribution before running standard Sinkhorn. The paper provides numerical stability and complexity analyses and validates the method on synthetic data, MNIST digit recognition under random translations, and a large-scale thunderstorm pattern detection task (205,848 radar images).
 
 ## Strengths
-1. **Decomposition theorem (Thm. 3) and the resulting algorithmic efficiency**: Theorem 3 proves that ROT(μ,ν,2) = min_P E(P) + min_s V(s), where V(s) is minimized analytically at s = ν̄−μ̄. This clean decoupling is the theoretical backbone of Algorithm 1—it means the RW₂ Sinkhorn simply shifts one distribution's coordinates by the mean difference before running a standard Sinkhorn. No prior translation-invariant OT formulation provides this exact, exploitable decomposition.
 
-2. **Pythagorean relationship and bias–variance interpretation (Cor. 5)**: Equation (Eq_RW_and_W) gives W₂²(μ,ν) = ‖μ̄−ν̄‖₂² + RW₂²(μ,ν), an exact three-term decomposition that connects directly to bias–variance thinking. The paper explicitly discusses the Dirac-specialization where this becomes classical bias–variance (end of Sec. 3.2). This is a genuine theoretical insight that goes beyond simply defining a new metric.
+1. **Decomposability theorem (Theorem 2, Sec. 3.2).** The paper proves that the quadratic ROT problem separates into an independent classical OT problem (determining the coupling $P$) and a simple quadratic minimization in $s$ (yielding $s = \bar{\nu} - \bar{\mu}$). This decomposition is correctly derived and is the theoretical linchpin that enables the efficient algorithm.
 
-3. **Controlled empirical validation of computational gains (Sec. 5.1, Fig. 3)**: The numerical experiment compares RW₂ Sinkhorn vs. classical Sinkhorn across Gaussian and uniform distributions under varying translation magnitudes. The results show the classical Sinkhorn's error and runtime exploding as translation grows (e.g., ~1.2s → ~0.2s improvement in runtime), while RW₂ Sinkhorn maintains low error and near-constant performance. This directly confirms the complexity and stability analysis.
+2. **Pythagorean relationship (Corollary 2, Sec. 3.2).** The identity $W_2^2(\mu,\nu) = \|\bar{\mu}-\bar{\nu}\|_2^2 + RW_2^2(\mu,\nu)$ provides a clean interpretation of distribution shift as a sum of "bias" (mean difference) and "shape" ($RW_2$) terms. This is a principled decomposition that the paper puts to concrete use.
 
-4. **Digit recognition with random translation (Sec. 5.2, Fig. 5)**: The MNIST experiment with independent random translations on both train and test sets quantitatively demonstrates that RW₂ significantly outperforms L₁, L₂, W₁, and W₂ baselines in classification accuracy as translation magnitude increases. Results are reported with means and standard deviations over 10 repeats, showing clear statistical trends.
+3. **Existence guarantee (Theorem 1, Sec. 3.1).** The proof that the outer minimization over $s$ can be restricted to a compact set $\{\|s\|_p \le 2\max_{ij}\|x_i-y_j\|_p\}$, ensuring a minimizer exists, grounds the ROT formulation rigorously and distinguishes it from a heuristic search.
+
+4. **Numerical validation (Experiment 1, Sec. 5.1).** Controlled experiments on Gaussian and uniform distributions in $\mathbb{R}$ and $\mathbb{R}^{10}$ cleanly demonstrate that as translation grows, the $RW_2$ Sinkhorn algorithm yields lower error and faster runtime compared to standard Sinkhorn. The results confirm the complexity/stability analysis and show the method's practical benefit.
+
+5. **Digit recognition under random translations (Experiment 2, Sec. 5.2).** On MNIST images embedded in larger grids with varying translation magnitudes (0–28 pixels), $RW_2$ achieves significantly higher nearest-neighbor classification accuracy than $L_1$, $L_2$, $W_1$, and $W_2$ as translation increases. The experiment uses two sample sizes ($N=100, 1000$) with 10 repeats and reports mean/std, establishing robustness empirically.
 
 ## Weaknesses
 
@@ -18,58 +22,55 @@ This paper introduces relative-translation invariant Wasserstein distances (RW�
 None.
 
 ### Major
-None. The paper's core theoretical results are sound and its algorithmic claims are supported by the controlled experiment.
+
+1. **The thunderstorm pattern detection experiment (Sec. 5.3) is purely qualitative.** The paper shows two figures comparing retrieved snapshots/sequences using $RW_2$ vs. $W_2$, but provides no quantitative evaluation — no retrieval precision/recall, no mean average precision, no user study, no objective shape-similarity metric. The claim that "$RW_2$ focuses more on shape similarity while $W_2$ pays more attention to location similarity" is an expected consequence of the definitions, not an empirical finding. Given that the weather application is presented as the primary motivation (Introduction, first paragraph), the absence of quantitative evidence is a significant gap that weakens the paper's overall empirical support.
+
+2. **Scope gap: the title and abstract claim a family $RW_p$, but the entire algorithmic and experimental contribution is limited to $p=2$.** The paper correctly defines $RW_p$ for general $p \ge 1$ and proves $RW_p$ is a metric on the quotient set. However, for $p \neq 2$ the ROT problem does not decompose as it does for $p=2$, and solving it would require a joint optimization over $s$ and $P$ that could be non-convex and computationally expensive. The paper does not discuss this difficulty, acknowledge that $p \neq 2$ is an open problem, or even state this limitation explicitly. A reader could reasonably assume the algorithm generalizes.
 
 ### Minor
 
-1. **Thunderstorm experiment (Sec. 5.3) is purely qualitative.** The paper presents side-by-side images of reference and retrieved events with claims that "RW₂ focuses more on shape similarity," but provides no quantitative evaluation—no human annotation, no shape-similarity metric (e.g., SSIM on binary masks), no accuracy metric. The paper lists "similar thunderstorm detection" as a key application in the abstract and conclusion, yet the evidence for this application is entirely anecdotal. The experiment serves as an illustration but does not constitute rigorous evidence for the claims made about "effectiveness" and "practical usage."
+3. **Experiment 2 (digit recognition) would be strengthened by an explicit centered-$W_2$ baseline.** Since $RW_2$ is mathematically equivalent to $W_2$ applied to centered distributions, a direct comparison against $W_2$ on pre-centered images would validate the theory and show that the benefit of $RW_2$ comes from its translation invariance, not from some other algorithmic artifact. The absence of this baseline does not invalidate the results, but it is a missed opportunity to make the experiment more informative.
 
-2. **Error metric in numerical validation (Sec. 5.1, Fig. 3) is undefined.** The paper states it compares algorithms "in W₂ error and running time" and the figures label the y-axis "Error," but never defines what error means—absolute deviation from ground-truth W₂? Relative error? Squared error? This should be explicitly stated.
+4. **The numerical stability analysis (Sec. 4.3) uses the product of all entries of $K$ ($g(K)$) as a stability criterion, which is a heuristic.** The paper shows that centering maximizes $g(K)$ and argues this improves stability by pushing entries away from zero. While the intuition is reasonable, the actual numerical stability of Sinkhorn depends on the range of the entries and their interaction with the iterative scaling, not just the product. The analysis would be stronger with a direct validation of stability (e.g., condition numbers of the iteration matrices or convergence rates under varying translations).
 
-3. **Numerical stability analysis (Sec. 4.3) is heuristic.** The paper defines g(K) as the product of all kernel entries and argues that maximizing g(K) (via centering) improves stability. However, the practical underflow issue in Sinkhorn concerns the *minimum* entry value (or equivalently the maximum cost), not the product. Maximizing the product does not strictly guarantee improvement in the worst-case entry. The argument is directionally correct and the heuristic is reasonable, but the paper presents it as a more rigorous analysis than it is.
-
-4. **No new complexity bound is derived for RW₂ (Sec. 4.4).** The paper cites the Altschuler et al. bound O(m²‖C‖_∞³(log m)τ⁻³) and argues qualitatively that reducing ‖C‖_∞ reduces complexity, but derives no RW₂-specific bound. This is fine as a qualitative justification but the language ("provides analysis of time complexity") slightly overstates the contribution.
-
-5. **Slight performance degradation for small translations is acknowledged but not explained.** The caption of Fig. 3 notes that RW₂ Sinkhorn "performs similarly or slightly worse" for small translations, but the paper offers no explanation (e.g., is it floating-point precision from mean computation? overhead from the centering step?). A brief discussion would improve clarity.
-
-6. **Missing limitations paragraph.** The paper does not explicitly discuss limitations: RW₂ only handles a single global translation, not rotation (noted in passing in Sec. 3.1), scaling, or non-uniform shifts; the Pythagorean decomposition does not generalize to p≠2; the algorithm's speed advantage depends on the mean difference being large. These are natural points to include in the conclusion.
+5. **The RW$_2$ Sinkhorn algorithm (Algorithm 1) is centering + standard Sinkhorn.** The algorithm computes $s = \bar{\nu} - \bar{\mu}$, translates the source points, and runs standard Sinkhorn on the shifted cost matrix. This is a straightforward application of the decomposition theorem rather than a novel algorithmic technique. The contribution lies in recognizing and formalizing this reduction, which is valuable, but the paper should be clearer about this framing to avoid overclaiming algorithmic novelty.
 
 ### Trivial
-
-- The notation E(P) in Theorem 3 is the objective for the *untranslated* problem, not W₂² until minimization. This is consistent with the standard definition but could cause momentary confusion for readers not familiar with the notation.
+None.
 
 ## Nice-to-Haves
-- **Adding a "centered W₂" baseline in the digit recognition experiment** (Sec. 5.2): Compute W₂ after subtracting each image's mean coordinates. This would help further clarify whether the benefit comes from the RW₂ metric specifically or from removing mean difference as a confounding factor. (Note: this is not the same as RW₂—RW₂ optimally translates one distribution toward the other, while "centered W₂" translates both to the origin—but it would be a useful additional point of comparison.)
-- The thunderstorm experiment could be strengthened with a quantitative shape-similarity metric (e.g., SSIM on thresholded reflectivity masks, or human-judgment agreement percentages on top-k retrievals).
-- The paper could briefly discuss why the Sinkhorn performs slightly worse at very small translations (floating-point precision in the empirical mean computation? overhead of the centering step?).
-- Mention that the convergence criterion in Algorithm 1 uses a primal residual, and for large-scale problems a relative criterion may be more appropriate.
+
+- Adding a quantitative retrieval evaluation for the thunderstorm experiment (e.g., precision@k against human-annotated shape similarity, or using known temporal proximity as pseudo-ground-truth).
+- A brief discussion of the challenges for $p \neq 2$ (non-convexity, potential approaches) to clarify the scope.
+- An explicit experiment showing $RW_2 \equiv W_2$ on pre-centered data to validate the theory.
 
 ## Removed Points
-These points were identified in the inputs but are removed or demoted per the filtering rules:
 
-1. **Theorem 2 (metric property) proof not in main text** — The harsh critic noted the proof was deferred to the appendix. The parser strips appendix content; the rule instructs to remove weaknesses about missing proofs in appendix. The paper also provides context ("Similar to the situation where Wₚ is a real metric... we can obtain") which sketches the reasoning. *Removed.*
+These points are flagged to be removed; treat them with caution.
 
-2. **Formatting nitpick about `./` notation in Equation (2.4)** — The critic claimed the equation was "missing a denominator." The notation `./` is standard for component-wise division; this is a parser artifact. *Removed* per the rule against formatting/style nitpicks and parser artifacts.
+1. **"Novelty is significantly overstated; core ideas are elementary and well-known."** This criticism asserts that the Pythagorean decomposition is "routinely used in the OT literature" and that the paper presents it as a new discovery. The paper claims "we introduce a new family of distances" ($RW_p$) and "identify three useful properties of $RW_2$." The reviewer provides no citations to support the claim that this specific decomposition for general discrete distributions is well-known. Per the meta-review rules, I cannot verify the existence of this alleged prior art, and I should not penalize the paper for missing related works that may not exist. The decomposition is correctly derived and forms part of a coherent framework.
 
-3. **Centered-W₂ "exactly equal" claim** — The harsh critic asserted that centered W₂ would be "exactly equal if the centering is done per image" to RW₂. This is factually incorrect: RW₂(μ,ν) = min_s W₂(μ+s, ν) = W₂(μ+ν̄−μ̄, ν), while centered W₂ computes W₂(μ−μ̄, ν−ν̄). These are different quantities in general. The suggestion to add the baseline is retained as a Nice-to-Have, but the incorrect mathematical claim is removed. *Removed (factually incorrect).*
+2. **"Motivation disconnected from evaluation."** The reviewer argues the paper does not show $RW_2$ improves downstream task performance (e.g., forecast accuracy). The paper's scope is to propose a distance metric and validate that it behaves as claimed (shape-focused retrieval). Requiring downstream weather prediction benchmarks is scope creep and goes beyond what the paper sets out to do.
 
-4. **Sinkhorn convergence criterion critique** — A minor suggestion about using a relative criterion instead of an absolute primal residual. This is a practice preference, not a flaw in the paper; the paper's chosen criterion is standard. *Moved to Nice-to-Haves.*
-
-5. **Strength Finder's generic/superficial strengths** — The Strengths section retains only concrete, evidence-backed strengths. The Strength Finder's characterizations of the thunderstorm experiment as a "real-world demonstration" are retained with the caveat of qualitative-only evidence. Generic framing claims not directly tied to specific content are dropped.
+3. **Strength: "Thunderstorm pattern detection experiment (Figures 6 and 7)."** This strength conflicts with the verified weakness that the experiment is purely qualitative. Following the rule that "when a strength and weakness disagree, the weakness wins," this claimed strength is removed.
 
 ## Novel Insights
-None beyond the paper's own contributions. The harsh critic and strength finder do not surface observations about the paper's theory or results that go beyond what the authors themselves articulate (the decomposition theorem, Pythagorean relationship, and algorithm design are already clearly presented by the authors).
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Define the error metric** in Sec. 5.1 explicitly (e.g., "error = |W₂ − computed W₂|" or "relative error = |W₂ − computed W₂|/W₂").
-2. **Add a quantitative component** to the thunderstorm experiment (e.g., compute SSIM between thresholded reflectivity masks for the top-k retrievals from RW₂ vs. W₂, or report agreement rates from a small human evaluation).
-3. **Add a limitations paragraph** to the conclusion covering: global-translation-only invariance (no rotation, scaling, or non-uniform shifts), p=2 specificity of the decomposition and Pythagorean relation, and dependence of speedup on translation magnitude.
-4. Briefly explain the slight degradation at small translations in Fig. 3 (a sentence hypothesizing the cause would suffice).
-5. Consider adding centered-W₂ as an additional baseline in the digit recognition experiment.
+
+1. **Add quantitative evaluation to Experiment 3.** For the thunderstorm retrieval task, compute precision@k, mean average precision, or a similar metric against a reasonable ground truth (e.g., human annotation of shape similarity, or temporal proximity under the assumption that consecutive storm images share similar shapes). Without numbers, the sole experiment tied to the paper's motivating application remains anecdotal.
+
+2. **Acknowledge the $p \neq 2$ limitation explicitly.** Either narrow the paper's scope in the title/abstract to $RW_2$, or add a paragraph discussing why $p \neq 2$ is more challenging and what approaches might be explored (even if not solved). This would set honest expectations.
+
+3. **Reframe the algorithm contribution.** Present Algorithm 1 as "a practical application of the decomposition theorem that enables efficient computation of $RW_2$ via standard OT solvers" rather than as a novel algorithmic variant. This accuracy would strengthen credibility.
+
+4. **Add an explicit centered-$W_2$ baseline to Experiment 2.** Show that $RW_2$ and $W_2$ on centered images produce identical or near-identical classification accuracy, confirming the theoretical equivalence.
+
+5. **Strengthen the numerical stability analysis.** Supplement the $g(K)$ heuristic with empirical validation (e.g., show condition numbers, convergence trajectories, or entropy values of the scaling vectors) to directly support the stability claim.
 
 ## Score and Decision
 
-This paper presents a clean, well-motivated theoretical contribution with a practical algorithm. The decomposition theorem and Pythagorean relationship are genuine insights, the RW₂ Sinkhorn algorithm is sound, and the controlled numerical experiment convincingly demonstrates its advantages. The digit recognition experiment provides quantitative evidence of translation robustness. The main empirical gaps are the purely qualitative thunderstorm demonstration and the undefined error metric in the numerical validation—both addressable without changing the core contribution. The writing is clear and the theoretical derivations are correct. No fatal or major flaws are present.
-
-MY FINAL SCORE: <score>7.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+**MY FINAL SCORE: <score>6.5</score>**
+**MY FINAL DECISION: <decision>Accept</decision>**

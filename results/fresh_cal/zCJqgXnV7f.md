@@ -1,24 +1,20 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper studies $(\epsilon,\delta)$-PAC best-item identification from Plackett-Luce relative feedback. It proposes **Dynamic Elimination (DE)**, which flexibly prunes suboptimal items during subset plays (rather than evaluating entire subsets before discarding all but the winner), achieving worst-case sample complexity $O\big(\frac{n}{\epsilon^2}\ln\frac{n}{n_s\delta}\big)$. It further extends DE to **DEBC**, which leverages item correlation information (cosine-similarity matrix) to perform Bayesian "inferred updates" on unplayed items, and provides a sample complexity bound under a noisy $R$-Block-Rank correlation model. Experiments on three synthetic dataset families show DE and DEBC outperforming existing baselines (TTB, DAB, a modified DKWT) by roughly an order of magnitude.
-
----
+This paper studies PAC best-item identification from subset-wise relative feedback under the Plackett-Luce model. It contributes two algorithms: **Dynamic Elimination (DE)**, which prunes suboptimal items dynamically during subset play rather than evaluating static subsets (achieving \(O(\frac{n}{\epsilon^2}\ln(\frac{n}{n_s\delta}))\) sample complexity), and **DEBC**, which extends DE by leveraging item correlation information to perform probabilistic "inferred updates" on unplayed items. Experiments on synthetic datasets show order-of-magnitude improvements over prior baselines (TTB, DAB, DKWT).
 
 ## Strengths
 
-1. **Dynamic elimination is a well-motivated algorithmic innovation.** The core idea — pruning items as soon as they can be confidently eliminated rather than waiting for full subset rounds — directly addresses a real inefficiency in prior PAC best-item algorithms (Saha & Gopalan 2019a,b; Haddenhorst et al. 2021). The worst-case bound $O(\frac{n}{\epsilon^2}\ln\frac{n}{n_s\delta})$ is clean, and the running-winner inheritance mechanism (Lemma 10) is a thoughtful engineering solution to the practical challenge of a winner being eliminated.
+1. **Dynamic elimination is a clean and motivated algorithmic innovation (Section 5, Algorithms 1–2).** Prior work (Saha & Gopalan 2019a,b; Haddenhorst et al. 2021) evaluates static subsets and waits for a winner to emerge, wasting plays on items already known to be suboptimal. DE eliminates items as soon as they are provably non-Condorcet with high probability. The running-winner inheritance mechanism (Alg. 2 lines 8–11) addresses the technical challenge of what happens when a running winner is eliminated. Experiments confirm this design yields large practical gains.
 
-2. **The inferred-update formalization (Theorem 2) is mathematically nontrivial.** Deriving closed-form conditional probabilities $p_{jk|ik}$ from cosine-similarity embeddings on the unit hypersphere, and relating them to the PL model, is a genuinely technical contribution. The result — $p_{jk|ik}=1-\frac{1}{\pi}\cos^{-1}(\cdots)$ — is concrete and directly computable from the correlation matrix alone, without needing the full item vectors.
+2. **Formalization of inferred updates from item correlations (Section 6, Theorem 2–3).** The paper introduces a principled Bayesian framework for probabilistically updating pairwise win-ratio estimates of unplayed items using correlation information. Theorem 2 derives a closed-form expression for \(p_{jk|ik}\) under a latent-embedding cosine-similarity model (Eq. 1). Theorem 3 claims the combined empirical+inferred sequence yields an unbiased estimator. This is a novel extension beyond standard rank-breaking and is conceptually interesting.
 
-3. **Empirical breadth across diverse correlation structures.** Experiments use three dataset families (N¹⁶: weak correlation; DIM: well-separated clusters; G2: strong overlap) that span the main scenarios for vector distributions. The robustness experiment (Figure 2b,c) and short-term performance analysis (Figure 2d,e) add useful dimensions beyond the main comparison.
+3. **DEBC item-selection strategy (Section 7.1).** The principled selection of poorly-correlated initial subsets and least-correlated replacements to maximize coverage of the item space is a well-reasoned departure from the random selection in prior work. It directly connects to the effectiveness of inferred updates.
 
-4. **Conservative multi-source inference (Section 6.3, Lemma 5).** The paper correctly identifies that combining inferred updates from multiple items is intractable in full generality, and shows that treating them independently yields a conservative estimate when constituent probabilities are high — a principled approximation.
-
----
+4. **Consistent and large empirical improvements across multiple settings (Section 8, Figures 1–3).** Experiments cover three distinct vector-distribution scenarios (weakly correlated Gaussian vectors, well-separated clusters, overlapping clusters), vary \(\epsilon\), \(n_s\), and \(n\), and include ablation on correlation noise and short-term performance. Both DE and DEBC consistently exceed 95% accuracy while requiring orders of magnitude fewer samples than TTB, DAB, and DKWT. The improvement is sustained across all scenarios tested.
 
 ## Weaknesses
 
@@ -27,77 +23,64 @@ None.
 
 ### Major
 
-1. **Bayesian–frequentist tension in the inferred-update framework (Sections 6.2–6.3, Theorem 3).** The conditional probability $p_{jk|ik}$ is defined as $\Pr_{\mathbf{q}}(p_{jk}>1/2 \mid p_{ik}>1/2)$ — a probability *over the space of all query vectors $\mathbf{q}$* (Section 3 notation: "$\Pr_{\mathbf{q}}(\dots)$ denotes the probability space over all possible vectors $\mathbf{q}$"). Yet the data-generating process in the problem setup (Section 3, Section 6.1) treats $\mathbf{q}$ as a *fixed* but unknown vector. For a fixed $\mathbf{q}$, the event $p_{jk}>1/2$ given $p_{ik}>1/2$ is deterministic (0 or 1). The paper implicitly treats $\mathbf{q}$ as random with a uniform prior over the unit sphere to derive the closed-form expression in Theorem 2, but this Bayesian interpretation is never explicitly stated or justified relative to the frequentist PAC objective. The unbiasedness claim (Theorem 3) — that the sample mean of inferred updates is unbiased for $p_{ij}$ — inherits this ambiguity: it is unclear whether the expectation is taken over a Bayesian posterior (over $\mathbf{q}$) or over the data-generating process (with fixed $\mathbf{q}$). **The paper partially acknowledges this tension in Section 7.2** ("there will be a region of query vectors for which the inferred updates are consistently wrong…"), but the acknowledgement sits in a later section while Theorem 3 is stated earlier without caveat. This is not fatal — the DEBC algorithm is presented as conditional on an $R$-Block-Rank model — but the foundational justification of the inferred updates needs to be clarified.
+1. **Theorem 4 uses undefined quantities, making it unverifiable.** The theorem's sample complexity bound (line 248) depends on \(w_{\min}^{\text{in}}\) which is never defined. Condition 4 of the theorem (line 254) invokes \(\text{Info}(\cdot)\) and \(\lambda\) without definition. Additionally, condition 2 uses both \(\varepsilon\) and \(\epsilon\) (line 254) without clarifying whether these are distinct parameters. A central theoretical result that cannot be parsed by a knowledgeable reader is a significant presentation gap.
 
-2. **The DKWT baseline modification is not described.** The paper states: "Due to the lack of competitive and compatible baselines, we consider a modified version of Dvoretzky–Kiefer–Wolfowitz Tournament (DKWT)… as an additional baseline." No details are given about what was modified or why. Since DKWT is a published algorithm (Haddenhorst et al., 2021), an undocumented modification makes the comparison uninterpretable: the claimed improvement over DKWT may be an artifact of the modification rather than a genuine advantage of DE/DEBC. This undermines the paper's strongest empirical claim ("outperform all existing SOTA benchmarks by over an order of magnitude").
+2. **No pseudocode or algorithmic box is provided for DEBC (Section 7.1).** While DE is specified by Algorithms 1 and 2, DEBC's item selection strategy ("least correlated to items that have already been played") is described only in prose. The selection metric, tie-breaking, and initialization procedure are underspecified. This makes the precise algorithm ambiguous and the experimental results harder to reproduce or build upon.
 
-3. **Missing statistical rigor in experiments.** Despite running 100 trials, the paper reports no confidence intervals, standard errors, or statistical tests on any sample complexity figure. The plots (Figures 1–3) show only point estimates on log-scale axes, making it impossible to assess whether the observed differences are statistically significant. Furthermore, for a PAC algorithm, the empirical *success rate* (fraction of trials where the output is $\epsilon$-optimal) is a critical diagnostic metric that is never explicitly reported — the paper only mentions "mean errors" without presenting them, and asserts that "DE and DEBC both find the $\epsilon$-optimal item with at least probability $1-\delta$ in all the settings" without backing this with tabulated numbers.
+3. **Missing ablation: the contribution of inferred updates vs. item selection is confounded.** DEBC differs from DE in two ways: (a) correlation-based item selection, and (b) inferred updates. The experiments compare DEBC directly to DE, but the performance gap could be driven primarily by better item selection alone. An ablation running DE with DEBC's selection (without inferred updates), or DEBC with random selection (without correlation-based selection), is needed to attribute the gains correctly.
+
+4. **Unbiasedness claim for inferred updates (Theorem 3) is not adequately justified.** The proof sketch (2 sentences) states that combining empirical and inferred sequences yields a Beta mixture whose mean is the sample mean. However, the inferred updates are functions of the same empirical data that informed the prior — the independence required for the standard unbiasedness argument is not established, and the proof sketch does not address this. Given that Theorem 3 is one of the paper's four headline contributions, this gap is significant.
 
 ### Minor
 
-1. **Theorem 4's conditions are stated without interpretation.** Conditions 2–4 of Theorem 4 are mathematically complex expressions involving $c$, $c'$, $\varepsilon$, $\epsilon$, $\lambda$, and an unexplained "Info" function (which may be defined in the appendix). No intuition is given for when these conditions hold, what they mean geometrically, or whether they are satisfiable for realistic parameter ranges. The proof sketch ("We then use Theorem 1 for the remaining items") suggests the block-separation conditions are doing the heavy lifting, but this is not made explicit. This limits the theorem's usefulness as a *verifiable* guarantee.
+1. **No error bars or variance information reported despite 100 trials.** The paper states "each setting is run for 100 trials" (line 268), but Figures 1–3 are described only as line plots. Without confidence intervals, quartiles, or any measure of variance, it is impossible to assess the statistical significance of the reported improvements.
 
-2. **Theoretical comparison with existing bounds is thin.** The paper's bound $O(\frac{n}{\epsilon^2}\ln\frac{n}{n_s\delta})$ improves over Saha & Gopalan's $O(\frac{n}{\epsilon^2}\ln\frac{n}{\delta})$ by only a $\ln(\frac{n}{n_s})$ factor — a modest improvement. The paper claims the "experimental superiority" but does not reconcile the theory with the dramatic empirical gains, nor provide an instance-dependent lower bound that would clarify where the practical advantage comes from.
+2. **DKWT modification is not described.** The paper says "we consider a modified version of DKWT... We compare both algorithms under this equivalence" (line 264), but neither the modification nor "this equivalence" is explained in the main text. This makes the primary baseline comparison uninterpretable on its face.
 
-3. **"Over an order of magnitude" claim lacks explicit numerical backing.** The improvement factor is asserted based on visual inspection of log-scale plots. For reproducibility, the paper should state the actual sample complexity numbers (e.g., "DE achieves mean sample complexity of X vs DKWT's Y, a Z× improvement").
+3. **No evaluation on real-world datasets.** The paper claims applications in recommender systems, search, and NLP (Section 1) but evaluates only on synthetic data (N¹⁶, DIM, G2). While synthetic experiments are acceptable for a theory-driven paper, the claimed practical relevance would be strengthened by at least one realistic benchmark.
 
-4. **Algorithm pseudocode clarity (Algorithm 2).** The variable $W$ is used on line 1 ("$G\backslash(\{i^{*}\}\cup W)$") but its initialization is ambiguous in the algorithm listing (the initialization line says "potential running winner challengers" without assigning this to $W$). The update rule on line 11 is notationally dense and would benefit from a clearer exposition.
+4. **Uniform query distribution assumption is implicit but not discussed.** The derivation of \(p_{jk|ik}\) (Theorem 2) relies on query vectors being uniformly distributed on the unit sphere (implied by the geometric area-of-hemisphere-intersection argument). This assumption is not stated explicitly, nor is its practical plausibility discussed or tested.
+
+5. **Proof sketches in the main text are very brief.** Each theorem is accompanied by a 2–5 sentence sketch. While full proofs may reside in the appendix, the main-text sketches for the central claims (particularly Theorems 3 and 4) are too vague for a reviewer to assess the logic without the supplementary material.
 
 ### Trivial
-None.
-
----
+- TTB and DAB are mentioned as having sample complexities "orders of magnitude larger" (line 272) but are not plotted in Figures 1–3. Including them (even on a separate scale or as annotations) would improve verifiability.
+- Algorithm 2, line 10's weighted-average update (\(P_{ij} \gets P_{i^*j} \times N_{i^*j} + P_{ij} \times N_{ij}\)) is described but the normalization post-update could be clarified.
 
 ## Nice-to-Haves
-
-- An ablation study isolating the effect of dynamic elimination alone (DE without inheritance) from the effect of correlation-based selection and inferred updates would help identify which component drives the empirical gains.
-- Real-world datasets (e.g., from recommender systems or information retrieval) would strengthen the evaluation beyond synthetic data.
-- A discussion reconciling the theoretical bound (modest improvement) with the empirical results (dramatic improvement) would clarify whether the practice outpaces the theory due to instance-dependent effects or other factors.
-
----
+- A small simulation validating the unbiasedness of the inferred-update estimator on known PL data would substantially strengthen the theoretical claim.
+- Reporting the sharpness values used in experiments and showing sensitivity (the paper mentions Figure 1.4 which appears to vary sharpness, but the values are not stated in text).
+- A discussion of whether and how the method extends to settings where item correlations are estimated from data rather than known a priori.
 
 ## Removed Points
 
-These points were identified in reviewer input but removed from the main review with justification:
-
-- **"Theorem 4 contains undefined terms $w_{\min}^{in}$ and 'Info' function"** — These may be defined in the appendix, which the parser strips from all papers per standard practice. Removing per the instruction that appendix content is not part of the extractable review text.
-- **"Lemma 10 proof is in the missing appendix"** — Likewise removed per the appendix-stripping rule.
-- **"Missing related works"** — Removed per the instruction that the reviewer has no external sources to verify existence of omitted references.
-- **"Formatting/style nitpicks about garbled text, broken characters, whitespace"** — These are parser artifacts from PDF extraction, not author errors.
-- **"Unclear whether the 'sharpness' parameter affects all algorithms equally"** — The paper states "this induces faster convergence across all instance optimal algorithms (DE, DEBC, DKWT)," which is a reasonable claim; this is a speculative rather than verified vulnerability.
-- **"'Over an order of magnitude' claim is anecdotal"** — The critic's stronger framing is downgraded; the issue is kept as Minor (lack of explicit numerical values) rather than treated as a fatal omission.
-- **"No real-world data is a limitation"** — Moved to Nice-to-Haves since the synthetic datasets are standard in the ranking literature and the paper's scope is algorithmic.
-- **Strength Finder's "Comprehensive experimental evaluation" strength** — Partially retained (breadth of datasets is a genuine strength) but weakened by verified rigor issues (no error bars, undocumented baseline modification).
-- **Strength Finder's "Practical input requirement" strength** — Partially retained implicitly through the main strengths; reframed as a property of the approach rather than a standalone strength.
-
----
+- **"Sharpness parameter gives unfair advantage to proposed method"** — The paper explicitly states sharpness "induces faster convergence across all instance optimal algorithms (DE, DEBC, DKWT)" (line 268), meaning it is applied uniformly. The critic's concern about tuning asymmetry is not supported by the text.
+- **"Missing related work: Yang & Feng (2023) not compared"** — This work operates in a different setting (variable-size subsets), which the paper notes. Not comparing against a method in a different problem setting is not a weakness.
+- **"No code release, no hyperparameter tables"** — These are standard reproducibility concerns but the instruction removes nitpicks about reproducibility artifacts impractical to include.
+- **Claims about stripped appendix content** — References to Lemma 5, Lemma 10, and footnotes (".1." artifacts) are parser-stripped content that exists in the original submission.
+- **"Evaluation fairness" as a general claim** — The critic's broad assertion that the comparison is unfair lacks specific anchor points beyond the DKWT modification (kept) and sharpness (removed above).
+- **Strength Finder's generic strengths** — "This paper addressed an important problem" and similar generic statements are removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions, though the synthesis of the two reviews surfaces an interesting tension: the paper's strongest empirical evidence (DE outperforming baselines by large margins) is largely attributable to the dynamic elimination mechanism, which has a clean theoretical foundation, while the more complex DEBC extension (with its Bayesian–frequentist tension and opaque conditions) contributes less clearly to the overall result. This suggests that a version of the paper focusing on DE with tighter theoretical and empirical analysis might be stronger than the current version that bundles both contributions.
-
----
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Clarify the probability space for inferred updates.** Explicitly state that $p_{jk|ik}$ is a Bayesian probability representing epistemic uncertainty over $\mathbf{q}$ under a uniform prior on the unit sphere, and clarify whether the unbiasedness claim (Theorem 3) holds with respect to the Bayesian expectation or the frequentist data-generating process. If the latter, provide a proof or a counterexample showing when it fails.
-
-2. **Describe the DKWT modification in detail**, or remove the DKWT comparison and instead compare only against TTB and DAB (which are unmodified). Alternatively, include the original (unmodified) DKWT as a separate baseline.
-
-3. **Add confidence intervals / standard errors to all experimental plots**, and explicitly report the empirical PAC success rate (fraction of 100 trials where the output is $\epsilon$-optimal) in a table.
-
-4. **Provide intuition and/or a worked example for Theorem 4's conditions** (especially Condition 2 and the role of Condition 4). If the appendix contains this material, signpost it clearly in the main text.
-
-5. **State exact numerical sample complexity values** for at least one representative setting (e.g., in a table) to substantiate the "order of magnitude" claim.
-
----
+1. Define every symbol used in Theorem 4 (\(w_{\min}^{\text{in}}\), \(\text{Info}(\cdot)\), \(\lambda\), clarify \(\varepsilon\) vs \(\epsilon\)) and show that condition 4 is satisfiable for reasonable parameter values.
+2. Provide a pseudocode box for DEBC that specifies the item selection and replacement procedure precisely.
+3. Add an ablation experiment: DE with DEBC's item selection (without inferred updates) vs. DEBC with random selection (without correlation-based selection) to disentangle the two contributions.
+4. Add confidence intervals or quartiles to all figures reporting sample complexity over 100 trials.
+5. Describe the DKWT modification explicitly so the baseline comparison is interpretable.
+6. Expand the proof sketches in the main text, especially the unbiasedness argument for Theorem 3, to at least sketch the handling of dependence between inferred and empirical sequences.
 
 ## Score and Decision
 
-**Score:** 6.0  
-**Decision:** Reject
+The paper identifies a real inefficiency in existing PAC best-item identification algorithms and proposes two sensible, novel ideas to address it. The dynamic elimination mechanism is clean and well-motivated, and the inferred-update framework is a genuinely interesting extension. The empirical results show large improvements that are consistent across multiple settings.
 
-The paper's core idea (dynamic elimination) is solid and well-motivated, and the empirical results are suggestive of real practical value. However, the Bayesian–frequentist tension in the inferred-update framework is not adequately resolved, the experimental evaluation lacks rigor in critical respects (undocumented baseline modification, no error bars, unreported PAC success rate), and Theorem 4's conditions are stated without sufficient interpretation. These issues are addressable, and the paper would be competitive after a careful revision that either cleanly resolves the DEBC theoretical issues or reframes DEBC as a heuristic without PAC claims, and substantially improves experimental reporting.
+However, the paper has significant presentation gaps in its theoretical core: Theorem 4 is unverifiable due to undefined symbols, DEBC lacks pseudocode, the main contributions of DEBC are confounded in the experiments, and the unbiasedness claim (Theorem 3) lacks adequate justification. These issues do not invalidate the paper's contributions but they undermine the paper's ability to be judged on its theoretical merits and make the experimental comparisons harder to interpret.
 
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+On balance, the paper presents interesting ideas with promising empirical results, but the presentation of both theory and experiments needs substantial tightening before it meets the bar for publication.
+
+**MY FINAL SCORE: <score>5.5</score>**
+**MY FINAL DECISION: <decision>Reject</decision>**

@@ -221,8 +221,8 @@ else:
         class CalibrationQuery(BaseModel):
             query: str
             n: int = 4
-            low_score: float = 0.0
-            high_score: float | None = 10.0
+            low_score: float = -1.0
+            high_score: float | None = 11.0
 
         @function_tool
         def calibration_search(queries: list[CalibrationQuery]) -> str:
@@ -245,10 +245,10 @@ else:
                 qtext = q.query
                 n = q.n
                 low_score = q.low_score
-                high_score = 10.0 if q.high_score is None else q.high_score
+                high_score = 11.0 if q.high_score is None else q.high_score
                 body = _search_file_impl(qtext, n, "vector", low_score, high_score)
                 sections.append(
-                    f"### Query {i}: {qtext!r}  (n={n}, score=[{low_score}, {high_score}])\n{body}"
+                    f"### Query {i}: {qtext!r}  (n={n}, score=({low_score}, {high_score}))\n{body}"
                 )
             return "\n\n".join(sections)
 

@@ -1,88 +1,85 @@
-Now I have a thorough understanding of both the paper and the reviews. Let me produce the final consolidated review.
-
----
+Now I have a thorough understanding of the paper. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes LLMEraser, a unified framework for instance-wise unlearning in LLMs that handles three tasks (Instance Removal, Query Modification, Response Correction) by using influence functions to directly compute parameter updates on PEFT adapters. The key technical contribution is reformulating the inverse-Hessian-vector-product computation as a finite-sum convex quadratic problem solvable via mini-batch algorithms like SGD, reducing complexity from O(p²) to O(p). Experiments on LLM4Rec (LLaMA2-7B) and MLLM tasks (LLaVA 1.5-7B) show the method closely matches retrain performance while being ~38× faster, and outperforms SISA, RecEraser, Gradient Ascent, and E2URec.
+The paper introduces LLMEraser, a unified parameter-efficient unlearning framework for LLMs fine-tuned with PEFT adapters. It proposes a taxonomy of three instance-wise unlearning tasks (Instance Removal, Query Modification, Response Correction) and uses influence functions to directly compute parameter changes for each task. The key technical contribution is reformulating the inverse-Hessian-vector product computation as a convex quadratic optimization problem solvable with mini-batch algorithms, reducing complexity from O(p²) to O(p). Experiments on LLM4Rec (LLaMA2-7B) and MLLM relation mining (LLaVA 1.5-7B) show the method closely approximates retrained model performance while achieving substantial speedups.
 
 ## Strengths
 
-- **Unified taxonomy and single method for three instance-wise unlearning tasks.** The paper identifies IR, QM, and RC as a coherent family of instance-level perturbations and derives a single influence-function-based formula (Eq. 7) that encompasses all three. Prior exact methods (SISA, FairSISA, APA) require retraining and alter model architecture; prior approximate methods (Gradient Ascent, EUL, E2URec) only handle IR (Table 1, lines 40–49). This unification is the paper's central claimed contribution and is well-motivated.
+- **Unified coverage of three instance-wise unlearning tasks**: The paper systematically defines a taxonomy (IR, QM, RC) and presents LLMEraser as the only method that supports all three. Table 1 clearly maps existing methods to task coverage, substantiating the "unified" claim.
 
-- **Reformulation of IHVP as a finite-sum quadratic enabling mini-batch optimization.** Section 3.3 (Eqs. `fx`–`summaryf`) converts the linear system HΔ = b into the minimization of a convex quadratic expressed as a sum over training examples. This allows using SGD with Hessian-vector products (O(p) per step) instead of exact inversion or truncated power series, directly addressing the two challenges cited in the introduction: expensive IHVP computation and cumulative errors from stochastic estimation.
+- **Technically sound reformulation of influence-function computation**: Section 3.3 recasts the inverse-Hessian-vector product as a convex quadratic finite-sum problem (Eq. 13–15), enabling mini-batch SGD with Hessian-vector products. This reduces complexity from O(p²) to O(p) and is well-motivated against the limitations of both CG (full-batch requirement) and stochastic estimation (cumulative approximation errors).
 
-- **Experimental evidence that LLMEraser closely approximates retrain across all three tasks.** On IR (Table "auc," line 249): AUC 0.6319 vs. Retrain 0.6357 (gap 0.0038, ~0.6%). On QM (Table "main," lines 263–272): HitRatio@1 of 0.4456 vs. Retrain 0.4565 (10% interaction removal), outperforming SISA (0.4130) and RecEraser (0.2717). On RC (Table "mmspubench," lines 290–294): average accuracy 0.81 vs. Retrain 0.84, and (Table "rbench," lines 310–313): F1 0.63 vs. Retrain 0.66. These consistently show LLMEraser closest to the retrain oracle across all settings.
+- **Close approximation to retrain across tasks**: The reported numbers show small gaps to Retrain: AUC gap of 0.0038 (0.6%) for IR (Table 2), HitRatio@1 gap of 0.0109 (2.4%) on MovieLens for QM (Table 3), and average accuracy gap of 0.024 (2.9%) on MM-SPUBENCH for RC (Table 4). These results, if reliable, support the claim of maintaining model integrity.
 
-- **Substantial efficiency gain over retraining.** Table "time" (lines 361–367) reports 1.4×10³ seconds for LLMEraser vs. 5.4×10⁴ seconds for Retrain (≈38.5× speedup), vs. 1.8×10⁴ for SISA and 2.0×10⁴ for RecEraser. This directly supports the "parameter-efficient" and "fast model updates" claims.
+- **Substantial efficiency gain**: Table 6 reports LLMEraser completes the QM task in 1.4×10³ s vs. Retrain's 5.4×10⁴ s — a large practical speedup that supports the "parameter-efficient" framing.
 
-- **Model-agnostic and validated on both LLMs and MLLMs.** Tested on LLaMA2-7B (LLM4Rec) and LLaVA 1.5-7B (MLLM relation mining), demonstrating generality (Section 4.1). Preserves original model architecture (no sharding, no sub-model retraining).
+- **Demonstration across model types**: Experiments span both LLMs (LLaMA2-7B for recommendation) and MLLMs (LLaVA 1.5-7B for relation mining), supporting the model-agnostic claim.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Hessian (near-)singularity for overparameterized models is not addressed.** The influence function derivation (Eq. 5) requires H⁻¹, assuming an invertible Hessian. The paper correctly notes (line 200) that H is positive *semidefinite* at a minimizer, but does not discuss the practical fact that for overparameterized models (even with LoRA's reduced parameter count), the Hessian of the empirical risk is typically rank-deficient. The reformulation as a quadratic (Eq. `fx`) does not resolve this: if H is singular, the linear system HΔ = b may have no solution or infinitely many, and the equivalence between the influence function and the quadratic minimizer is not guaranteed. The paper should discuss this issue, and in practice should adopt a damped Hessian (H + λI) or comparable regularization with a sensitivity analysis over λ. *Why it matters: this is a theoretical gap in the foundation of the method; without addressing it, the parameter changes produced by LLMEraser lack formal grounding under the standard influence-function interpretation.*
+- **Missing competitive approximate unlearning baselines in the IR experiment**: For Instance Removal (Table 2), the only approximate baselines are Gradient Ascent and E2URec. The paper's own introduction (line 28) discusses KL-divergence-based approximate unlearning methods (citing `2402-08787`, `2403-15779`) and positions LLMEraser against them, but these methods are not included in any experiment. Since the paper's comparative claims are central to its impact, the absence of these recent and directly relevant baselines weakens the evidence. For QM and RC this is partly excusable — as Table 1 shows, no existing approximate method supports those tasks — but for IR the gap is material.
+
+- **No variance or statistical significance reported**: Every result table reports single numbers without error bars, standard deviations, or confidence intervals. This is especially problematic because many performance gaps are small (e.g., 0.0038 AUC between LLMEraser and Retrain in Table 2; 0.024 average accuracy gap on MM-SPUBENCH in Table 4). Without variance estimates, the reader cannot assess whether these differences are meaningful or within measurement noise. This is a methodological gap that affects confidence in all quantitative claims.
 
 ### Minor
 
-2. **Missing natural approximate baselines for QM and RC.** The paper compares against SISA and RecEraser (exact, retrain-based), and against Gradient Ascent/E2URec only on one IR task. For QM and RC, a natural simple baseline is: take a few gradient steps on the corrected data using the same PEFT method. This would be far simpler and faster than LLMEraser (no Hessian computation), and comparing against it would clarify whether the complexity of influence functions is justified. SISA (which retrains sub-models on clean data) partially serves as an upper bound, but a lightweight fine-tuning baseline is a more direct competitor. *Why it matters: without this comparison, a practitioner cannot assess whether LLMEraser is preferable to a trivial alternative.*
+- **The reformulation is not empirically validated against alternative influence-function solvers**: The paper motivates its quadratic programming reformulation by arguing that CG requires full-batch computation and that stochastic estimation suffers from cumulative errors. However, no experiment compares LLMEraser against a CG-based solver or truncated-series stochastic estimation for either accuracy or wall-clock time. The efficiency comparison (Table 6) only includes retrain-based methods. The claimed advantage in mitigating approximation errors is asserted but not demonstrated.
 
-3. **No statistical significance or variability reported.** Every experimental result (Tables "auc," "main," "mmspubench," "rbench") is a single point estimate without standard deviations, confidence intervals, or multi-seed runs. This is especially important for a method that aims to *match* retrain performance — the gap of 0.0038 in Table "auc" could be within noise. *Why it matters: the claimed precision of the method cannot be evaluated without understanding its variance.*
+- **Training-set requirement is underacknowledged in positioning**: The Limitations section states the method "assumes the availability of the training set." This is a significant practical constraint — many real-world unlearning scenarios arise precisely because the original training data must be deleted (e.g., GDPR right-to-erasure requests). The method's dependency on the full training set is not surfaced in the claims table (Table 1) or in the positioning, making the "free from retrain/pretrain" checkbox potentially misleading without this contextual caveat. Additionally, the paper does not ablate this requirement (e.g., by testing performance when only a subset of training data is available).
 
-4. **Evaluation scope is mismatched with the paper's privacy framing.** The abstract and introduction motivate unlearning by "privacy and security concerns" and "sensitive information," but the experimental evaluation focuses on correcting noise in recommendation data and label corruption on MLLM benchmarks — i.e., data correction, not privacy-oriented forgetting. No evaluation is performed on standard forgetting benchmarks (e.g., measuring memorization, membership inference risk, or forgetting of specific training data). The paper should either evaluate on genuine forgetting tasks or explicitly re-frame its contribution as data correction rather than privacy-preserving unlearning. *Why it matters: the stated motivation and the evaluation do not align, making it unclear what practical problem the method solves.*
+- **Discrepancy in reported speedup**: Table 6 reports Retrain at 5.4×10⁴ s and LLMEraser at 1.4×10³ s, yet the paper claims a "speedup of approximately 31.25 times" (line 372). 5.4×10⁴ / 1.4×10³ ≈ 38.6, not 31.25. This ~19% discrepancy needs explanation.
 
-5. **Computational cost breakdown is opaque.** The total time for LLMEraser (1.4×10³ seconds) is reported only as a single number. It is not broken down into: gradient computation on unlearning instances, HVP computation for the quadratic solver, number of SGD iterations, or batch size. The paper also does not report the hyperparameters of the SGD solver (learning rate, number of iterations, batch size), which is essential for reproducibility. *Why it matters: the reader cannot judge whether the reported efficiency is driven by the method or by implementation choices, and cannot reproduce the results.*
+- **Experimental details for the quadratic solver are missing**: The paper does not report SGD hyperparameters (learning rate, number of iterations, batch size, convergence criterion) used to solve Eq. 13–15. These details are necessary for reproducibility and for understanding the efficiency-accuracy trade-off of the solver.
+
+- **Hessian approximation quality and conditioning not analyzed**: The method assumes the per-sample Hessian is positive semidefinite (line 200). No analysis is provided on whether this holds for LoRA adapters in practice, or whether ill-conditioning affects solver convergence.
 
 ### Trivial
 
-6. **Notation inconsistency in Equation (10).** Equation (10) (line 178) writes $\nabla_\Theta \mathcal{G}(x+\delta_x,y)$ for the QM task, where the gradient at the perturbed input is intended. Since $\mathcal{G}$ is already defined (line 167) as $\nabla_\Theta \mathcal{L}$, the expression $\nabla_\Theta \mathcal{G}$ would denote the Hessian — inconsistent with the general derivation in Equation (7) (line 165) and with the $b$ formulation (line 197), both of which correctly use $\mathcal{G}$ for this term. The correct expression should be $\mathcal{G}(x+\delta_x,y)$. (Note: the $b$ definition on line 197 then correctly uses $\mathcal{G}$.)
-
-7. **Minor typo in b-vector definition (line 197):** The task label "IM" should be "QM" for consistency.
+- The "IM" label in the b-vector definition (Eq. 14, line 197) appears to be a typo — it should be "QM" for consistency with the taxonomy.
+- The speedup factor claimed (31.25×) does not match the numbers in Table 6 (which imply ~38.6×), a minor arithmetic inconsistency.
 
 ## Nice-to-Haves
-- Adding a damped Hessian (H + λI) with a sensitivity analysis over λ would substantially strengthen the theoretical grounding.
-- An ablation study comparing the quadratic solver (SGD) against standard conjugate gradient with damping would clarify the advantage claimed in Section 3.3.
-- Reporting results on a standard forgetting benchmark (e.g., TOFU-style or a memorization extraction test) would better align the evaluation with the privacy motivation.
+
+- Validating the influence function approximation by comparing predicted parameter changes against actual retrained parameter changes (e.g., via vector norm or downstream metrics) would strengthen the paper's core technical claim.
+- Including efficiency comparisons against simpler approximate methods (e.g., gradient ascent fine-tuning on the forget set) would contextualize the overhead of the influence-function approach.
+- Ablating the training-set requirement by testing performance with partial retention of training data would help quantify this limitation.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution:
 
-- *"Equations (10) and (11) contain an apparent typo: they write ∇_Θ 𝒢 where 𝒢 already is ∇_Θ ℒ, so ∇_Θ 𝒢 would be the Hessian"* — **Partially retained**: There is indeed an inconsistency in Eq. (10) (see Weakness #6). But the critic's framing as a "typo or parser artifact" is incorrect — the issue is a real notation inconsistency, not a parser error. The critic also incorrectly flags Eq. (11) which uses 𝒢, not ∇_Θ 𝒢. Retained only for Eq. (10) as Minor #6.
+These points are flagged to be removed; treat them with caution.
 
-- *"The claimed advantage [of the quadratic reformulation] is the ability to use mini-batch algorithms... The paper does not analyze convergence, does not report the number of iterations or batch size used"* — Partially retained: the missing hyperparameters is noted in Minor #5. The claim about convergence analysis is excessive for an empirical systems paper and would be a nice-to-have, not a weakness.
-
-- *"No discussion of why standard CG with damping would not work"* — Removed. The paper explicitly states CG requires "full-batch gradient computation" (line 186), which is a valid practical concern for large-scale data.
-
-- *"Missing comparisons on standard unlearning benchmarks (TOFU, WMDP, Harry Potter)"* — Removed as a standalone point and folded into Minor #4. The paper scopes itself to instance-wise unlearning on PEFT data; TOFU and concept-level unlearning (Harry Potter) are different paradigms. The mismatch is between privacy motivation and noise-correction evaluation, not the absence of specific benchmarks.
-
-- *"The absolute time of 1.4×10³ seconds seems high for a single unlearning request"* — Removed. This is a subjective opinion without context; the comparison against retrain (5.4×10⁴s) makes the reported time reasonable. The lack of breakdown is the valid concern (retained in Minor #5).
-
-- *"The evaluation does not establish that LLMEraser outperforms relevant approximate unlearning methods"* — Removed. The paper compares against multiple baselines (SISA, RecEraser, Gradient Ascent, E2URec) and outperforms them. The absence of one specific baseline (fine-tuning on corrected data) is noted in Minor #2, but the overall claim that LLMEraser outperforms relevant baselines is supported.
-
-- *"The overall assessment... the paper should not be accepted as is"* — This is the critic's verdict, not a weakness. The review's own assessment is provided below.
-
-- Strength Finder's claims about "dramatic efficiency gain" and "model-agnostic" — Retained in Strengths (they are supported by the paper).
-
-- Strength Finder's generic or sycophantic claims (none present — all strengths are concrete and evidence-backed).
+- **"The evaluation protocol is designed in a way that avoids the most informative comparisons"** — This characterization is too strong. For QM/RC tasks, Table 1 shows that no existing approximate methods support those tasks, so the absence of approximate baselines for QM/RC is structurally justified, not evasive. For IR, the paper does include two approximate baselines (Gradient Ascent, E2URec), and the missing KL-divergence methods are a legitimate gap but not evidence of intentional avoidance.
+- **"The method requires full training set access...misrepresented in the claims table"** — Table 1's rows are about model architecture preservation and retraining freedom. The training-set requirement is a separate dimension not claimed in the table; the paper acknowledges it in the Limitations section. The criticism overstates the misrepresentation.
+- **"SISA was never designed for label correction"** — This is true but standard practice in unlearning evaluation: SISA is a general deletion mechanism and its application to QM/RC tasks is a reasonable baseline choice (the paper correctly notes SISA's limitations).
+- **"The paper claims to be model-agnostic but experiments use only LLaMA2-7B and LLaVA 1.5-7B"** — Two models from distinct families (LLM and MLLM) is a reasonable demonstration of model-agnosticity for a method paper; additional models would strengthen but are not missing to a degree that undermines the claim.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews do not surface any observation about the method or results that the paper itself does not already state.
+
+None beyond the paper's own contributions. The reviewer analyses largely converge on the paper's stated claims and limitations without revealing unexpected patterns.
 
 ## Suggestions
-1. **Address the Hessian singularity explicitly**: Add a damping term (H + λI) and report sensitivity of results to λ over at least 3 orders of magnitude (e.g., λ ∈ {1e-4, 1e-2, 1}). This directly resolves the major theoretical concern.
-2. **Add a simple fine-tuning baseline**: For QM and RC tasks, after identifying corrupted instances, take 1–5 gradient steps on the corrected data using the same PEFT adapter. Report both the unlearning quality and wall-clock time. This would directly answer whether the influence-function machinery is justified.
-3. **Run experiments with multiple seeds** (at least 3) and report mean ± std. Ensure the gap to Retrain is not within noise.
-4. **Provide a computational breakdown** of the 1.4×10³ seconds: time for gradient computation on unlearning instances, time for HVP per SGD iteration, number of SGD iterations, and batch size.
-5. **Clarify the notation in Equation (10)**: Replace $\nabla_\Theta \mathcal{G}(x+\delta_x,y)$ with $\mathcal{G}(x+\delta_x,y)$ for consistency with Equation (7) and the $b$-vector definition.
-6. **Correct the label "IM" to "QM"** in the $b$-vector definition (line 197).
+
+1. **Add KL-divergence-based approximate unlearning methods** as baselines in the IR experiment, and consider adding gradient-ascent-style methods in QM/RC for completeness.
+2. **Report variances** by running each experiment with multiple seeds/splits and reporting means with standard deviations or confidence intervals.
+3. **Fix the speedup discrepancy** and provide the exact arithmetic for the claimed factor.
+4. **Disclose SGD solver hyperparameters** (learning rate, iterations, batch size, convergence criterion) for reproducibility.
+5. **Add an ablation** comparing LLMEraser against CG-based influence function computation on a small-scale proxy to validate the reformulation.
+6. **Discuss the training-set requirement more prominently** in the main body (not just the Limitations section), and ideally ablate the dependency.
 
 ## Score and Decision
 
-This paper makes a genuine contribution: a unified influence-function-based framework for instance-wise unlearning on PEFT adapters, with a computationally efficient reformulation. The experiments consistently show the method matches retrain closely and outperforms existing approaches. The main weaknesses are (a) the unaddressed Hessian singularity concern, which is real but standard in the influence-function literature and addressable in revision, and (b) missing baselines and error bars, which weaken but do not invalidate the empirical claims. The paper's strengths — unified taxonomy, efficient reformulation, and consistently strong results — outweigh its weaknesses, which are addressable.
+The paper addresses a timely and important problem, proposes a well-motivated method with a clever technical reformulation, and provides a taxonomy that is genuinely useful for the community. The experiments span multiple tasks and model types, showing promising results. However, the evaluation has material gaps: the absence of recent competitive approximate baselines for IR, the lack of any variance reporting for small-gap comparisons, and missing solver details that affect reproducibility. These are fixable but currently limit confidence in the headline claims.
 
-MY FINAL SCORE: <score>7.0</score>
+**Score**: 6.0 — A paper with clear contributions whose evaluation needs substantive strengthening to fully support its comparative claims. The core idea and framework are sound.
+
+**Decision**: Marginal Accept (with major revisions to address baselines, variance, and reproducibility)
+
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

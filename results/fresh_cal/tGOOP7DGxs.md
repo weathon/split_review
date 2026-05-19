@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper and can verify each claim against the actual text. Let me synthesize the final review.
+Now I have sufficient information to compose the final consolidated review.
 
 ## Summary
 
-This paper proposes SANGRE, a Graph Transformer framework for single large-scale graphs (millions to hundreds of millions of nodes). Its core innovation is a tokenization strategy (InputTokens) that uses 2-hop neighbor sampling plus precomputed context features (ÃH and Ã²H) to achieve up to a 4-hop effective receptive field while keeping neighbor retrieval to 2 hops. A LocalModule processes these tokens with a Transformer encoder, and a GlobalModule (codebook-based attention) provides global context. Experiments on ogbn-products (2.4M nodes), snap-patents (2.9M nodes), and ogbn-papers100M (111M nodes) show competitive or better accuracy under the same 2-hop retrieval constraint, with up to 3× per-epoch speedup versus the best comparable baseline.
+This paper proposes LARGE-GT, a graph transformer framework designed to scale to graphs with millions of nodes. It combines a local module that samples a fixed-size set of 1- and 2-hop neighbors (enriched with precomputed 1-hop and 2-hop context features) with a global module based on a trainable codebook (adapted from GOAT). The key claims are: (1) achieving a 4-hop effective receptive field through only 2-hop operations via the context features, (2) computational complexity independent of graph size, (3) a 3× training speedup on ogbn-products, (4) a 16.8% gain on snap-patents, and (5) a 5.9% gain on ogbn-papers100M over GOAT.
 
 ## Strengths
 
-- **Novel tokenization for broader receptive field under constrained retrieval** (Algorithm 2, InputTokens). The paper's central idea — sampling 1- and 2-hop neighbors and then retrieving each neighbor's precomputed 1-hop and 2-hop context features — is well-motivated and technically sound. This gives the model access to information up to 4 hops away while only ever retrieving 2-hop neighbor sets, directly addressing the neighbor explosion problem. The precomputation (C⁰=ÃH, C¹=Ã²H) is clearly specified and the mechanism is fully described.
+1. **Clear and practical design for scalability**: The framework's complexity is O((3K)² + B), depending only on tunable constants K (sampled neighbors) and B (codebook size), not on graph size N (Section 3.2, Complexity paragraph). This is a formal guarantee that the approach can be applied to graphs with billions of nodes without quadratic growth in computation, directly addressing the core scalability challenge.
 
-- **Strong empirical gains on the non-homophilic benchmark (snap-patents)**. SANGRE-full achieves **70.21% test accuracy**, a **16.8% absolute improvement** over the best baseline (NAGphormer-2H at 60.11%) (Table 2b). The margin is substantial and demonstrates the value of broader receptive field on tasks where long-range information is needed.
+2. **Strong empirical performance on snap-patents**: On the non-homophilic snap-patents dataset (2.9M nodes), LARGE-GT-full achieves 70.21% test accuracy, outperforming the best baseline (NAGphormer-constraint at 60.11%) by 16.8% (Table 1b). The large margin suggests the local-global architecture is genuinely beneficial for non-homophilic tasks where local-only information is insufficient.
 
-- **Scalability to 111M nodes demonstrated**. SANGRE-full obtains 64.73% on ogbn-papers100M, **5.9% higher than GOAT-full-2H** (61.12%) under the same constraints (Table 2c). Even with a single baseline comparison, running at this scale with positive results is non-trivial and supports the method's scalability claims.
+3. **Demonstrated scalability to 111M nodes**: LARGE-GT-full achieves 64.73% on ogbn-papers100M, a 5.9% improvement over GOAT-full-constraint (61.12%) within a 48-hour computational budget (Table 1c). This demonstrates the framework can be applied to one of the largest publicly available single-graph benchmarks.
 
-- **Per-epoch training efficiency (3× speedup)**. On ogbn-products, SANGRE-full completes each epoch in ~70s versus ~205s for GOAT-full-2H (Figure 2). The complexity analysis (§4.2) — O((3K)²) for LocalModule and O(B) for GlobalModule, independent of graph size N — provides a principled explanation for this efficiency.
+4. **Offline sampling design enables distributed training**: The LocalNodes and InputTokens algorithms (Algorithms 1-2) are designed to run independently per node on CPU prior to training, can be parallelized across cores/machines, and do not require the full adjacency matrix on a single machine (lines 123, 180). This is a principled design choice that avoids the memory bottlenecks of traditional GNN training.
 
-- **Ablation of global vs. local modules**. The paper compares SANGRE-local (local module only) and SANGRE-full (local + global), showing a ~1-2% improvement from adding the global module on both datasets. This helps validate the D1 design principle about integrating local and global information.
+5. **Transparent attribution of borrowed components**: The paper explicitly states the global module is "adapted from GOAT" (line 32, line 82) and discusses NAGphormer in related work. The contributions are clearly scoped around the novel tokenization and the combination of components.
 
 ## Weaknesses
 
@@ -23,62 +23,71 @@ None.
 
 ### Major
 
-- **Missing ablation on the core claimed novelty: the context features C⁰ and C¹.** The paper's most distinctive claim is achieving a 4-hop effective receptive field through 2-hop operations via the precomputed context features. Yet there is no experiment that ablates these features — i.e., comparing SANGRE with and without the C⁰ and C¹ tokens (using only raw node features H as the 3K tokens). Without this ablation, it is impossible to determine how much of the performance gain comes from the context features vs. from the Transformer attending over a larger set of raw sampled neighbor features. This is the single most important missing experiment to substantiate the paper's central contribution.
+1. **Single baseline on ogbn-papers100M**: The flagship large-scale result (5.9% improvement over GOAT-full-constraint on 111M nodes, Table 1c) is compared against only one baseline. The paper states this is "due to computational constraints" (line 295), but without additional comparisons—even GraphSAGE-constraint or NAGphormer-constraint trained to a limited budget—it is difficult to interpret whether the gain reflects genuine superiority or is specific to the GOAT comparison. This weakens the paper's most impressive headline result.
 
-- **Thin evidence on ogbn-papers100M (the flagship large-scale benchmark).** Only one baseline (GOAT-full-2H) is compared, and the paper cites "computational constraints" (§5). At minimum, GraphSAGE-2H and GAT-2H are substantially cheaper and should be feasible on 111M nodes with standard sampling. Without broader comparison, the claimed 5.9% improvement lacks context — it is unclear whether other baselines would also be competitive under the same compute budget. The paper also does not report epoch times or memory usage on this dataset.
+2. **Missing comparison with decoupled/feature-precomputation GNNs**: Methods such as SIGN (frasca2020sign), SAGN, GBP, or SGC (wu2019simplifying) are the most natural competitors for a model that relies on precomputed neighborhood aggregations (C⁰ = ÃH, C¹ = Ã²H). The paper cites these in the related work (line 47) but does not include them as baselines. Since these methods also achieve multi-hop receptive fields through precomputed diffusions without any transformer machinery, their absence makes it unclear whether LARGE-GT's transformer provides meaningful benefits beyond the precomputed features.
+
+3. **Insufficient ablation study**: The paper does not isolate the contribution of the context features (C⁰, C¹) — there is no comparison of LARGE-GT-local with vs. without these features, or using only raw node features of sampled neighbors. The global codebook size B is not reported or ablated. The K-parameter study (Figure 5) is useful but only examines one axis. Without these ablations, the individual contributions of the claimed innovations cannot be assessed.
 
 ### Minor
 
-- **GT-sparse-2H reports zero variance across 4 runs (60.76±0.00) on ogbn-products (Table 2a).** Zero variance on a neural network with stochastic training is unexpected and warrants explanation. This may indicate a bug, unreported seed fixity, or deterministic collapse — in any case, it should be addressed.
+1. **"4-hop receptive field" framing requires clarification**: The mechanism (Algorithm 2) is correctly described: sampling 1- and 2-hop neighbors and retrieving their precomputed 1-hop and 2-hop context features does provide information from up to 4 hops away. However, the terminology "receptive field" could mislead readers into thinking this is a learned 4-hop propagation mechanism (like stacking 4 GNN layers). It is more precisely "access to multi-hop aggregated information via precomputed context features." The paper should clarify this distinction; it does not invalidate the contribution but the framing should be more precise (see lines 9, 31, 175).
 
-- **High variance for SANGRE-local on snap-patents (68.19±3.11).** This is substantially larger than all other models' standard deviations on the same dataset (most are ≤0.25). The paper does not discuss or investigate this instability. It raises questions about sensitivity to the random offline sampling (Algorithm 1) and whether the local-only model is particularly brittle on this non-homophilic graph.
+2. **Speedup claim is slightly imprecise**: The abstract states "3× speedup" (line 12), and the text says "up to a maximum of 3× times" (line 322). The actual ratio from the figure (GOAT-full-constraint at ~15.2s/epoch vs. LARGE-GT-full at ~5.6s/epoch) is approximately 2.7×. This is a reasonable rounding but should be more precise in the abstract.
 
-- **The relationship between SANGRE's tokenization and NAGphormer's Hop2Token is not clearly differentiated.** Both approaches precompute hop-wise aggregated features (C⁰ and C¹ in SANGRE, analogous to NAGphormer's per-hop features) and feed them as Transformer tokens. The paper cites NAGphormer as a related work and a baseline, but does not provide a clear point-by-point distinction of how and why SANGRE's InputTokens differs from or improves upon NAGphormer's treatment of hop features. This makes it harder to assess the novelty of the tokenization design.
+3. **Per-epoch time reported, not total training time to convergence**: Figure 4 shows per-epoch wall-clock time, but total training time (hours to reach best validation performance) is not reported. A model with faster per-epoch time but requiring more epochs could be slower overall. For a paper centered on scalability, total training cost is the more meaningful metric.
 
-- **Distributed training claim is stated as a design principle but not experimentally validated.** The paper argues (Design Principle D2, §3) that offline sampling converts graph learning to "standard neural network training" that can be distributed, but no experiment — not even a small-scale distributed setup — is provided. The paper would benefit from clarifying that this remains a design affordance rather than a demonstrated capability.
+4. **High variance of LARGE-GT-local on snap-patents**: The local-only variant shows 68.19±3.11 standard deviation across 4 runs on snap-patents (Table 1b), which drops to 0.12 for the full model. The paper does not discuss this instability or whether the runs used different seeds or node subsets.
 
-- **Memory footprint is not analyzed.** The precomputed context features C ∈ ℝ^{N×2×D} consume substantial memory (e.g., for papers100M with D=128, ~113 GB for C alone in float32). The paper discusses runtime efficiency but does not compare memory usage against baselines. This is relevant for practitioners assessing practical scalability.
-
-- **Single Transformer layer and unexplored depth limitation.** The paper reports (footnote, §5) that stacking multiple Transformer layers decreased performance, and does not investigate why. This limits the model's depth and expressivity. While noted in passing, the underlying cause (e.g., overfitting, optimization difficulty, token design) is unexplored, which weakens the claim that the framework generalizes to deeper architectures.
-
-- **Variance from offline random sampling (Algorithm 1) not studied.** The offline sampling step selects K nodes randomly from each node's 1- and 2-hop neighbors. Different random seeds for this offline step could produce different sampled sets and affect results. The paper reports standard deviations over training seeds but not over different offline sampling seeds.
+5. **Performance on ogbn-products is not state-of-the-art**: LARGE-GT-full (79.81%) ranks second behind GOAT-local-constraint (81.17%) and is statistically tied with GOAT-full-constraint (79.88%) (Table 1a). The paper honestly calls this "competitive," but on the homophilic benchmark, the proposed model does not outperform a purely local baseline. This limits the strength of the claim that the 4-hop context and global module are beneficial in all settings.
 
 ### Trivial
-None. (Formatting issues are parser artifacts, not author errors.)
+- The abstract phrasing "3× speedup and 16.8% performance gain on ogbn-products and snap-patents compared to their nearest baselines respectively" is ambiguous — the speedup applies to ogbn-products and the gain to snap-patents, but the sentence structure could mislead readers into thinking both metrics apply to both datasets.
 
 ## Nice-to-Haves
-- An ablation of the context features (C⁰, C¹) to isolate their contribution.
-- At least 1-2 cheaper baselines (GraphSAGE-2H, GAT-2H) on ogbn-papers100M.
-- Analysis of the sensitivity of results to different offline sampling seeds.
-- Discussion of memory footprint compared to baselines.
+- Report the actual time/cost of the offline sampling step (Algorithm 1) and the storage cost of the precomputed context features C (for ogbn-papers100M, C would be N × 2 × D — at D=128 that is ~28 GB). The paper states the offline step's complexity is not a concern, but concrete numbers would be informative.
+- Include a comparison showing original (non-constrained) performance of baselines for context, to quantify how much the 2-hop constraint degrades each method.
+- Report total training time to convergence (hours) in addition to per-epoch time.
+- Study the sensitivity of the codebook size B in the global module.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
+The following points from the reviewers are removed (with justification):
 
-- **"Unfair baseline comparison (4-hop vs 2-hop)"** — The paper explicitly states (line 222) that SANGRE is also under the same 2-hop retrieval constraint. The whole point of the experimental design is to show that SANGRE's tokenization achieves broader effective information flow while respecting the same constraint. This is the contribution being evaluated, not an unfair advantage. Removing this does not remove the valid underlying concern about the missing ablation.
+1. **"Missing hyperparameters/details in main text"** (e.g., hidden dimension D, number of heads, codebook size B, positional encodings): The paper explicitly references "Section sec:hyperparameters" (line 222-223) for these details, which is in the appendix. Per instructions, the appendix was stripped by the parser and exists in the original submission. This criticism is removed.
 
-- **"Cherry-picked headline claims"** — The abstract clearly attributes the 16.8% gain to snap-patents and the 3× speedup to ogbn-products. On ogbn-products, the paper acknowledges SANGRE is competitive (79.81 vs GOAT-local's 81.17), not state-of-the-art. The paper is transparent about this.
+2. **"Missing appendix content"**: Several criticisms reference missing proofs, tables, or details that are in the appendix. Per hard rules, these are removed.
 
-- **"Speedup is ambiguous"** — The paper clearly states: "3× times (GOAT-full-constraint vs. SANGRE-full)" (§5, On Runtime). The comparison baseline and configuration are specified.
+3. **"Global module novelty questioned"**: The paper is transparent that the global module is "adapted from GOAT" (line 32). This is not a weakness — the paper clearly scopes its contribution as the combination + local module. The harsh critic's framing of this as a weakness is removed.
 
-- **"Original GOAT (3-hop NS) likely achieves higher accuracy"** — This is speculative. The paper does not report original GOAT's accuracy, and there is no evidence in the paper to support this claim.
+4. **"Related work gaps" (general)**: The harsh critic claimed the paper "does not discuss precomputed neighborhood aggregation methods (SIGN, SAGN, GBP, etc.)." In fact, the paper does cite these at line 47 ("Information propagation prior to or after the training stage (gasteiger2018predict, wu2019simplifying, frasca2020sign)"). The specific claim of omission is factually wrong. However, the related point about missing these as baselines in experiments is retained as a Major weakness.
 
-- **"Not competitive on ogbn-products"** — 79.81 vs 81.17 is within ~1.7 points. The paper describes it as "competitive," which is a reasonable characterization for a model that also provides speed and cross-dataset consistency advantages.
+5. **"The 4-hop receptive field conflates precomputed static aggregations with learned receptive field"** framed as a fatal flaw: The paper's claim is about the information accessible to the model, not about learned propagation. The mechanism (Algorithm 2) is mathematically sound — precomputed or not, the transformer attends to tokens carrying information from up to 4 hops away. This is a valid design choice, not a fundamental error. The milder framing (clarification needed) is retained in Minor weaknesses.
 
-- **"Offline step complexity scales with edges"** — The paper does not claim the offline step is independent of graph size for computing C⁰ and C¹; it only says Algorithm 1 (LocalNodes) complexity does not affect training complexity. This criticism misreads the paper.
+6. **"Weakness: NO distributed training experiments"**: The paper discusses distributed training as a design principle (D2, Section 3.1) and states the framework can be parallelized "in principle" (line 180, 319). It does not claim to have conducted distributed experiments. The lack of distributed experiments is outside the paper's stated scope.
+
+7. **"Weakness: 2-hop limit not justified"**: The paper provides detailed justification at lines 80-81, explaining the O(dˡ) complexity of l-hop retrieval and citing prior work that adopts the 2-hop limit. The criticism that this is "self-imposed" and "not justified" ignores this explicit justification.
+
+8. **Several generic/formulaic strengths from the Strength Finder** (e.g., "the paper addresses a genuinely difficult problem") are dropped as they are superficial and lack specific evidence.
 
 ## Novel Insights
-None beyond the paper's own contributions. The critic's observation about the asymmetry between the claimed 4-hop receptive field (via aggregated context features) and the 2-hop retrieval constraint is real, but the paper itself surfaces this as its key design point. No deeper insight emerges from the aggregation of the reviews beyond what the paper already articulates: the trade-off between retrieval cost and effective receptive field, with the paper proposing a specific resolution via offline precomputation.
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Run the context-feature ablation** (SANGRE with vs. without C⁰, C¹ tokens). This is the most impactful addition: it would isolate whether the gains come from the broader effective receptive field or from the Transformer over sampled neighbors alone.
-2. **Add at least GraphSAGE-2H and GAT-2H to ogbn-papers100M.** These are standard, cheap baselines and would provide meaningful context for the 5.9% improvement claim.
-3. **Investigate and explain the GT-sparse zero variance.** If this is correct behavior, provide the reason. If not, correct the results.
-4. **Discuss the high variance of SANGRE-local on snap-patents.** This would improve confidence in the method's stability.
-5. **Clarify the differentiation from NAGphormer** in the method section: how does sampling neighbors' precomputed features (InputTokens) differ from a node's own hop-wise features (Hop2Token), and what advantage does each design provide?
+1. Add at least 2-3 additional baselines on ogbn-papers100M (e.g., GraphSAGE-constraint, NAGphormer-constraint) trained to a limited budget to strengthen the large-scale result.
+2. Include decoupled GNN baselines (SIGN, SAGN) as they are the most natural competitors using precomputed aggregations.
+3. Add an ablation comparing LARGE-GT-local with vs. without context features C⁰, C¹ to isolate their contribution.
+4. Report the codebook size B used in experiments and study its sensitivity.
+5. Clarify the "4-hop receptive field" terminology as "access to multi-hop aggregated features through precomputed context" to avoid confusion with learned multi-layer propagation.
+6. Report total training time to convergence in addition to per-epoch time.
+7. Make the speedup claim in the abstract more precise (e.g., "up to 2.7×" instead of "3×").
 
 ## Score and Decision
-Overall, the paper presents a genuinely novel and well-motivated tokenization strategy for scaling Graph Transformers to large graphs. The core idea (4-hop effective receptive field via 2-hop retrieval + precomputed context) is conceptually clean, the complexity analysis is sound, and the results on snap-patents (16.8% gain) are strong. However, the experimental validation has notable gaps: the missing ablation of the context features undermines the ability to attribute gains to the claimed mechanism, the single-baseline comparison on papers100M is thin, and several unexplained phenomena (zero variance, high variance) should be addressed. The paper is a solid submission with a real contribution, but the evaluation needs strengthening before the claims are fully supported.
 
-MY FINAL SCORE: <score>6.0</score>
+Based on my assessment: the paper makes a genuine practical contribution to an important problem (scaling GTs to very large graphs). The architecture is well-designed, the complexity analysis is convincing, and the empirical results on snap-patents and ogbn-papers100M are strong. However, the evaluation has meaningful gaps (single baseline on papers100M, missing decoupled GNN comparisons, minimal ablations) that prevent the paper from fully substantiating its claims. These are addressable in revision. The writing is clear and the paper is transparent about borrowed components.
+
+Score: 6.5 — solid contribution with addressable weaknesses.
+
+Decision: Accept.
+
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

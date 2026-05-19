@@ -90,7 +90,6 @@ def main():
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                temperature=0,
                 extra_body={"reasoning": {"enabled": False}, "provider": {"only": ["deepseek"]}},
             )
             out = resp.choices[0].message.content

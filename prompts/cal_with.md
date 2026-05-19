@@ -4,10 +4,10 @@ Use comparative scoring to calibrate your final score against human-reviewed anc
 
 ## Round 1 — Bracketing
 
-Make one `calibration_search` call with three queries that anchor each score band on a topic similar to the paper:
-- "<topic>" with `high_score=3` (weak anchors)
-- "<topic>" with `low_score=4, high_score=7` (middle anchors)
-- "<topic>" with `low_score=8` (strong anchors)
+Make one `calibration_search` call with three queries that anchor each score band on a topic similar to the paper. Filters are strict: `low_score` is exclusive lower bound (avg > low_score) and `high_score` is exclusive upper bound (avg < high_score).
+- "<topic>" with `high_score=3.5` (weak anchors)
+- "<topic>" with `low_score=3.5, high_score=7.5` (middle anchors)
+- "<topic>" with `low_score=7.5` (strong anchors)
 
 If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 
@@ -15,7 +15,7 @@ Use `read_file` on a small number of anchors (typically 1–2 per band) to inspe
 
 ## Round 2 — Narrowing within the bracket
 
-Make a second `calibration_search` call to pull more anchors *inside* your round-1 bracket. Use 2–3 queries with `low_score` and `high_score` tuned to your bracket. For example, if round 1 placed the paper between 5 and 7, query for anchors in `[4.5, 6]` and `[6, 7.5]` on the most topically relevant aspects of the paper. The goal is to find anchors that sit close to where you think the paper lands, so the comparison is sharper than "this paper is between the weak anchor at 3 and the strong anchor at 8."
+Make a second `calibration_search` call to pull more anchors *inside* your round-1 bracket. Use 2–3 queries with `low_score` and `high_score` tuned to your bracket (remember: both bounds are exclusive — avg > low_score and avg < high_score). For example, if round 1 placed the paper between 5 and 7, query for anchors in `(4.5, 6)` and `(6, 7.5)` on the most topically relevant aspects of the paper. The goal is to find anchors that sit close to where you think the paper lands, so the comparison is sharper than "this paper is between the weak anchor at 3 and the strong anchor at 8." Since this narrows the search pool, you can use a more lax search term.
 
 Read 2–4 of these new anchors in full with `read_file`. Compare the paper against each and ask: is this paper better, similar, or worse than this specific anchor? Use those comparisons to set the score.
 

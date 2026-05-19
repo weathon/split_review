@@ -1,78 +1,80 @@
-Now I have all the evidence I need. Let me write the consolidated review.
-
----
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper studies open-set noise in learning with noisy labels (LNL). It introduces a complete noise transition matrix that accounts for unknown outlier classes, derives error rate inflation bounds for both fitted and overfitted training regimes, and theoretically proves (under a class-concentrated assumption) that open-set noise causes smaller degradation to classification accuracy than closed-set noise at equal noise ratios. The paper constructs CIFAR100-O and ImageNet-O datasets for empirical validation, analyzes 'easy' vs. 'hard' open-set noise modes, and examines entropy-based open-set noise detection.
+This paper provides a formal theoretical and empirical analysis of open-set noise in learning with noisy labels (LNL). It introduces a complete noise transition matrix that accounts for multiple outlier classes, defines two pragmatic learning regimes (fitted and overfitted), and proves that open-set noise causes less classification error inflation than closed-set noise under a class-concentrated assumption. The paper also constructs CIFAR100-O and ImageNet-O datasets, examines entropy-based open-set noise detection, and proposes OOD detection as a complementary evaluation framework for LNL methods.
 
 ## Strengths
 
-1. **Generalized noise transition matrix (Definition 3.1).** The paper extends prior work by defining a complete noise transition matrix that handles multiple unknown outlier classes (not just a single meta-class), with a zero block reflecting that noisy labels are never assigned to unknown classes. This is a clean and useful formalization.
+- **Formal definition of the complete noise transition matrix (Definition 3.1).** Unlike prior work (Xia et al. 2022) that collapses all open-set noise into a single meta-class, this paper models open-set noise as originating from multiple outlier classes via a structured matrix with a zero-block for unknown outlier labels. This provides a principled foundation for comparing open-set and closed-set noise.
 
-2. **Two-case theoretical analysis (Section 3.2).** The paper distinguishes between fitted (model fits the noisy distribution) and overfitted (model memorizes noisy labels) regimes and derives separate error rate inflation expressions for each. This is more realistic than prior work that typically assumes ideal conditions, and the distinction is carried through the experiments (PreActResNet18 for overfitted, pretrained ResNet18 for fitted).
+- **Theorem 3.7 and its empirical validation.** The theorem proves that, under the class-concentrated assumption, open-set noise yields strictly less classification error inflation than closed-set noise at the same total noise ratio. Figure 2(a/b) validates this across CIFAR100-O and ImageNet-O at multiple noise ratios in both the fitted and overfitted regimes — clean, controlled experiments that match the theory.
 
-3. **Theoretical comparison of open-set vs. closed-set noise (Theorem 3.7).** The paper formally proves that, under a class-concentrated assumption, open-set noise causes lower error rate inflation than closed-set noise at the same noise ratio. The toy example illustrating why the assumption is needed (different T matrices yielding different error rates from the same O_x, C_x) is helpful.
+- **Distinction between "easy" and "hard" open-set noise.** The paper introduces a categorization based on ID/OOD separability that explains why some open-set noise is detectable via entropy while other types are not. This adds useful nuance beyond prior binary treatments.
 
-4. **Empirical validation on new benchmarks.** The paper constructs CIFAR100-O and ImageNet-O datasets and provides experimental results on classification accuracy (Figure 2a/b) that consistently show open-set noise causes smaller accuracy degradation than closed-set noise, across datasets, noise ratios, and both training regimes.
+- **Construction of CIFAR100-O and ImageNet-O datasets.** These provide controlled benchmarks for studying open-set noise modes, filling a gap in available LNL evaluation resources.
 
-5. **Empirical analysis of entropy-based detection limits (Figure 3).** The paper confirms that entropy dynamics are effective for detecting 'easy' open-set noise but not 'hard' open-set noise, a finding that documents a known detection mechanism's limitations.
+- **Novel empirical finding about OOD detection.** Figure 2(c/d) demonstrates contrasting trends: open-set noise degrades OOD detection performance while closed-set noise can improve it. This is a nontrivial insight that suggests OOD detection as a more sensitive evaluation axis for LNL methods than classification accuracy alone.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The core theoretical and empirical contributions are substantiated and no verified error invalidates the paper's central claims.
 
 ### Major
 
-- **Contradictory claims about OOD detection trends (Section 4.1, lines 182–183).** The paper states: "the presence of open-set noise degrades OOD detection performance" — then immediately gives as an example: "in the fitted case, the existence of open-set noise leads to steady improvement in OOD detection performance." These two statements directly contradict each other within the same paragraph. "Degrades" and "improves" cannot both be true as general claims about the same phenomenon. This is not a minor wording issue: the paragraph proposes OOD detection as a more discriminative evaluation framework for LNL methods, but the contradictory description of the data undermines the evidentiary basis for that proposal. The authors must clarify which trend actually holds (or whether it depends on dataset, noise ratio, or regime) and reconcile the text with the figures.
+- **OOD detection metric is not specified.** The paper reports "OOD detection performance" in Figure 2(c/d) and cites Hendrycks & Gimpel (2016), but never states which metric is plotted (AUROC? AUPR? FPR@95TPR?). This is a reproducibility gap that must be closed. The finding itself is interesting, but without a specified metric the reader cannot interpret the curves or compare against future work.
+
+- **Entropy-based detection experiments are purely qualitative.** Section 4.2 presents only histograms of prediction entropy (Figure 3) and relies on visual inspection to conclude that entropy dynamics are more effective for easy than hard open-set noise. No quantitative detection metrics are reported (e.g., AUROC for distinguishing open-set noise from clean samples). Since the paper explicitly analyzes entropy-based detection in Section 3.4, the experiments should provide quantitative validation of the theoretical prediction.
 
 ### Minor
 
-- **Definition of 'easy' vs. 'hard' open-set noise is not provided in the main text.** The paper uses these terms throughout the experiments (Figures 2, 3) but never defines how they are operationalized — e.g., whether 'hard' means semantically similar outlier classes, or what the construction criteria are for CIFAR100-O and ImageNet-O. The main text should state which classes serve as outliers and how easy/hard is controlled, as these distinctions are central to interpreting the experimental results. (Some details may reside in the appendix, but the main text should be self-contained for this key design choice.)
+- **Clarity issue in the overfitted case formula (Remark 3.6).** The definition states that the model "completely memorises the noisy labels" (outputting a one-hot at the realized noisy label yⁿ), but the formula ΔE_x = max[p₁,...,p_A] − Σᵢ₌₁^A (p_i · Σⱼ p_j T_{ji}) computes the *expected* error rate inflation marginalized over the noise process (i.e., max_k p_k − E_{yⁿ}[p_{yⁿ}]), not the inflation for a specific yⁿ realization. This is not mathematically wrong — the expected quantity is valid and meaningful for population-level analysis — but the paper does not articulate this distinction. The definition and the formula appear mismatched as written, which risks confusion and needs explicit clarification.
 
-- **Theorem 3.7 is stated without any proof sketch in the main text.** After a toy example showing why the class-concentrated assumption is needed, the theorem is simply declared ("we have proved") with no intuition, no sketch of why the inequality follows from the assumption, and no explanation of how the result connects to the earlier derivations (Remark 3.6). A brief proof sketch or intuitive explanation would significantly improve readability and trust in the result.
+- **No experimental results on the WebVision open-set test set.** The paper constructs an open-set test set for WebVision (mentioned in the abstract and Figure 1), but presents no experimental results on it. Including even a single experiment validating that the theoretical trends (open-set noise causing less accuracy degradation) hold on real web-crawled data would substantially strengthen the empirical contribution.
 
-- **No discussion of the class-concentrated assumption's viability.** The paper acknowledges that the assumption is necessary for tractability and provides a helpful toy example showing why. But it never discusses whether real datasets (like WebVision) satisfy this assumption to a meaningful degree, nor how the theorem's conclusions degrade when the assumption is partially violated. A limitations paragraph would strengthen the paper.
+- **No error bars or statistical significance.** All experiments appear to be single-run. Given that noise is injected probabilistically and multiple random seeds would affect both the noise composition and the training outcomes, error bars (or at minimum results averaged over 3+ seeds) are expected for a study paper claiming empirical validation of theoretical trends.
 
 ### Trivial
 
-- **Typo in Definition 3.3 (line 74):** The text reads "expected to be an open-set noise with probability as O_x and expected to be an open-set noise with probability O_x" — the second "open-set" should read "closed-set."
-
-- **Panel labels in Figure 2 caption (line 178):** The caption says "(a/b)" and "(c/d)" but does not explain which panel is which. The text references these, but the caption should be self-explanatory.
+- In Section 3.3 lines 139–144, the paper writes "toainnsguae caotsniscte ntairoc vmealpnsioeson rwaeot. aFlysylrtez,e" — garbled text from the extracted figure/equation area (parsing artifact). The original submission presumably has clean text.
 
 ## Nice-to-Haves
 
-- Report results with variance across multiple runs (e.g., 3–5 seeds) for the key comparisons in Figures 2 and 3, to increase confidence that the observed trends are robust rather than noise artifacts.
-- Add a dedicated limitations paragraph discussing the class-concentrated assumption, the simplicity of synthetic noise on CIFAR/ImageNet subsets, and the fact that real training often lies between the fitted and overfitted extremes.
-- Explain why 'hard' vs. 'easy' open-set noise show opposite trends between fitted and overfitted cases (Figure 2a/b) — the paper notes this intriguing result but never connects it back to the theory.
+- A simulation or ablation that relaxes the class-concentrated assumption would help establish the generality of Theorem 3.7 beyond the limiting case.
+- The fitted case experiments use a "Pretrained-ResNet18" but do not specify which pretrained weights (ImageNet? Places?). This can affect what counts as an outlier class and should be stated.
 
 ## Removed Points
 
-- **Vision-language model experiments not discussed in main text.** Removed per the rule that appendix-stripped content is not a valid weakness. These explorations may be fully described in the appendix.
-- **Missing related works.** Removed per rule: the reviewer cannot confirm the existence of missing references from external knowledge.
-- **Missing error bars / statistical significance.** Moved to Nice-to-Have; single-run evaluation is common practice in this benchmark setting and is not a flaw.
-- **Formatting nitpicks and parser artifacts.** Removed per rules about formatting issues being parser errors.
-- **Reproducibility concerns about undisclosed hyperparameters.** Removed per rules about trivial implementation details impractical to include in a submission.
-- **Speculative "fatal" framing of OOD contradiction.** Demoted to Major (not Fatal) because the contradiction is in presentation/writing, not in the underlying methodology. The core theoretical contributions (Theorem 3.7, error rate inflation analysis) remain intact irrespective of this writing issue.
+These points were flagged by the reviewers but are removed for the reasons stated:
+
+1. **"The overfitted case formula is invalid / Theorem 3.7 is suspect."** — The critic claimed the formula was inconsistent with the definition. As analyzed above, the formula computes the *expected* error rate inflation over the noise process, which is a mathematically valid quantity and does not invalidate the theorem. The issue is one of clarity, not correctness. Demoted from "fatal" to "minor" and retained above.
+
+2. **"Section 3.4 theoretical analysis is missing from the main text."** — The parser strips appendix/supplementary content. The original submission contains this section. Removed per hard rule.
+
+3. **"Proof of Theorem 3.7 is not in the main text."** — Same reason: the proof is in the appendix (stripped by parser). Removed per hard rule.
+
+4. **"Cannot independently verify the theorem because the proof is missing."** — Speculative gap based on a missing appendix. Removed per hard rule.
+
+5. **"Missing related works."** — I cannot verify this from external sources. Removed per hard rule.
+
+6. **Strength Finder point: "This paper provides a comprehensive theoretical and empirical analysis..."** — Generic praise, not a specific strength. Removed.
+
+7. **Strength Finder point: "The most important evidence supporting this contribution is the tight coupling between Theorem 3.7 and the controlled experiments..."** — Redundant with listed strengths. Removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface no new analytical perspectives not already present in the paper's framework.
+The most interesting observation that goes beyond the paper's own framing is the asymmetry between how open-set and closed-set noise affect classification accuracy versus OOD detection: open-set noise has a weaker negative effect on accuracy but a stronger negative effect on OOD detection, while closed-set noise is the opposite. This suggests that the standard LNL evaluation protocol (classification accuracy on inlier classes) systematically under-reports the harm of open-set noise, which is a genuine insight for the community. The entropy analysis also reveals a practical limitation: entropy-based detection, widely used in LNL sample selection, fails for hard open-set noise — a finding that could inform the design of better noise detection mechanisms.
 
 ## Suggestions
 
-1. **Resolve the OOD detection contradiction** — the single highest-leverage fix. Clarify whether open-set noise degrades or improves OOD detection, under which conditions (dataset, noise ratio, regime), and ensure the text and figures are consistent. This is essential for the paper's credibility.
-
-2. **Define 'easy' and 'hard' open-set noise explicitly in the main text**, including how they are operationalized in CIFAR100-O and ImageNet-O (which outlier classes, selection criteria).
-
-3. **Add a brief proof sketch or intuition for Theorem 3.7**, explaining how the class-concentrated assumption leads to the inequality.
-
-4. **Consider adding a limitations paragraph** acknowledging the scope conditions of the theoretical analysis and the synthetic nature of the empirical evaluation.
+1. **Specify the OOD detection metric used in Figure 2(c/d)** and ideally report multiple metrics (AUROC, AUPR, FPR@95TPR) for completeness.
+2. **Add quantitative detection metrics (e.g., AUROC) to the entropy dynamics experiments** in Section 4.2, such as a plot of detection AUROC vs. warm-up epochs for easy and hard open-set noise.
+3. **Clarify Remark 3.6** by stating explicitly that the overfitted case formula computes the *expected* error rate inflation over the noise process, and briefly explain the relationship between this expectation and the definition of the overfitted case.
+4. **Include error bars** (at least 3 random seeds) for key experiments.
+5. **Add at least one experiment on the WebVision open-set test set** to validate that the theoretical trends hold on real-world noisy data.
 
 ## Score and Decision
 
-The paper presents a genuinely useful formalization of open-set noise in LNL with clean notation, a sensible two-case analysis, and a theoretically grounded comparison showing that open-set noise is less harmful than closed-set noise. The empirical results broadly support the theory. The main weakness is a clear writing contradiction in the OOD detection claims that undermines one of the paper's proposed contributions. This is fixable with revision and does not invalidate the core theoretical framework. The paper would benefit from slightly more main-text detail about experimental construction and proof intuition, but these are minor.
-
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

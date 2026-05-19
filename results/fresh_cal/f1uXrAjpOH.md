@@ -1,22 +1,20 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
-
----
+Now I have all the information needed to produce the final consolidated review. Let me compose it.
 
 ## Summary
 
-This paper introduces Open-vocabulary Multimodal Emotion Recognition (OV-MER), a paradigm that removes constraints on the label space, allowing models to predict an arbitrary number and categories of emotion labels. To support this new task, the authors construct OV-MERD (a dataset with 248 emotion categories derived from MER2023 via human-LLM collaborative annotation), propose set-based evaluation metrics with two grouping strategies (GPT-based and emotion-wheel-based), and benchmark 16 MLLMs alongside CLUE variants. The work provides foundational resources for transitioning from basic-emotion recognition to richer, open-vocabulary emotion understanding.
+This paper proposes Open-vocabulary Multimodal Emotion Recognition (OV-MER), a paradigm shift that relaxes the traditional fixed-label-space constraint to allow predicting any number and category of emotion labels. The authors contribute: (1) **OV-MERD**, a dataset with 248 emotion categories (1–9 labels per sample) constructed via a human-LLM collaborative annotation pipeline; (2) **set-based evaluation metrics** (Precision_s, Recall_s, F_s) with GPT-based and EW-based emotion grouping strategies that are shown to be highly correlated (PCC=0.942); and (3) **a comprehensive benchmark** of 16 MLLMs plus heuristic baselines, revealing that current MLLMs still struggle (best GPT-4V achieves only 55.51 F_s) compared to a human-LLM collaborative pipeline (80.05 F_s).
 
 ## Strengths
 
-- **Substantially larger label space than any prior MER dataset.** Table 1 shows OV-MERD has 248 emotion categories and supports 1–9 labels per sample (most 2–4), whereas all 12 listed existing MER datasets have at most 10 categories and only a single label per sample. This is a genuine, concrete expansion that directly supports the paper's core contribution.
+- **Human-LLM collaborative annotation pipeline with quantitative evidence of label enrichment.** Section 3.1 and Figure 20 directly compare human-only vs. human-LLM annotation across three dimensions (clue length, label count, word cloud), showing that the proposed strategy produces longer descriptions, more labels per sample, and a broader emotional vocabulary. This provides concrete evidence supporting the claim of richer label coverage.
 
-- **Human-LLM collaborative annotation demonstrably enriches label quality.** Figure 20 compares human-only (H) vs. human-LLM (H+L) annotation along three dimensions: description length, label count distribution, and word cloud diversity. The H+L descriptions are longer, produce more labels per sample, and exhibit a broader set of emotion terms, providing quantitative evidence that the proposed annotation method outperforms human-only approaches.
+- **Set-based evaluation metrics with validated grouping that addresses open-vocabulary ambiguity.** Section 4 defines precision/recall over grouped label sets, and Table 4 reports a Pearson correlation of 0.942 between the EW-based M-avg and GPT-based grouping. This demonstrates that the metric is both reproducible (EW-based approach avoids API dependency for evaluation) and produces consistent rankings with the GPT-based approach.
 
-- **Comprehensive benchmark establishing a clear performance gap.** Table 1 evaluates 16 MLLMs plus CLUE variants under a consistent protocol. The best MLLM (GPT-4V) achieves F_s = 55.51, while the human-LLM pipeline (CLUE-Multi) reaches 80.05 — a 24.5-point gap that quantifies how far current models are from adequate OV-MER performance and validates the task's difficulty.
+- **Comprehensive benchmark establishing OV-MER as a challenging task.** Table 1 evaluates 16 MLLMs plus CLUE variants, showing GPT-4V at 55.51 F_s — a clear demonstration that current state-of-the-art MLLMs perform far below the human-LLM collaborative baseline (80.05 F_s). This provides a well-documented baseline for future work.
 
-- **Informative ablation study on CLUE-MLLM generation strategies.** Figures 5–6 compare three strategies (S0: no text; S1: joint text+video input; S2: two-stage — extract descriptions first, then combine with text). S2 consistently outperforms S1 across all tested MLLMs, providing clear, evidence-based guidance for future practitioners.
+- **Ablation on CLUE-MLLM generation strategies (S0/S1/S2).** Figure 6 systematically compares three strategies, demonstrating that the two-step extraction (S2: separate description generation followed by label extraction) consistently outperforms joint input (S1), providing a principled design choice for reducing task complexity.
 
-- **Validation that emotion-wheel-based metrics can substitute for GPT-based grouping.** Table 4 reports Pearson correlation coefficients between the EW-based M-avg and GPT-based metric as high as 0.942, showing that a cheaper, reproducible alternative can maintain ranking consistency with the more expensive GPT-based grouping.
+- **Language-agnostic label merging methodology.** Section 3.2 reports a similarity score of 0.82 between English and Chinese label sets and describes a label-merging pipeline with manual checks to eliminate language bias — a concrete methodological contribution for cross-lingual robustness.
 
 ## Weaknesses
 
@@ -25,59 +23,59 @@ None.
 
 ### Major
 
-- **Tension between the open-vocabulary premise and the grouping-based metric.** The paper motivates OV-MER by arguing that human emotions span ~34,000 distinct states and that fixed label spaces miss nuance. Yet the evaluation metric groups emotions into coarse categories (e.g., mapping "angry" and "frustrated" to the same L1 group in an emotion wheel). After grouping, predicting any emotion in the correct group earns full credit regardless of fine-grained specificity — a model that outputs "angry" scores the same as one that outputs "frustrated" when both fall under "mad" (L1 in W1). The paper acknowledges the need to handle synonyms (lines 139–142), but the grouping goes well beyond synonym handling to coarse psychological categories (e.g., "offended" and "humiliated" grouped together). This does not invalidate the contribution — the dataset and task framing remain valuable — but it means the metric measures *group-level* accuracy, not fine-grained open-vocabulary fidelity. The paper should more clearly delimit what the metric captures and discuss this gap.
+- **The CLUE-Multi baseline shares its description source with the ground-truth pipeline, making the performance gap in Table 1 misleading as a measure of model capability.** The CLUE-Multi description (generated via ALLM/VLLM pre-annotation → manual checks → LLM merging) serves as the input to *both* the CLUE-Multi baseline *and* the ground-truth extraction pipeline (Section 3.2, lines 94–98). Although the paper notes (Section 5.2, line 228) that "the OV labels extracted from the monolingual CLUE-Multi differ from the ground truth" because the ground truth merges bilingual extractions with additional manual checks, the shared source remains decisive. The 80.05 vs. 55.51 gap overwhelmingly reflects the baseline's privileged access to a description already curated for emotion recognition, not a genuine comparison between annotation paradigms. The paper should either (a) clearly frame CLUE-Multi as an approximate upper bound rather than a baseline, with explicit disclosure in the table caption, or (b) evaluate it against a ground truth produced via an independent pipeline (e.g., held-out human-only annotations) where this overlap is eliminated. The MLLM comparisons among themselves are unaffected — this issue is confined to CLUE-Multi's standing relative to them.
 
-- **Heavy reliance on GPT-3.5 across multiple pipeline stages without quantifying downstream effects.** GPT-3.5 is used to: (a) extract ground-truth emotion labels from CLUE-Multi descriptions (line 95), (b) define the GPT-based grouping that the evaluation metric depends on (line 146), and (c) serve as the LLM that combines MLLM outputs with text in the CLUE-MLLM baselines (line 216). While the ground-truth labels are human-validated, the validation *follows* GPT-3.5 extraction and is thus bounded by what GPT-3.5 produced. The paper does not report how often annotators *added* labels that GPT-3.5 missed versus removing erroneous ones. Without this quantification, it is unclear whether the reported gap between CLUE-MLLM baselines and CLUE-Multi partly reflects vocabulary alignment with GPT-3.5 rather than genuine multimodal emotion understanding.
+- **The claimed superiority of human-LLM annotation over human-only annotation lacks external validation.** Section 6 (Figure 20) shows that human-LLM collaboration produces longer descriptions, more labels, and a broader word cloud, and the paper interprets this as evidence of "richer and more comprehensive" annotations. However, there is no external criterion — no independent human evaluation, no downstream task validation, no comparison against an independently collected ground truth — to confirm that these differences constitute *better* annotations rather than simply *different* ones. Longer descriptions and more labels could include noise or spurious emotions. The claim that the strategy is "more accurate" or "more nuanced" is not directly supported by the evidence presented. Including an independent human rating study comparing the quality of human-LLM vs. human-only labels on a random subset would substantially strengthen this claim.
 
 ### Minor
 
-- **The exact number of samples in OV-MERD is not stated.** The paper says it "evenly selects samples with further annotations" from MER2023 (line 131) but gives no count. Knowing the test-set size is essential for assessing statistical power and generalizability.
+- **Dataset documentation gaps.** The paper does not report: (1) the total number of samples in OV-MERD (only "evenly select samples from MER2023"); (2) the number of annotators involved; (3) inter-annotator agreement for the two rounds of manual checks. These are standard reporting requirements for a dataset paper and are needed for the community to assess label reliability.
 
-- **Annotation quality metrics are not reported.** The paper describes having "experts in affective computing" conduct two rounds of manual checks with non-overlapping annotators (line 83), but provides no inter-annotator agreement statistics, number of annotators, or breakdown of labels added vs. removed during human validation.
+- **Reliance on proprietary API models for core components limits reproducibility.** The dataset construction, CLUE-MLLM generation, GPT-based grouping, and synonym/word-form expansion all depend on GPT-4V and GPT-3.5 at specific API versions. The paper partially mitigates this with EW-based metrics as a reproducible alternative for evaluation, but the dataset itself is inseparable from these proprietary models. Releasing the exact prompts and the manual-checked intermediate clues (not just final descriptions) would substantially improve reproducibility.
 
-- **The Random baseline is not a valid lower bound for the open-vocabulary setting.** It selects one label from basic emotions (6 categories) rather than from the full 248-category space (line 292). A baseline restricted to 6 categories has an artificially high chance of hitting a group, achieving ~17% F_s. A random draw from the full label distribution would produce a lower and more meaningful baseline.
+- **Only two experimental runs are reported** (Section 6, line 284: "conduct each experiment twice"). For a benchmark paper, a small number of runs limits the ability to estimate variance meaningfully, especially given the stochasticity of LLM-based pipelines.
 
-- **Only two experimental runs per baseline.** The paper conducts each experiment twice (line 284). Two runs are insufficient to characterize variance reliably, and many baselines show overlapping error bars (e.g., Video-ChatGPT and LLaMA-VID in English, Table 1). Three to five runs would be more credible.
-
-- **The similarity metric used to compute the 0.82 score between Y_EE and Y_CE is unspecified.** The paper reports "the similarity score between Y_EE and Y_CE is 0.82" (line 98) without defining what similarity metric was used (e.g., Jaccard, cosine, set overlap). This makes the claim difficult to interpret or reproduce.
+- **Baseline hyperparameters (e.g., LLM temperature, decoding strategy) are not specified.** Without this information, independent replication of the results is difficult.
 
 ### Trivial
 
-- **Implementation statement inconsistent with GPT-4V baseline.** The paper states "all models are implemented in PyTorch, and all inference processes are carried out using a 32G NVIDIA Tesla V100 GPU" (line 216) in the context of CLUE-MLLM baselines, which include GPT-4V — a cloud API that cannot run locally on a V100 GPU. The phrasing should clarify that this applies only to local models.
+- The paper reports both English and Chinese results side-by-side throughout but does not clearly justify why both are needed for the benchmark, given that the ground truth merges both languages.
 
 ## Nice-to-Haves
 
-- Include a human judgment study validating that the emotion groupings (both GPT-based and EW-based) align with perceived emotion equivalence in this task, or replace group-based metrics with a continuous semantic similarity measure (e.g., cosine distance in an emotion embedding space).
-- Report a random baseline sampled from the full 248-category label distribution.
-- Compare the OV-MER metric against embedding-based semantic similarity metrics (e.g., cosine similarity between label embeddings) alongside the lexical-overlap metrics already evaluated.
+- **Held-out evaluation with independent ground truth.** The strongest improvement would be to hold out a subset where ground truth is produced via an independent pipeline (e.g., human-only annotations with separate validation), enabling a fair comparison between CLUE-Multi and MLLMs without pipeline overlap concerns.
+
+- **Downstream validation of annotation quality.** A small user study asking independent raters to compare human-LLM vs. human-only emotion labels for appropriateness/completeness on a random sample would strengthen the annotation strategy claims.
+
+- **Exact prompts in an appendix.** Releasing the verbatim prompts used for GPT-4V pre-annotation, GPT-3.5 merging, and label extraction would reduce reproducibility barriers.
 
 ## Removed Points
 
-- **"Paper implies prior work is strictly limited to Ekman's six"**: The paper says "researchers *typically* limit the label space to these basic emotions" (line 18) and Table 1 correctly shows IEMOCAP (10 categories). The characterization is accurate, not overstated. **Removed** (factually incorrect criticism).
-- **"The metric, test set, and baselines all rely on the same LLM creating circularity"**: The critic frames this as "circular," but the pipeline is sequential, not circular. Ground truth is human-validated, grouping is a separate post-hoc process, and baselines use diverse MLLMs (only the final text-combination step uses GPT-3.5). The overlap is a legitimate concern about vocabulary alignment, but "circularity" is too strong a characterization. **Re-framed** as the GPT-3.5-reliance weakness above.
-- **"GPT-based and EW-based grouping use different notions of similarity — the paper does not discuss this discrepancy"**: The paper *does* discuss this by comparing both approaches via PCC (Table 4) and explicitly notes that GPT-based grouping uses "same meaning" while EW uses psychological relatedness. The discrepancy is acknowledged and empirically evaluated. **Removed** (paper already addresses this).
-- **"Correlation between GPT-based and M-avg does not imply they capture the same construct"**: A standard methodological observation that could be applied to any correlation analysis. Without specific evidence that the correlation is misleading, this is generic speculation. **Removed**.
-- **"The paper should have compared against semantic similarity metrics"**: This is a suggestion for improvement, not a weakness. **Moved to Nice-to-Haves**.
-- **Strength Finder's generic strengths**: Removed strengths framed as "this paper addresses an important problem" or similar generic praise. **Removed** per filtering rules.
+**These points are flagged to be removed, treat them with caution:**
+
+- "The circularity is a structural flaw that makes the paper's core results uninformative." This overstates the severity. The circularity affects only the CLUE-Multi baseline's comparison with MLLMs; the MLLM comparisons among themselves, the dataset, the task definition, and the evaluation metrics remain valid contributions.
+
+- "Reporting both English and Chinese inflates the table without clear rationale." This is a subjective formatting complaint. The paper provides a rationale (Section 5.2, line 228: investigating language differences).
+
+- "The paper's core results do not support the conclusions drawn from them." This is an overstatement contradicted by the evidence. The paper's main conclusions (OV-MER is a challenging task, current MLLMs struggle, EW metrics correlate with GPT metrics) are supported by the data.
+
+- "CLUE-Multi should be excluded from the benchmark table entirely." This is an overly prescriptive demand. The baseline is informative if properly contextualized (as an approximate upper bound).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface legitimate methodological concerns (metric-grouping tension, GPT-3.5 reliance) but do not offer novel scientific insights that the paper itself does not provide.
+The most noteworthy observation emerging from these reviews is the **tension between the paper's dual use of the CLUE-Multi description** as both the evaluation baseline input and the ground-truth source. This design choice, while procedurally natural (the same curated description is the richest available representation), creates an ambiguity that cuts to the heart of what OV-MER benchmarks are intended to measure: is the task "recognize emotions from raw multimodal input" or "extract emotions from a curated emotion-centric description"? The reviewers correctly identified that these are different tasks with different difficulty profiles, and the paper would benefit from explicitly disentangling them. A second notable insight is that the paper's defense of its annotation strategy relies on internal comparisons (human-only vs. human-LLM within the same pipeline) rather than external validation against an independent standard — a structural limitation that any dataset paper in this space would face but that warrants explicit acknowledgment and mitigation.
 
 ## Suggestions
 
-1. **Report the exact dataset size** (number of samples) in OV-MERD alongside the number of emotion categories already given.
-2. **Validate the grouping** with a human study showing that grouped emotions are indeed considered equivalent for the task, or supplement with a fine-grained continuous similarity metric.
-3. **Quantify the human contribution** to ground-truth labels: report how many labels were added by human annotators vs. retained/removed from GPT-3.5's extraction.
-4. **Replace the Random baseline** with sampling from the full 248-category distribution to establish a meaningful lower bound.
-5. **Increase experimental runs** to at least 3–5 for reliable variance estimation.
-6. **Specify the similarity metric** used for the cross-language label comparison (0.82 value on line 98).
-7. **Add inter-annotator agreement statistics** (e.g., Cohen's kappa) for the manual check rounds.
-8. **Clarify the infrastructure statement** to distinguish between locally-run models and cloud APIs (GPT-4V).
+1. Redesign Table 1's presentation of CLUE-Multi: add a footnote or row label clearly stating that CLUE-Multi uses the same description source as the ground-truth pipeline, making it an approximate upper bound rather than a directly comparable baseline.
+2. Add inter-annotator agreement statistics for the two rounds of manual checks and report the total dataset sample count in Section 3.3.
+3. Provide a small-scale external validation of annotation quality (e.g., independent raters comparing human-LLM vs. human-only labels on 50–100 samples).
+4. Release the exact prompts used at each stage of the pipeline.
+5. Report baseline decoding hyperparameters (temperature, sampling strategy) to aid reproducibility.
 
 ## Score and Decision
 
-This paper makes a genuinely novel contribution by defining the OV-MER task and providing foundational resources (dataset, metrics, baselines). The label space expansion (248 vs. ≤10 categories) is a meaningful step forward, and the benchmark provides a useful reference for future work. The weaknesses are real but not fatal — they concern the metric's ability to fully deliver on the "open-vocabulary" promise and the heavy GPT-3.5 footprint — and are addressable in revision. The paper warrants acceptance at a venue that values new task/dataset contributions over tight evaluation, provided the authors acknowledge and discuss these limitations.
+**Score:** 7.0 — The paper identifies and operationalizes a genuinely important new paradigm in MER, produces substantial groundwork (dataset, metrics, benchmark), and provides solid evidence for most claims. The main weaknesses (pipeline circularity affecting one baseline comparison, and insufficient external validation of annotation quality) are significant but addressable and do not invalidate the paper's core contributions. The MLLM benchmark, evaluation metrics, and task formulation remain valuable independently of the CLUE-Multi comparison issue.
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

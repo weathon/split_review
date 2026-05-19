@@ -128,7 +128,7 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
         vectors = _bm25_db["vectors"]
         filenames = _bm25_db["filenames"]
         allowed_mask = np.array([
-            low_score <= score_index.get(fn, -1.0) <= high_score for fn in filenames
+            low_score < score_index.get(fn, -1.0) < high_score for fn in filenames
         ])
         if not allowed_mask.any():
             return "No files in that score range."
@@ -189,12 +189,13 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
                 continue
             qtext = str(q["query"])
             n = int(q.get("n", 4) or 4)
-            low_score = float(q.get("low_score", 0.0) or 0.0)
-            hs = q.get("high_score", 10.0)
-            high_score = float(hs if hs is not None else 10.0)
-            print(f"  [merger:calibration_search] q{i}='{qtext}' n={n} score=[{low_score}, {high_score}]")
+            ls = q.get("low_score", -1.0)
+            low_score = float(ls if ls is not None else -1.0)
+            hs = q.get("high_score", 11.0)
+            high_score = float(hs if hs is not None else 11.0)
+            print(f"  [merger:calibration_search] q{i}='{qtext}' n={n} score=({low_score}, {high_score})")
             body = _run_single_vector_query(qtext, n, low_score, high_score)
-            sections.append(f"### Query {i}: {qtext!r}  (n={n}, score=[{low_score}, {high_score}])\n{body}")
+            sections.append(f"### Query {i}: {qtext!r}  (n={n}, score=({low_score}, {high_score}))\n{body}")
         return {"content": [{"type": "text", "text": "\n\n".join(sections)}]}
 
     tools = [_read_file, _grep_file]

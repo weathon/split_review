@@ -1,66 +1,95 @@
-Now I have a comprehensive understanding of the paper. Let me produce the final consolidated review.
+Now I have all the information I need. Let me verify the specific claims in the paper against each reviewer point, then produce the final consolidated review.
+
+---
 
 ## Summary
 
-X-PlugVid proposes a unified framework to adapt pretrained image-based spatial-control plugins (e.g., ControlNet, T2I-Adapter) to video diffusion models without per-plugin retraining. The method introduces a spatial-temporal adapter to bridge the domain and modality gaps, a high-pass filter on adapter inputs to eliminate low-quality/low-frequency components from the diffusion prior, and a timestep remapping strategy that injects richer features from later image-model denoising steps into earlier video-model steps. Extensive experiments on I2VGen-XL and Hotshot-XL show compatibility with multiple plugin types and improved FID/optical flow error over prior controllable video generation methods.
+This paper proposes X-PlugVid, a framework for adapting pretrained image-based spatial-control plugins (e.g., ControlNet, T2I-Adapter) to video diffusion models without per-plugin retraining. The method trains a single spatial-temporal adapter that bridges the image model (SD v1.5) to video backbones (I2VGen-XL, Hotshot-XL, SVD), augmented by a high-pass filter to remove low-frequency artifacts from the spatial prior and a timestep remapping strategy that injects later-timestep (information-richer) image features into earlier video timesteps. Experiments show compatibility with multiple plugins and backbones, and ablations isolate the contribution of each component.
 
 ## Strengths
 
-- **Timestep remapping strategy is well-motivated and ablated convincingly.** The paper identifies (via PCA-based denoising trajectory visualization in Fig. 6 and frequency analysis in Fig. 3) that early-step features from the image model contain insufficient information for guidance. The remapping function (Eq. 2, Fig. 5) addresses this by mapping later image-model timesteps to earlier video-model timesteps. The ablation in Table 2 and Fig. 8 systematically studies n=1,2,4,1000 and demonstrates that n=2 substantially outperforms synchronous timesteps (n=1), while also showing that excessively strong guidance (n=1000) degrades quality. The visual comparison of adapter outputs with/without remapping (Fig. 9) provides direct evidence that the remapping produces sharper, more temporally consistent guidance features.
+- **Single adapter achieves universal plugin compatibility across backbones.** Table 1 shows X-PlugVid on I2VGen-XL and Hotshot-XL with both depth and canny ControlNets outperforms prior methods (Control-A-Video, ControlVideo, VideoComposer) on FID and optical flow error. Figure 7 further shows qualitative results with both ControlNet and T2I-Adapter on both backbones, demonstrating the method's generality.
 
-- **High-pass filtering is grounded in a principled analysis and validated.** The paper analyzes the frequency characteristics of ControlNet outputs vs. diffusion model feature maps (Fig. 3), finding that ControlNet produces predominantly high-frequency patterns at every timestep while the diffusion prior contains low-frequency, low-quality components. The high-pass filter (Eq. 1) is directly motivated by this finding. Ablation results (Table 2, "High-pass filter only" vs. "No filter & no remapping") show measurable improvements in FID and optical flow error, supporting the claim that filtering low-quality components benefits both quality and consistency.
+- **Timestep remapping measurably improves guidance.** Table 2's ablation shows timestep remapping alone reduces optical flow error from 0.1380 to 0.0729 (a ~47% reduction). Figure 6 visualizes the effect via PCA denoising trajectories, showing that the remapping allows the adapter to provide meaningful guidance during early denoising steps where synchronized timesteps fail.
 
-- **First unified framework enabling image-to-video plugin transfer without per-plugin retraining.** This is a genuine contribution: whereas prior work (ControlVideo, Control-A-Video) requires per-plugin training or per-model adaptation, X-PlugVid trains a single adapter that works with all spatial-control plugins (ControlNet, T2I-Adapter) and multiple video backbones (I2VGen-XL, Hotshot-XL, SVD). Table 1 shows competitive quantitative results against prior methods on the Panda70M validation set, and qualitative results (Fig. 7) demonstrate the breadth of compatibility.
+- **High-pass filtering of the spatial prior provides a small but consistent quality gain.** Table 2 shows that adding the high-pass filter on top of timestep remapping improves FID from 47.86 to 47.14 and reduces optical flow error from 0.0729 to 0.0710, confirming that removing low-frequency artifacts from the image model's feature maps prevents degradation.
 
-- **Mechanistic analysis of ControlNet and X-Adapter provides a clear foundation.** The visualizations in Fig. 2 and Fig. 3 go beyond simply proposing a method, offering insight into why ControlNet works (high-frequency pattern injection at every timestep) and why X-Adapter's synchronous timestep mapping is suboptimal (early-step features are too weak). This analysis is presented as a self-contained motivation for the paper's design choices.
+- **Empirical analysis of ControlNet and X-Adapter mechanisms grounds the design decisions.** Section 3.3.1 uses feature-map similarity (Figure 2) and frequency analysis (Figure 3) to motivate why high-frequency injection is necessary and why the image model's raw feature maps contain low-quality components that must be filtered. This analysis is not merely qualitative but directly informs the adapter architecture.
+
+- **Efficient training with modest data requirements.** The adapter is trained on only 100k text-video pairs from Panda70M for 5 epochs (Section 4.1). This supports the paper's central efficiency claim—one trained adapter replaces per-plugin retraining that would require labeled video-condition pairs for each plugin.
+
+- **Generalization to video editing is demonstrated.** Figure 10 shows the same framework applied to video editing, indicating the method is not limited to controllable generation with spatial conditions.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Metrics do not directly measure the paper's primary claim of controllability.** The paper uses FID (distributional distance) and optical flow error (motion consistency between generated and reference videos). Neither metric directly quantifies how faithfully the generated video adheres to the spatial condition (e.g., depth map or canny edges). The paper frames optical flow error as a "spatial control" metric (line 169), but optical flow measures frame-to-frame motion, not spatial condition fidelity. Standard practice in the controllable generation literature includes task-specific metrics such as depth RMSE (for depth conditions) or edge F1 / Chamfer distance (for edge conditions). Without these, the quantitative superiority claim in Table 1 is weakened — improvements in FID and flow error could arise from factors unrelated to condition adherence (e.g., better overall video quality from a different backbone). The qualitative results (Fig. 7) mitigate this concern but do not fully replace direct quantitative measures of control.
+- **No direct temporal video quality metric.** The paper uses FID (per-frame) and optical flow error (condition-alignment). Neither directly measures temporal coherence—flickering, motion smoothness, or frame-to-frame consistency—which is precisely what distinguishes video generation from per-frame image generation. The paper claims "high-quality and consistent" video generation (lines 17, 278) and the temporal adapter is a key contribution, yet the evaluation does not include a standard video-level metric like FVD (Fréchet Video Distance) or a temporal consistency score. The optical flow error only checks whether the generated spatial structure matches the input condition; it does not assess whether the temporal dynamics are realistic. This weakens the evidence for the core claim of producing *consistent* videos. *Evidence: Section 4.3 lines 168-169 list only FID and optical flow error as metrics.*
 
-- **Baseline comparison setup is underspecified.** The paper reports comparisons against ControlVideo, Control-A-Video, and VideoComposer on the Panda70M validation set, but does not state: (1) which base video backbone each baseline method uses, (2) whether these baselines were retrained on Panda70M data or used off-the-shelf with their original weights, and (3) whether the conditioning inputs (depth maps, canny edges) were computed using the identical preprocessing pipeline across all methods. These details are necessary to assess whether the reported margins (e.g., FID 22.3 vs. 27.8) reflect a genuine advantage of X-PlugVid or differences in backbone quality, data overlap, or preprocessing. The comparison as presented is insufficiently controlled.
+- **Comparison set is narrow and lacks a simple per-frame baseline.** The paper compares against ControlVideo, Control-A-Video, and VideoComposer. While these are the most directly relevant prior works, the evaluation would be substantially stronger with the inclusion of: (a) a trivial baseline that applies the image ControlNet independently to each frame with no temporal modeling (to isolate the benefit of the temporal adapter), and (b) methods that train video-temporal ControlNets from scratch (as an upper bound). Without these, the claim that the temporal adapter is responsible for the gains (rather than the spatial ControlNet alone) is plausible but not definitively established.
 
 ### Minor
 
-- **Temporal attention module is underspecified.** The paper states only that a "temporal attention (Vaswani et al., 2017) module" is added to ensure temporal coherence (line 93). It does not specify the type of attention (self-attention over frames? cross-attention with a reference frame?), number of heads, feature dimensions, or where precisely in the adapter architecture the temporal modules are inserted relative to the mapping layers. Reproducibility would benefit from additional detail.
+- **High-pass filter implementation is underspecified.** Section 3.3.2 defines the filter as \(\mathcal{H}()\) but does not specify the filter type (e.g., ideal, Gaussian, Butterworth), cutoff frequency, kernel size, or whether it is applied in the spatial or frequency domain. This omission makes reproduction dependent on guesswork. *Evidence: lines 95-101 define the operation formally but only say "high-pass filter."*
 
-- **Generalization claim in Section 5.1 lacks evidence.** The paper states: "we implement timestep remapping and high-pass filter upon X-Adapter and achieve better results" (line 253) — but provides no quantitative results, ablation, or even qualitative example to support this. This claim about transferability to the image-to-image setting is presented as a demonstration of generality but is not backed by any experimental data in the paper.
+- **Quantitative results lack confidence intervals or significance tests.** In Table 1, differences between methods are small (e.g., FID 71.05 vs. 71.25). Without error bars across the 2000-sample validation set, it is unclear whether these differences are statistically meaningful. *Evidence: Table 1, lines 167-169 describe the evaluation setup but no error bars are reported.*
 
-- **No training convergence or validation analysis.** Training is done on a 100K-pair subset of Panda70M for 5 epochs with batch size 8. The paper does not discuss whether 5 epochs is sufficient for convergence, nor does it analyze whether the adapter generalizes beyond this fixed training subset.
+- **Generalization claim in Section 5.1 is unquantified.** The paper states "we implement timestep remapping and high-pass filter upon X-Adapter and achieve better results" for image model upgrade, but provides no quantitative comparison. This reads as a promissory note rather than demonstrated generalization. *Evidence: lines 253-254.*
+
+- **Computational cost is not reported.** The paper argues for efficiency over per-plugin retraining but does not report training time, inference overhead (e.g., additional latency per frame), or the number of added parameters in the adapter. These numbers would concretely substantiate the efficiency claim. *Evidence: Section 4.1 mentions "4 NVIDIA A100 GPUs" and 5 epochs but no training duration.*
+
+- **Failure cases and limitations are underexplored.** Section 5.2 discusses identity/style plugins as future work but does not analyze where the current method fails (e.g., complex motions, extreme viewpoint changes, long videos). Including a failure analysis would improve credibility.
 
 ### Trivial
 
-- None. (The paper is generally well-written and no trivial formatting/issues warrant mentioning.)
+None.
 
 ## Nice-to-Haves
 
-- A human evaluation (e.g., preference study on condition fidelity and video quality) would strengthen the controllability claims, since automated metrics for generation quality are known to be imperfect.
-- Failure case analysis: the paper shows only successful generations. Examples where the condition is conflicting, extremely detailed, or involves large motion would help characterize the method's limitations.
+- **Broader cross-condition evaluation.** Testing on a condition type not seen during training (e.g., segmentation map, sketch) would strengthen the "universal compatibility" claim beyond the two conditions (depth, canny) tested.
+- **Ablation on the number/location of mapping layers beyond encoder vs. decoder.** The paper tests encoder vs. decoder placement but does not ablate the specific configuration used (middle block + first three decoder blocks) vs. alternatives.
+- **Analysis of long-range temporal modeling** (e.g., beyond 16 frames) would clarify the limitations of the temporal attention module.
 
 ## Removed Points
 
-- Harsh critic's claim that "the paper does not justify why the image model must run alone during the first stage" — REMOVED. The paper explains (line 135) that the two-stage inference aligns with the remapping strategy: at inference start, the video model is at timestep T while the image model's remapped timestep is T/n; the image model runs alone from T to T/n to produce the richer features that remapping requires. This is adequately justified.
-- Harsh critic's claim that "the claim 'previous works overlook this point' is vague" — REMOVED. The paper specifically identifies X-Adapter as the work that overlooks high-frequency injection at every timestep (line 86: "one important aspect X-Adapter overlooks").
-- Harsh critic's speculations about VideoComposer being "not optimized for single-condition" and Control-A-Video having "advantage or disadvantage depending on data overlap" — REMOVED as speculative assertions without evidence in the paper.
-- Harsh critic's question about "whether the same conditioning inputs were extracted from the Panda70M videos at test time" — PARTIALLY RETAINED. The broader concern about underspecified baseline setup is retained (Major weakness 2), but the specific speculation about different preprocessing lacking evidence is removed from the severity it was given.
-- Strength Finder's strength about SOTA — RETAINED as stated, since Table 1 does show numerical improvements, but the metric concern (Major weakness 1) qualifies this strength and the reader should weigh both.
-- Strength Finder's claim about "supporting strengths" of mechanistic analysis — RETAINED as a genuine supporting strength since it is concrete and specific to the paper.
+*These points are flagged to be removed; treat them with caution.*
+
+- **Criticism that timestep remapping is "ad hoc" and the n parameter makes the method "fragile":** The paper provides an extensive ablation on n (Table 2, Figure 8, with n=1,2,4,1000), includes qualitative visualization (Figure 9), and explicitly states "n=2 is suitable in most cases." The method is studied, not assumed. The sensitivity is characterized, not hidden.
+- **Criticism that the ablation for "where to insert mapping layers" is incomplete:** The paper tests the two main architectural choices (encoder vs. decoder), finds decoder clearly better, and uses that result. A more granular ablation would be nice but is not a deficiency given the clear finding.
+- **Criticism about training data scale leading to overfitting:** Speculative. The paper shows generalization across two backbones and two condition types, suggesting the method is not overfit to a specific motion pattern. The validation set being from the same distribution as training is standard practice.
+- **Criticism demanding comparison with VideoControlNet (which trains temporal ControlNets from scratch):** VideoControlNet requires per-plugin retraining, which is the opposite paradigm from this paper's contribution. The paper cites it for the metric, which is appropriate.
+- **Strength Finder's claim about "state-of-the-art results":** The paper reports improvements over the chosen baselines, but without a broader comparison set and error bars, "state-of-the-art" is not conclusively established. This strength is removed to avoid overclaiming.
 
 ## Novel Insights
 
-The harsh critic and strength finder together surface an important tension: the paper's core methodological contribution (timestep remapping, high-pass filtering, spatial-temporal adapter) is well-motivated by mechanistic analysis and well-validated by ablation, but the evaluation against prior work relies on metrics that do not directly measure the central claim of condition adherence. This suggests a pattern in the controllable generation literature where task-specific control metrics (depth error, edge F1) are underused in favor of generic quality metrics, leaving a gap between methodological contributions and their measured evidence. The paper would benefit from adopting the controllability metrics that are standard in the conditioning literature from which it draws inspiration (e.g., ControlNet evaluations report depth RMSE).
+None beyond the paper's own contributions. The key insight—that the image diffusion model's feature maps at later timesteps contain richer spatial information that can be remapped to earlier video timesteps for better guidance—is the paper's central contribution and is well-supported by analysis. The reviews do not surface any unrecognized insight beyond what the paper already claims.
 
 ## Suggestions
 
-1. Add direct controllability metrics: depth RMSE (using a pretrained depth estimator) for depth-conditioned generation and edge F1 or Chamfer distance for edge-conditioned generation. Re-run the comparison in Table 1 with these metrics.
-2. Clarify the baseline comparison: specify the exact backbone used for each baseline, whether baselines were retrained or used off-the-shelf, and how the conditioning inputs were preprocessed (same pipeline for all methods).
-3. Provide architectural details for the temporal attention module (self-attention vs. cross-attention, number of heads, feature dimensions, insertion points).
-4. Either provide quantitative results for the X-Adapter generalization claim (Section 5.1) or remove the claim as unsupported.
-5. Add error bars or confidence intervals to Table 2 to assess the reliability of the ablation comparisons.
+1. **Add a temporal video quality metric** such as FVD or a per-video consistency score (e.g., CLIP temporal similarity, warping error) to the main evaluation. This directly tests whether the temporal module and timestep remapping produce coherent videos.
+2. **Include a per-frame ControlNet baseline** (applying the spatial ControlNet independently to each frame without temporal modeling). This cleanly isolates the contribution of the temporal adapter.
+3. **Report confidence intervals or error bars** on all quantitative results (Table 1, Table 2) to establish significance of the reported gains.
+4. **Specify the high-pass filter implementation** (filter type, parameters, domain of application) to aid reproducibility.
+5. **Report training time, inference overhead, and parameter count** for the adapter to substantiate the efficiency claim quantitatively.
+6. **Include a brief failure analysis** discussing cases where the method struggles (complex motion, extreme viewpoint changes) to improve credibility.
 
 ## Score and Decision
 
-MY FINAL SCORE: <score>6.5</score>
+**Originality:** Good. The task of reusing image plugins for video models without per-plugin retraining is well-motivated and not previously solved. The timestep remapping is a novel and clever idea grounded in analysis.
+
+**Importance of research question:** High. Reducing the training burden for controllable video generation has practical value given the abundance of image plugins and the scarcity of video-condition data.
+
+**Claims supported:** Moderately. The core claim of compatibility across plugins and backbones is supported. The claim of "high-quality and consistent" video generation is partially supported but weakened by the absence of a temporal video metric and narrow baseline set.
+
+**Soundness of experiments:** Adequate but improvable. Ablations are well-designed and isolate each component. But the evaluation lacks a video-level temporal metric, error bars, and a per-frame baseline, which collectively weaken the experimental rigor.
+
+**Clarity of writing:** Clear. The method is well-structured, the analysis of ControlNet and X-Adapter is accessible, and the figures effectively communicate the ideas.
+
+**Value to community:** Moderate to high. The framework could enable practical reuse of the large ecosystem of image plugins for video generation, which would be valuable to practitioners.
+
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

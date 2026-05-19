@@ -1,20 +1,19 @@
-Now I have all the evidence from the paper. Let me compose the final consolidated review.
+Now I have a clear picture of the paper's content. Let me finalize the consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces the problem of temporal (time-dependent) label noise in sequential classification — a setting that prior label-noise literature has not addressed. The authors formalize the noise through a time-varying transition matrix Q(t), propose backward and forward sequence losses that are provably robust when Q(t) is known (Theorems 1–2), and introduce TENOR, a method that jointly learns a classifier and the temporal noise function via a neural-network-parameterized Q(t). Experiments on one synthetic and four real-world time-series datasets across six temporal noise patterns show consistent improvements over static baselines and simple temporal extensions.
+This paper introduces and formalizes the problem of *temporal label noise* — label corruption that varies over time in sequential classification tasks. It proposes (i) backward and forward sequence losses that are provably robust when the temporal noise function Q(t) is known, and (ii) TENOR, a method that jointly learns a classifier and estimates Q(t) from data using a neural network parameterization with a volume-minimization penalty. Experiments on synthetic and four real-world time-series datasets show that temporal methods outperform static baselines.
 
 ## Strengths
 
-1. **Novel problem formalization with clear empirical evidence that static methods underperform.** The paper convincingly demonstrates that existing static label-noise methods are inadequate for temporal noise. Table 1 shows temporal methods consistently outperform their static counterparts across all five datasets (e.g., HAR: Uncorrected 73.6% → TENOR 82.1%; VolMinNet 71.6% → VolMinTime 78.4%). Figure 3 further shows the gap widens as noise increases.
-
-2. **Theoretical guarantees for temporal noise-robust losses.** Theorem 1 proves that minimizing the expected backward sequence loss over noisy labels is equivalent to maximizing the likelihood over clean labels, and Theorem 2 establishes the same for the forward sequence loss. These extend Patrini et al.'s static results to the temporal setting and provide the foundation for the Q(t)-estimation methods.
-
-3. **TENOR achieves state-of-the-art results by learning temporal noise functions.** Across all datasets and noise patterns, TENOR attains the highest clean test accuracy and lowest Q(t) reconstruction MAE. Table 2 shows this holds across six diverse noise functions (e.g., HAR with Exponential noise: TENOR 81.3% vs. VolMinTime 78.2% and AnchorTime 77.0%).
-
-4. **Thorough evaluation breadth.** The paper evaluates across one synthetic and four real datasets (HAR, HAR70, EEG_Sleep, EEG_Eye) and six temporal noise functions, providing robust evidence of generalization.
-
-5. **Analysis of forward vs. backward loss correction.** Figure 2's comparison of the two loss forms under oracle Q(t) knowledge is practically useful — forward loss consistently outperforms backward, and both match the static baseline when noise is time-independent.
+- **Novel problem formalization**: Section 3 and Definition 1 are the first to formalize label noise that varies over time in sequential classification, giving a precise matrix-valued noise function Q(t). This provides a clear foundation for a genuinely underexplored problem.
+- **Provably robust loss functions extended to temporal setting**: Theorems 1 and 2 show that the backward and forward sequence losses yield consistent estimators when Q(t) is known, extending static noise-robust losses (Patrini et al.) to the temporal setting.
+- **TENOR learns the noise function from data without prior knowledge**: Section 4.3 presents the first method to explicitly model and estimate temporal label noise using a neural-network parameterization of Q(t) jointly trained with the classifier.
+- **Strong empirical evidence**: Table 1 shows temporal methods consistently outperform static baselines across all five datasets, with TENOR achieving the best clean-test accuracy and Q(t) reconstruction error (MAE) in most cases. Table 2 and Figure 3 confirm these gains across six different temporal noise functions and varying noise levels.
+- **Demonstrates that ignoring temporal structure degrades performance**: Figure 2 directly compares using the true temporal Q(t) vs. a static average approximation, showing the static approximation consistently underperforms — particularly for mixed noise. This provides clean evidence that temporal modeling is necessary.
+- **Diverse evaluation with realistic temporal noise functions**: Six functional forms of noise (exponential decay, linear decay, sigmoid, sinusoidal, mixed, and time-independent) are tested on four real-world sequential tasks, strengthening generalization claims.
 
 ## Weaknesses
 
@@ -23,61 +22,55 @@ None.
 
 ### Major
 
-1. **Incorrect claim that Frobenius norm minimization equals volume minimization (Section 4.3, line 167).** The paper states: "minimizing the Frobenius norm of Q, a convex function, amounts to minimizing the volume of Q." This is not correct. The Frobenius norm and determinant (volume) are unrelated matrix quantities; a matrix can have large Frobenius norm and small determinant, or vice versa. The volume of the simplex formed by Q's columns is proportional to |det(Q)|, not to ‖Q‖_F. The paper provides no proof, citation, or argument for this claimed equivalence. This undermines the theoretical justification for TENOR's regularizer in Eq. (3). Notably, the paper's own VolMinTime method (Eq. 6) correctly uses log det for volume minimization, creating an internal inconsistency. The empirical results suggest TENOR works despite this flawed justification, but the claimed theoretical grounding for the regularizer is unsupported as written.
+- **Unsubstantiated claim about TENOR's volume penalty**: The paper states (line 167) that "Given the constraints imposed in Definition 1, minimizing the Frobenius norm of Q, a convex function, amounts to minimizing the volume of Q." This claim is presented as fact without proof or citation. The minimum-volume simplex framework (Li et al. [25]) uses the determinant/log-determinant — not the Frobenius norm — as the proper measure of simplex volume. Meanwhile, VolMinTime (Eq. 6) correctly uses log-det, creating an inconsistency: the authors seem aware of the correct measure but substitute a different one for TENOR without justification. The Frobenius norm as a volume surrogate is not generally equivalent, and the paper's stated justification is insufficient. This does **not** invalidate TENOR's empirical results (the Frobenius norm may still act as a useful regularizer), but it means the method's theoretical grounding for identifiability is incomplete. The authors should either provide a justification, replace the penalty with log-det, or reframe the motivation.
 
-2. **Missing baseline to isolate the source of improvement.** The paper compares against static methods and temporal Q-estimation methods, but does not include a simple "time-aware" baseline: training a static noise-robust method (e.g., VolMinNet, Anchor) with the timestep index fed as an additional feature. This would disentangle whether TENOR's benefits come from *explicitly modeling temporal noise* in the loss/transition matrix or simply from allowing the classifier to condition its predictions on time. Without this control, the reader cannot determine which mechanism drives the gains.
+- **Theorem 2 uses undefined notation**: The right-hand side of Theorem 2's equation uses ℓ_{t,φ}(⋅) which is never defined in the paper. Only ℓ_{t,ψ}(⋅) (with ψ as the link function) is defined in Definition 3. This makes the theorem's statement incomplete and unverifiable as written. Additionally, the verbal claim ("maximizes the empirical likelihood of the data over the clean labels") is imprecise — the standard result is consistency of the argmin, not equivalence of the loss values. The theorem should be restated with clearly defined notation and framed as a consistency result.
 
 ### Minor
 
-1. **No statistical significance testing.** Standard deviations over 10 runs are reported, but no significance tests are provided. On some real-dataset comparisons (e.g., Table 1 — HAR: VolMinTime 78.4% vs. TENOR 82.1%; EEG_Sleep: VolMinTime 81.7% vs. TENOR 82.8%), the effect sizes are modest enough that formal tests (e.g., Mann-Whitney U or bootstrap confidence intervals) would help readers assess reliability.
+- **Backward loss numerical stability acknowledged but not analyzed**: The paper notes (line 260) that the backward sequence loss requires inverting Q_t at each time step, and that "the inverse-determinant of the matrix will scale the loss and therefore the gradients," attributing underperformance to "gradient-related issues." However, no analysis is provided of when Q_t is invertible, how near-singular matrices are handled, or what regularization (if any) is applied. Figure 2 shows the backward loss frequently underperforms the forward loss, but without controlled analysis the cause remains speculative.
 
-2. **Figure 4 shows only one random seed.** The qualitative Q(t) reconstruction is visually impressive, but showing only a single seed leaves questions about variance. A shaded confidence band across runs would be more informative.
+- **Statistical significance not assessed**: Results are reported as mean ± std over 10 runs, but no pairwise significance tests or effect sizes are provided. In cases where error bars overlap (e.g., the critic estimates ~2% std with differences ~2% for some comparisons), it is unclear whether improvements are statistically robust. Standard practice in this setting is to include at least a discussion of significance or confidence intervals.
 
-3. **No discussion of limitations.** The paper does not address: (i) what happens when Q(t) changes faster than the data sampling rate; (ii) how the method scales to very long sequences (large T); (iii) whether the model can handle instance-dependent noise (which violates the class-conditional assumption of Eq. 2). A brief limitations paragraph would strengthen the paper.
+- **Overstated "state-of-the-art" claim**: The abstract claims "state-of-the-art performance," but since no prior temporal noise methods exist, the comparisons are necessarily against self-constructed extensions of static methods. The paper should qualify this as "outperforms static baselines and their temporal extensions." This is a minor overclaim given the lack of external prior art.
 
-4. **Backward loss invertibility handling is acknowledged but underspecified.** The paper notes in Section 5.2 that the backward loss requires explicit Q(t) inversion, which can cause gradient issues. However, it does not describe any practical mitigation (e.g., pseudo-inverse, small-identity regularization, gradient clipping), leaving a reproducibility gap for the backward loss results. (The forward loss, which the paper recommends and uses in TENOR, does not require inversion.)
+- **Single classifier architecture**: All experiments use a GRU-based classifier. Given the variety of sequential architectures (LSTM, Transformers), testing a second architecture on at least one dataset would strengthen generalizability claims.
 
 ### Trivial
-None.
+
+- The notation in the Theorem 2 equation uses both ψ (in the left-side →ℓ_{seq,ψ}) and φ (in the right-side ℓ_{t,φ}) without distinguishing or defining the latter. This is a typographical/inconsistency issue that should be fixed.
 
 ## Nice-to-Haves
 
-- If the paper intends to keep the Frobenius-norm regularizer in TENOR, it should either replace it with log det (consistent with VolMinTime) or provide a clear theoretical justification for why Frobenius norm serves as a valid proxy for volume under the diagonally-dominant stochastic-matrix constraints of Definition 1.
-- Adding the time-aware baseline described in Major weakness #2.
-- Reporting confidence intervals or significance tests for the main comparisons.
-- A brief discussion of the method's limitations and failure modes.
+- Include a clean-label oracle baseline to contextualize how far all methods are from the upper bound.
+- Add an ablation study isolating the benefit of temporal coupling (TENOR's neural network across time) vs. the volume penalty — comparing TENOR with a corrected volume penalty against VolMinTime would clarify the source of improvement.
+- Provide controlled analysis of forward vs. backward loss gradient behavior (e.g., gradient norms, convergence curves) for at least one dataset.
 
 ## Removed Points
 
-These points from the reviewers were removed after cross-checking against the paper. Treat them with caution — they may reflect reviewer misinterpretation rather than actual paper problems.
+These points are flagged to be removed; treat them with caution:
 
-- **"The paper does not discuss the condition that every Q(t) must be invertible for the theorems."** The backward loss definition (Definition 2) explicitly uses Q_t^{-1}, making invertibility mathematically implicit. The paper further discusses gradient issues from near-singular Q(t) in Section 5.2. This is not a missing condition — it's stated in the definition and acknowledged in the experiments.
-- **"Figure 2 confusion — forward loss underperforms in sinusoidal noise."** The critic misread the text. The paper clearly states that *backward* loss underperforms in the sinusoidal setting, while forward loss shows consistent improvements. The paper text (Section 5.2) is unambiguous: "we find consistent performance improvements using the forward sequence loss technique. In contrast, we find inconsistent effects for the backward sequence loss technique."
-- **"Reproducibility details are sparse (hyperparameters, learning rates, optimizer, Lagrangian schedule)."** Removed per hard rule: nitpicks about undisclosed hyperparameters are not included in the final review.
-- **"Code availability not mentioned."** Removed per hard rule about reproducibility nitpicks.
-- **"Theorem 2 typographical mismatch."** The equation's asymmetry (y_{1:T} on left vs. y_{1:t} in the sum on right) is not verifiable as a real error vs. a PDF-parsing artifact. The proofs are in the (stripped) appendix. Removed per hard rule.
-- **"The citation to 'noise in time series data [2, 10]' is vague."** This is a presentation preference, not a substantive weakness.
-- **"AnchorTime relies on the strong anchor-point assumption."** The paper explicitly discusses the assumptions of each method in Section 4.4 and positions them as baselines. The anchor-point assumption is standard in the static-noise literature and carried over faithfully.
+- **"The proofs are not in the body, so the reader cannot verify them"** — Removed per hard rules: appendix content is stripped by the parser and exists in the original submission.
+- **"No discussion of hyperparameter selection for the augmented Lagrangian (λ, c, penalty schedule)"** — Removed per hard rules: this is a reproducibility nitpick about undisclosed hyperparameters, not a substantive flaw.
+- **Frobenius norm called "conceptually wrong" / "structural flaw"** — Downgraded from the critic's "fatal/structural" framing to Major. While the justification is insufficient, the relationship between Frobenius norm and volume for row-stochastic, diagonally dominant matrices is not *clearly false* (it holds for the 2×2 case and may approximately hold more generally); the real problem is the lack of proof or citation, not a "conceptual error."
+- **"TENOR's reported improvements may arise from regularization rather than correctly identifying Q(t)"** — This is speculation that the reviewer cannot verify from the paper. The empirical Q(t) reconstruction error (MAE) in Table 1 provides evidence that TENOR does learn Q(t) reasonably well.
+- **Strength Finder: generic/problem-importance strengths** — Removed per filtering rules (e.g., "this paper addressed an important problem"). Only concrete, evidence-grounded strengths are retained.
+- **Criticism that baselines are "self-constructed" as a weakness** — Downgraded: since no prior temporal methods exist, any baseline must be constructed. This is a limitation of the problem area, not the paper. Reframed as part of the "state-of-the-art" overclaim above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews surface no genuinely novel observation about the paper that the paper itself does not already articulate. The key insight from the reviews is that the discrepancy between TENOR's Frobenius-norm penalty and VolMinTime's log-det penalty warrants deeper justification — this is a gap the authors can address, not a discovery.
 
 ## Suggestions
 
-1. **Fix the volume-minimization justification.** Replace the Frobenius norm with a proper volume measure (e.g., log|det(Q)|) in TENOR, consistent with VolMinTime, or provide a rigorous theoretical argument for why Frobenius norm serves as a valid proxy under the diagonally-dominant stochastic-matrix constraints of Definition 1. If the regularizer genuinely serves a different purpose (e.g., encouraging Q(t) toward the identity), state that directly and re-evaluate the identifiability claims.
-
-2. **Add the time-aware control baseline.** Train a static noise-robust method (e.g., VolMinNet) with timestep index as an additional input feature to isolate whether the gains come from explicit temporal noise modeling.
-
-3. **Report statistical significance** (e.g., bootstrap confidence intervals or Mann-Whitney U tests) for the key comparisons, especially on real datasets where differences are smaller.
-
-4. **Show confidence bands in Figure 4** by plotting reconstructions across multiple seeds.
-
-5. **Add a limitations paragraph** addressing when the assumptions break (fast-changing noise, long sequences, instance-dependent noise).
+1. **Fix the volume penalty**: Either replace ∥Q_ω(t)∥_F in Eq. (4) with a proper log-det penalty (consistent with the VolMinTime formulation), or provide a rigorous justification (proof or citation) for why the Frobenius norm serves as a valid convex surrogate for simplex volume under the constraints of Definition 1. If the latter route is taken, also explain why the same surrogate was not used in VolMinTime.
+2. **Clarify Theorem 2**: Define ℓ_{t,φ} explicitly. Restate the theorem as a consistency result (argmin equivalence under correct specification) rather than making an imprecise claim about "maximizing likelihood."
+3. **Address backward loss numerical stability**: Add a brief analysis or at minimum a practical note about conditions under which Q_t is invertible, and whether regularization (e.g., adding ϵI) is used.
+4. **Add statistical significance**: Include pairwise tests (e.g., paired t-test or Wilcoxon) or report confidence intervals for key comparisons in Tables 1 and 2.
+5. **Qualify the "state-of-the-art" claim**: Rephrase to reflect that comparisons are against static methods and their natural temporal extensions, since no prior temporal noise methods exist.
+6. **Add a second architecture**: Test one additional sequential classifier (e.g., LSTM) on at least one dataset to strengthen generalizability.
 
 ## Score and Decision
 
-This paper addresses a genuinely novel and practically important problem. The core contribution — formalizing temporal label noise and developing methods to handle it — is solid, and the empirical evidence for TENOR's effectiveness is consistent and compelling across diverse settings. However, the major weakness (incorrect theoretical claim about Frobenius norm equating to volume minimization) undermines the paper's own justification for its central method's identifiability, and the missing baseline prevents attribution of the performance gains. The paper would be substantially stronger by fixing the former and adding the latter. While the empirical results suggest the overall approach has merit, the theoretical unsoundness in a core claim is a non-trivial gap that would need to be addressed before acceptance.
-
-**MY FINAL SCORE: <score>6.5</score>
-MY FINAL DECISION: <decision>Reject</decision>**
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

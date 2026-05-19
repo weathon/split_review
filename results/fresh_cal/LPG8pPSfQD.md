@@ -1,18 +1,20 @@
-Now I have a thorough understanding of the paper. Let me write the final consolidated review.
+Now I have all the information needed. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper introduces DistRL, an asynchronous distributed reinforcement learning framework for fine-tuning on-device mobile control agents. The framework uses a decoupled host-worker architecture where mobile workers collect trajectories independently and a central learner updates the policy asynchronously. The authors also propose A-RIDE, a custom off-policy RL algorithm combining Retrace corrections with distributed prioritized experience replay (DPER). Experiments on AitW benchmark tasks show DistRL achieves ~20% relative improvement in success rate over DigiRL, with 3× training efficiency gains attributed to its asynchronous design.
+The paper presents DistRL, an asynchronous distributed reinforcement learning framework for fine-tuning on-device mobile control agents. It introduces a host-worker architecture with centralized training and decentralized data acquisition, alongside a custom RL algorithm (A-RIDE) combining importance sampling, Retrace off-policy corrections, and Distributed Prioritized Experience Replay (DPER). Experiments on Android control benchmarks (AitW) show DistRL achieves ~20% relative improvement in success rate over the synchronous DigiRL baseline, along with near-linear scalability and faster data collection.
 
 ## Strengths
 
-- **Quantified efficiency and scalability gains**: Figures 3(a) and 3(c) provide concrete evidence — DistRL accumulates 800 trajectories in 6k seconds versus DigiRL's 300 (a 2.67× advantage), and Figure 3(d) shows near-linear scalability from 32 to 192 CPUs. These measurements directly substantiate the claimed efficiency improvements over synchronous multi-machine methods.
+1. **Concrete empirical gains over synchronous methods** — Table 1 shows DistRL achieves 73.2% ± 1.1% on General test and 68.5% ± 1.7% on Web Shopping, versus DigiRL (multi) at 61.2% ± 2.4% and 59.9% ± 2.8% respectively. The ~20% relative improvement with lower variance on training sets is a real result.
 
-- **Strong empirical results on a standard benchmark**: Table 1 reports DistRL achieving 73.2% success rate on the AitW General test set versus 61.2% for DigiRL multi (19.6% relative improvement) and 68.5% versus 59.9% on Web Shopping (14.4% relative improvement). Results are reported as means with standard deviations over three runs.
+2. **Algorithmic benefit isolated from framework benefit** — The DigiRL-DistRL Async baseline (DigiRL's algorithm inside DistRL's async framework) underperforms DistRL by ~10% success rate (line 251), showing that the A-RIDE algorithm adds value beyond the distributed architecture alone.
 
-- **Ablation evidence for algorithmic components**: Figure 3(b) shows that removing DPER degrades success rate by ~8% and removing Retrace causes ~6% degradation with training instability, providing empirical validation that these specific components contribute meaningfully beyond the baseline framework.
+3. **Near-linear scalability demonstrated** — Figure 3(d) shows collection speed of ~7.7 trajectories/minute with 192 CPUs, closely tracking the ideal linear upper bound (line 253). This directly addresses the synchronous bottleneck of DigiRL where workers idle due to up to 100× variation in task duration.
 
-- **Practical asynchronous architecture addressing a real bottleneck**: Section 4 describes a well-motivated host-worker design with FIFO trajectory queues, environment snapshots, and multi-threaded emulator management. The paper correctly identifies that DigiRL's synchronous multi-machine setup causes faster workers to idle waiting for slower ones — a problem exacerbated by task durations varying by up to 100× in real mobile environments.
+4. **Ablation quantifies component contributions** — Removing DPER causes an 8% drop, and removing Retrace causes a 6% drop with training instability (Figure 4b / Section 6.6), providing controlled evidence that both components matter independently.
+
+5. **Evaluator validated against human judgment** — Section 6.3 reports <2% discrepancy between the Gemini-1.5-pro evaluator and human assessment on the General subset when given the last screenshot and last two actions, which is important for reward signal reliability.
 
 ## Weaknesses
 
@@ -21,56 +23,58 @@ None.
 
 ### Major
 
-- **Base model is incompletely specified**. The paper states the model is "a T5-based multimodal generation architecture" (line 37) but does not specify the model size (e.g., T5-small/base/large/XL), pre-training data, initialization checkpoint, or whether it was pre-fine-tuned from offline data. Since the comparison against DigiRL (which also uses a VLM, but its architecture/size is also not specified here) is the primary evidence for the framework's efficacy, the reader cannot determine how much of the reported gain comes from the distributed framework versus the underlying MLLM choice. The "DigiRL-DistRL Async" ablation (DigiRL algorithm in DistRL framework) partially controls for the framework architecture, but does not control for the base model used within each method.
+1. **The state-value function as a binary classifier creates a theoretical gap that is unaddressed.** The paper trains V(s) to predict Pr(G_t > 0) — a probability in [0,1] — rather than the expected return (Section 5, line 146-148). The advantage is then computed as A(s_t,a_t) = r(s_t,a_t) + γV(s_{t+1}) - V(s_t) (line 152), and Retrace corrections are applied to this V(s) (Section 5.2). The standard policy gradient theorem and Retrace derivation assume V(s) is an expected return, not a probability of positive return. The paper provides no theoretical justification or empirical ablation validating this unusual choice, nor does it discuss how the semantics of a classifier V(s) affect the advantage interpretation and off-policy correction. This makes the method's theoretical grounding unclear and undermines the claim that A-RIDE is a principled extension of GAE/Retrace.
 
-- **A-RIDE algorithm description has several ambiguities that hinder reproducibility**:
-  1. **Trajectory-level estimator filtering**: The trajectory-level value estimator $V_{\text{traj}}$ is said to "filter the replay buffer to retain only high-value trajectories" (line 138), but no filtering criterion, threshold value, or mechanism (deterministic/stochastic) is specified. How this interacts with the priority sampling from DPER is not described.
-  2. **Binary-classification value network**: The state-value function $V(s_t;\phi)$ predicts $\Pr(G_t > 0)$ via binary cross-entropy rather than the conventional regression on expected return. This design choice is not ablated, compared against a conventional regression-based $V(s)$, or analyzed for potential information loss. Since the advantage $A = r + \gamma V(s_{t+1}) - V(s_t)$ inherits this binary nature, the signal becomes coarse.
-  3. **Retrace update mechanism unclear**: The paper writes "$V(s_t) \leftarrow V(s_t) + \delta_t$" (line 174) as the Retrace correction, which reads as a direct value update rather than a gradient-based training target. It is not explained how this interacts with the gradient-based binary-classification training of $V(s_t;\phi)$, or whether $\delta_t$ serves as a target for the value network loss.
-  4. **Advantage computation vs. Retrace correction**: The advantage used in the policy loss (Eq. 1, line 159) is the one-step TD advantage $r + \gamma V(s_{t+1}) - V(s_t)$, while Retrace corrects $V(s_t)$. The connection between these two uses of $V$ and why the policy advantage does not use the Retrace-corrected values is not clarified.
-  5. **No importance ratio clipping**: The importance sampling ratio $\rho_t = \pi/\mu$ appears directly in both the policy gradient (Eq. 1) and Retrace weights without any clipping, which is a known source of variance in off-policy methods.
+2. **The headline efficiency claims ("3× improvement", "2.4× faster") are not formally defined.** The abstract states these numbers, but the paper never specifies what metric "training efficiency" refers to. The supporting evidence (800 vs. 300 trajectories over 6k seconds gives ~2.67×, not 2.4×; success rate differences are 1.7×, not 3×) suggests the claims are computed from different curve points without a clear definition. Combined with the fact that DigiRL's resource configuration is never stated — while DistRL uses 4 V100 GPUs + 2 workers with 8 T4 GPUs + 192 vCPUs — the reader cannot determine whether the speedup reflects algorithmic improvement or simply more hardware. The paper should state DigiRL's exact resource usage and formally define the efficiency metric.
 
-- **Resource-matched comparison with DigiRL is not established**. DistRL uses 32 emulators supported by 192 vCPUs across two worker machines plus 4 V100 GPUs for the host learner. The paper does not report how many emulators, GPUs, or CPU cores DigiRL used. The 3× training efficiency and 2.4× data collection speed improvements are measured in wall-clock time, which naturally advantages the system with more parallel workers. While the paper notes it gave DigiRL "2 times the convergence time" (line 267), this compensates for time rather than parallelism; a fairer comparison would match total environment interactions or plot success rate versus interaction count rather than wall-clock time.
+3. **The method specification is incomplete, preventing reproduction.** Key details are absent: (a) No pseudocode or algorithm box for A-RIDE, despite the method involving multiple interacting components (V_traj training, binary V(s), one-step advantage, Retrace correction, DPER priority computation, policy update). (b) No hyperparameter table (learning rates, batch sizes, β, λ, w1/w2/w3 weights, replay buffer size, queue capacity, filtering threshold for V_traj). (c) The "filtering" mechanism for V_traj-labeled trajectories (line 138) is mentioned but never specified — what threshold is used? How does the filter interact with DPER? (d) The repetition penalty (line 87) is mentioned but its magnitude and detection method are not specified.
 
 ### Minor
 
-- **Key hyperparameters are not reported**: Learning rates, batch sizes, replay buffer capacity, priority mixing weights $w_1, w_2, w_3$, Retrace trace decay $\lambda$, entropy coefficient $\beta$, and action penalty coefficient $\lambda$ are all absent. This makes the experimental setup difficult to reproduce.
-- **Unusually low variance in DistRL results**: DistRL reports $\sigma = 0.2$ percentage points for training success rate across three runs (Table 1), which is substantially tighter than DigiRL's $\sigma = 1.3$ and unusually low for online RL on dynamic mobile environments. The paper should clarify whether this reflects evaluation on a fixed test set, deterministic components, or averaging over a large number of evaluation episodes.
-- **Dismissal of IMPALA/IMPACT is unevidenced**: The paper claims these algorithms "inadequately handle fluctuating online experiences" and "lack efficient buffer management" (lines 69-70) without empirical demonstration or analysis. Given IMPALA was designed for large-scale distributed RL, this assertion weakens the related work positioning.
-- **Generalization claims are limited**: The gap between training and test performance is small for DistRL (e.g., 75.5 → 73.2 on General) but this could partly reflect distributional similarity between the training and test sets (both derived from AitW). Analysis of per-category or unseen-app performance would strengthen the generalization claims.
+1. **Resource asymmetry with baselines is not controlled.** The paper details its hardware (4 V100 GPUs, 192 vCPUs, 8 T4 GPUs) but never states DigiRL's hardware configuration. Without this, the reported speedups conflate algorithmic gains with resource scaling.
+
+2. **Low training variance is suspicious.** DistRL's training-set standard deviations (0.2–0.5) are substantially lower than DigiRL's (1.1–1.5) despite online RL being inherently noisy (Table 1). The paper does not explain this — it could reflect genuine stability from prioritized sampling, or an artifact of the evaluation procedure.
+
+3. **The "extends GAE" framing is inconsistent with the actual method.** Section 5 (line 134) says the approach "extends the Generalized Advantage Estimation (GAE) framework," but the method uses one-step TD advantage (GAE with λ=0, which is a simplification, not an extension). This is a framing mismatch that misleads readers about the relationship to prior work.
+
+4. **Evaluator validated only on General tasks, not Web Shopping.** Section 6.3 reports <2% human-evaluator discrepancy on the General subset, but Web Shopping results (Table 1) rely on the same evaluator without separate validation. Given that Web Shopping involves different visual patterns and success criteria, the evaluator's reliability on that domain is unverified.
 
 ### Trivial
 
-- Figure 3(a) labels the y-axis "Success Rate" without explicitly stating it is training success rate (though the caption says "Training performance" and the text discusses training context). This should be clarified in the figure.
-- The claim of being "the first deployable and scalable autonomous RL fine-tuning system for online mobile device control" (line 37) slightly overstates novelty, as DigiRL already demonstrated online RL fine-tuning on real devices; DistRL's novelty is specifically the asynchronous distributed design.
+- The reward notation r(s_H, a_H) in the V_traj MLE loss (line 140) uses the same symbol as the per-timestep reward r(s_t, a_t) in the advantage equation, which is potentially confusing since rewards are sparse (0/1 at termination).
 
 ## Nice-to-Haves
 
-- An ablation of the binary-classification value network against a conventional regression-based $V(s)$ would empirically justify this design choice.
-- Analysis of how many evaluator (Gemini) API calls were made during training and their cost contribution would be useful for practitioners assessing the framework's practicality.
-- Reporting confidence intervals around the <2% evaluator discrepancy figure (Section 6.3) would strengthen validation.
+- Ablate the binary classification formulation of V(s) vs. standard regression on Monte Carlo returns to justify this unusual design choice.
+- Provide a cost/throughput analysis of the Gemini evaluator calls per trajectory (both for reward assignment and action validation), since this is a practical deployment concern.
+- Report network bandwidth/latency overheads in the distributed setup to validate the claimed near-linear scalability.
 
 ## Removed Points
 
-These points from the inputs are flagged to be removed; treat them with caution:
+The following points from the input reviews were examined and removed:
 
-1. **Criticism about the base model being "never specified" in absolute terms**: The paper does specify "T5-based multimodal generation architecture" — the model family IS identified. The criticism that it is insufficiently specified is retained as a Major weakness above, but the absolute framing ("never specified") is removed as inaccurate.
-2. **Criticism about the truncated sentence "with 1"**: This is a parser artifact from PDF extraction. Per the hard rules, formatting/parser artifacts are not author errors.
-3. **Strength Finder's "Supporting strengths" item about practical asynchronous architecture**: While the strength is genuine, it's somewhat generic (describing one's own architecture). The core strengths (efficiency, performance, ablation) already cover this.
-4. **Criticism about missing appendix content**: Per the hard rules, missing appendix content reflects parser stripping, not author omission.
-5. **The vague criticism that "the harsh critic's weaknesses are real but minor" type framing**: Removed as meta-commentary; specific weaknesses are evaluated directly.
+- **"Method cannot be faithfully implemented from the text"** (Harsh Critic) — Overstated. The equations for each component are present; the issue is missing details (no pseudocode, no hyperparameters), which is a valid reproducibility concern but not that the method is unimplementable. The concrete missing items are listed in Weakness #3 (Major).
+- **"Contribution is primarily a systems integration, not an algorithmic advance"** (Harsh Critic) — This is a framing opinion, not a verifiable weakness. The paper makes legitimate architecture contributions (async distributed design for mobile agents) and the ablation shows the algorithm components matter. The framing could be improved, but this is not a technical flaw.
+- **"First deployable claim is too strong"** (Harsh Critic, line notes) — Debatable and not central to the paper's technical contribution. Removed.
+- **"Task distribution confound"** (Harsh Critic, Critical Issue 2) — Speculative; both methods are evaluated on standard AitW benchmarks. No evidence the training mix gives an unfair advantage.
+- **"No confidence intervals / statistical significance tests"** (Harsh Critic, Missing Parts) — Standard deviations over 3 runs are reported. Significance tests are not standard practice in this empirical setting.
+- **"No discussion of failure cases"** (Harsh Critic) — Nice-to-have but not a weakness; many papers do not include failure case analysis.
+- **"No discussion of network bandwidth or latency"** (Harsh Critic) — Nice-to-have analysis for a systems paper, not a core weakness.
+- Several generic strengths from the Strength Finder that are generic re-statements of problem importance rather than specific to this paper's contribution.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do surface the observation that the paper's value-function-as-binary-classifier is an unusual and potentially consequential design choice that should have been ablated — this is a practical insight for RL practitioners designing value networks for sparse-reward settings — but it stems from the paper's own description rather than a novel synthesis across reviews.
+None beyond the paper's own contributions. The two reviews largely converge: the system contribution (async distributed RL for mobile agents) is genuine and well-demonstrated, but the method description is underspecified and the unusual binary-classifier V(s) lacks theoretical grounding. The most interesting tension is that the paper shows a clean ablation demonstrating the algorithm components matter (DigiRL-DistRL Async < DistRL), yet the paper's own method has an unaddressed theoretical gap in its value function formulation. Resolving this — either by justifying the binary classification or showing empirically it is equivalent in practice — would significantly strengthen the paper.
 
 ## Suggestions
 
-1. **Specify the base model fully** in a revision: architecture variant (T5-small/base/large/XL), parameter count, pre-training data, and any offline pre-fine-tuning steps. If the model used is the same as or comparable to DigiRL's, state this explicitly.
-2. **Provide pseudocode for A-RIDE** that clearly connects: (a) the trajectory-level estimator and its filtering mechanism, (b) the binary-classification value network and its loss, (c) how Retrace updates interact with the value network (is $\delta_t$ a gradient target or a direct update?), and (d) how the policy advantage is computed. Clarify whether importance ratios are clipped and at what thresholds.
-3. **Add a resource-matched comparison**: Either report DigiRL's hardware configuration and match it, or add a comparison plot of success rate versus number of environment interactions (which factors out parallelism) rather than wall-clock time alone.
-4. **Report missing hyperparameters** in a table: learning rates, batch sizes, replay buffer capacity, $w_1, w_2, w_3$, $\beta$, $\lambda$, Retrace $\lambda$, and how runs were seeded.
-5. **Explain the low variance** in DistRL's training success rate — specify whether the $\pm 0.2$ is the standard deviation of per-run means or of per-evaluation-episode metrics.
+1. Add a complete pseudocode block for A-RIDE showing how V_traj filtering, binary V(s), Retrace correction, DPER priority computation, and the policy update interact in a single training loop.
+2. Add a hyperparameter table with all training/config parameters (learning rates, β, λ, w1/w2/w3, replay buffer size, queue capacity, V_traj filtering threshold, repetition penalty magnitude).
+3. Provide a clear formal definition of "training efficiency" and show how the 3× and 2.4× numbers are derived from the data.
+4. Report DigiRL's hardware configuration (number of emulators, CPUs, GPUs) and ideally run a controlled comparison with matched resources.
+5. Either justify the binary classification formulation of V(s) theoretically, ablate it against standard regression, or replace it with the standard formulation. At minimum, discuss how the semantics of V(s) as Pr(G_t > 0) affects the advantage interpretation and the applicability of Retrace.
+6. Validate the Gemini evaluator on the Web Shopping subset as well, or acknowledge the gap.
+7. Explain the source of the unusually low training variance for DistRL (0.2–0.5 vs. 1.1–1.5 for DigiRL).
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

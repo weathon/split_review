@@ -25,6 +25,11 @@ elif _calibration_env in ("2026", "iclr2026"):
     _embeddings_path = os.path.expanduser("~/review_agent/new/human_reviews_embeddings_2026.pkl")
     _score_index_path = os.path.expanduser("~/review_agent/new/human_review_score_index_2026.pkl")
     _calibration_set = "iclr2026"
+elif _calibration_env in ("ai_cal", "ai-cal"):
+    CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "ai_review_cal").resolve())
+    _embeddings_path = str((DATASETS_DIR / "human_reviews_embeddings_ai_cal.pkl").resolve())
+    _score_index_path = str((DATASETS_DIR / "human_review_score_index_ai_cal.pkl").resolve())
+    _calibration_set = "ai_cal"
 elif _calibration_env in ("", "deepreview"):
     CALIBRATION_REVIEW_DIR = str((DATASETS_DIR / "deepreview_13k_calibration").resolve())
     _embeddings_path = ensure_hf_file("human_reviews_embeddings_deepreview.pkl")
@@ -33,7 +38,7 @@ elif _calibration_env in ("", "deepreview"):
 else:
     raise ValueError(
         f"Unknown CALIBRATION_SET={_calibration_env!r}; expected one of "
-        "'deepreview', '2025', '2026' (or unset)."
+        "'deepreview', '2025', '2026', 'ai_cal' (or unset)."
     )
 
 ALLOWED_PATHS = [CALIBRATION_REVIEW_DIR]
@@ -171,27 +176,27 @@ def _is_excluded(basename: str) -> bool:
     return pid in EXCLUDED_PAPER_IDS
 
 
-def _search_file_impl(query: str, n: int, mode: str, low_score: float = 0.0, high_score: float = 10.0) -> str:
+def _search_file_impl(query: str, n: int, mode: str, low_score: float = -1.0, high_score: float = 11.0) -> str:
     """Search human reviews, optionally filtered by the reviewer avg-score range.
 
     Args:
         query: search query.
         n: number of top results.
         mode: 'vector' for semantic similarity, 'bm25' for keyword matching.
-        low_score: include only papers with avg score >= low_score (default 0.0).
-        high_score: include only papers with avg score <= high_score (default 10.0).
+        low_score: include only papers with avg score > low_score (default -1.0).
+        high_score: include only papers with avg score < high_score (default 11.0).
 
     Filtering is applied FIRST by score range, THEN ranking (BM25/vector) runs
     over the filtered subset. Use this to anchor calibration to a specific
     score band (e.g. low_score=7, high_score=10 for strong papers).
     """
-    print(f"  [search_file] query='{query}' mode='{mode}' n={n} score=[{low_score}, {high_score}]")
+    print(f"  [search_file] query='{query}' mode='{mode}' n={n} score=({low_score}, {high_score})")
     if mode == "bm25":
         bm25 = list(database.values())[0]["bm25"]
         files = list(database.values())[0]["files"]
         allowed_idx = [
             i for i, p in enumerate(files)
-            if low_score <= _score_index.get(os.path.basename(p), -1.0) <= high_score
+            if low_score < _score_index.get(os.path.basename(p), -1.0) < high_score
             and not _is_excluded(os.path.basename(p))
         ]
         if not allowed_idx:
@@ -210,7 +215,7 @@ def _search_file_impl(query: str, n: int, mode: str, low_score: float = 0.0, hig
         return "\n---\n".join(results) if results else "No relevant files found."
     elif mode == "vector":
         allowed_mask = np.array([
-            low_score <= _score_index.get(fn, -1.0) <= high_score and not _is_excluded(fn)
+            low_score < _score_index.get(fn, -1.0) < high_score and not _is_excluded(fn)
             for fn in filenames
         ])
         if not allowed_mask.any():
@@ -241,15 +246,15 @@ def _search_file_impl(query: str, n: int, mode: str, low_score: float = 0.0, hig
 
 
 @function_tool
-def search_file(query: str, n: int, mode: str, low_score: float = 0.0, high_score: float = 10.0) -> str:
+def search_file(query: str, n: int, mode: str, low_score: float = -1.0, high_score: float = 11.0) -> str:
     """Search human reviews, optionally filtered by the reviewer avg-score range.
 
     Args:
         query: search query.
         n: number of top results.
         mode: 'vector' for semantic similarity, 'bm25' for keyword matching.
-        low_score: include only papers with avg score >= low_score (default 0.0).
-        high_score: include only papers with avg score <= high_score (default 10.0).
+        low_score: include only papers with avg score > low_score (default -1.0).
+        high_score: include only papers with avg score < high_score (default 11.0).
 
     Filtering is applied FIRST by score range, THEN ranking (BM25/vector) runs
     over the filtered subset. Use this to anchor calibration to a specific
