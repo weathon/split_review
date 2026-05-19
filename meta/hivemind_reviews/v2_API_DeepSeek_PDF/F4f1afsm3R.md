@@ -1,0 +1,225 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper presents SC-MCTS*, a Monte Carlo Tree Search reasoning algorithm for Large Language Models that integrates three main contributions: (1) an action-level contrastive reward model based on Jensen-Shannon divergence between expert and amateur LLM distributions, (2) a Multi-RM method for statistically normalized linear combination of multiple reward signals (contrastive JSD, log-likelihood, and self-evaluation), and (3) integration of speculative decoding for node-level speedup. Additional refinements include UCT exploration constant tuning and a modified backpropagation that rewards steadily improving paths. The method is evaluated on the Blocksworld multi-step reasoning dataset across steps 2-12 and two difficulty modes.
+
+**Strengths:** The paper addresses an important practical problem — MCTS-based LLM reasoning is accurate but slow, and reward model design has received insufficient systematic study. The ablation study provides useful component-level analysis. The speculative decoding speedup (51.9% for 70B+1B) is a practical contribution.
+
+**Major Weaknesses:** (1) No statistical significance or variance reported for any result, making the core claims of "significant outperformance" unverifiable. (2) The ablation study uses pseudo-random rewards as baseline, which inflates the apparent improvement of each component. (3) The "free lunch" framing of speculative decoding is misleading. (4) Critical limitation — MCTS accuracy declines more steeply than CoT on long reasoning paths — is handled with post-hoc speculation rather than controlled analysis. (5) External literature verification unavailable in this run; novelty/comparison conclusions require manual verification.
+
+## Strengths
+1. **Addresses an important practical problem.** MCTS-based LLM reasoning suffers from high latency, and the paper's integration of speculative decoding as a training-free speedup mechanism is a practical contribution with measurable impact (51.9% node-level speedup for Llama-3.1-70B + Llama-3.2-1B, ~100% for 405B + 8B).
+
+2. **Systematic ablation study.** The paper provides a component-by-component ablation (Table 2) that traces accuracy improvements from individual reward signals (R_JSD, R_LL, R_SE) through Multi-RM normalization, UCT tuning, and backpropagation refinement. This helps isolate the contribution of each design choice.
+
+3. **Action-level contrastive reward is a sensible innovation.** Adapting contrastive decoding from token-level to action-level by averaging JSD over an entire reasoning step is a natural and well-motivated extension. The bounded nature of JSD (0-1) also makes it more suitable for normalization than unbounded logit differences.
+
+4. **Interpretability analysis provides useful diagnostics.** The correlation analysis between reward values and ground-truth progress (Figure 6) offers empirical evidence that the designed rewards align with task-relevant progress, which is more informative than reporting only accuracy numbers.
+
+5. **Reproducibility-oriented reporting.** The paper provides checkpoint links, hyperparameters, EOS token details, and GPU usage data (Appendix E, H, I), which aids reproducibility. The use of open-weight models (Llama-3, Llama-3.1) and quantized checkpoints is practical.
+
+## Weaknesses
+1. **No statistical significance or variance reporting.** Every experimental result reports single-point accuracy without standard deviations, confidence intervals, or significance tests. The word "significantly" is used throughout the paper (Abstract, Section 5.2, Conclusion) without statistical backing. This is a critical weakness because the performance differences between SC-MCTS* and RAP-MCTS are often small (e.g., 0.6026 vs 0.5796 in Easy mode, ~2.3% absolute), and could lie within run-to-run noise.
+
+2. **Ablation study uses an artificially weak baseline.** The MCTS base in Table 2 uses "pseudo-random numbers" as the reward signal, which is not representative of any realistic MCTS implementation. Improvements measured against this straw-man baseline overstate the real contribution of each component. A credible baseline (e.g., RAP-MCTS's log-likelihood reward) would provide a more meaningful comparison.
+
+3. **"Free lunch" framing of speculative decoding is misleading.** The paper claims speculative decoding is a "free lunch" because contrastive decoding already requires a smaller amateur model. However, speculative decoding requires the amateur model to generate *draft tokens autoregressively*, which imposes additional latency and compute overhead not present in the contrastive reward calculation. The term conflates model reuse with zero-cost operation.
+
+4. **Critical limitation not systematically analyzed.** The paper observes that MCTS accuracy declines more steeply than CoT on long reasoning paths (after Step 6), but offers only speculative explanations (fixed iteration limit, completion mode issues). This is arguably the most important practical limitation of the approach, yet it is deferred to "future work" without controlled experiments.
+
+5. **Equation (1) has a likely indexing error.** The region boundaries in the Multi-RM formula use [b1, bk+1) for each mode k, causing overlapping regions. The correct formulation should use [bk, bk+1) to ensure disjoint partition of the reward distribution.
+
+6. **Self-evaluation reward signal is unvalidated.** The R_SE reward uses a vague prompt ("Is this answer correct/good?") and relies on LLM self-evaluation log-probabilities without any calibration analysis against ground-truth correctness. The claimed 2.63% improvement from R_SE may be unreliable.
+
+7. **External literature verification unavailable.** Due to Retrieval-Disabled Mode, novelty and comparison conclusions are deferred for manual verification. The paper's claims about prior work gaps and the novelty of the contrastive reward model cannot be independently confirmed from external sources in this review.
+
+## Key Issues
+### Issue 1 (Critical): No statistical evidence for core performance claims
+- **Location:** Pages 7-8 — Section 5.2 Main Results, Table 1
+- **Evidence:** All results are single-point accuracy without variance. The term "significantly outperforms" is used without statistical testing. Key deltas are small (2.3% on Easy, 1.7% on Hard for SC-MCTS* vs RAP-MCTS with Llama-3.1-70B).
+- **Impact:** The paper's central claim — that SC-MCTS* outperforms prior methods — cannot be reliably assessed. A single-seed evaluation with small deltas is scientifically inconclusive.
+
+### Issue 2 (Critical): Ablation baseline inflates component contributions
+- **Location:** Page 9 — Section 5.5 Ablation Study, Table 2
+- **Evidence:** The MCTS base uses "pseudo-random numbers" as reward. This is not a credible baseline — no real MCTS system uses random rewards. The 25% overall improvement is measured against this straw man.
+- **Impact:** The claimed improvements for each component (+6.58% for RJSD, +5.26% for RLL, etc.) are overstated. The true novelty margin over a realistic baseline (e.g., RAP-MCTS) is likely much smaller.
+
+### Issue 3 (Major): Missing analysis of steep accuracy decline on long reasoning paths
+- **Location:** Page 8 — Section 5.2 Figure 2 discussion
+- **Evidence:** The paper notes that MCTS accuracy declines more steeply than CoT after Step 6, but only offers speculative explanations (fixed iteration limit, completion mode, EOS token).
+- **Impact:** This is a fundamental limitation of the approach. Without systematic analysis, readers cannot determine whether SC-MCTS* is suitable for complex multi-step tasks requiring >6 steps.
+
+### Issue 4 (Major): Equation (1) indexing error in Multi-RM method
+- **Location:** Page 6 — Section 4.1 Harnessing Multiple Reward Models
+- **Evidence:** The summation range [b1, bk+1) for region k causes overlapping between regions. Correct formulation should be [bk, bk+1).
+- **Impact:** If implemented as written, per-mode statistics would be incorrect, potentially degrading Multi-RM performance.
+
+### Issue 5 (Major): Self-evaluation reward lacks validation
+- **Location:** Page 5 — Section 4.1 Self Evaluation
+- **Evidence:** The R_SE reward uses a vague prompt ("Is this answer correct/good?") with no calibration analysis showing correlation with actual correctness.
+- **Impact:** The claimed 2.63% improvement from R_SE may be noise rather than signal. The reward may reinforce model biases rather than provide independent information.
+
+### Issue 6 (Major): "Free lunch" framing is scientifically imprecise
+- **Location:** Page 4 — Section 3.4, also Abstract and Contribution 3
+- **Evidence:** Speculative decoding requires autoregressive draft generation by the amateur model, which is a different workload pattern than the one-shot scoring used for contrastive reward calculation.
+- **Impact:** Overstates the efficiency gain and may mislead readers about the cost-benefit tradeoff.
+
+## Actionable Suggestions
+### S1 (Must): Add statistical variance and significance testing
+- **Where:** Table 1, all experimental results
+- **Action:** Run all experiments with at least 3 random seeds. Report mean ± std. Add paired bootstrap or McNemar's test comparing SC-MCTS* against RAP-MCTS and CoT baselines. Mark statistically significant improvements (p < 0.05) with an asterisk.
+- **Impact:** This single change would transform the paper from suggestive to conclusive. Without it, the core claim cannot be verified.
+- **Effort:** Moderate (3x compute for seed runs; analysis is lightweight).
+
+### S2 (Must): Replace pseudo-random ablation baseline with realistic baseline
+- **Where:** Table 2, Section 5.5
+- **Action:** Replace the "pseudo-random rewards" MCTS base with the RAP-MCTS reward model (log-likelihood only) as the baseline. Re-compute all component improvements from this realistic baseline. Also test at least one alternative ordering of component addition.
+- **Impact:** Provides an honest assessment of each component's marginal benefit.
+- **Effort:** Low (re-run ablation with different baseline reward).
+
+### S3 (Must): Correct Equation (1) indexing error
+- **Where:** Page 6, Section 4.1
+- **Action:** Change [b1, bk+1) to [bk, bk+1) in Equation (1). Verify that the code implementation matches the corrected formula.
+- **Impact:** Ensures correct per-mode statistics in Multi-RM normalization.
+- **Effort:** Trivial (one-line fix).
+
+### S4 (Must): Systematically analyze the MCTS accuracy decline on long paths
+- **Where:** Page 8, Section 5.2
+- **Action:** Add controlled experiments: (a) Run MCTS with variable iteration limits (5, 10, 20, 30) on Step 10-12 problems to test whether more iterations recover accuracy. (b) Compare completion mode vs chat mode for node evaluation on long problems. (c) Report the crossover point where MCTS accuracy drops below CoT.
+- **Impact:** Addresses the most important practical limitation of the approach.
+- **Effort:** Moderate (requires additional experiment sweeps).
+
+### S5 (Should): Clarify speculative decoding overhead
+- **Where:** Section 3.4 and Abstract
+- **Action:** Replace "free lunch" with precise language: "Since both methods can share the same smaller model, speculative decoding can be integrated with minimal additional memory footprint and a favorable speed-accuracy tradeoff." Report both the speedup percentage and the actual wall-clock time per MCTS node.
+- **Impact:** Improves scientific accuracy and prevents reviewer objection.
+- **Effort:** Low.
+
+### S6 (Should): Validate self-evaluation reward signal
+- **Where:** Section 4.1 (Self Evaluation) and Section 5.5
+- **Action:** Report Spearman correlation between R_SE and ground-truth correctness on a held-out set. Use a single-attribute prompt ("Is this answer correct?") instead of the compound "correct/good" prompt.
+- **Impact:** Determines whether R_SE adds meaningful signal or just noise.
+- **Effort:** Low (analysis-only, no new experiments needed).
+
+### S7 (Nice-to-have): Restructure Introduction for narrative clarity
+- **Where:** Page 1, Introduction
+- **Action:** Follow the revised structure proposed in the Storyline Options section. Split the first paragraph into two focused paragraphs: one establishing the problem and CoT limitations, one positioning MCTS and stating the remaining gaps.
+- **Impact:** Improves readability and reviewer first impression.
+- **Effort:** Low (writing revision).
+
+## Storyline Options + Writing Outlines
+### Current Storyline Assessment
+
+The current Introduction has a scattered narrative that covers o1, CoT, DFS, MCTS, and AlphaGo in a single paragraph without a clear logical progression. The contribution list (three bullets) mixes framing statements with engineering contributions. The Abstract uses an informal numbered-list format.
+
+### Recommended Storyline: Problem-Gap-Solution-Effect (PGSE)
+
+**Title alternative suggestion:**
+"SC-MCTS*: Action-Level Contrastive Reward Models and Speculative Decoding for Accelerated MCTS Reasoning in LLMs"
+
+### Abstract Outline (5 sentences)
+
+**S1 (Problem):** Multi-step reasoning in LLMs remains challenging, especially for problems requiring long reasoning chains where autoregressive decoding accumulates errors.  
+**S2 (Prior Gap):** Monte Carlo Tree Search (MCTS) improves reasoning accuracy but suffers from high latency, and prior work has not systematically studied the reward models that drive MCTS performance.  
+**S3 (Proposed Method):** We propose SC-MCTS*, which introduces an action-level contrastive reward model based on Jensen-Shannon divergence, a Multi-RM method for statistically normalized reward combination, and speculative decoding for node-level speedup, along with refined UCT and backpropagation.  
+**S4 (Key Results):** On the Blocksworld multi-step reasoning dataset, SC-MCTS* with Llama-3.1-70B achieves accuracy gains of up to 2.3% over RAP-MCTS and 17.4% over o1-mini (average), while accelerating node-level inference by 51.9% via speculative decoding.  
+**S5 (Bounded Conclusion):** These results demonstrate that systematic reward model improvement and inference acceleration can substantially enhance the practicality of MCTS-based LLM reasoning.
+
+### Introduction Outline (5 paragraphs)
+
+**P1 — Problem and Motivation (rewritten from current first paragraph, split into two):**  
+Role: Establish that multi-step reasoning remains hard for LLMs and that CoT-based approaches degrade with increasing reasoning depth.  
+Key claim: CoT accuracy drops for long reasoning chains due to autoregressive decoding limitations.  
+Transition: "To overcome this limitation, recent work has turned to heuristic search algorithms..."
+
+**P2 — MCTS Potential and Current Limitations:**  
+Role: Position MCTS as a promising alternative, then state the two specific gaps: (a) MCTS is much slower than CoT, and (b) the reward model — the primary driver of MCTS quality — has received insufficient systematic study.  
+Transition: "In this paper, we address both gaps through three contributions."
+
+**P3 — Contribution 1 (Reward Model Design):**  
+Role: Introduce the action-level contrastive JSD reward, its interpretability advantage, and the Multi-RM method for combining multiple reward signals.  
+Key claim: Novel reward design requires no external tools, training, or task-specific engineering.  
+Evidence anchor: Algorithm 1, Section 4.1, Table 2 (ablation).
+
+**P4 — Contribution 2 (MCTS Component Analysis + Speedup):**  
+Role: Present the UCT constant optimization, backpropagation refinement, and speculative decoding integration.  
+Key claim: Each component yields measurable improvement; speculative decoding provides a practical speedup without accuracy loss.  
+Evidence anchor: Figure 3, Table 2.
+
+**P5 — Summary and Roadmap:**  
+Role: State that all experiments are on the Blocksworld dataset, preview the main finding (accuracy gain + speedup), and outline the paper structure.  
+Transition: "We describe the method in Section 4, followed by experiments in Section 5."
+
+### Alternative Storyline Candidate: Efficiency-First (if targeting more applied venue)
+
+Reposition the paper around the speed advantage: lead with the 51.9% speedup result, frame the reward improvements as enabling this speedup (better rewards → fewer MCTS iterations needed → faster convergence → less total compute). This narrative would strengthen the practical impact story.
+
+## Priority Revision Plan
+### P0 (Must fix, pre-submission critical)
+
+| Priority | Issue | Action | Expected Impact | Effort |
+|----------|-------|--------|-----------------|--------|
+| P0.1 | No statistical variance | Add 3-seed runs + significance tests for Table 1 | Core claim becomes verifiable | Moderate |
+| P0.2 | Weak ablation baseline | Replace pseudo-random with RAP-MCTS reward baseline | Honest component assessment | Low |
+| P0.3 | Equation (1) indexing error | Fix [b1,bk+1) to [bk,bk+1) | Correct Multi-RM statistics | Trivial |
+
+### P1 (Should fix, major quality improvement)
+
+| Priority | Issue | Action | Expected Impact | Effort |
+|----------|-------|--------|-----------------|--------|
+| P1.1 | MCTS accuracy decline on long paths | Add controlled experiments (variable iterations, completion vs chat mode) | Addresses the most important practical limitation | Moderate |
+| P1.2 | "Free lunch" framing | Replace with precise description of compute tradeoffs | Scientific accuracy | Low |
+| P1.3 | Self-evaluation reward unvalidated | Add calibration analysis; fix prompt | Determines if R_SE is meaningful | Low |
+
+### P2 (Nice-to-have, polish)
+
+| Priority | Issue | Action | Expected Impact | Effort |
+|----------|-------|--------|-----------------|--------|
+| P2.1 | Introduction narrative | Restructure into 5-paragraph PGSE arc | Improved readability | Low |
+| P2.2 | Related Work structure | Reorganize by comparison axes, not chronological list | Better positioning | Low |
+| P2.3 | Interpretability analysis | Report exact correlation values in text; add case study | Stronger interpretability claim | Low |
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|-------|---------|--------------|-----------------|-------------------|
+| E1 | Main comparison (Table 1) | Blocksworld all steps, Easy/Hard, Llama-3/3.1-70B, RAP-MCTS/CoT baselines | Accuracy per step + average | SC-MCTS* outperforms RAP-MCTS and CoT in most settings | C1, C2, C3 | No variance; single seed |
+| E2 | Speed comparison (Figure 3) | 70B+1B, 70B+8B, 405B+1B, 405B+8B | Speedup % over vanilla decoding | 51.9% for 70B+1B, ~100% for 405B+8B | C3 | Wall-clock time not reported; only "per node" speed |
+| E3 | UCT constant C sweep (Figure 4) | MCTS base + R_LL only, varying C | Accuracy | C value matters greatly | C1 | Only tested on one configuration |
+| E4 | Iteration count sweep (Figure 5) | SC-MCTS* with varying T | Accuracy | Diminishing returns after 7 iterations | C1 | Only one difficulty/step length |
+| E5 | Ablation study (Table 2) | Step 6, Hard mode, incremental component addition | Accuracy + improvement % | Each component contributes positively | C1, C2 | Baseline uses pseudo-random rewards |
+| E6 | Interpretability (Figure 6) | Reward vs progress delta correlation | Spearman ρ, Pearson r | SC-MCTS* rewards correlate with progress | C2 | Values only in figure, not text |
+
+### Research-Theme Gap Diagnosis
+
+- **New knowledge (weakly supported):** The paper's main claim of "outperforming" baselines lacks statistical verification. The ablation study's inflated baseline weakens the knowledge contribution.
+- **Reproducibility (partially supported):** Checkpoints and hyperparameters are provided, but single-seed results and missing wall-clock timing reduce reproducibility.
+- **Potential to change practice/understanding (moderate):** The action-level contrastive reward and Multi-RM method are practical proposals, but their advantage over simpler alternatives (e.g., just using R_LL) needs stronger evidence.
+
+### Proposed Research Experiments (P0/P1/P2)
+
+| Target Claim | Hypothesis | Minimal Design | Controls | Metrics | Success Criterion | Est. Cost/Time | Expected Gain |
+|-------------|------------|---------------|----------|---------|-------------------|---------------|---------------|
+| P0-E1: SC-MCTS* significantly outperforms baselines | With 3 seeds, SC-MCTS* rank is stable | Re-run Table 1 with 3 seeds | Same hyperparameters, same data splits | Mean acc ± std, p-value vs RAP-MCTS | SC-MCTS* > RAP-MCTS on >80% of settings with non-overlapping std | ~1σ | ~3x existing compute | Core claim becomes verifiable |
+| P0-E2: Component improvements are real | Realistic baseline shows similar ranking | Re-run ablation with RAP-MCTS reward as base | Same as Table 2 | Accuracy delta from RAP-MCTS base | Component ordering preserved | Low | Honest assessment |
+| P1-E3: MCTS accuracy decline is due to fixed iteration limit | Increasing iterations recovers accuracy on long paths | Run SC-MCTS* on Step 10-12 with T={5,10,20,30} | Same setup from Table 1 | Accuracy vs T | Accuracy@T | Accuracy at T=30 > Accuracy at T=10 | Moderate | Addresses key limitation |
+| P1-E4: Self-evaluation reward is meaningful | R_SE correlates with ground-truth correctness | Compute Spearman R_SE vs verifier on held-out 100 problems | Same as interpretability study | Spearman ρ | ρ > 0.3 (p < 0.05) | Low | Validates R_SE component |
+| P2-E5: Method generalizes beyond Blocksworld | SC-MCTS* works on other reasoning tasks | Adapt to GSM8K or MATH with step-splitting | Same reward models, adapted prompts | Accuracy | Non-trivial gain over CoT baseline | High | Broader applicability |
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score:** 5.5 / 10
+
+**Rationale:** The paper addresses a worthwhile problem and offers sensible methodological components (action-level contrastive reward, Multi-RM normalization, speculative decoding integration). However, the core empirical claims are undermined by the absence of statistical variance reporting and an ablation baseline that inflates component contributions. The critical limitation of MCTS accuracy declining faster than CoT on long reasoning paths is acknowledged but not analyzed. Novelty conclusions are deferred due to unavailable external literature verification. The practical contribution (speedup via speculative decoding) is the strongest aspect, but the accuracy claims require stronger evidence.
+
+**Post-Revision Target:** [6.5, 7.5] / 10
+
+**Rationale:** If the authors (a) add multi-seed variance and significance tests, (b) re-run ablation with a realistic baseline, (c) correct the equation indexing error, (d) systematically analyze the long-path accuracy decline, and (e) validate the self-evaluation reward, the paper would provide credible evidence for its claims. The upper bound (7.5) assumes the action-level contrastive reward proves genuinely novel upon literature verification and that the ablation ranking holds under more rigorous evaluation. The lower bound (6.5) assumes some claims are only partially supported but the practical speedup contribution is solid.

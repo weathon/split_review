@@ -1,0 +1,132 @@
+# loYSzjSaAK — Meta Review
+
+- Model: DeepReviewer 14B
+- Decision: Accept
+- Rating: 6.0
+- Soundness: 3.0
+- Presentation: 3.0
+- Contribution: 3.0
+
+## Summary
+
+This paper introduces a novel framework for reinforcement learning (RL) with submodular rewards, termed SubRL, which extends beyond the traditional Markov assumption by optimizing non-additive, history-dependent rewards. The core contribution is the development of SubPO, a policy gradient-based algorithm that maximizes marginal gains in submodular reward settings. The authors provide a comprehensive theoretical analysis, including inapproximability results and approximation guarantees under specific assumptions, such as the $	extit{epsilon-Bandit SubMDP}$ and bounded curvature of the reward function. Empirically, the paper demonstrates the effectiveness and scalability of SubPO across various applications, including biodiversity monitoring, Bayesian experiment design, informative path planning, and coverage maximization. The significance of this work lies in its ability to handle a broader class of reward functions, which are particularly relevant in scenarios where diminishing returns are a key factor. However, the paper could benefit from a more detailed justification of its assumptions, a clearer articulation of the technical challenges in adapting policy gradient methods to submodular rewards, and a more comprehensive empirical evaluation.
+
+## Strengths
+
+The paper's core contributions are both novel and well-motivated. The introduction of SubRL, a framework for optimizing non-additive, history-dependent rewards using submodular set functions, is a significant advancement in the field of reinforcement learning. This approach is particularly relevant for applications where the principle of diminishing returns applies, such as coverage control, experiment design, and informative path planning. The authors provide a solid theoretical foundation, including inapproximability results that highlight the complexity of the problem and approximation guarantees under specific assumptions. The proposed algorithm, SubPO, is inspired by the greedy algorithm in submodular optimization and is shown to achieve optimal constant factor approximations in certain restricted settings. The empirical evaluation is another strong aspect of the paper, with experiments across a diverse set of applications demonstrating the practical utility and scalability of SubPO. The paper is well-written and easy to follow, making the concepts and contributions accessible to a broad audience. The authors also provide a clear overview of the related work, positioning their contributions within the broader RL landscape.
+
+## Weaknesses
+
+Despite the paper's strengths, several limitations and areas for improvement have been identified. One of the primary concerns is the limited justification for the assumptions made in Section 5, particularly the $	extit{epsilon-Bandit SubMDP}$ and the DR-submodularity assumption. The $	extit{epsilon-Bandit SubMDP}$ is introduced without extensive motivation or examples of real-world scenarios where this specific structure is likely to occur. This makes it difficult to assess the practical relevance of the theoretical results derived under this assumption. Additionally, the connection between the reparameterization trick and the DR-submodularity of the reward function is not clearly explained, and the paper lacks concrete examples of submodular reward functions that satisfy this condition. This omission weakens the theoretical analysis and leaves readers questioning the applicability of the results (High confidence, evidence from Section 5 and Appendix C).
+
+Another significant weakness is the limited scope of the theoretical guarantees. The approximation results in Section 5 are derived under specific assumptions that are independent of the proposed algorithm. This makes it challenging to evaluate the algorithm's performance in settings where these assumptions do not hold. The curvature-based approximation result for general MDPs, while theoretically sound, is not very satisfying. The result relies on a specific choice of modular reward, and the paper does not explore alternative choices or analyze their impact on the approximation ratio. Moreover, the dependence of the approximation ratio on the curvature is quite weak, and the paper could benefit from investigating tighter bounds under additional assumptions (High confidence, evidence from Proposition 5.1 and Appendix D).
+
+The proposed algorithm, SubPO, is presented as a straightforward extension of policy gradient methods to submodular rewards. However, the paper does not adequately discuss the challenges in adapting policy gradient to submodular rewards, such as the non-additivity of the reward function and the variance of gradient estimates. The core technical contribution, the derivation of the unbiased gradient estimator using marginal gains, could be highlighted more prominently. A more detailed discussion of these technical challenges would significantly strengthen the paper's contribution (High confidence, evidence from Section 4).
+
+The empirical evaluation, while demonstrating the effectiveness of SubPO, could be more convincing. The paper provides some details about the experimental setup, but more granular information, such as hyperparameter settings and training procedures, would be beneficial. The comparison with existing RL algorithms is limited to a standard RL baseline (	extit{mrl}), and the paper does not include a direct comparison with methods specifically designed for maximizing submodular rewards. A more comprehensive empirical evaluation, including ablation studies and comparisons with a broader range of algorithms, would provide stronger evidence for the proposed algorithm's effectiveness (High confidence, evidence from Section 7).
+
+Finally, the paper could benefit from a more detailed discussion of practical implementation challenges and potential solutions. For example, the paper could elaborate on how the submodular reward function is chosen and parameterized for different applications, and discuss the computational complexity of SubPO, especially in relation to the size of the state and action spaces. A discussion of potential optimizations or approximations to improve scalability would also be valuable (High confidence, evidence from Section 4 and 7).
+
+## Suggestions
+
+To address the identified weaknesses, several concrete and actionable improvements can be made. First, the assumptions in Section 5, particularly the $	extit{epsilon-Bandit SubMDP}$ and the DR-submodularity assumption, should be more thoroughly justified. The authors could provide a detailed discussion of the types of submodular reward functions that satisfy these conditions and offer real-world examples where these assumptions are likely to hold. This would help readers understand the practical relevance of the theoretical results and the scope of the proposed framework (High confidence, evidence from Section 5 and Appendix C).
+
+Second, the theoretical analysis could be strengthened by exploring alternative approaches that do not rely on assumptions independent of the proposed algorithm. For instance, the authors could derive convergence guarantees or performance bounds that are directly related to the properties of the policy gradient algorithm. This would provide a more direct assessment of the algorithm's performance and its limitations. Additionally, the curvature-based approximation result for general MDPs could be improved by investigating tighter bounds under additional assumptions, such as smoothness or Lipschitz continuity of the reward function. The authors should also consider alternative choices of modular rewards and analyze their impact on the approximation ratio (High confidence, evidence from Proposition 5.1 and Appendix D).
+
+Third, the paper should more clearly articulate the specific challenges in adapting policy gradient methods to the submodular reward setting. The non-additive nature of submodular rewards introduces significant complexities, and the authors should explain how they address these issues. For example, the paper could discuss how the marginal gains of submodular functions are handled within the policy gradient framework and how this differs from the standard approach. The authors should also elaborate on the variance of the gradient estimates in the submodular setting and how their algorithm mitigates this variance (High confidence, evidence from Section 4).
+
+Fourth, the empirical evaluation could be significantly enhanced. The authors should provide more detailed information about the experimental setup, including the specific environments used, the hyperparameter settings, and the training procedures. It is crucial to compare the proposed algorithm with existing baselines, such as standard policy gradient methods and other algorithms designed for non-additive rewards. The paper could also include ablation studies to understand the impact of different components of SubPO, such as the choice of policy parameterization or the specific submodular optimization algorithm used. A more comprehensive experimental evaluation would provide stronger evidence for the effectiveness of the proposed algorithm (High confidence, evidence from Section 7).
+
+Finally, the paper could benefit from a more detailed discussion of practical implementation challenges and potential solutions. The authors should elaborate on how the submodular reward function is chosen and parameterized for different applications, and discuss the computational complexity of SubPO, especially in relation to the size of the state and action spaces. A discussion of potential optimizations or approximations to improve scalability would also be valuable. The authors could also explore the sensitivity of SubPO to different hyperparameter settings and provide guidelines for selecting appropriate values. This would provide a more practical perspective on the applicability of the proposed approach and its limitations (High confidence, evidence from Section 4 and 7).
+
+## Questions
+
+1. Could the authors provide more details about the reparameterization trick mentioned in the first paragraph of Section 5? Specifically, how does this trick handle the policy simplex constraints, and what are the implications for the DR-submodularity of the reward function?
+
+2. How does the performance of SubPO compare to existing methods for maximizing submodular rewards, particularly in terms of sample efficiency and scalability? Are there specific environments or reward functions where SubPO outperforms these methods?
+
+3. What are the limitations of the SubRL framework, and are there any potential extensions or modifications that could address these limitations? For example, how could the framework be extended to handle more complex reward functions or larger state and action spaces?
+
+4. Can the authors provide more insights into the practical implementation of SubPO in real-world scenarios, including potential challenges and solutions? For instance, how is the submodular reward function chosen and parameterized for different applications, and what are the computational costs associated with this process?
+
+5. How does the performance of SubPO vary with the curvature of the reward function, and what are the implications for the approximation guarantees? Are there specific types of MDPs or reward functions where the curvature assumption is more likely to hold, and how does this affect the algorithm's performance?
+
+## Full Content
+
+## Summary:
+
+This paper introduces a novel framework for reinforcement learning (RL) with submodular rewards, termed SubRL, which extends beyond the traditional Markov assumption by optimizing non-additive, history-dependent rewards. The core contribution is the development of SubPO, a policy gradient-based algorithm that maximizes marginal gains in submodular reward settings. The authors provide a comprehensive theoretical analysis, including inapproximability results and approximation guarantees under specific assumptions, such as the $	extit{epsilon-Bandit SubMDP}$ and bounded curvature of the reward function. Empirically, the paper demonstrates the effectiveness and scalability of SubPO across various applications, including biodiversity monitoring, Bayesian experiment design, informative path planning, and coverage maximization. The significance of this work lies in its ability to handle a broader class of reward functions, which are particularly relevant in scenarios where diminishing returns are a key factor. However, the paper could benefit from a more detailed justification of its assumptions, a clearer articulation of the technical challenges in adapting policy gradient methods to submodular rewards, and a more comprehensive empirical evaluation.
+
+
+## Soundness:
+
+3.0
+
+
+## Presentation:
+
+3.0
+
+
+## Contribution:
+
+3.0
+
+
+## Strengths:
+
+The paper's core contributions are both novel and well-motivated. The introduction of SubRL, a framework for optimizing non-additive, history-dependent rewards using submodular set functions, is a significant advancement in the field of reinforcement learning. This approach is particularly relevant for applications where the principle of diminishing returns applies, such as coverage control, experiment design, and informative path planning. The authors provide a solid theoretical foundation, including inapproximability results that highlight the complexity of the problem and approximation guarantees under specific assumptions. The proposed algorithm, SubPO, is inspired by the greedy algorithm in submodular optimization and is shown to achieve optimal constant factor approximations in certain restricted settings. The empirical evaluation is another strong aspect of the paper, with experiments across a diverse set of applications demonstrating the practical utility and scalability of SubPO. The paper is well-written and easy to follow, making the concepts and contributions accessible to a broad audience. The authors also provide a clear overview of the related work, positioning their contributions within the broader RL landscape.
+
+
+## Weaknesses:
+
+Despite the paper's strengths, several limitations and areas for improvement have been identified. One of the primary concerns is the limited justification for the assumptions made in Section 5, particularly the $	extit{epsilon-Bandit SubMDP}$ and the DR-submodularity assumption. The $	extit{epsilon-Bandit SubMDP}$ is introduced without extensive motivation or examples of real-world scenarios where this specific structure is likely to occur. This makes it difficult to assess the practical relevance of the theoretical results derived under this assumption. Additionally, the connection between the reparameterization trick and the DR-submodularity of the reward function is not clearly explained, and the paper lacks concrete examples of submodular reward functions that satisfy this condition. This omission weakens the theoretical analysis and leaves readers questioning the applicability of the results (High confidence, evidence from Section 5 and Appendix C).
+
+Another significant weakness is the limited scope of the theoretical guarantees. The approximation results in Section 5 are derived under specific assumptions that are independent of the proposed algorithm. This makes it challenging to evaluate the algorithm's performance in settings where these assumptions do not hold. The curvature-based approximation result for general MDPs, while theoretically sound, is not very satisfying. The result relies on a specific choice of modular reward, and the paper does not explore alternative choices or analyze their impact on the approximation ratio. Moreover, the dependence of the approximation ratio on the curvature is quite weak, and the paper could benefit from investigating tighter bounds under additional assumptions (High confidence, evidence from Proposition 5.1 and Appendix D).
+
+The proposed algorithm, SubPO, is presented as a straightforward extension of policy gradient methods to submodular rewards. However, the paper does not adequately discuss the challenges in adapting policy gradient to submodular rewards, such as the non-additivity of the reward function and the variance of gradient estimates. The core technical contribution, the derivation of the unbiased gradient estimator using marginal gains, could be highlighted more prominently. A more detailed discussion of these technical challenges would significantly strengthen the paper's contribution (High confidence, evidence from Section 4).
+
+The empirical evaluation, while demonstrating the effectiveness of SubPO, could be more convincing. The paper provides some details about the experimental setup, but more granular information, such as hyperparameter settings and training procedures, would be beneficial. The comparison with existing RL algorithms is limited to a standard RL baseline (	extit{mrl}), and the paper does not include a direct comparison with methods specifically designed for maximizing submodular rewards. A more comprehensive empirical evaluation, including ablation studies and comparisons with a broader range of algorithms, would provide stronger evidence for the proposed algorithm's effectiveness (High confidence, evidence from Section 7).
+
+Finally, the paper could benefit from a more detailed discussion of practical implementation challenges and potential solutions. For example, the paper could elaborate on how the submodular reward function is chosen and parameterized for different applications, and discuss the computational complexity of SubPO, especially in relation to the size of the state and action spaces. A discussion of potential optimizations or approximations to improve scalability would also be valuable (High confidence, evidence from Section 4 and 7).
+
+
+## Suggestions:
+
+To address the identified weaknesses, several concrete and actionable improvements can be made. First, the assumptions in Section 5, particularly the $	extit{epsilon-Bandit SubMDP}$ and the DR-submodularity assumption, should be more thoroughly justified. The authors could provide a detailed discussion of the types of submodular reward functions that satisfy these conditions and offer real-world examples where these assumptions are likely to hold. This would help readers understand the practical relevance of the theoretical results and the scope of the proposed framework (High confidence, evidence from Section 5 and Appendix C).
+
+Second, the theoretical analysis could be strengthened by exploring alternative approaches that do not rely on assumptions independent of the proposed algorithm. For instance, the authors could derive convergence guarantees or performance bounds that are directly related to the properties of the policy gradient algorithm. This would provide a more direct assessment of the algorithm's performance and its limitations. Additionally, the curvature-based approximation result for general MDPs could be improved by investigating tighter bounds under additional assumptions, such as smoothness or Lipschitz continuity of the reward function. The authors should also consider alternative choices of modular rewards and analyze their impact on the approximation ratio (High confidence, evidence from Proposition 5.1 and Appendix D).
+
+Third, the paper should more clearly articulate the specific challenges in adapting policy gradient methods to the submodular reward setting. The non-additive nature of submodular rewards introduces significant complexities, and the authors should explain how they address these issues. For example, the paper could discuss how the marginal gains of submodular functions are handled within the policy gradient framework and how this differs from the standard approach. The authors should also elaborate on the variance of the gradient estimates in the submodular setting and how their algorithm mitigates this variance (High confidence, evidence from Section 4).
+
+Fourth, the empirical evaluation could be significantly enhanced. The authors should provide more detailed information about the experimental setup, including the specific environments used, the hyperparameter settings, and the training procedures. It is crucial to compare the proposed algorithm with existing baselines, such as standard policy gradient methods and other algorithms designed for non-additive rewards. The paper could also include ablation studies to understand the impact of different components of SubPO, such as the choice of policy parameterization or the specific submodular optimization algorithm used. A more comprehensive experimental evaluation would provide stronger evidence for the effectiveness of the proposed algorithm (High confidence, evidence from Section 7).
+
+Finally, the paper could benefit from a more detailed discussion of practical implementation challenges and potential solutions. The authors should elaborate on how the submodular reward function is chosen and parameterized for different applications, and discuss the computational complexity of SubPO, especially in relation to the size of the state and action spaces. A discussion of potential optimizations or approximations to improve scalability would also be valuable. The authors could also explore the sensitivity of SubPO to different hyperparameter settings and provide guidelines for selecting appropriate values. This would provide a more practical perspective on the applicability of the proposed approach and its limitations (High confidence, evidence from Section 4 and 7).
+
+
+## Questions:
+
+1. Could the authors provide more details about the reparameterization trick mentioned in the first paragraph of Section 5? Specifically, how does this trick handle the policy simplex constraints, and what are the implications for the DR-submodularity of the reward function?
+
+2. How does the performance of SubPO compare to existing methods for maximizing submodular rewards, particularly in terms of sample efficiency and scalability? Are there specific environments or reward functions where SubPO outperforms these methods?
+
+3. What are the limitations of the SubRL framework, and are there any potential extensions or modifications that could address these limitations? For example, how could the framework be extended to handle more complex reward functions or larger state and action spaces?
+
+4. Can the authors provide more insights into the practical implementation of SubPO in real-world scenarios, including potential challenges and solutions? For instance, how is the submodular reward function chosen and parameterized for different applications, and what are the computational costs associated with this process?
+
+5. How does the performance of SubPO vary with the curvature of the reward function, and what are the implications for the approximation guarantees? Are there specific types of MDPs or reward functions where the curvature assumption is more likely to hold, and how does this affect the algorithm's performance?
+
+
+## Rating:
+
+6.0
+
+
+## Confidence:
+
+3.0
+
+
+## Decision:
+
+Accept

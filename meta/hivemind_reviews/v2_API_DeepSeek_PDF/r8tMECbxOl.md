@@ -1,0 +1,390 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper proposes TDTransformer (Tabular Domain Transformer), a transformer-based framework for tabular data classification. The core idea is to use distinct embedding processes for categorical, numerical, and binary columns, with alignment layers that map these type-specific embeddings to a common space. For numerical values, the paper adapts piecewise linear encoding (PLE) from prior work, making it label-free with a symmetric output range. Additional contributions include column-type-aware (CTA) positional encoding and a column-type-dependent corruption strategy for contrastive pre-training.
+
+The paper evaluates on 76 OpenML classification datasets and reports that TDTransformer outperforms tree-based methods (XGBoost, CatBoost) and existing transformer-based tabular models (TransTab, SCARF, SwitchTab, SubTab) on average. The main results show a 1.67% gain in binary classification accuracy and a 3.62% gain in multiclass accuracy over the best baseline.
+
+The paper addresses an important and timely problem — adapting transformers for tabular data where tree-based methods still dominate. The per-type embedding design is a well-motivated engineering approach. However, the manuscript has several critical weaknesses that limit its current contribution strength: (1) no variance/statistical significance reporting across experiments, (2) the PLE adaptation's justification is partially unclear, (3) the related-work section lacks comparative positioning, (4) the training pipeline description contains a factual error about SSCL vs SCL, and (5) the conclusion overstates claims beyond available evidence. Novelty assessment is deferred due to unavailability of external literature retrieval in this run.
+
+## Strengths
+**1. Well-motivated problem and practical relevance.** The gap between tree-based methods and deep learning on tabular data is an active and practically important research area. The paper correctly identifies two key challenges — data heterogeneity and numerical value interpretation — that have been cited in multiple prior surveys (Shwartz-Ziv & Armon, 2022; Grinsztajn et al., 2022; Borisov et al., 2022).
+
+**2. Clean architectural design with clear motivation.** The per-type embedding design (categorical via tokenized language, numerical via PLE, binary via direct encoding) is conceptually clean and the alignment layer approach is a reasonable solution to the heterogeneous embedding space problem. The CLIP-inspired analogy helps readers understand the design rationale.
+
+**3. Extensive benchmark evaluation.** Testing on 76 OpenML datasets is a substantial empirical effort that covers diverse tabular classification settings. The results are reported across multiple meaningful subgroups (positive ratio binning, dataset size, class count), which provides useful granularity beyond single average numbers.
+
+**4. Honest failure case analysis.** The paper openly discusses the Au4-2500 failure case where XGBoost outperforms TDTransformer due to lack of semantic column names. This transparency about limitations is commendable and helps readers understand the boundary conditions of the method.
+
+**5. Ablation studies covering key design choices.** The paper systematically ablates: (a) SSCL vs SCL pre-training, (b) positional encoding variants (none, standard, CTA), and (c) batch size effects. The finding that binary and multiclass tasks respond differently to these choices is informative.
+
+## Weaknesses
+**1. Missing variance and statistical significance (Major).** All results in Tables 2, 3, 5, and 6 are reported as single-point estimates with no standard deviation, confidence intervals, or significance tests. Given that reported gains against tree-based baselines are modest (1.67% on binary, 3.62% on multiclass), the statistical reliability of these claims cannot be assessed. This is a critical gap for a benchmark paper claiming superiority.
+
+**2. PLE adaptation justification is incomplete (Major).** The paper claims [-1,1] range is "closer to the embedding" due to layer normalization, but provides no formal analysis or empirical comparison. The original PLE paper (Gorishniy et al., 2022) used [0,1] range and reported strong results. Without a direct comparison between [0,1] and [-1,1] PLE in the same setting, the claimed benefit remains unsubstantiated.
+
+**3. Factual error in SSCL vs SCL description (Major).** Page 5, line 100 states: "The self-supervised pre-training focuses on the category-level discrimination while self-supervised pre-training pays attention to the instance-level discrimination." This contains a copy-paste error (both say "self-supervised") and the mapping is reversed — SSCL is instance-level discrimination while SCL is category-level (label-based) discrimination.
+
+**4. Related work lacks comparative positioning (Major).** The related work section is organized as a paper-by-paper summary list rather than grouped by comparison axes. It does not explicitly differentiate TDTransformer from the most closely related methods (TransTab, TabTransformer, FT-Transformer), making it hard to assess what is genuinely new.
+
+**5. Overclaiming in conclusion (Major).** The conclusion states TDTransformer "overcomes the incapability of classical transformer-based architectures" — this overstates the evidence. The paper demonstrates competitive averages on a benchmark, not evidence of overcoming architectural limitations. A more bounded claim is needed.
+
+**6. Semantic dependency confound not controlled (Moderate).** TDTransformer's advantage partly comes from pre-trained language model embeddings for categorical columns. The paper does not ablate this factor (e.g., comparing against a version with random embeddings vs. LM embeddings) to isolate structural gains from semantic knowledge.
+
+**7. Limited novelty of core components (Moderate).** Per-type embeddings have been explored in prior tabular transformer work (TransTab, TabTransformer). PLE is adapted from Gorishniy et al. (2022) with modifications. The CTA positional encoding is a simple modification of standard sinusoidal encoding. The cumulative contribution is incremental rather than a fundamental advance.
+
+**8. Token-length bottleneck for categorical columns (Minor).** The method processes categorical columns by concatenating column name and cell value tokens, which can produce long sequences. This scalability limitation is not discussed.
+
+**9. t-SNE visualization without quantitative metrics (Minor).** The positional encoding analysis relies on visual inspection of t-SNE plots, which are known to be sensitive to hyperparameters. No quantitative cluster quality metrics are reported.
+
+## Key Issues
+### Issue 1: Missing Statistical Variance (Severity: Major)
+**Evidence:** Tables 2, 3, 5, 6 report only single-point accuracy/AUC/F1 values. No standard deviations, confidence intervals, or significance tests are reported for any method.
+
+**Root Cause:** The experimental design does not incorporate multiple random seeds or statistical significance testing protocol.
+
+**Impact:** The core performance claim (TDTransformer outperforms tree-based methods) cannot be evaluated for statistical reliability. With margins as small as 1.67% (binary accuracy) and 3.62% (multiclass accuracy), the gains may fall within typical variance for tabular benchmarks.
+
+**Fix:** Report mean ± std over ≥3 random seeds for all methods and datasets. Add a paired statistical test (Wilcoxon signed-rank or paired t-test) comparing TDTransformer against XGBoost/CatBoost across the 76 datasets.
+
+---
+
+### Issue 2: Factual Error in Contrastive Loss Description (Severity: Major)
+**Evidence:** Page 5, line 100: "The self-supervised pre-training focuses on the category-level discrimination while self-supervised pre-training pays attention to the instance-level discrimination."
+
+**Root Cause:** Copy-paste error (both clauses say "self-supervised pre-training") and incorrect mapping. SSCL is instance-level (pull together augmented views of same instance), while SCL is category-level (pull together same-label instances).
+
+**Impact:** This error undermines reader trust in the technical accuracy of the training pipeline description.
+
+**Fix:** Replace with: "SSCL performs instance-level discrimination by pulling together a row and its corrupted version. SCL performs category-level discrimination by grouping all rows sharing the same label."
+
+---
+
+### Issue 3: Related Work Lacks Comparative Positioning (Severity: Major)
+**Evidence:** Page 2, lines 78-90: The related work section is organized as paper-by-paper summaries without comparison axes or explicit differentiation.
+
+**Root Cause:** The paper does not establish a comparative framework (e.g., by supervision type, embedding strategy, or architectural choice) to position TDTransformer.
+
+**Impact:** Reviewers cannot assess what is truly new. The boundary between TDTransformer and closely related methods (TransTab, TabTransformer, FT-Transformer) is unclear.
+
+**Fix:** Reorganize related work around 2-3 comparison axes. For each group, state one sentence explaining how TDTransformer differs.
+
+---
+
+### Issue 4: Overclaiming in Conclusion (Severity: Major)
+**Evidence:** Page 10, line 81-88: "TDTransformer is able to overcome the incapability of classical transformer-based architectures in interpreting heterogeneous data."
+
+**Root Cause:** The conclusion uses absolute language ("overcomes the incapability") that is not proportional to the evidence (competitive benchmark results on 76 datasets).
+
+**Impact:** Overclaiming can lead to rejection at top venues where claim-evidence alignment is strictly checked.
+
+**Fix:** Replace with: "TDTransformer achieves stronger average performance than existing transformer-based tabular methods on the OpenML benchmark, suggesting that per-type embedding and PLE-based numerical encoding are promising directions for tabular transformers."
+
+---
+
+### Issue 5: PLE [-1,1] Range Justification Unsubstantiated (Severity: Major)
+**Evidence:** Page 4, lines 74-76: "codomain of [-1,1] for our adapted PLE function is closer to the embedding than the that of [0,1]."
+
+**Root Cause:** The statement is made without theoretical analysis or empirical comparison. The relationship between layer normalization and optimal PLE range is not explained.
+
+**Impact:** A claimed advantage of the adapted PLE is not empirically supported, weakening a core contribution.
+
+**Fix:** Add an ablation experiment comparing [0,1] PLE (Gorishniy et al., 2022) vs [-1,1] PLE (ours) under identical conditions, or provide a theoretical justification for the range choice.
+
+---
+
+### Issue 6: Semantic Confound Not Controlled (Severity: Moderate)
+**Evidence:** Page 7, line 85-90: The Au4-2500 analysis reveals TDTransformer degrades without semantic column names, showing reliance on LM embeddings.
+
+**Root Cause:** The paper does not separate the benefit of per-type structural design from the benefit of pre-trained language model knowledge.
+
+**Impact:** It is unclear whether the gains come from the architectural innovation (per-type embeddings + alignment) or simply from using a pre-trained language model.
+
+**Fix:** Add an ablation with randomly initialized embeddings for categorical columns (no LM knowledge) to isolate structural contribution.
+
+## Actionable Suggestions
+### S1: Add Statistical Variance Reporting (Must)
+**Target:** Page 6 — Tables 2, 3 (main results) and Tables 5, 6 (ablation)
+**Action:** Re-run all experiments with at least 3 different random seeds. Report mean ± standard deviation for all metrics. For the main results (Tables 2 and 3), add a column showing the number of seeds and a footnote indicating whether the same splits/hyperparameters were used across all methods.
+**Expected Benefit:** Restores statistical credibility. Reviewers can assess whether reported gains are within noise range.
+
+### S2: Add Ablation for PLE Range Comparison (Must)
+**Target:** Page 4 — PLE adaptation description
+**Action:** Add an experiment comparing PLE with [0,1] range (Gorishniy et al., 2022) vs [-1,1] range (ours) on a representative subset of 10-20 OpenML datasets. Report accuracy and AUC for both variants.
+**Expected Benefit:** Empirically validates the claimed advantage of symmetric PLE range.
+
+### S3: Fix SSCL/SCL Description Error (Must)
+**Target:** Page 5, line 100
+**Action:** Replace the erroneous sentence with: "SSCL performs instance-level discrimination by pulling together a row and its corrupted version, while SCL performs category-level discrimination by grouping all rows sharing the same label."
+**Expected Benefit:** Eliminates a factual error that could undermine technical credibility.
+
+### S4: Reorganize Related Work with Comparison Axes (Must)
+**Target:** Page 2 — Section 2: Related Work
+**Action:** Restructure into 3-4 thematic paragraphs:
+- **Graph-based methods** (Ruiz et al., Chen et al.): model column relations explicitly
+- **LLM-based methods** (Zhang et al., Zhu et al., Hegselmann et al.): serialize tables for pre-trained LMs
+- **Direct transformer methods** (TransTab, TabTransformer, FT-Transformer): embed tables directly
+End each paragraph with "TDTransformer differs by..."
+**Expected Benefit:** Readers can immediately see the positioning and differentiation.
+
+### S5: Bounded Conclusion Language (Must)
+**Target:** Page 10 — Section 5: Discussion and Conclusion
+**Action:** Replace "overcomes the incapability of classical transformer-based architectures" with "achieves stronger average performance on the evaluated OpenML benchmark, suggesting that per-type embedding design is a promising direction."
+**Expected Benefit:** Aligns claim strength with available evidence, reducing risk of overclaim criticism.
+
+### S6: Add Semantic Embedding Ablation (Nice-to-Have)
+**Target:** Page 7 — Experiments section or Appendix
+**Action:** Add an ablation where categorical embeddings use randomly initialized embeddings instead of pre-trained BERT embeddings, keeping all other components identical. Compare the performance drop to quantify how much TDTransformer relies on LM knowledge vs. structural design.
+**Expected Benefit:** Isolates the contribution of the architectural innovation from the pre-trained LM confound.
+
+### S7: Add Quantitative Cluster Metrics for t-SNE (Nice-to-Have)
+**Target:** Page 9 — Figure 4 / Positional encoding analysis
+**Action:** Compute silhouette score or adjusted Rand index for [CLS] embeddings with and without positional encoding. Report in a small table or inline text.
+**Expected Benefit:** Strengthens the positional encoding analysis beyond visual inspection.
+
+### S8: Discuss Token-Length Bottleneck (Nice-to-Have)
+**Target:** Page 3 — Method section or Page 5 — Feature Combination section
+**Action:** Add 1-2 sentences: "For datasets with many categorical columns, the total token count kcat may approach the maximum sequence length of the backbone LM (512 for BERT). In our benchmark this was not an issue, but users should monitor total token counts."
+**Expected Benefit:** Provides transparency about a practical limitation.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Analysis
+
+The current manuscript follows:
+1. **Intro P1 (P1):** DL excels, but not on tabular data; tree-based methods dominate.
+2. **Intro P2 (P2):** Two hypotheses: heterogeneity + numerical reasoning.
+3. **Intro P3 (P3):** Spectral bias -> heterogeneity -> high-frequency difficulty.
+4. **Intro P4 (P4):** Proposed solution overview + contribution bullets.
+
+**Problems with current storyline:** 
+- P1 conflates "deep learning" and "transformer-based" without distinction.
+- P2 and P3 are reversed: the spectral argument (P3) is a supporting detail that should follow the gap statement (P2), not precede it.
+- The method description in P4 jumps into architectural details (alignment layers, PLE) before establishing what concrete problem each component solves.
+- There is no paragraph dedicated to explaining WHY the per-type approach is better than alternatives (e.g., one-hot encoding, serialization, FT-Transformer-style embeddings).
+
+---
+
+### Alternative Storyline A (Recommended) — Problem-Solution-Evidence
+
+**P1 (Stakes + Gap):** Tree-based methods dominate tabular ML. Transformer-based methods, despite success in NLP, underperform on tabular data. This gap matters because transformers could offer transfer learning and scaling benefits.
+
+**P2 (Diagnosis - Two Causes):** Based on prior analysis, we identify two root causes: (i) tabular data heterogeneity creates irregular target functions that transformers learn inefficiently; (ii) numerical value processing via discrete token embeddings loses continuity information.
+
+**P3 (Existing Attempts + Their Limits):** Prior work has tried per-feature embeddings (TabTransformer, FT-Transformer), serialization (TabLLM), and graph-based modeling, but none simultaneously address both heterogeneity AND numerical reasoning.
+
+**P4 (Our Approach - Intuition):** We propose TDTransformer, which assigns each column type (categorical/numerical/binary) a dedicated embedding process. This preserves type-specific structure while alignment layers project embeddings into a common space. For numerical columns, we use piecewise linear encoding to maintain continuity.
+
+**P5 (Evidence Preview + Contributions):** We evaluate on 76 OpenML datasets. TDTransformer achieves [specific numbers], outperforming both tree-based and transformer-based baselines. Key contributions: per-type embedding + alignment, adapted PLE, CTA positional encoding, and column-type corruption.
+
+---
+
+### Alternative Storyline B — Architecture-Focused
+
+**P1 (Landscape):** Current tabular transformer methods fall into two camps — those using feature-wise embeddings (FT-Transformer, TabTransformer) and those using serialization (TabLLM, TableLLaMA). Both have limitations.
+
+**P2 (Gap):** Feature-wise methods typically use shared embedding layers across column types, losing type-specific structure. Serialization methods rely on pre-trained LMs but tokenize numerical values destructively.
+
+**P3 (Proposal):** TDTransformer bridges both camps: it uses type-specific embeddings like feature-wise methods, but leverages LM tokenization for categoricals and PLE for numericals, with alignment layers resolving the space mismatch.
+
+**P4-Evidence:** Same as Storyline A.
+
+---
+
+### Abstract Outline (Complete)
+
+**S1 (Problem):** "Transformer-based language models achieve state-of-the-art results in natural language processing but consistently underperform tree-based methods on tabular data."
+
+**S2 (Root Causes):** "We attribute this gap to two factors: heterogeneous column types create irregular target functions, and numerical value interpretation via tokenization loses continuity information."
+
+**S3 (Proposed Solution):** "We propose Tabular Domain Transformer (TDTransformer), which uses distinct embedding processes for categorical, numerical, and binary columns, with alignment layers to a shared space, and adapts piecewise linear encoding for numerical values."
+
+**S4 (Key Results):** "On 76 OpenML classification datasets, TDTransformer achieves an average accuracy of 87.79% (binary) and 80.23% (multiclass), surpassing XGBoost by 2.82% and 3.78% respectively."
+
+**S5 (Scope):** "These results suggest per-type embedding design is a promising direction for closing the gap between transformers and tree-based methods on tabular data."
+
+---
+
+### Introduction Outline (Complete)
+
+**P1 (Territory + Gap):** "Tree-based ensemble methods (XGBoost, CatBoost) remain the dominant approach for tabular classification benchmarks. While transformers have revolutionized NLP and vision tasks, their adaptation to tabular data has yet to match tree-based performance. This discrepancy motivates investigating whether transformer design can be modified for tabular data characteristics."
+
+**P2 (Diagnosis):** "We identify two structural causes. First, tabular data contains heterogeneous column types (categorical, numerical, binary), each with different statistical properties, creating a target function with mixed-frequency patterns that transformers struggle to learn. Second, numerical values, when tokenized into discrete subword tokens, lose the continuity information essential for ordinal reasoning."
+
+**P3 (Prior Work Limitation):** "Existing approaches address these challenges partially. Feature-wise embedding methods (FT-Transformer, TabTransformer) use per-feature linear projections but do not distinguish between column types. Serialization methods (TabLLM) leverage pre-trained language models but suffer from numerical tokenization and variable-length inputs. TDTransformer combines type-specific processing with semantic embeddings in a unified framework."
+
+**P4 (Solution + Contributions):** "TDTransformer employs separate embedding pathways — LM tokenization for categoricals, PLE for numericals, and direct encoding for binary values — connected by type-specific alignment layers. Contributions include: (1) per-type embedding with alignment, (2) label-free PLE adaptation with symmetric range, (3) column-type-aware positional encoding, and (4) column-type corruption for contrastive pre-training. Our evaluation on 76 OpenML datasets shows consistent improvements over strong baselines."
+
+## Priority Revision Plan
+```text
+ASCII Diagram — Revision Strategy Roadmap
+
+[P0: Missing variance reporting]
+  -> [Add 3-seed runs + std dev to Tables 2,3,5,6]
+  -> [Paired Wilcoxon test across 76 datasets]
+  -> Expected: statistical credibility restored
+
+[P0: SSCL/SCL factual error]
+  -> [Fix copy-paste error + correct instance/category mapping]
+  -> Expected: technical accuracy restored
+
+[P0: PLE range justification]
+  -> [Add [0,1] vs [-1,1] ablation on 10-20 datasets]
+  -> Expected: validates or refutes claimed advantage
+
+[P1: Related work reorganization]
+  -> [Restructure by comparison axes instead of paper list]
+  -> [Add differentiation sentence per group]
+  -> Expected: clearer novelty positioning
+
+[P1: Bounded conclusion language]
+  -> [Replace overclaim wording with evidence-matched phrasing]
+  -> Expected: reduces rejection risk from overclaiming
+
+[P2: Semantic embedding ablation]
+  -> [Random-init vs BERT embedding comparison]
+  -> Expected: separates structural vs LM contribution
+
+[P2: t-SNE quantitative metrics]
+  -> [Add silhouette scores/NMI to Fig 4 analysis]
+  -> Expected: strengthens positional encoding analysis
+```
+
+### Ordered Revision Priority (Highest Impact First)
+
+| Priority | Action | Expected Effort | Impact on Paper Quality |
+|----------|--------|-----------------|------------------------|
+| **P0** | Add variance reporting (3 seeds + std + significance test) | High (requires re-running experiments) | Critical — without this, core claims are not statistically validated |
+| **P0** | Fix SSCL/SCL description error | Low (text edit) | High — removes a factual error that undermines credibility |
+| **P0** | Add PLE range ablation ([0,1] vs [-1,1]) | Medium (add 10-20 runs) | High — validates a claimed contribution |
+| **P1** | Reorganize related work by axes | Low-Medium (text rewrite) | Medium — improves positioning clarity |
+| **P1** | Bound conclusion language | Low (text edit) | Medium — aligns claim with evidence |
+| **P2** | Add semantic embedding ablation | Medium (10-20 additional runs) | Medium — clarifies source of gains |
+| **P2** | Add t-SNE quantitative metrics | Low (compute from existing embeddings) | Low-Medium — strengthens analysis |
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|-------|---------|-------------|----------------|-------------------|
+| E1 (Table 2) | Binary classification comparison | 76 OpenML datasets; 72/8/20 split; 7 methods | Accuracy, AUC | TDTransformer avg 87.79% acc, 0.88 AUC | C1 (per-type embedding improves performance) | No variance; single-seed |
+| E2 (Table 3) | Multiclass classification comparison | Same 76 datasets; 7 methods | Accuracy, F1 | TDTransformer avg 80.23% acc, 0.70 F1 | C1, C2 (PLE helps) | No variance; single-seed |
+| E3 (Table 4) | Positional encoding ablation | Same benchmark; 3 variants | Accuracy, AUC, F1 | CTA pos encoding matches standard pos encoding; no-pos drops multiclass acc by 5.45% | C3 (CTA positional encoding) | Binary accuracy actually higher without pos encoding (88.07 vs 87.48) — unexplained |
+| E4 (Figure 3) | SSCL vs SCL pre-training | Same benchmark | Accuracy, AUC, F1 | SSCL > SCL; larger gap in multiclass | C3 (SSCL preferred) | No hypothesis about WHY SSCL outperforms SCL |
+| E5 (Tables 5,6) | Batch size effect | Batch sizes 128, 64, 32 | Accuracy, AUC, F1 | Binary: negligible effect; Multiclass: drops with smaller batch | — | No discussion of why binary vs multiclass differ |
+| E6 (Figure 4) | t-SNE of [CLS] embeddings | CarEval, Kropt, Splice datasets | Visual inspection | Positional encoding improves class separation | C3 (CTA positional encoding) | No quantitative metrics; small sample (3 datasets) |
+| E7 (Au4-2500 analysis) | Failure case analysis | Au4-2500 dataset (anonymized columns) | Accuracy | XGBoost outperforms TDTransformer | C1 (semantic dependency) | Single dataset; no systematic analysis |
+
+### Research-Theme Gap Diagnosis
+
+1. **New Knowledge (weakly supported):** The paper's primary claim is that per-type embedding improves transformer performance on tabular data. However, without controlling for the LM embedding confound (random vs. BERT embeddings), we cannot determine whether the knowledge is structural (new) or just the benefit of pre-trained embeddings (incremental).
+
+2. **Reproducibility (weakly supported):** Code is provided, but the lack of multi-seed variance reporting means the stability of results cannot be assessed.
+
+3. **Impact on Practice/Understanding (moderately supported):** The benchmark evaluation on 76 datasets and the PLE adaptation are practically useful resources. The honest failure case analysis is valuable for practitioners.
+
+### Proposed Research Experiments (P0/P1/P2)
+
+```text
+ASCII Diagram — Experiment Upgrade Plan
+
+Stage 1 (P0 — Minimum Viable Revision):
+  [Exp A: Multi-seed variance] -> [3 seeds, std dev, Wilcoxon test]
+  [Exp B: PLE range ablation] -> [[0,1] vs [-1,1] on 15 datasets]
+  
+Stage 2 (P1 — Core Strength):
+  [Exp C: Semantic embedding control] -> [Random BERT vs pretrained BERT]
+  [Exp D: Component ablation] -> [Remove each component, measure delta]
+  
+Stage 3 (P2 — Robustness):
+  [Exp E: OOD generalization] -> [Cross-dataset evaluation]
+  [Exp F: Scalability test] -> [Vary number of categorical columns]
+```
+
+---
+
+**Experiment A (P0) — Multi-Seed Variance and Significance Testing**
+- **Target Claim:** C1, C2 (TDTransformer outperforms tree-based methods)
+- **Hypothesis:** TDTransformer's gains are statistically significant across seeds.
+- **Minimal Design:** Run TDTransformer, XGBoost, CatBoost, and TransTab on all 76 datasets with 3 random seeds each. Use the same train/val/test splits. Report mean ± std.
+- **Controls/Baselines:** All methods use identical data splits and early stopping criteria.
+- **Metrics:** Accuracy, AUC (binary), F1 (multiclass); plus Wilcoxon signed-rank test p-value.
+- **Success Criterion:** p < 0.05 for TDTransformer vs best tree-based baseline.
+- **Estimated Cost/Time:** ~3-4 GPU-days (re-running 76 datasets × 3 seeds).
+- **Expected Paper-Quality Gain:** Critical — without this, the core claim is statistically unverifiable.
+
+---
+
+**Experiment B (P0) — PLE Range Ablation**
+- **Target Claim:** C2 (PLE adaptation improves numerical encoding)
+- **Hypothesis:** [-1,1] range outperforms [0,1] range due to better alignment with layer normalization.
+- **Minimal Design:** Compare PLE with [0,1] range (Gorishniy et al., 2022) vs [-1,1] range (ours) on 15 representative OpenML datasets (varied numerical column counts).
+- **Controls/Baselines:** Same model architecture, optimizer, hyperparameters.
+- **Metrics:** Accuracy, AUC.
+- **Success Criterion:** [-1,1] variant outperforms [0,1] on ≥11/15 datasets.
+- **Estimated Cost/Time:** ~0.5 GPU-day.
+- **Expected Paper-Quality Gain:** High — validates a claimed contribution.
+
+---
+
+**Experiment C (P1) — Semantic Embedding Control**
+- **Target Claim:** C1 (per-type structural design drives gains)
+- **Hypothesis:** A significant portion of TDTransformer's gain comes from pre-trained LM embeddings rather than the per-type structural design.
+- **Minimal Design:** Replace BERT tokenizer/embeddings with randomly initialized embeddings for categorical columns. Keep all other components identical.
+- **Controls/Baselines:** Original TDTransformer (BERT embeddings) vs random-embedding variant.
+- **Metrics:** Accuracy drop rate, relative performance against XGBoost.
+- **Success Criterion:** If random-embedding variant drops <30% of the gain over XGBoost, the structural claim is supported.
+- **Estimated Cost/Time:** ~1 GPU-day.
+- **Expected Paper-Quality Gain:** High — separates confound from genuine contribution.
+
+---
+
+**Experiment D (P1) — Component Ablation**
+- **Target Claim:** C1, C2, C3 (all components contribute)
+- **Hypothesis:** Each component (per-type embedding, PLE, CTA positional encoding, column-type corruption) contributes positively.
+- **Minimal Design:** Remove each component one at a time from the full TDTransformer. Measure delta on 15 datasets.
+- **Controls/Baselines:** Full TDTransformer as reference.
+- **Metrics:** Accuracy delta per component.
+- **Success Criterion:** Each component removal causes a measurable accuracy decrease (>0.5% on average).
+- **Estimated Cost/Time:** ~1-2 GPU-days.
+- **Expected Paper-Quality Gain:** High — provides clarity on what drives performance.
+
+---
+
+**Experiment E (P2) — Out-of-Distribution Generalization**
+- **Target Claim:** C1 (TDTransformer generalizes better)
+- **Hypothesis:** TDTransformer's per-type embeddings generalize better to distribution shifts.
+- **Minimal Design:** Select 3-5 datasets with known domain shifts. Evaluate TDTransformer vs XGBoost on shifted test splits.
+- **Controls/Baselines:** Same methods as main benchmark.
+- **Metrics:** Accuracy drop rate (in-distribution → OOD).
+- **Success Criterion:** TDTransformer shows smaller relative drop than tree-based methods.
+- **Estimated Cost/Time:** ~0.5 GPU-day.
+- **Expected Paper-Quality Gain:** Medium — adds robustness analysis beyond IID evaluation.
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 5.5/10**
+
+**Rationale:** The paper addresses a relevant problem and presents a clean, well-motivated architecture with extensive benchmarking. However, the score is constrained by:
+
+1. **Missing statistical rigor (critical):** No variance reporting or significance tests for any result. Single-seed experiments with modest gains (1.67-3.62%) cannot be assessed for reliability.
+2. **Factual error (major):** The SSCL/SCL description contains a clear copy-paste error and incorrect mapping, undermining technical trust.
+3. **Unsubstantiated PLE claim (major):** The claimed advantage of [-1,1] range over [0,1] is not empirically supported.
+4. **Overclaiming (major):** Conclusion language exceeds what the evidence supports.
+5. **Novelty uncertainty (moderate):** Core components are adaptations of existing ideas (PLE from Gorishniy et al.; per-type embeddings from TransTab/TabTransformer; contrastive pre-training is standard). The cumulative contribution is incremental rather than transformative. External literature verification was unavailable in this run.
+
+**Primary scoring dimensions:**
+- Research Value: 6/10 (practical benchmark contribution + honest failure case analysis)
+- Novelty: 4/10 (incremental adaptation of existing ideas; novelty deferred for manual verification)
+- Validity/Soundness: 5/10 (methodology is sound but missing variance reporting undermines empirical validity)
+- Reproducibility: 5/10 (code provided, but single-seed results without variance are insufficient for independent verification)
+
+**Post-Revision Target: [6.5, 7.5]/10**
+
+If the authors address all P0 items (multi-seed variance, PLE range ablation, SSCL/SCL fix, bounded conclusion language), the score could reasonably reach 6.5-7.5. Full resolution of P1/P2 items (semantic embedding control, component ablation, OOD tests) could push toward 7.5. The upper bound is constrained by the incremental nature of the technical contributions relative to existing tabular transformer literature.

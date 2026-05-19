@@ -1,0 +1,226 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper addresses signal delay in deep reinforcement learning (DRL) — a problem where there is a lag between an agent's perception and its corresponding actions. The authors formalize the delayed-observation Markov decision process (DOMDP) as a special case of POMDP, supporting both fixed and variable/probabilistic delays. They propose and empirically evaluate three complementary strategies: (1) delay-reconciled critic training that uses post-hoc oracle state recovery, (2) state augmentation for the actor using historical actions (MLP/RNN/Transformer encoders), and (3) auxiliary prediction/encoding losses for explicit state estimation.
+
+The core technical idea — using an asymmetric actor-critic design where the critic receives true (delay-resolved) states offline while the actor operates on delayed observations — is well-motivated and practically relevant. Experiments on MuJoCo continuous control tasks (Ant, HalfCheetah, Hopper, Walker2d) under fixed/unfixed delay, probabilistic transitions, and large state spaces show that the combined approach recovers 75-85% of delay-free performance under fixed delay and 72-77% under unfixed delay, substantially outperforming standard DRL algorithms and existing POMDP/baseline methods.
+
+The paper has solid technical contributions and extensive empirical evaluation (8 seeds per condition, multiple environments, multiple delay levels). However, several issues reduce confidence in the results: (a) absence of matched-capacity ablations to support causal claims about individual components, (b) missing statistical significance testing, (c) potentially unverifiable novelty claims due to unsupported literature assertions, and (d) incomplete method description for the key delay-reconciled critic pipeline. The conclusion is underdeveloped given the empirical breadth of the paper.
+
+## Strengths
+**S1 — Well-motivated problem with practical relevance.** Signal delay is a genuine, understudied challenge in DRL deployment, and the paper makes a convincing case for its importance through diverse real-world examples (robotics, autonomous driving, tokamak control, telemedicine). The DOMDP formalization provides a clean theoretical foundation that extends prior fixed-delay models to variable/probabilistic delays.
+
+**S2 — Systematic empirical investigation.** The experimental design covers four delay settings (fixed, unfixed, probabilistic, large state space), four MuJoCo environments, up to 12-step delays, and multiple delay levels per setting (7 delay levels: 0,1,2,4,8,12,16). Using 8 independent runs per condition provides reasonable statistical grounding, and the use of separate fixed-duration training (2M steps for basic, 1M for complex environments) shows awareness of task-specific learning requirements.
+
+**S3 — Clean ablative analysis of design choices.** The paper evaluates each component separately (delay-reconciled critic alone, + state augmentation, + prediction/encoding) and reports when each helps or harms. The finding that prediction-based auxiliary losses improve fixed-delay performance but degrade unfixed-delay and large-observation-space performance is a non-trivial insight that provides practical guidance for practitioners.
+
+**S4 — Generality of the framework.** The proposed methods are designed to be integrated into any actor-critic architecture (DDPG, TD3, SAC) rather than requiring a specialized algorithm. The modular delay-reconciled training and state augmentation can be independently applied, making the work more practically useful.
+
+**S5 — Good theoretical grounding for state augmentation.** Theorem 4.1 (Markovian Property) formally proves that incorporating historical actions restores the Markov property, which is a fundamental requirement for convergence of many RL algorithms. The mutual information reasoning explaining why historical observations are uninformative is a nice theoretical touch.
+
+## Weaknesses
+**W1 — Missing matched-capacity ablations for causal claims.** The paper attributes performance gains to specific design choices (delay-reconciled critic, state augmentation, prediction losses) but does not run controlled ablations that isolate each factor. For example, the asymmetric critic receives oracle states (s_t) while baselines receive delayed states (s̃_t). Without a baseline where the critic receives oracle states WITHOUT the delay-reconciled pipeline, the mechanism behind gains cannot be attributed to the recovery process vs. simply having more information. (Severity: Major)
+
+**W2 — Insufficient statistical rigor.** Despite reporting mean ± SEM over 8 runs, the paper does not conduct statistical significance tests (e.g., paired t-tests, confidence intervals of differences) for the core comparisons. Many improvements are within overlapping error bars (e.g., State Augmentation-MLP vs. Encoding† at delay=4: 81.6 vs 86.6, both with overlapping SEM). Without significance testing, it is unclear whether several reported improvements are statistically reliable. (Severity: Major)
+
+**W3 — Unverifiable novelty claims.** The introduction claims Chen et al. (2021) is "the only study" explicitly addressing DRLwD, but this assertion cannot be verified in this review (Retrieval-Disabled Mode active). The paper also acknowledges a concurrent work (Kim et al., 2023) only in the related work appendix. This inconsistency weakens the credibility of the novelty positioning. Related-work completeness needs manual verification. (Severity: Major)
+
+**W4 — Incomplete method description for Delay-Reconciled Critic.** The core technical contribution — the post-processing recovery pipeline — is described at a high level without implementation details (e.g., how exactly is the temporal alignment achieved? How does the replay buffer handle time-shifted labels?). A sentence appears truncated ("Similar techniques can be found in..."). Reproducibility is compromised. (Severity: Major)
+
+**W5 — Underdeveloped conclusion.** The conclusion (Section 6) is only one paragraph that restates motivation and generic limitations. It does not summarize the specific validated findings (what works, what doesn't, when), does not discuss the paper's limitations concretely (e.g., assuming known ∆T, oracle state recoverability during training), and does not state specific next steps beyond "explore real-world scenarios." Given the empirical breadth of the paper, this is a missed opportunity. (Severity: Minor)
+
+**W6 — Overclaiming in abstract and introduction.** The abstract uses "remarkable performance" and "novel approaches" without quantitative anchors. The introduction's contribution list mixes empirical investigations with methodological contributions, making it harder for readers to identify what is genuinely new. (Severity: Minor)
+
+**W7 — Notation inconsistencies in delay types.** The paper uses inconsistent notation for delay types: ∆T_a, ∆T_I, ∆T_s in the text vs. different labels in Theorem 2.1 proof. The proof labels action delay as ∆T_a and observation delay as ∆T_s but the main text (Fig. 2b) uses "inference delay ∆T_a, action delay ∆T_I" — creating confusion about what ∆T_a refers to. (Severity: Minor)
+
+**W8 — Biological motivation is a loose narrative thread.** The paragraph about biological signal delay (human neural delay, Usain Bolt) is introduced but never revisited or connected to any technical contribution. This creates a narrative loose end that should either be removed or explicitly connected to the DOMDP formulation. (Severity: Minor)
+
+## Key Issues
+### Issue 1 (Critical / Must Fix): Missing controlled ablation for asymmetric critic
+The core claim that "Delay-Reconciled Training" improves performance cannot be causally attributed to the recovery pipeline because the critic receives oracle states (s_t) that are fundamentally richer than what baselines use (s̃_t). Without a controlled baseline where the critic receives s_t WITHOUT the delay reconciliation (e.g., simply storing true state when available), the mechanism remains unclear. **Fix:** Add an ablation: "Critic with s_t (no delay-reconciled pipeline)" — same architecture, same training, but without the post-hoc recovery described in Sec. 4.1. Compare with delay-reconciled training to isolate the effect.
+
+### Issue 2 (Major / Must Fix): No statistical significance testing
+Many improvement claims rely on numeric differences that overlap within standard error. For example, at delay=8 (fixed), State Augmentation-MLP gets 84.0±9.9 while Encoding† gets 77.9±10.8 — these are within 1 SEM of each other. Without significance tests (paired bootstrap or t-test), the priority ranking of methods is not statistically supported. **Fix:** Add pairwise significance tests (at minimum, across the best 3 methods per delay setting) and report which differences are statistically significant at p<0.05.
+
+### Issue 3 (Major / Must Fix): "Only study" novelty claim is unverifiable and inconsistent
+The introduction claims Chen et al. (2021) is "the only study" on DRLwD, but the paper itself cites a concurrent work (Kim et al., 2023) in the appendix. The completeness of related work cannot be verified in this review run. **Fix:** (a) Replace "only study" with "to our knowledge, the most directly relevant prior work is Chen et al. (2021)." (b) Move the Kim et al. discussion into the main gap paragraph for a more accurate picture. (c) Request manual literature verification before submission.
+
+### Issue 4 (Major / Must Fix): Reproducibility gap in core method
+The delay-reconciled critic training is the paper's central technical contribution, but the description lacks implementation details necessary for reproduction. The sentence "Similar techniques can be found in" is incomplete. The temporal alignment mechanism between delayed observations and oracle states is not specified. **Fix:** Provide a complete algorithmic description: (a) concrete replay buffer format with time stamps, (b) how delay is resolved and when oracle states become available, (c) the exact training procedure (online vs. offline gradient steps, when the delay-resolved labels are used).
+
+### Issue 5 (Major / Should Fix): Conclusion is too brief
+Given the paper's extensive empirical evaluation (5 environment types, 7 delay levels, 10+ method variants, 8 seeds), the one-paragraph conclusion undersells the work and does not provide readers with actionable guidance. **Fix:** Expand to a structured 3-paragraph conclusion: validated findings, concrete limitations, and specific future work.
+
+## Actionable Suggestions
+### A1 (Must): Add matched-capacity controlled ablation
+Add a new baseline row to Table 1: "Oracle Critic (No Recovery)" where the critic receives true states s_t (same as Delay-Reconciled Training) but without the explicit post-hoc recovery pipeline — i.e., the critic is simply trained on stored s_t from the environment log when available. This separates the effect of having oracle state information from the effect of the delay-reconciled mechanism itself.
+
+### A2 (Must): Add statistical significance tests
+For the core comparison table (Table 1), add significance markers (e.g., *, **, *** for p<0.05, 0.01, 0.001) between the best-performing method and the strongest baseline at each delay level. Use paired bootstrap or paired t-test across the 8 seeds. Add a footnote explaining the test procedure.
+
+### A3 (Must): Revise novelty claims
+Replace: "the only study, to our knowledge, explicitly touched this problem in deep reinforcement learning is from Chen et. al."
+With: "To our knowledge, the most directly relevant prior work on DRL with delay is Chen et al. (2021), though they assume a fixed delay and known reward function. A concurrent work by Kim et al. (2023) also addresses this setting by compressing the augmented state dimension."
+
+### A4 (Must): Complete the method description for delay-reconciled critic
+Add a new paragraph in Section 4.1 or Appendix E with the following details:
+- Replay buffer stores (s̃_t, a_t, r_t, s̃_{t+1}, t) where t is a global step counter
+- After the environment resolves the delay (e.g., after ∆T steps), the true state s_t is retrieved and the tuple is updated to (s_t, a_t, r_t, s_{t+1})
+- The critic is trained on these oracle-augmented transitions via standard TD learning
+- During inference, only the actor network is used with delayed observations s̃_t
+
+### A5 (Should): Expand conclusion
+Restructure Section 6 into three paragraphs:
+- **Validated findings:** "Our experiments demonstrate three principal results. First, delay-reconciled critic training provides consistent gains across all delay settings, recovering X% of delay-free performance. Second, state augmentation with historical actions (MLP encoder) is the most robust single component, maintaining Y% performance even under 12-step unfixed delay. Third, explicit prediction/encoding auxiliary losses help under fixed delay but can degrade performance when delay is unfixed or observation space is large."
+- **Limitations:** "A key assumption is that oracle states are recoverable during offline training, which may not hold in real-world settings where ground-truth state is never available. Additionally, our method assumes the maximum delay ∆T is known. Extending to unknown delay magnitudes remains open."
+- **Future work:** "Three directions are particularly promising: (1) relaxing the oracle state assumption by using learned state estimation, (2) handling unknown variable delays via timestamp-aware architectures, and (3) validating on real robotic systems with actual sensor/actuator latency."
+
+### A6 (Should): Fix notation for delay types
+Standardize notation: use ∆T_obs for observation delay, ∆T_act for action delay, ∆T_inf for inference delay. Ensure consistency between Fig. 2, Theorem 2.1, and the proof in Appendix D.1.
+
+### A7 (Nice-to-have): Add compute budget reporting
+Report training wall-clock time and GPU hours for the main method and baselines under comparable settings. This helps reviewers assess fairness and practical deployability.
+
+### A8 (Nice-to-have): Remove or connect biological motivation paragraph
+Either remove the Usain Bolt/biological delay paragraph (page 1) to tighten the introduction, or add a sentence connecting it to the method: "This biological perspective motivates our approach: just as the cerebellum uses efference copies of motor commands to predict sensory outcomes, our actor state augmentation uses historical actions to recover oracle state information."
+
+## Storyline Options + Writing Outlines
+### Abstract Outline (Complete)
+
+**S1 (Problem):** "Signal delay — a lag between an agent's perception and its actions — is a prevalent but often overlooked challenge in deep reinforcement learning (DRL)."
+
+**S2 (Gap):** "Existing DRL algorithms assume synchronous observation-action loops and fail catastrophically under even modest delays, while prior delay-aware methods assume fixed delays or known reward functions."
+
+**S3 (Method):** "We formalize delayed-observation MDPs (DOMDPs) supporting variable delay and propose three integrated strategies: delay-reconciled critic training using post-hoc oracle state recovery, state augmentation for the actor with historical actions, and auxiliary prediction/encoding losses."
+
+**S4 (Key Result):** "On MuJoCo continuous control benchmarks with up to 12-step delays, our approach recovers 75-85% of delay-free performance under fixed delay and 72-77% under unfixed delay, substantially outperforming standard DRL algorithms and existing POMDP baselines."
+
+**S5 (Bounded Claim):** "These results demonstrate that asymmetric actor-critic designs with delay compensation are effective for simulated robotic control, though real-world validation and unknown-delay settings remain open challenges."
+
+### Introduction Outline (Complete)
+
+**P1 (Stakes):** Open with a compelling motivation directly tied to delay — e.g., "When controlling a tokamak plasma with 0.1ms dynamics, even 1ms of neural-network inference delay can be catastrophic. Such delays — from sensor processing, network latency, or inference time — are pervasive in real-world DRL deployments but have received surprisingly little attention."
+- Transition: "This paper addresses this gap."
+
+**P2 (Problem demonstration):** "Our first contribution is to demonstrate empirically that standard DRL algorithms (DDPG, TD3, SAC) and general POMDP methods suffer catastrophic performance degradation under even modest observation delays of 1-4 steps across four MuJoCo continuous control tasks."
+- Anchor: Fig. 3, Table 1
+
+**P3 (Gap in prior work):** "Prior work on delayed feedback has focused on bandit settings or control-theoretic MDP analyses. Within deep RL, Chen et al. (2021) address the problem under the restrictive assumptions of fixed delay and known reward function. Concurrently, Kim et al. (2023) propose belief-state compression for delayed feedback. Neither handles variable/probabilistic delay in a model-free actor-critic framework."
+- Note: This paragraph replaces the current "biological analogy" paragraph (P3 in current intro) which should be moved or removed.
+
+**P4 (Proposed approach):** "We propose DOMDP, a formalism that encompasses variable and probabilistic delay as a POMDP subclass. Building on this, we develop three practical techniques: (1) delay-reconciled critic training that exploits post-hoc oracle state availability, (2) state augmentation with historical actions to restore the Markov property, and (3) auxiliary prediction/encoding losses for explicit state estimation."
+
+**P5 (Contributions summary):** List C1-C3 explicitly as: "C1: DOMDP formalization with variable/probabilistic delay support. C2: Asymmetric actor-critic with delay-reconciled training and state augmentation. C3: Empirical characterization of when prediction/encoding techniques help vs. harm."
+
+## Priority Revision Plan
+### P0 — Critical (must fix before resubmission)
+| # | Issue | Action | Expected Gain |
+|---|-------|--------|---------------|
+| P0.1 | Missing matched-capacity ablation for critic | Add "Oracle Critic (No Recovery)" baseline to Table 1 | Causal attribution of delay-reconciled mechanism |
+| P0.2 | No statistical significance tests | Add pairwise significance markers to Table 1 | Scientific credibility of performance rankings |
+| P0.3 | "Only study" novelty claim | Revise wording; move concurrent work into main gap paragraph | Avoid reviewer rejection on novelty grounds |
+
+### P1 — Major (should fix for strong revision)
+| # | Issue | Action | Expected Gain |
+|---|-------|--------|---------------|
+| P1.1 | Incomplete method description | Add detailed replay buffer and temporal alignment description in Sec 4.1 / Appendix | Reproducibility |
+| P1.2 | Conclusion too brief | Restructure to 3-paragraph format (findings, limitations, future work) | Reader impact and clarity |
+| P1.3 | Notation inconsistency | Standardize ∆T_obs, ∆T_act, ∆T_inf across Fig. 2, Theorem 2.1, and Appendix D.1 | Readability |
+
+### P2 — Nice-to-have (quality improvement)
+| # | Issue | Action | Expected Gain |
+|---|-------|--------|---------------|
+| P2.1 | Biological motivation loose end | Remove or connect to DOMDP via efference copy analogy | Narrative coherence |
+| P2.2 | Compute budget not reported | Add GPU hours/memory to Appendix | Fairness assessment |
+| P2.3 | Abstract lacks quantitative anchors | Add specific recovery percentages to abstract | First-impression clarity |
+
+### ASCII Diagram — Revision Strategy Roadmap
+
+```text
+[Problem: Unverifiable novelty claims]
+  -> [Fix: Revise "only study" wording + add Kim et al. to intro]
+  -> [Expected gain: Avoid novelty-based rejection]
+
+[Problem: No causal attribution for critic gain]
+  -> [Fix: Add Oracle Critic (No Recovery) ablation]
+  -> [Expected gain: Stronger causal claims]
+
+[Problem: Overlapping error bars without significance]
+  -> [Fix: Add pairwise significance tests to Table 1]
+  -> [Expected gain: Scientifically defensible rankings]
+
+[Problem: Method not reproducible]
+  -> [Fix: Detailed replay buffer and temporal alignment]
+  -> [Expected gain: Reproducibility + reviewer trust]
+
+[Problem: Underdeveloped conclusion]
+  -> [Fix: Structured 3-paragraph summary of findings/limits]
+  -> [Expected gain: Stronger final impression]
+```
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup (data/split/protocol/baselines) | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|--------------------------------------|---------|--------------|----------------|-------------------|
+| E1 | Baseline failure under delay | 4 MuJoCo tasks (Ant, HalfCheetah, Hopper, Walker2d); DDPG, TD3, SAC, RNN Strong, VRM, DATS; Fixed delay 0-16 steps | Normalized return (% of SAC no-delay) | All baselines degrade catastrophically at delay≥4 | C1 (empirical evidence) | No statistical sig. tests across runs |
+| E2 | Delay-Reconciled Critic Training | Same as E1; compare SAC vs. Delay-Reconciled SAC | Normalized return | Consistent improvement over SAC at all delays; gap widens with delay | C2 (critic design) | No ablation separating oracle info from recovery mechanism |
+| E3 | State Augmentation for Actor | Same as E1+E2; MLP/RNN/Transformer encoders for historical actions | Normalized return | MLP augmentation best; 75.9% (fixed) and 77.0% (unfixed) avg. | C2 (actor design) | RNN/Transformer underperform — not explained |
+| E4 | Prediction/Encoding Auxiliary Losses | Same as E1-E3; Prediction†, Encoding† variants | Normalized return | Help under fixed delay (84.5% avg); degrade under unfixed/large obs space | C3 (characterization) | Mechanism for degradation not fully explained |
+| E5 | Fixed vs. Unfixed Delay | Same environments, compare delay=1,2,4,8,12 | Normalized return | Prediction methods drop from 83.6% (fixed) to 72.5% (unfixed) avg. | C3 | Root cause (prediction difficulty vs. policy instability) unclear |
+| E6 | Large Observation Space | Humanoid env (376-dim); SAC, Delay-Reconciled, State Aug-MLP, Prediction†, Encoding† | Normalized return | State Aug-MLP robust (89.7% at delay=12); Prediction† collapses (14.4%) | C3 | Not analyzed why State Aug-MLP succeeds |
+| E7 | Probabilistic Transitions | Gaussian noise (σ=0.05-0.4), noisy actions, sticky actions; SAC vs. Ours* | Normalized return | Ours* recovers 79-98% of delay-0 performance across noise levels | C2 (robustness) | Only one environment type tested |
+
+### Research-Theme Gap Diagnosis
+
+**New knowledge gaps:**
+- The paper does not analyze *why* the RNN and Transformer encoders underperform compared to MLP augmentation. This limits understanding of the state augmentation design space.
+- The mechanism by which prediction/encoding losses degrade performance under unfixed delay is not experimentally isolated (is it due to prediction difficulty, policy instability from noisy gradients, or both?).
+
+**Reproducibility gaps:**
+- The delay-reconciled training procedure is not described with sufficient detail for independent reproduction.
+- Hyperparameter tuning details (specific SAC parameters, prediction loss weights per environment) are aggregated rather than reported per-setting.
+
+**Impact on practice/understanding gaps:**
+- The paper does not provide practical guidelines for choosing between augmentation strategies given real-world constraints (e.g., known vs. unknown delay, state-space size, compute budget).
+
+### Proposed Research Experiments (P0/P1/P2)
+
+| Target Claim | Hypothesis | Minimal Design | Controls/Baselines | Metrics | Success Criterion | Est. Cost/Time | Expected Paper-Quality Gain |
+|-------------|------------|----------------|-------------------|---------|------------------|---------------|---------------------------|
+| P0: C2 (critic gain mechanism) | Delay-reconciled critic pipeline provides gain beyond simply having oracle state info | Add "Oracle Critic (No Recovery)" where critic uses s_t from buffer without post-hoc delay reconciliation; train on same SAC setup | Compared to Delay-Reconciled Critic and Vanilla SAC at delay=4,8,12 | Normalized return, learning curve slope | If Delay-Reconciled outperforms No-Recovery → pipeline matters. If equal → oracle info alone sufficient | 2-3 days (8 seeds × 3 settings) | High: enables causal claim about recovery pipeline |
+| P1: C3 (degradation mechanism) | Prediction loss degrades performance under unfixed delay due to gradient interference, not prediction error | Train Prediction† with prediction loss but detach gradients from policy (currently Prediction† detaches prediction→policy, but prediction loss still updates encoder). Compare: (a) full gradient, (b) detached, (c) no prediction loss | State Aug-MLP at delay=8 unfixed | Normalized return, prediction loss trace, policy gradient variance | If (b) ≈ (c) > (a) → gradient interference is cause | 1-2 days (8 seeds × 3 variants) | Medium: explains C3 finding |
+| P2: C2 (RNN underperformance) | RNN augmentation underperforms due to processing redundant historical info beyond ∆T window | Test RNN with history truncated to ∆T steps vs. full history; also test with attention-based selection of relevant timesteps | State Aug-RNN at delay=4,8 fixed vs. MLP | Normalized return | If truncated RNN ≈ MLP → redundancy is cause. If still worse → fundamental RNN limitation | 2-3 days (8 seeds × 2 settings × 2 history lengths) | Medium: guides architecture choice |
+
+### ASCII Diagram — Experiment Upgrade Plan
+
+```text
+Stage 1 (P0 — Before Resubmission)
+  ├── Oracle Critic (No Recovery) ablation [E2 extension]
+  └── Statistical significance markers on Table 1
+
+Stage 2 (P1 — During Revision)
+  ├── Gradient interference analysis for Prediction† [E4 extension]
+  └── RNN history truncation experiment [E3 analysis]
+
+Stage 3 (P2 — Before Final Submission)
+  ├── Compute budget reporting
+  └── Practical guideline table for strategy selection
+```
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 6.5 / 10**
+
+**Justification:** The paper addresses a genuinely important and understudied problem (signal delay in DRL) with a well-motivated formalization (DOMDP) and a systematic empirical evaluation across diverse settings. The core ideas (asymmetric delay-reconciled critic training, historical action augmentation for the actor) are practical and effective. However, the score is constrained by several factors: (a) missing controlled ablations prevent causal attribution of the main mechanism, (b) absence of statistical significance testing weakens confidence in method rankings, (c) potentially overstated novelty claims that cannot be verified in this review, and (d) incomplete method description that compromises reproducibility. The paper's primary value is in its empirical characterization of delay mitigation strategies rather than in theoretical novelty, which is reasonable for an ICLR submission but limits the ceiling.
+
+**Post-Revision Target: [7.5, 8.5] / 10**
+
+**Justification:** If the authors address the P0 items (matched-capacity ablation, significance testing, revised novelty claims) and P1 items (complete method description, expanded conclusion), the paper would be substantially stronger. The empirical breadth is already excellent; what is missing is the analytical rigor to support the paper's own claims. With those fixes, the paper would be a solid contribution to the emerging literature on deploying DRL under realistic conditions.

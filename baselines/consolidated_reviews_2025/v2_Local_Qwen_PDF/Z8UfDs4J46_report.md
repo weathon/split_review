@@ -1,0 +1,97 @@
+## Summary
+# Final Review Report
+
+## Summary
+This paper addresses signal delay in deep reinforcement learning (DRL), a critical bottleneck for real-world deployments where perception-action loops incur latency. The authors formalize the Delayed-Observation Markov Decision Process (DOMDP), extending standard MDPs to accommodate both fixed and unfixed delays. They prove a delay equivalence theorem showing that inference, action, and observation delays are interchangeable in their impact on decision-making. To mitigate performance degradation, the paper proposes a modular actor-critic framework featuring delay-reconciled critic training (leveraging offline replay to align delayed observations with true states) and historical action augmentation for the actor (restoring Markovian properties). Extensive experiments on MuJoCo continuous control tasks demonstrate that these techniques consistently restore performance to near non-delayed baselines, outperforming standard DRL and POMDP algorithms. While the work is simulation-focused, it provides a theoretically grounded and practically scalable approach to handling delayed feedback in DRL.
+
+## Strengths
+1. **Clear Problem Formulation and Theoretical Insights**: The DOMDP formalization provides a rigorous mathematical framework for analyzing signal delay in DRL. The delay equivalence theorem (Theorem 2.1) and the Markovian restoration via action augmentation (Theorem 4.1) offer valuable theoretical grounding that clarifies why standard DRL fails under delay and how to structurally address it.
+2. **Modular and Practical Algorithmic Design**: The proposed delay-reconciled critic training and state augmentation strategies are conceptually simple, easy to integrate with existing actor-critic algorithms (e.g., SAC, TD3), and do not require complex model-based assumptions or extensive hyperparameter tuning.
+3. **Comprehensive Empirical Evaluation**: The paper evaluates performance across fixed and unfixed delays, large observation spaces, and probabilistic environments. The ablation studies clearly isolate the contributions of critic reconciliation, actor augmentation, and complementary prediction/encoding techniques, providing actionable insights into when explicit state prediction helps or hurts.
+4. **Strong Baseline Comparisons**: The inclusion of both standard DRL algorithms (DDPG, TD3, SAC) and POMDP-specific baselines (RNN Strong, VRM, DATS) demonstrates the robustness of the proposed framework relative to the closest prior work.
+
+## Weaknesses
+1. **Incomplete Sentence and Structural Oversight in Method Section**: Section 4.1 contains an abrupt sentence cutoff ("Similar techniques can be found in"), which disrupts readability and suggests insufficient proofreading. This is a critical presentation flaw that must be corrected.
+2. **Limited Analysis of Prediction Failure Under Unfixed Delays**: While the paper observes that explicit prediction/encoding techniques degrade performance under unfixed delays, the explanation ("future states become more unpredictable") is superficial. A deeper mechanistic analysis (e.g., distribution shift in prediction targets, gradient interference with policy optimization) is missing, reducing the analytical depth of the results.
+3. **Related Work Placement and Comparison Depth**: Placing the Related Work in the appendix is unconventional and reduces the paper's self-containment. The comparison with the closest concurrent work (Kim et al., 2023) is brief and lacks a side-by-side analysis of state compression vs. architecture design, making it harder for reviewers to assess the precise novelty boundary.
+4. **Assumption Clarification in Theoretical Claims**: The mutual information claim $I(s_t, \tilde{s}_{<t} | \tilde{s}_t) = 0$ and the Markovian restoration proof rely on stationary delay distributions and strictly Markovian environments. These assumptions are not explicitly bounded, potentially leading to overgeneralization in non-stationary or partially observable settings beyond delay.
+5. **Simulation-Only Evaluation**: The experiments are confined to MuJoCo continuous control tasks. While appropriate for initial validation, the lack of discrete action space tests or real-world latency simulations limits the claimed generalizability to broader DRL applications.
+
+## Key Issues
+1. **Incomplete Sentence in Section 4.1 (Critical)**: The paragraph ends abruptly with "Similar techniques can be found in", breaking the narrative flow and suggesting a drafting error. This must be completed or removed to maintain professional standards.
+2. **Gradient Bias in Asymmetric Actor-Critic Design (Major)**: The delay-reconciled critic training introduces an asymmetric observation setup, which is known to cause gradient bias (Baisero & Amato, 2021). The paper acknowledges this risk but does not provide theoretical or empirical mitigation strategies, leaving a potential validity gap in the critic's value estimation.
+3. **Superficial Analysis of Prediction Degradation (Major)**: The drop in performance for prediction/encoding methods under unfixed delays is a key empirical finding, but the explanation lacks mechanistic depth. Without discussing distribution shift or gradient interference, the conclusion remains descriptive rather than analytical.
+4. **Related Work in Appendix (Major)**: Moving Related Work to the appendix reduces the paper's self-containment and makes it harder for reviewers to assess novelty. The comparison with Kim et al. (2023) needs expansion to clarify the orthogonal contributions (state compression vs. architecture design).
+5. **Unbounded Theoretical Assumptions (Minor)**: The mutual information claim and Markovian restoration proof assume stationary delay distributions and strictly Markovian environments. Explicitly bounding these assumptions will prevent overgeneralization to non-stationary or partially observable settings.
+
+## Actionable Suggestions
+1. **Fix Incomplete Sentence in Section 4.1**: Complete the sentence "Similar techniques can be found in" by citing relevant asymmetric actor-critic works (e.g., Baisero et al., 2022) or remove it if redundant. Ensure all paragraphs are self-contained and free of drafting artifacts.
+2. **Address Gradient Bias in Asymmetric Design**: Add a brief discussion on how the delay-reconciled pipeline mitigates gradient bias, e.g., by leveraging large replay buffers to stabilize value estimation or by comparing performance against symmetric baselines (as done in Table 1). Explicitly state the bias-variance trade-off and why the benefits outweigh the risks.
+3. **Deepen Analysis of Prediction Failure**: Expand the explanation for why prediction/encoding techniques degrade under unfixed delays. Discuss distribution shift in prediction targets, target instability, and potential gradient interference with policy updates. Reference Appendix F.3/F.4 results to support this analysis.
+4. **Move Related Work to Main Text and Expand Comparison**: Relocate Appendix B to the main body (after Introduction). Add a side-by-side comparison with Kim et al. (2023), clarifying that their state compression approach focuses on efficiency, while your architecture design focuses on restoring Markovian properties and stabilizing critic training.
+5. **Bound Theoretical Assumptions Explicitly**: In Theorem 4.1 and the mutual information claim, explicitly state the assumptions of stationary delay distributions and strictly Markovian environments. Add a sentence noting that non-stationary delays or additional partial observability may require extended formulations.
+6. **Improve Abstract and Conclusion Specificity**: Replace vague phrases like "remarkable performance" with concrete metrics (e.g., "up to 84.5% of optimal reward under 12-step fixed delays"). In the conclusion, explicitly bound limitations (simulation-only, continuous control) and propose concrete next steps (discrete actions, real-world latency testing).
+
+## Storyline Options + Writing Outlines
+### Abstract Outline (Complete)
+- **S1 (Problem & Domain)**: Deep reinforcement learning struggles with signal delay—the lag between perception and action—which is prevalent in real-world applications like robotics and autonomous systems.
+- **S2 (Significance/Challenge)**: Standard DRL algorithms rely on immediate state-action-reward tuples, making them uniquely vulnerable to temporal misalignment, often leading to catastrophic performance drops.
+- **S3 (Prior Gap)**: Existing works either assume fixed delays, require known reward functions, or treat delay as a general POMDP problem without leveraging the specific structure of delayed feedback.
+- **S4 (Proposed Method)**: We formalize the Delayed-Observation MDP (DOMDP) and propose a modular actor-critic framework featuring delay-reconciled critic training and historical action augmentation to restore Markovian properties.
+- **S5 (Key Result & Bounded Implication)**: Our methods achieve up to 84.5% of optimal reward under 12-step fixed delays on MuJoCo tasks, providing a scalable foundation for handling latency in continuous control, though real-world validation remains future work.
+
+### Introduction Outline (Complete)
+- **P1 (Big Picture)**: DRL has achieved remarkable success in virtual and simulated environments, but deployment in latency-sensitive real-world systems remains challenging due to signal delay.
+- **P2 (Concrete Gap)**: Unlike classical control methods that can explicitly model delay dynamics, model-free DRL algorithms suffer from temporal misalignment between delayed observations and true states, breaking the Markovian assumption and destabilizing gradient estimation.
+- **P3 (Proposed Idea)**: We address this by formalizing DOMDP, proving that inference, action, and observation delays are interchangeable, and showing that augmenting observations with historical actions restores Markovianity.
+- **P4 (Method Intuition)**: Building on these insights, we design a delay-reconciled critic training pipeline that leverages offline replay to align delayed trajectories, and an actor augmentation strategy that concatenates past actions to compensate for missing state information.
+- **P5 (Evidence Preview)**: Extensive experiments on MuJoCo environments demonstrate that our framework consistently outperforms standard DRL and POMDP baselines under both fixed and unfixed delays, with performance gains widening as delay increases.
+- **P6 (Contribution Summary)**: Our contributions include the DOMDP formalization, theoretical delay equivalence and Markovian restoration results, a practical actor-critic architecture for delayed feedback, and comprehensive empirical validation across diverse delay regimes.
+
+## Priority Revision Plan
+| Priority | Task | Effort | Expected Impact |
+|---|---|---|---|
+| **P0** | Fix incomplete sentence in Section 4.1 and proofread entire manuscript for drafting artifacts. | Low | Eliminates critical presentation flaw; restores professional tone. |
+| **P0** | Move Related Work (Appendix B) to main text and expand comparison with Kim et al. (2023). | Medium | Improves self-containment; clarifies novelty boundary against closest prior work. |
+| **P1** | Add discussion on gradient bias mitigation in asymmetric actor-critic design (Section 4.1). | Low | Addresses validity concern; strengthens theoretical grounding. |
+| **P1** | Deepen analysis of prediction failure under unfixed delays (Section 5.1), discussing distribution shift and gradient interference. | Medium | Transforms descriptive observation into mechanistic insight; improves analytical depth. |
+| **P1** | Explicitly bound theoretical assumptions (stationary delay, Markovian environment) in Theorem 4.1 and mutual information claim. | Low | Prevents overgeneralization; improves scientific rigor. |
+| **P2** | Replace vague phrases in Abstract/Conclusion with concrete metrics and bounded limitations. | Low | Enhances defensibility; aligns claims with empirical evidence. |
+| **P2** | Add standard deviations/confidence intervals to key performance deltas in Table 1 and Section 5.1. | Medium | Strengthens statistical validity; supports significance of reported gains. |
+
+**Execution Order**: Complete P0 tasks immediately (1-2 days). Proceed to P1 tasks (3-5 days) by revising Section 4.1 and Section 5.1 analysis. Finalize P2 tasks (1-2 days) during final polish. Total estimated revision time: 1-2 weeks.
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|---|---|---|---|---|---|---|
+| E1 | Baseline failure under delay | MuJoCo (Ant, Walker, Hopper, HalfCheetah), delays 0-12 | Normalized reward | DDPG/TD3/SAC drop >79% at delay=4 | Standard DRL fails catastrophically | Single-seed variance not reported |
+| E2 | Delay-Reconciled Critic efficacy | Fixed/Unfixed delays, SAC baseline | Normalized reward, learning curves | Consistent improvement over Vanilla SAC | Critic reconciliation restores learning | Gradient bias not quantified |
+| E3 | Actor State Augmentation | MLP/RNN/Transformer encoders, delays 0-12 | Normalized reward | MLP augmentation best; RNN/Transformer underperform | Action history restores Markovianity | No discrete action space tested |
+| E4 | Prediction/Encoding techniques | Detached vs non-detached, fixed/unfixed | Normalized reward | Helps under fixed, hurts under unfixed delays | Explicit prediction sensitive to delay variability | Mechanistic analysis missing |
+| E5 | Large observation space & probabilistic | Humanoid env, Gaussian/sticky/noisy actions | Normalized reward | State augmentation robust; prediction fails | Framework generalizes to complex dynamics | Limited to MuJoCo physics |
+
+### Research-Theme Gap Diagnosis
+The core research value (new knowledge on delay handling in DRL) is well-supported by E1-E3. However, reproducibility and robustness claims are weakened by the lack of multi-seed variance reporting and the absence of discrete action space or real-world latency simulations. The impact on practice is bounded by simulation-only evaluation.
+
+### Proposed Research Experiments (P0/P1/P2)
+| Target Claim | Hypothesis | Minimal Design | Controls/Baselines | Metrics | Success Criterion | Est. Cost | Expected Gain |
+|---|---|---|---|---|---|---|---|
+| Robustness under delay variability | Unfixed delays cause distribution shift in prediction targets | Run E4 with 5 seeds, report mean±std | Vanilla SAC, DATS | Reward, std dev | Std < 5% of mean | Low | Statistical validity |
+| Generalization to discrete actions | Action augmentation works for discrete spaces | Apply to Atari/Pendulum-v1 | DQN, RNN Strong | Normalized score | >80% of no-delay baseline | Medium | Broader applicability |
+| Real-world latency simulation | Hardware-induced latency behaves like unfixed delay | Add network jitter wrapper to MuJoCo | Kim et al. (2023) | Reward drop | <10% drop vs simulation | Medium | Deployment readiness |
+
+**Traceability**: E1-E3 validate core claims; proposed experiments address robustness (variance), generalization (discrete actions), and deployment (real-world latency), directly mapping to unresolved limitations.
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score**: 6.5/10  
+The paper presents a theoretically grounded and practically useful framework for handling signal delay in DRL, with strong empirical results on continuous control tasks. The DOMDP formalization and delay-reconciled critic training are clear contributions. However, the score is moderated by the incomplete sentence in Section 4.1, the placement of Related Work in the appendix, the superficial analysis of prediction failure under unfixed delays, and the simulation-only evaluation scope. These issues reduce the current defensibility and generalizability of the claims.
+
+**Post-Revision Target**: [7.5, 8.5]/10  
+If the authors fix the drafting errors, move and expand the Related Work comparison, deepen the mechanistic analysis of delay variability effects, and explicitly bound theoretical assumptions, the paper will achieve strong scientific rigor and clear novelty positioning. Adding multi-seed variance reporting and a brief discrete action space test would further solidify the robustness claims, making it highly competitive for top-tier venues.

@@ -17,6 +17,7 @@ This is research code, NOT a production system. Optimize for **iteration speed a
 - Hard-coded paths, top-level side-effecting code, notebook-style `# %%` cells, and inline `print()` debugging are all idiomatic. Match the existing style of the repo.
 - Save artifacts and write files freely. Disk is cheap; recomputing expensive runs is not.
 - When in doubt, do the simplest thing that works for the next experiment, not the thing that would survive a code review at a SaaS company.
+- When calling OpenAI (or other models) API, if JSON is needed, use client.chat.completions.parse(model=..., messages=..., response_format=PydanticModel) instead of forcing the model to output JSON by prompt. 
 
 ## Scope discipline
 
@@ -79,6 +80,7 @@ The user needs to know when their input was modified before being processed. Lou
 - When given an unclear instruction, consider it in the context of the current working directory and the surrounding code. If "rename methodName to snake case" is the ask, find the method and edit the code, don't just print `method_name`.
 - If you genuinely don't know something, say so. Don't fabricate API surfaces, model names, or library behavior to fill the gap.
 - Never "correct" the user on model versions, library versions, or tools you haven't seen. If they say a model exists, it exists. Lack of knowledge ≠ nonexistence. AI/ML tooling evolves faster than your training data.
+- Do not use "got it" etc words, keep conversation normal. 
 
 ## Pipeline / agent loop discipline
 

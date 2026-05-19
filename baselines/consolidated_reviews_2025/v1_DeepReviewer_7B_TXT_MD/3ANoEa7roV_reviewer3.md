@@ -1,0 +1,56 @@
+### Summary
+
+The paper proposes a systematic evaluation framework for assessing tabular data synthesis algorithms. The framework includes three key metrics: fidelity, privacy, and utility. The authors introduce a new fidelity metric based on Wasserstein distance, a new privacy metric based on membership disclosure score, and a new utility metric based on machine learning affinity. The paper evaluates 8 different synthesizers across 12 real-world datasets and identifies several interesting findings.
+
+### Soundness
+
+3
+
+### Presentation
+
+3
+
+### Contribution
+
+2
+
+### Strengths
+
+1. The paper is well-written and easy to follow.
+2. The proposed metrics are intuitive and reasonable.
+3. The experimental results provide valuable insights into the strengths and weaknesses of different types of synthesizers.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+1. The proposed metrics are not novel, as the Wasserstein distance and membership disclosure score are widely used in the literature.
+2. The paper does not provide a clear justification for why the Wasserstein distance is a better fidelity metric than other existing metrics, such as total variation distance or KL divergence. The authors should provide a more detailed analysis of the properties of the Wasserstein distance and how it addresses the limitations of other metrics in the context of tabular data synthesis.
+3. The paper does not provide a clear justification for why the membership disclosure score is a better privacy metric than other existing metrics, such as differential privacy or Rényi differential privacy. The authors should provide a more detailed analysis of the properties of the membership disclosure score and how it addresses the limitations of other metrics in the context of tabular data synthesis.
+4. The paper does not provide a clear justification for why the machine learning affinity score is a better utility metric than other existing metrics, such as classification accuracy or F1 score. The authors should provide a more detailed analysis of the properties of the machine learning affinity score and how it addresses the limitations of other metrics in the context of tabular data synthesis.
+5. The paper does not provide a clear explanation of how the proposed metrics are computed in practice. The authors should provide more details on the implementation of the proposed metrics and how they are used in the evaluation framework.
+
+### Suggestions
+
+The paper would benefit significantly from a more rigorous justification of the proposed metrics. While Wasserstein distance, membership disclosure score, and machine learning affinity are established metrics, the paper needs to articulate why they are particularly suitable for evaluating tabular data synthesis algorithms compared to other alternatives. For instance, the authors should discuss the specific properties of these metrics that make them appropriate for capturing fidelity, privacy, and utility in the context of tabular data. A detailed comparison with other commonly used metrics, such as total variation distance for fidelity; differential privacy, Rényi differential privacy for privacy; and classification accuracy, F1 score for utility, would strengthen the paper. This comparison should not only highlight the advantages of the proposed metrics but also acknowledge their limitations and how they address specific challenges in tabular data synthesis. Furthermore, the authors should provide a more in-depth analysis of the computational complexity of each metric and discuss the practical implications of these complexities for large-scale datasets.
+
+To improve the clarity of the paper, the authors should provide a more detailed explanation of how the proposed metrics are computed in practice. This should include a step-by-step description of the algorithms used to calculate the Wasserstein distance, membership disclosure score, and machine learning affinity. For example, the authors should specify how the optimal transport plan is computed for the Wasserstein distance, how the membership disclosure score is calculated for different types of synthesizers, and how the machine learning affinity score is computed for different types of machine learning models. The authors should also discuss the practical challenges of implementing these metrics, such as the computational cost of calculating the Wasserstein distance for high-dimensional data and the sensitivity of the membership disclosure score to the choice of the training data. Providing concrete examples of how these metrics are applied to different types of tabular data would also enhance the paper's clarity and practical value.
+
+Finally, the paper should include a more comprehensive experimental evaluation of the proposed metrics. While the paper presents results for 8 different synthesizers across 12 datasets, it would be beneficial to include a more detailed analysis of the sensitivity of the proposed metrics to different parameters and settings. For example, the authors should investigate how the Wasserstein distance is affected by the choice of the transport plan and how the membership disclosure score is affected by the choice of the training data. The authors should also compare the performance of the proposed metrics with other existing metrics on a wider range of datasets and synthesizers. This would provide a more robust evaluation of the proposed metrics and demonstrate their practical utility. Furthermore, the authors should discuss the limitations of the proposed metrics and identify areas for future research.
+
+### Questions
+
+See weaknesses.
+
+### Rating
+
+5
+
+### Confidence
+
+3
+
+**********

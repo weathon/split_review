@@ -1,0 +1,387 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper addresses the problem of code readability in automatically generated Scalable Vector Graphics (SVGs). The authors identify that existing SVG generation methods optimize for visual accuracy while producing code that is poorly structured, overly complex with path elements, and redundant. They propose three contributions: (1) a set of three desiderata for SVG readability (Good Structure, Appropriate Element Use, Redundant Element Removal), (2) three quantitative metrics (Structural Proximity Index SPI, Element Simplicity Score ESS, Redundancy Quotient RQ) to measure readability, and (3) three differentiable proxy loss functions (L_SC, L_EA, L_RR) designed to guide a VAE-based SVG generator toward more readable output. Experiments on SVG-Fonts font reconstruction show improved readability metrics at the cost of substantial reconstruction accuracy (SSIM drops from 0.923 to 0.742). A GPT-3.5-based evaluation on the SHAPES dataset further supports the readability improvement. The paper addresses a real and practically important problem, and the conceptual framing (defining readability desiderata) is a useful contribution. However, the technical execution has several critical weaknesses: the proposed metrics and loss functions suffer from sigmoid saturation that makes them non-discriminative and gradient-ineffective, the base VAE model is not competitive with state-of-the-art SVG generators, the experimental comparison is confounded by architectural differences, and the GPT-3.5 evaluation lacks human validation. The paper would benefit from fundamental reformulation of the losses, fairer baselines, and human readability studies.
+
+## Strengths
+1. **Well-motivated problem**: SVG code readability is a genuinely overlooked dimension in the growing field of generative vector graphics. The paper correctly identifies that existing methods (Im2Vec, DeepVecFont, DualVector) produce visually accurate but code-level messy SVGs, which undermines one of SVG's key advantages—human editability. This problem framing is practically relevant for design tools, data visualization, and editable graphics workflows.
+
+2. **Clear conceptual framework**: The three desiderata (Good Structure, Appropriate Element Use, Redundant Element Removal) provide a simple, understandable taxonomy for SVG readability. This is a useful contribution that could serve as a foundation for future work, even if the specific metric implementations have issues.
+
+3. **End-to-end differentiable approach**: The attempt to integrate readability objectives directly into the VAE training pipeline through differentiable proxy losses is a principled direction. Making readability a first-class optimization objective rather than a post-processing step is the right conceptual approach.
+
+4. **Comprehensive ablation and parameter study**: The ablations in Table 3 trace the effect of each loss component, and the parameter study in Table 4 explores weight configurations. This level of controlled investigation is commendable and provides useful insights into the behavior of each loss term.
+
+5. **Multi-dimensional evaluation**: The paper evaluates both accuracy (SSIM, L1, s-IoU) and readability (SPI, ESS, RQ) metrics, providing a holistic picture of the accuracy-readability trade-off. Including the GPT-3.5 understandability study, despite its methodological limitations, represents an attempt to go beyond automatic metrics toward practical usability assessment.
+
+## Weaknesses
+This section lists key weaknesses; detailed analysis is in Key Issues and annotations.
+
+1. **Sigmoid saturation invalidates all metrics and losses (Critical)**: All three metrics (Eq 1-3) and all three loss functions (Eq 4-6) apply a sigmoid to aggregated sums that can be orders of magnitude larger than the sigmoid's active range. For typical SVGs with dozens of elements and pixel-scale distances, the inputs to sigmoid can be 10^3 to 10^6, producing outputs of exactly 1.0 with zero gradient. This fundamentally breaks both the metrics (they cannot discriminate between methods) and the losses (they provide no training signal).
+
+2. **Abstract claim contradicts experimental evidence (Major)**: The abstract states "significant improvements in code readability without compromising visual accuracy," but Table 2 shows SSIM dropping from 0.923 (Multi-Implicits) to 0.742 (Ours)—a ~20% relative drop. This is a substantial compromise, not "without compromise." This misrepresentation damages paper credibility.
+
+3. **Unfair baseline comparison (Major)**: Table 2 compares the proposed simple VAE against sophisticated baselines (Multi-Implicits, Im2Vec) that use entirely different architectures. The accuracy gap is partially due to architectural simplicity, not solely the readability-accuracy trade-off. A same-architecture baseline is needed.
+
+4. **GPT-3.5 study lacks validity (Major)**: The GPT-3.5 evaluation reports accuracy numbers (19.38, 17.14, 38.18) without defining the scale or metric. No human validation or correlation study is provided. Without evidence that GPT-3.5's code comprehension correlates with human readability, the results are not interpretable as readability measures.
+
+5. **Loss weights omitted (Major)**: Eq. (7) states the overall objective "for brevity, the weight of each term is omitted." This omission makes the training objective underdetermined and the experimental results non-reproducible. The parameter study (Table 4) shows sensitivity to weights, making this omission even more critical.
+
+6. **Missing architectural details (Major)**: The VAE framework description (Sec 3.1) omits encoder/decoder architecture, latent dimension, element count determination mechanism, exact rasterization tool used, and training resolution. These are essential for reproducibility.
+
+7. **Conclusion lacks depth (Major)**: The conclusion is only three sentences summarizing what was done, with no quantitative summary of results, no acknowledgment of limitations (accuracy trade-off, metric saturation, architectural simplicity), and no discussion of future work directions.
+
+8. **No human readability evaluation (Major)**: The entire paper claims to improve human readability but never presents a human study. The GPT-3.5 proxy is not validated. Human evaluation with designers/developers is essential for this type of claim.
+
+## Key Issues
+### Issue 1: Sigmoid Saturation in All Metrics and Losses (Critical)
+**Location**: Page 3 (Eq 1 SPI), Page 3-4 (Eq 2 ESS), Page 4 (Eq 3 RQ), Page 5 (Eq 4 L_SC), Page 6 (Eq 5 L_EA), Page 6 (Eq 6 L_RR)
+
+All six formulas use sigmoid(·) to normalize summed values. For typical SVG configurations:
+- **SPI/L_SC**: Sum of Euclidean distances between consecutive element pairs. In a 128×128 image, distances of 50-100 pixels per pair, summed over N-1 pairs, yields inputs of 500-5000+. Sigmoid saturates at 1.0.
+- **ESS**: Sum of complexity scores (1 for rect/circle/line, 3 for path). For 50+ elements, sum ≥ 50. Sigmoid(50) = 1.0.
+- **RQ/L_RR**: Average pixel-level rendering change per element. For a 128×128 image (16384 pixels), per-pixel changes of 1-255 produce sums of 10^3-10^6. Sigmoid saturates.
+- **L_EA**: Sum of edge-detection responses across 16384 pixels, each in [0,255]. Typical sums are 10^5-10^6. Sigmoid(10^6) = 1.0 exactly with zero gradient.
+
+**Impact**: The losses provide negligible learning signal; the metrics cannot discriminate between methods of practical interest. Table 2 shows ESS values of 0.1938, 0.6818, 0.7385 — all mapped to the [0,1] range by sigmoid, but the raw scores that produce these values (before sigmoid) are not reported, making the table non-interpretable.
+
+**Required action**: Remove sigmoid from all formulations. Report raw sums or means. See Actionable Suggestions for alternatives.
+
+---
+
+### Issue 2: Abstract Overclaim vs. Empirical Evidence (Major)
+**Location**: Page 1 - Abstract (lines 22-24)
+
+The abstract states "significant improvements in code readability without compromising visual accuracy." Table 2 shows SSIM 0.742 (Ours) vs 0.923 (Multi-Implicits) — a 19.6% relative loss. L1 increases from 0.0183 to 0.0713 (3.9× higher). s-IoU drops from 0.871 to 0.607 (30.3% relative loss). These are substantial compromises.
+
+**Impact**: Misleads readers about the method's practical utility and invites immediate rejection from reviewers who check the tables.
+
+**Required action**: Rewrite the abstract to honestly characterize the accuracy-readability trade-off, including quantitative bounds.
+
+---
+
+### Issue 3: Confounded Baseline Comparison (Major)
+**Location**: Page 8 - Table 2, Section 4.3 Font Reconstruction
+
+Multi-Implicits and Im2Vec use fundamentally different architectures (multi-implicit neural fields, hierarchical vector representations), while the proposed method uses a "simple VAE" (as the authors acknowledge). The accuracy gap is caused by architectural simplicity + readability loss, not readability loss alone.
+
+**Impact**: Readers cannot determine how much accuracy loss is due to the readability objective vs. the weaker base architecture.
+
+**Required action**: Add VAE-without-readability-loss row to Table 2; separate architecture comparison from loss comparison.
+
+---
+
+### Issue 4: GPT-3.5 Study Invalid Without Human Validation (Major)
+**Location**: Page 7-8 - Section 4.2
+
+Accuracy metrics 19.38/17.14/38.18 are reported without scale definition (percentage? raw score?). No variance, confidence intervals, or significance tests. No human baseline validating that GPT-3.5's SVG code comprehension correlates with human readability. No description of the prompt or whether GPT-3.5 receives rendered images or SVG code text.
+
+**Impact**: The study cannot be interpreted as evidence of readability improvement.
+
+**Required action**: Report exact metric definition and prompt; add human evaluation with 3-5 participants; report variance across multiple GPT-3.5 runs.
+
+---
+
+### Issue 5: Loss Weights Omitted from Training Objective (Major)
+**Location**: Page 7 - Eq. (7)
+
+The total loss L_accuracy + L_SC + L_EA + L_RR omits weighting coefficients. The parameter study (Table 4) shows that weight configuration strongly affects results (SSIM ranges from 0.706 to 0.742 across configurations), making the omission critical for reproducibility.
+
+**Impact**: Experimental results are not reproducible.
+
+**Required action**: Always include weights; report the exact configuration used for main results with justification.
+
+---
+
+### Issue 6: Reproducibility Gap in Method Description (Major)
+**Location**: Page 4 - Section 3.1 Framework
+
+Missing: encoder architecture, decoder architecture, latent dimension, element count determination (fixed or variable), exact rasterization tool and version, training resolution.
+
+**Impact**: The method cannot be reproduced or compared against.
+
+**Required action**: Provide a complete architecture table in appendix; specify all implementation details.
+
+## Actionable Suggestions
+### S1: Replace Sigmoid with Non-Saturating Aggregation (P0 — Must Fix)
+**Problem**: All six equations (SPI, ESS, RQ, L_SC, L_EA, L_RR) use sigmoid(·) on sums that are orders of magnitude larger than the sigmoid's active range, causing saturation at exactly 1.0 with zero gradients.
+
+**Solution**: Remove sigmoid from all formulations. Use raw means with clear semantics:
+
+- **SPI** → SPI_corrected = (1/(N-1)) Σ_{i=1}^{N-1} (d(P(e_i), P(e_{i+1})) / D_max) where D_max = image diagonal. This gives the average normalized spatial distance between consecutive elements in [0,1]. Lower is better. No sigmoid.
+
+- **ESS** → ESS_corrected = (1/N) Σ C(e_i). Average complexity per element in [1,3]. Lower is better.
+
+- **RQ** → RQ_corrected = (1/N) Σ ΔR(e_i) where ΔR is the per-element rendering change (e.g., per-pixel L2 difference when element is removed), normalized by image dimensions. Higher is better.
+
+- **L_SC** → Replace with rank correlation: L_SC_corrected = -Spearman_ρ(D_code, D_spatial) where D_code[i,j] = |i-j| and D_spatial[i,j] = ||P(e_i)-P(e_j)||/D_max. This directly measures structural ordering quality without saturation.
+
+- **L_EA** → Replace with direct element-type penalty: L_EA_corrected = (1/N) Σ type_penalty(e_i) where type_penalty(path)=1, other=0. This directly targets the intended behavior.
+
+- **L_RR** → Replace with L_RR_corrected = (1/N) Σ exp(-||∂θ_i R|| / τ) with τ = 0.01. This avoids arbitrary thresholds and provides smooth gradients.
+
+### S2: Correct the Abstract (P0 — Must Fix)
+Rewrite to honestly characterize the trade-off. Replace the sentence about "without compromising visual accuracy" with:
+"Experiments show that our method substantially improves readability metrics (SPI, ESS, RQ) on the SVG-Fonts task, though this comes at a measured cost in reconstruction accuracy (SSIM drops from 0.923 to 0.742). We discuss the practical implications of this accuracy-readability trade-off and outline directions for closing the accuracy gap."
+
+### S3: Add Same-Architecture Baseline (P0 — Must Fix)
+In Table 2, add a row for "VAE baseline (accuracy only)" using the exact same VAE architecture but trained only with L2 + KL loss (no readability losses). This isolates the effect of readability optimization from the effect of architectural choice.
+
+### S4: Validate and Report GPT-3.5 Study Properly (P1 — Must Fix)
+- Define the accuracy metric explicitly as "% correctly answered questions out of N total questions."
+- Report the exact prompt given to GPT-3.5.
+- State whether GPT-3.5 receives raw SVG code text or rendered images.
+- Run 5+ GPT-3.5 queries with temperature=0.3, report mean±std.
+- Most importantly, add a human evaluation: recruit 3-5 participants familiar with SVG, ask them to rate code readability (1-5 Likert scale) on 20 samples from each method, report inter-rater agreement (Fleiss' κ) and mean scores.
+
+### S5: Report Loss Weights Explicitly (P0 — Must Fix)
+Replace Eq. (7) with:
+L_total = λ_acc · (L2 + β·KL) + λ_SC · L_SC + λ_EA · L_EA + λ_RR · L_RR
+where λ and β are reported in a table. State that weights were selected based on validation set performance optimizing a combined accuracy-readability score, and justify the chosen configuration.
+
+### S6: Complete Method Description (P1 — Must Fix)
+Provide in the appendix: (a) encoder architecture table (layer types, channels, kernel sizes, strides), (b) decoder architecture, (c) latent dimension, (d) how element count N is determined (is it fixed? predicted? if fixed, what value and how chosen?), (e) exact rasterizer used (DiffVG version, rendering parameters), (f) training resolution (presumably 128×128), (g) batch size, training epochs, GPU type.
+
+### S7: Expand Conclusion (P1 — Must Fix)
+The conclusion should be rewritten to include:
+- Quantitative summary of key results (actual SPI/ESS/RQ improvements and SSIM/L1/s-IoU costs).
+- Acknowledged limitations: sigmoid saturation issue, architectural simplicity, lack of human validation.
+- Concrete future work: integrate readability objectives into stronger generators (transformer-based models), validate with user studies, explore context-aware element selection.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Analysis
+
+The current introduction follows this structure:
+- P1: Generic image representation learning background (bitmap-based)
+- P2: SVG format introduction and method review (SVG-VAE, Im2Vec)
+- P3: Problem statement — SVG readability is overlooked
+- P4 (Page 2): Readability definition and three challenges
+- P5 (Page 2): Solution overview and three contributions
+
+**Problem**: P1 is too generic (image representation learning, not SVG-specific). P2 and P3 overlap in establishing the gap. The reader must wait until P4 to understand concrete challenges. The three-contribution list at the end is too vague ("provide clarity on the ambiguous nature").
+
+### Recommended Storyline (Best for This Paper)
+
+**P1 — The Practical Problem**: SVG is widely used in design tools because it remains editable as code. But current SVG generation methods produce visually accurate but code-level messy output, defeating the purpose of editability.
+
+**P2 — Why Existing Methods Fail**: Existing generators (SVG-VAE, DeepVecFont, Im2Vec) optimize for raster-level accuracy only. The code they produce is filled with complex paths, redundant nodes, and disorganized element ordering.
+
+**P3 — What Readability Means**: We define three specific dimensions of SVG code readability — Good Structure, Appropriate Element Use, and Redundant Element Removal — and explain why each matters for human editability.
+
+**P4 — The Three Challenges**: Measuring and optimizing readability is non-trivial because (a) readability has no standard definition/metric, (b) SVG element selection is discrete, and (c) end-to-end training requires differentiable objectives.
+
+**P5 — Our Approach and Contributions**: We propose three proxy metrics (SPI, ESS, RQ) and three differentiable loss functions (L_SC, L_EA, L_RR) that can be integrated into VAE-based SVG generators. Contributions listed concretely.
+
+### Abstract Outline (Complete)
+
+**S1 — Problem and Domain**: "Scalable Vector Graphics (SVGs) are used across design and visualization for their scalability and editability, but neural SVG generators optimize for visual fidelity while producing disorganized, overly complex code that is difficult for humans to edit."
+
+**S2 — Gap**: "Code readability—encompassing logical structure, element simplicity, and absence of redundancy—is essential for downstream editing but has been largely ignored in existing SVG generation methods."
+
+**S3 — Our Solution**: "We define three desiderata for SVG readability, introduce three quantitative metrics (SPI, ESS, RQ) to measure them, and propose differentiable proxy loss functions that allow VAE-based SVG generators to optimize readability alongside visual accuracy."
+
+**S4 — Key Results**: "On the SVG-Fonts benchmark, our method substantially improves all three readability metrics compared to prior methods, with SPI decreasing from 0.787 to 0.242 and RQ increasing from 0.727 to 0.916, though at a measured accuracy cost (SSIM: 0.742 vs 0.923)."
+
+**S5 — Implications**: "These results demonstrate the feasibility of training for SVG code readability and highlight the accuracy-readability trade-off that future work should address."
+
+### Introduction Outline (Complete)
+
+**P1 — Hook (Problem):** "Scalable Vector Graphics (SVGs) are the backbone of modern digital design—from icons and fonts to data visualizations—because they combine infinite visual scalability with human-readable, editable code. Recent deep learning methods can generate SVGs from raster images with high visual fidelity. However, these methods optimize exclusively for pixel-level accuracy, producing SVG code that is logically disorganized, filled with complex Bezier paths, and laden with redundant nodes. Such code undermines one of SVG's chief advantages: the ability for designers to open the file and make modifications."
+
+**P2 — Gap (Why Prior Methods Fail):** "Existing SVG generators—including SVG-VAE (Lopes et al., 2019), DeepVecFont (Wang & Lian, 2021), Im2Vec (Reddy et al., 2021a), and DualVector (Liu et al., 2023)—share a common limitation: they treat the SVG code as an intermediate representation that only needs to render correctly, ignoring its structure, simplicity, and editability. The resulting files are visually accurate but code-level labyrinths of disorganized path elements."
+
+**P3 — Definition (What Readability Means):** "We argue that readability in SVG code comprises three core attributes: (1) Good Structure—elements should be logically ordered and grouped; (2) Appropriate Element Use—simpler primitives (rectangles, circles) should be preferred over complex paths when possible; (3) Redundant Element Removal—elements that do not materially affect the rendered output should be eliminated. These three dimensions form our proposed desiderata for SVG readability."
+
+**P4 — Challenges (Why It's Hard):** "Realizing these desiderata faces three challenges: (C1) what constitutes 'readable' SVG code is not well-defined; (C2) no metrics exist to quantify SVG readability; (C3) optimizing for readability requires differentiable objectives that can work with SVG's discrete element structure and the rasterization pipeline."
+
+**P5 — Our Approach:** "To address these challenges, we first formalize the three desiderata. We then introduce three metrics—SPI for structural proximity, ESS for element simplicity, and RQ for redundancy—to operationalize readability assessment. Finally, we design differentiable proxy loss functions that allow a VAE-based SVG generator to optimize readability objectives end-to-end. Experiments on font reconstruction and a GPT-3.5-based understandability study demonstrate measurable readability improvements, though at a quantified accuracy cost that we discuss openly."
+
+## Priority Revision Plan
+### P0 Items (Publication-Critical — Must Fix Before Resubmission)
+
+| Priority | Issue | Fix Description | Expected Gain | Effort |
+|----------|-------|-----------------|---------------|--------|
+| P0.1 | Sigmoid saturation in all metrics/losses | Replace sigmoid with non-saturating aggregations (raw means, rank correlations, or exp-based sparsity losses). See Actionable Suggestions S1. | Restores gradient signal; makes metrics discriminative; enables meaningful optimization. | High (core reformulation) |
+| P0.2 | Abstract overclaim | Rewrite abstract to honestly describe accuracy-readability trade-off with numbers. See S2. | Eliminates reviewer rejection trigger; builds credibility. | Low |
+| P0.3 | Loss weights omitted | Report explicit weights in Eq. (7) and describe selection procedure. See S5. | Enables reproducibility and fair evaluation. | Low |
+| P0.4 | Same-architecture baseline missing | Add "VAE baseline (accuracy only)" row to Table 2. See S3. | Isolates readability effect from architectural capacity effect. | Medium (requires re-training) |
+
+### P1 Items (High Priority — Strongly Recommended Before Resubmission)
+
+| Priority | Issue | Fix Description | Expected Gain | Effort |
+|----------|-------|-----------------|---------------|--------|
+| P1.1 | GPT-3.5 study validity | Add metric definition, variance, prompt transparency, and human evaluation study. See S4. | Provides real evidence for readability claims. | Medium-High |
+| P1.2 | Method reproducibility gap | Provide complete architecture table and training details in appendix. See S6. | Enables replication and builds confidence. | Medium |
+| P1.3 | Conclusion too brief | Expand to include quantitative summary, limitations, and future work. See S7. | Improves paper completeness and professionalism. | Low |
+| P1.4 | Unfair font reconstruction comparison | Clarify that Table 2 compares different architectures; add architecture-controlled comparison. | Fair evaluation of readability approach. | Medium |
+
+### P2 Items (Quality Improvement — Recommended)
+
+| Priority | Issue | Fix Description | Expected Gain | Effort |
+|----------|-------|-----------------|---------------|--------|
+| P2.1 | Generic first intro paragraph | Replace with SVG-specific problem framing. See Storyline section. | Better reader engagement; clearer motivation. | Low |
+| P2.2 | Vague contribution list | Replace vague claims with concrete contribution statements. | Clearer positioning. | Low |
+| P2.3 | Missing related work section | Add dedicated related-work section organized by comparison axes. | Better novelty positioning. | Medium |
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|-------|---------|--------------|-----------------|-------------------|
+| E1 | GPT-3.5 Understandability (SHAPES dataset) | SVGs from 3 methods + GPT-3.5 QA on visual questions | Accuracy (unscaled) 19.38/17.14/38.18 | Ours (38.18) > Multi-Implicits (19.38) > Im2Vec (17.14) | Readability improves LLM comprehension | Scale undefined; no human validation; no variance |
+| E2 | Font Reconstruction (SVG-Fonts) — Accuracy | Compare rendered output vs ground truth at 128×128 | SSIM↑, L1↓, s-IoU↑ | Ours: SSIM 0.742, L1 0.071, s-IoU 0.607; Multi-Implicits: SSIM 0.923 | Readability gains come with accuracy cost | Confounded by architecture (VAE vs specialized methods) |
+| E3 | Font Reconstruction (SVG-Fonts) — Readability | Compare generated SVG code on 3 proposed metrics | SPI↓, ESS↓, RQ↑ | Ours: SPI 0.242, ESS 0.194, RQ 0.916; Multi-Implicits: SPI 0.787, ESS 0.682, RQ 0.727 | Readability metrics improve with losses | Metrics may saturate (sigmoid); no human validation |
+| E4 | Ablation (loss components) | Add L_SC, L_EA, L_RR sequentially to base VAE | All 6 metrics | Each loss improves its target metric independently | Each loss works as intended | Ablation is additive not combinatorial; small sample |
+| E5 | Parameter study (loss weights) | Vary λ_SC, λ_EA, λ_RR across 7 configurations | All 6 metrics | Weight configuration strongly affects results; (0.1,0.1,0.1) used as default | Weight selection matters | No validation-based selection; weights omitted from Eq (7) |
+
+### Research-Theme Gap Diagnosis
+
+1. **New Knowledge**: The core new knowledge—that readability can be formulated as differentiable objectives—is conceptually valuable but empirically weakened by the sigmoid saturation issue, which makes it unclear whether the observed readability improvements are due to the losses or architectural biases.
+
+2. **Reproducibility/Reusability**: Currently low. Missing architectural details, loss weight specification, and saturated loss formulations prevent independent reproduction. The metrics (SPI/ESS/RQ) could be reusable if reformulated without sigmoid saturation.
+
+3. **Impact on Practice/Understanding**: Potentially high if validated. The concept of treating SVG code readability as a trainable objective could influence how SVG generation tools are built. However, without human evaluation, the practical significance is unproven.
+
+### Proposed Research Experiments (P0/P1/P2)
+
+| Target Claim | Hypothesis | Minimal Design | Controls/Baselines | Metrics | Success Criterion | Est. Cost | Expected Gain |
+|-------------|-----------|---------------|-------------------|---------|------------------|-----------|---------------|
+| **P0: Readability losses improve code structure** | Replacing sigmoid losses with non-saturating alternatives (raw means, rank correlations) preserves or improves readability gains | Same VAE architecture, replace Eq 1-6 with non-saturating alternatives from S1 | (a) VAE baseline (accuracy only), (b) Original sigmoid-based version, (c) New non-saturating version | SPI_corrected, ESS_corrected, RQ_corrected, SSIM, L1, s-IoU | New version matches or exceeds original readability gains while providing non-zero gradients | 2-3 GPU-days | Core technical fix; removes gradient starvation concern |
+| **P1: Same-architecture accuracy comparison** | The accuracy gap between our VAE and strong baselines is partly due to architectural simplicity, not only readability loss | Train VAE baseline (no readability loss) and evaluate on SVG-Fonts | (a) VAE baseline (accuracy only), (b) VAE+readability losses, (c) Multi-Implicits, (d) Im2Vec | SSIM, L1, s-IoU | Gap between (a) and (c) reveals architecture-driven accuracy loss | 1 GPU-day | Fair comparison; isolates readability impact |
+| **P1: Human readability evaluation** | Human raters judge readable-SVG-trained outputs as more editable and understandable | 3-5 SVG-experienced raters evaluate 20 samples/method on 1-5 scales for: code clarity, editability, logical structure | Compare Ours vs Multi-Implicits vs Im2Vec vs VAE baseline | Mean Likert scores, Fleiss' κ inter-rater agreement, rank correlation with SPI/ESS/RQ | Ours significantly outperforms baselines (p<0.05, paired t-test); SPI/ESS/RQ correlate with human scores (ρ>0.5) | 1-2 weeks (human study) | Gold-standard evidence for readability claims |
+| **P2: Stronger base model** | Integrating readability losses into a stronger SVG generator (e.g., transformer-based) reduces accuracy loss while maintaining readability gains | Take an existing strong SVG generator (e.g., DeepSVG, DualVector), add L_SC/L_EA/L_RR corrections | (a) Base generator, (b) Base + readability losses | Accuracy metrics + corrected readability metrics | Base+readability improves readability with less than 5% accuracy drop | 3-5 GPU-days | Shows generality and mitigates accuracy trade-off |
+| **P2: Readability-vs-reconstruction Pareto analysis** | There exists a Pareto frontier between readability and accuracy that can be navigated by weight tuning | Sweep λ across 10 values, plot SPI vs SSIM for each | None (self-comparison) | SPI_corrected, SSIM | Clear Pareto frontier observable | 2 GPU-days | Guides practitioners on weight selection based on use case |
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 4.5 / 10**
+
+**Rationale**: The paper addresses a genuinely important and overlooked problem (SVG code readability) with a clear conceptual framework (three desiderata and corresponding metrics). However, the technical execution has fundamental issues—the sigmoid-saturated loss functions likely provide no meaningful gradient signal, making the reported results unreliable as evidence for the proposed method. The abstract misrepresents the accuracy trade-off, the experimental comparison is confounded by architecture differences, and the GPT-3.5 evaluation lacks validity without human validation. The omission of loss weights and critical architectural details further reduces reproducibility. The core idea is promising, but in its current form, the paper does not provide reliable evidence that the proposed losses work as claimed.
+
+**Score Breakdown**:
+- Research Value / Problem Importance: 7/10 (readability in SVG generation is genuinely important)
+- Novelty of Approach: 6/10 (desiderata framework is useful; sigmoid-based losses are standard)
+- Technical Soundness: 2/10 (sigmoid saturation invalidates the core technical mechanism)
+- Experimental Validity: 3/10 (confounded baselines, unvalidated proxy evaluation, missing weights)
+- Reproducibility: 3/10 (missing architecture details, loss weights, and exact implementation specifics)
+- Writing Quality / Clarity: 5/10 (clear framing but overclaiming abstract and vague contributions)
+- Completeness: 4/10 (missing related-work section, inadequate conclusion, no human evaluation)
+
+**Post-Revision Target: [6.0, 7.0] / 10**
+
+**Rationale**: If the authors fix the sigmoid saturation issue (replacing with non-saturating alternatives), add a same-architecture baseline, conduct a human readability evaluation, correct the abstract overclaim, and provide full implementation details, the paper's technical soundness and validity would substantially improve. The achievable score range reflects the remaining inherent limitation (the accuracy drop may be unavoidable even with correct loss formulations) and the effort required for a thorough human evaluation.
+
+---
+
+## ASCII Diagrams
+
+### ASCII Diagram — Paper Structure & Evidence Map
+
+```text
+[Problem: SVG code generated by neural methods is readable-unfriendly]
+    |
+    ├── Claim C1: Desiderata for SVG readability (3 dimensions)
+    │   └── Evidence: Expert opinion, no empirical validation of framework
+    │       ⚠ Gap: No user study validating that these 3 dimensions 
+    │              capture human readability preferences
+    |
+    ├── Claim C2: Quantitative metrics (SPI, ESS, RQ)
+    │   └── Evidence: Eq (1)-(3) with sigmoid normalization
+    │       ⚠ Gap: Sigmoid saturates; metrics may not discriminate
+    │
+    └── Claim C3: Differentiable proxy losses (L_SC, L_EA, L_RR)
+        └── Evidence: Table 2-4 showing metric improvements
+            ⚠ Gap: Losses saturate (same sigmoid issue);
+                    comparison confounded by architecture;
+                    loss weights unreported
+```
+
+### ASCII Diagram — Revision Strategy Roadmap
+
+```text
+[Current State: 4.5/10]
+    |
+    ├── P0 Fix: Replace sigmoid with non-saturating alternatives
+    │   -> [Metrics meaningful, gradients active]
+    |
+    ├── P0 Fix: Add same-architecture baseline to Table 2
+    │   -> [Fair comparison, isolates readability effect]
+    |
+    ├── P0 Fix: Report loss weights, correct abstract
+    │   -> [Reproducible, honest claims]
+    |
+    ├── P1 Fix: Human evaluation study
+    │   -> [Gold-standard readability evidence]
+    |
+    └── P2 Fix: Stronger base model + Pareto analysis
+        -> [Generality, practical guidance]
+            |
+            ↓
+    [Post-Revision Target: 6.0-7.0/10]
+```
+
+### ASCII Diagram — Related-Work Taxonomy Tree (Layered)
+
+```text
+SVG Generation Methods (Root)
+├── Branch 1: Vector Font Generation
+│   ├── Leaf 1.1: Autoencoder-based sequence generation
+│   │   └── SVG-VAE [Lopes et al., 2019]
+│   ├── Leaf 1.2: Dual-modality learning
+│   │   └── DeepVecFont [Wang & Lian, 2021]
+│   └── Leaf 1.3: Implicit neural representations
+│       └── Multi-Implicits [Reddy et al., 2021b]
+│
+├── Branch 2: General Vector Graphics Generation
+│   ├── Leaf 2.1: Raster-to-vector without vector supervision
+│   │   └── Im2Vec [Reddy et al., 2021a]
+│   ├── Leaf 2.2: Hierarchical generative networks
+│   │   └── DeepSVG [Carlier et al., 2020]
+│   └── Leaf 2.3: Unsupervised dual-part representation
+│       └── DualVector [Liu et al., 2023]
+│
+├── Branch 3: Differentiable Rasterization (infrastructure)
+│   ├── Leaf 3.1: Differentiable SVG rasterizer
+│   │   └── DiffVG [Li et al., 2020]
+│   └── Leaf 3.2: Layer-wise image vectorization
+│       └── LIVE [Ma et al., 2022]
+│
+└── Branch 4: SVG Code Readability (THIS PAPER)
+    └── Leaf 4.1: Readability desiderata + metrics + losses
+        └── Proposed: SPI, ESS, RQ and L_SC, L_EA, L_RR
+            ⚠ Novelty Status: Partial — concept of readable
+               code is recognized but formal metrics are new.
+               Verdict deferred (Retrieval-Disabled Mode).
+               Manual literature check recommended.
+```
+
+### ASCII Diagram — Experiment Upgrade Plan
+
+```text
+Stage 1 (P0 — Core Fix): Non-saturating metric/loss reformulation
+    -> Replace Eq 1-6 sigmoids
+    -> Report corrected SPI/ESS/RQ with raw scores
+    -> Timeline: 2-3 GPU-days
+
+Stage 2 (P0 — Fair Comparison): Architecture-controlled baselines
+    -> Train VAE baseline (accuracy-only)
+    -> Add to Table 2
+    -> Timeline: 1 GPU-day
+
+Stage 3 (P1 — Gold-Standard Evidence): Human readability study
+    -> 3-5 participants, 20 samples/method
+    -> Likert rating + inter-rater agreement
+    -> Timeline: 1-2 weeks (human effort)
+
+Stage 4 (P2 — Generalizability): Stronger base model integration
+    -> Add readability losses to transformer-based SVG generator
+    -> Pareto analysis of accuracy vs readability
+    -> Timeline: 3-5 GPU-days
+```

@@ -1,0 +1,54 @@
+### Summary
+
+This paper explores the potential of pre-training on geometric tasks, specifically monocular depth estimation, for downstream transfer to semantic segmentation. The authors investigate different forms of supervision, including multi-view stereo, binocular stereo, and LiDAR data. The results indicate that monocular depth pre-training improves semantic segmentation performance, often outperforming ImageNet pre-training.
+
+### Soundness
+
+2
+
+### Presentation
+
+3
+
+### Contribution
+
+2
+
+### Strengths
+
+- The paper is well-written and easy to follow.
+- The authors conduct a thorough set of experiments, covering various aspects of the proposed approach, including different forms of supervision, network architectures, and datasets.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+ - The motivation of this paper is not very clear. The authors claim that "pre-training is often performed on heavily human-biased datasets, where the photographer who framed the picture meant to convey a particular concept (say, a cup), and therefore took care to make sure that the manifestation of the concept (the image) prominently features the object by choice of vantage point, illumination, and (lack of) occlusion." However, it is not clear why pre-training on depth estimation can be a "human-free" approach to learning semantic concepts. The paper does not adequately explain the connection between depth estimation and the emergence of semantic understanding. Specifically, it is unclear how the geometric cues from depth estimation translate into the semantic features required for segmentation. The claim of a "human-free" approach is not well-supported by the methodology, as the depth estimation itself is trained on human-annotated data, even if it avoids human labeling in the downstream task.
+- The paper does not provide a clear definition of what constitutes "semantic understanding" in the context of this study. The authors use the term "semantic understanding" to refer to the emergence of "object-centric bias" in the feature space, but this definition is not sufficiently rigorous. The paper needs to clarify what specific properties of the learned features indicate that they are capturing semantic information, rather than just low-level geometric features. The connection between the learned features and the actual semantic labels is not clearly established.
+- The paper does not adequately address the potential limitations of the proposed approach. For example, it is not clear how the method would perform in scenarios with significant occlusions or lighting variations. The paper should discuss the robustness of the method to these challenges and provide some analysis of its performance under such conditions. Furthermore, the paper does not explore the computational cost of the proposed approach, which could be a limiting factor for practical applications.
+
+### Suggestions
+
+The paper would benefit from a more precise definition of "semantic understanding" and a more rigorous explanation of how depth estimation contributes to this understanding. The authors should clarify what specific properties of the learned features indicate that they are capturing semantic information, rather than just low-level geometric features. For example, they could analyze the feature maps to show how they respond to different object categories or scene contexts. This could involve techniques such as visualizing the activation maps or using probing techniques to assess the semantic content of the features. Furthermore, the authors should provide a more detailed explanation of how the geometric cues from depth estimation translate into the semantic features required for segmentation. This could involve analyzing the relationship between the depth maps and the resulting semantic predictions, and explaining how the depth information helps the network learn object-centric biases. Without a clear understanding of how depth pre-training leads to semantic understanding, the significance of the results is difficult to fully assess.
+
+To address the limitations of the proposed approach, the authors should conduct a more thorough analysis of its robustness to various challenges, such as occlusions, lighting variations, and different viewpoints. This could involve testing the method on datasets with more diverse and challenging scenes, and providing a quantitative analysis of its performance under these conditions. The authors should also discuss the computational cost of the proposed approach and compare it to other pre-training methods. This would help to assess the practical feasibility of the method for real-world applications. Additionally, the authors should explore the potential of combining depth pre-training with other pre-training techniques, such as those based on image classification or object detection. This could lead to further improvements in segmentation performance and provide a more comprehensive understanding of the benefits of geometric pre-training. The paper should also discuss the limitations of the approach in the context of the broader field of geometric perception, and suggest directions for future research.
+
+Finally, the paper should provide a more detailed comparison of the proposed approach with existing methods for semantic segmentation. This should include a discussion of the advantages and disadvantages of each method, as well as a quantitative comparison of their performance on a common set of benchmarks. The authors should also discuss the potential for combining the proposed approach with other techniques, such as those based on attention mechanisms or graph neural networks. This would help to position the paper within the broader research landscape and highlight its unique contributions. The paper should also clarify the specific scenarios where the proposed approach is expected to be most effective, and where it might be less suitable. This would help to guide future research and practical applications of the method.
+
+### Questions
+
+- The paper does not provide a clear definition of what constitutes "semantic understanding" in the context of this study. The authors use the term "semantic understanding" to refer to the emergence of "object-centric bias" in the feature space, but this definition is not sufficiently rigorous. The paper needs to clarify what specific properties of the learned features indicate that they are capturing semantic information, rather than just low-level geometric features. The connection between the learned features and the actual semantic labels is not clearly established.
+- The paper does not adequately address the potential limitations of the proposed approach. For example, it is not clear how the method would perform in scenarios with significant occlusions or lighting variations. The paper should discuss the robustness of the method to these challenges and provide some analysis of its performance under such conditions. Furthermore, the paper does not explore the computational cost of the proposed approach, which could be a limiting factor for practical applications.
+
+### Rating
+
+5
+
+### Confidence
+
+4
+
+**********

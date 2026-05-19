@@ -1,0 +1,367 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper proposes OptBatch, an online data selection method for instruction tuning of large language models. The core idea combines three components: (1) loss-probability stratified sampling to maintain coverage across difficulty levels, (2) maximizing L2 Hessian-gradient distances within each stratum to enhance batch diversity, and (3) Hessian-approximated gradient optimization (borrowing from Adam's second-moment estimates) to stabilize selection across training steps. The method is evaluated on three instruction-following datasets (NetLit, LLaMaQA, WikiMatrix) using LLaMa-3-8B and ChatGLM-3-6B, with comparisons to Random, Online Hard, CCS, and InfoBatch baselines. Results show consistent loss reduction at 20-90% pruning rates, with computational savings of 20-50% reported.
+
+**Core contributions claimed (C1-C3):**
+- **C1**: An online loss-probability stratified sampling algorithm that prioritizes batch-level diversity rather than sample-level selection.
+- **C2**: A Hessian-gradient optimization mechanism that uses second-moment cumulative gradient information (from Adam) to guide subsequent batch selection, with a Lipschitz continuity proof for gradients.
+- **C3**: Empirical demonstration that OptBatch reduces computational cost by 20-40% while maintaining or improving loss across multiple datasets and two LLM families.
+
+**Overall assessment:** The paper addresses a practically important problem (data-efficient instruction tuning) and contains reasonable technical intuition. However, several fundamental issues limit its current contribution: (a) the claimed "Hessian gradient" is a simple norm ratio (||g/sqrt(v)||) rather than actual second-order information, which misrepresents the technical novelty; (b) the experimental evaluation relies almost exclusively on loss as the primary metric, with limited downstream task validation; (c) no variance/statistical significance is reported across any experiment; (d) the theoretical Lipschitz continuity proof (deferred to Appendix) contains several formal gaps; and (e) writing quality has notable typos and imprecise terminology. Novelty verification is deferred due to disabled external retrieval in this run.
+
+## Strengths
+**S1 — Practical and timely problem.** Data selection for instruction tuning is a practically important problem given the high cost of training large language models. The paper's focus on reducing computational cost while maintaining performance is well-motivated and addresses a real bottleneck in LLM fine-tuning pipelines.
+
+**S2 — Intuitive multi-component design.** The three-component pipeline (stratified sampling by loss probability, max-distance selection within strata, and second-moment gradient smoothing) is clearly described and follows a coherent intuition: maintain coverage across difficulty levels while maximizing diversity. The use of Adam-style second-moment estimates to stabilize batch-to-batch gradient variation is a reasonable engineering insight.
+
+**S3 — Multi-dataset, multi-model evaluation.** The paper evaluates on three diverse datasets (dialogue, QA, translation) spanning different task types and data scales (1.69M–100M samples), and uses two different model families (LLaMa-3-8B, ChatGLM-3-6B). This breadth provides some evidence of generalizability.
+
+**S4 — Explicit limitation discussion.** The Conclusion section includes a limitations paragraph (lm-head gradient inadequacy for long sequences, difficulty-diversity balance, loss-only evaluation), which is commendable for transparency and helps bound the claims.
+
+**S5 — Computational efficiency analysis.** Section 4.4 provides a FLOPs-based analysis that quantifies the computational savings from pruning, going beyond simple wall-clock time reporting. This is useful for practitioners evaluating the method's practical viability.
+
+## Weaknesses
+**W1 — Metric insufficiency: loss-only evaluation for most experiments (CRITICAL).** The main results (Figures 3-6, Section 4.2) rely almost exclusively on cross-entropy loss as the comparison metric. Loss reduction alone does not guarantee improved downstream task performance, response quality, or generalization. While the authors acknowledge this in the Limitations (Page 9 - Conclusion), the absence of accuracy/quality metrics for the primary claims weakens the paper's central thesis. The reference-based metrics (BLEU, ROUGE) are only reported for two datasets (Tables 1-2) under a single pruning rate (70%), and the GPT-4/Human evaluations are limited to the NetLit role-playing dataset only.
+
+**W2 — "Hessian gradient" is a misnomer (MAJOR).** Equation (8) defines `Ht = ||gt/sqrt(v_hat)||_2,axis=1`. This is a *normalized gradient norm* using the Adam second-moment estimate as a scaling factor, not a Hessian (second-derivative) quantity. The term "Hessian-approximated gradient optimization" (Section 3.2) is misleading because no Hessian matrix, Hessian-vector product, or curvature information is actually computed or approximated. This mislabeling inflates the perceived technical contribution.
+
+**W3 — No variance or statistical significance reporting (MAJOR).** Across all tables, figures, and experiments, zero measures of variance (standard deviation, confidence intervals) are reported. Given that improvements are often small (e.g., ~1-2 BLEU points in Tables 1-2), readers cannot assess whether OptBatch's gains are statistically significant or simply due to random seed variation. This is a critical reproducibility and credibility gap.
+
+**W4 — Ablation studies are insufficient (MAJOR).** The only ablation-like experiment is the feature selection comparison (Figure 9, Page 7), which compares embedding vs. gradient norm vs. Hessian gradient as features. However, there is no ablation of the three core components: (1) What is the contribution of stratified sampling alone? (2) What is the contribution of max-distance selection alone? (3) What is the contribution of the Hessian-gradient smoothing alone? Without these component ablations, readers cannot attribute observed gains to any specific design choice.
+
+**W5 — Theoretical justification has formal gaps (MAJOR).** The bound in Equation (7) states `||∇l(x,y;h'_S)|| ≤ rLs + sqrt(L^2 log(1/γ) / (2n))`. However, the proof (Appendix A) only establishes gradient Lipschitz continuity (i.e., `||∇l(x')-∇l(x)|| ≤ Ls||x'-x||`), which does NOT directly lead to the claimed bound on the *norm* of a single gradient. The connection between the r-cover argument, the Lipschitz constant, and the Hoeffding bound on gradient norms is not justified. The derivation jumps from a Lipschitz bound on gradient *differences* to a bound on gradient *magnitudes* without explanation. Moreover, the Hessian-boundedness assumption (Page 12, line 675: `||H(x)|| ≤ M`) is stated without justification.
+
+**W6 — Missing head-to-head comparison with standard data selection methods (MODERATE).** The baseline set (Random, Online Hard, CCS, InfoBatch) does not include several prominent methods: LESS [Xia et al., 2024], influence-function-based selection [Koh & Liang, 2017], or data Shapley-based approaches. Given that LESS specifically targets instruction tuning data selection, its absence is notable.
+
+**W7 — Computed gradient from lm-head only (MODERATE).** Section 2.1 uses only the LM head layer gradient as the feature representation. While this is computationally efficient, it ignores gradient information from intermediate layers, which may contain richer representation information. The authors acknowledge this limitation for long sequences but do not analyze how this choice may already be inadequate for the relatively short (2048-token) sequences used.
+
+**W8 — Writing quality issues (MINOR).** The abstract and introduction contain typos: "diveristy" (Page 2, line 64), and several sentences are overly long and hard to parse. The phrase "prioritizes batch selection methods with higher diveristy" is ungrammatical. The figure references (e.g., "Figure 9: Feature seletion") contain typos. These issues reduce professional polish but do not affect scientific validity.
+
+## Key Issues
+### Issue 1: Overclaiming of "Hessian" gradient (Severity: Major, Evidence: Page 4 - Section 3.2, Equation 8)
+The paper calls `Ht = ||gt/sqrt(v_hat)||_{2,axis=1}` a "Hessian gradient" and "Hessian-approximated gradient optimization." This is not a Hessian — it is a gradient norm normalized by Adam's second-moment estimate. A true Hessian approximation would involve second-order derivatives (curvature), e.g., via a diagonal Hessian, a Gauss-Newton matrix, or a Hessian-vector product approximation. The current usage inflates the contribution. **Fix:** Rename to "adaptive gradient normalization" or "second-moment normalized gradient." Revise Section 3.2 title accordingly.
+
+### Issue 2: Empirical evidence is insufficient to support cost-accuracy claims (Severity: Major, Evidence: Pages 6-8 - Section 4)
+The paper claims "OptBatch training in various pruning rates outperforms full dataset training" (Abstract) and "reducing computational cost by 20-40%." However, this is evaluated almost entirely through loss curves. For the two datasets where BLEU/ROUGE are reported (Tables 1-2), improvements are marginal (e.g., +0.07 BLEU-4 on LLaMaQA-LLaMa3, +0.70 on WikiMatrix) without any variance. For the NetLit dataset, the GPT-4 and human evaluations (Figures 7a-7b) show OptBatch achieving ~60% high-score vs. ~48% for baselines — but no inter-annotator agreement, no sample size, and no confidence intervals are reported. **Fix:** Add confidence intervals, multi-seed runs, and significance tests. Report downstream task accuracy (not just loss) for all datasets.
+
+### Issue 3: Missing component ablation (Severity: Major, Evidence: Pages 4-7 - Sections 3 and 4)
+OptBatch has three distinct design components: (a) loss-probability stratified sampling, (b) max-L2-distance selection within strata, and (c) Hessian-gradient (normalized gradient) smoothing. There is no ablation isolating these components. The only comparison varying features (Figure 9) changes the representation (embedding vs. gradient norm vs. normalized gradient) but does not vary the selection strategy itself. **Fix:** Add a controlled ablation: Full OptBatch vs. (a) only, (b) only, (c) only, and all pairs.
+
+### Issue 4: Formal gap in theoretical Lipschitz bound (Severity: Major, Evidence: Page 4 - Equation 7, Appendix A)
+The main text claims a bound `||∇l(x,y;h'_S)|| ≤ rLs + sqrt(...)`. But the proof in Appendix A only shows gradient Lipschitz continuity (gradient differences bounded by input distance), not a bound on the absolute gradient norm. The step from "gradients are Lipschitz" to "gradient norm at any point is bounded by rLs + statistical term" is logically incomplete. The Hoeffding argument is applied to loss values in the original Sener & Savarese proof, but the authors attempt to transfer it to gradient norms without re-establishing the required concentration conditions. **Fix:** Clarify the derivation or remove the claimed bound if it cannot be properly justified. At minimum, state clearly that the bound holds only under the coreset r-cover condition and provide the full reasoning chain.
+
+## Actionable Suggestions
+### Suggestion 1: Rename and reframe the "Hessian gradient" (Must)
+**Problem:** The term "Hessian gradient" in Sections 2.2, 3.2, and throughout is technically incorrect. Equation (8) defines Ht as a normalized gradient norm, not a Hessian approximation.
+**Action:** Replace "Hessian gradient" with "second-moment normalized gradient" or "adaptive gradient magnitude" throughout. Revise the title of Section 3.2 from "Hessian-Approximated Gradient Optimization" to "Second-Moment Normalized Gradient for Batch Selection." Update Algorithm 1 caption and Figure 1 labels accordingly.
+**Expected benefit:** Eliminates a major credibility risk and aligns terminology with the actual computation performed.
+
+### Suggestion 2: Add variance reporting and significance tests (Must)
+**Problem:** No standard deviations, confidence intervals, or significance tests are reported for any experiment.
+**Action:**
+- Run all experiments with at least 3 random seeds.
+- Report mean ± std for all tables (Tables 1-2) and loss curves (Figures 3-6).
+- For the main comparisons (OptBatch vs. best baseline), include paired p-values or bootstrap confidence intervals.
+- For GPT-4 and human evaluations (Figure 7), report Cohen's kappa for inter-annotator agreement and confidence intervals for percentage scores.
+**Expected benefit:** Transforms suggestive rankings into statistically grounded comparisons. Without this, the paper cannot justify its superiority claims.
+
+### Suggestion 3: Conduct full component ablation (Must)
+**Problem:** OptBatch has three components (stratified sampling, max-distance selection, second-moment normalization) but no ablation isolates their individual contributions.
+**Action:** Add an ablation table with the following rows:
+| Variant | Setup | Loss | BLEU-4 (WikiMatrix) |
+|---------|-------|------|---------------------|
+| Full OptBatch | as-is | | |
+| w/o stratified sampling (uniform random selection) | | | |
+| w/o max-distance selection (random within strata) | | | |
+| w/o second-moment normalization (use raw gradient norm) | | | |
+| Only stratified sampling (no diversity max) | | | |
+Run on WikiMatrix with LLaMa3 at 70% pruning rate. Use 3 seeds.
+**Expected benefit:** Identifies which component drives gains and guides future improvements; strengthens the scientific contribution.
+
+### Suggestion 4: Add downstream task accuracy metrics (Must)
+**Problem:** The paper predominantly uses loss as the evaluation metric, which does not directly measure task performance.
+**Action:**
+- For LLaMaQA (QA dataset), add accuracy/F1-score evaluation on a held-out test set.
+- For WikiMatrix (translation), the BLEU/ROUGE metrics are already provided — extend them to multiple pruning rates (not just 70%).
+- For NetLit (dialogue), the GPT-4/Human evaluation is appropriate as-is, but add sample sizes and confidence intervals.
+- Add a small-scale evaluation on an established benchmark (e.g., MMLU, MT-Bench, or AlpacaEval) to demonstrate that loss reduction translates to measurable quality gains.
+**Expected benefit:** Bridges the gap between loss-based evidence and claimed downstream performance improvements.
+
+### Suggestion 5: Revise theoretical claim or remove unsupported bound (Nice-to-have)
+**Problem:** Equation (7)'s bound `||∇l(x,y;h'_S)|| ≤ rLs + sqrt(...)` is not adequately justified by the Appendix proof.
+**Action:**
+- Option A (preferred): Restructure the theoretical section to only claim gradient Lipschitz continuity (which is correctly proved in Appendix A), and remove the unsupported norm-bound equation (7). Connect Lipschitz continuity to the algorithm's stability motivation rather than to a specific numerical bound.
+- Option B: Provide a complete, step-by-step derivation showing how the r-cover argument leads to the norm bound, with all intermediate concentration inequalities justified.
+**Expected benefit:** Removes a formal vulnerability that reviewers will likely challenge.
+
+### Suggestion 6: Improve baseline completeness (Nice-to-have)
+**Problem:** The baseline set excludes LESS [Xia et al., 2024], a directly relevant instruction-tuning data selection method.
+**Action:** Add LESS as a baseline, at minimum on one dataset with one pruning rate. If computational cost is a concern, use the smaller LLaMaQA dataset with LLaMa3 at 70% pruning.
+**Expected benefit:** Strengthens the related-work positioning and addresses a likely reviewer concern.
+
+### Suggestion 7: Fix typos and improve writing precision (Nice-to-have)
+- Page 2, line 64: "diveristy" → "diversity"
+- Page 8, Figure 9 caption: "seletion" → "selection"
+- Page 1, Abstract: "surpasses previous state-of-the-art methods" → "outperforms selected baselines under the evaluated settings" (more defensible)
+- Page 1, Introduction: Reduce sentence length in paragraphs 2-3; split compound sentences into clearer units.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Diagnosis
+
+The current introduction (Page 1 - Introduction) has three paragraphs with the following roles:
+- **P1:** General motivation (instruction tuning, data quality problem) — sets context adequately.
+- **P2:** Literature survey (online vs. offline methods, reference-based vs. gradient-based) — reads as a dense literature dump rather than a motivated gap analysis.
+- **P3:** Paper's approach and contribution list — the contributions are stated but the narrative logic from gap to solution is compressed.
+
+**Key problems:** (a) The transition from P2 (survey) to P3 (method) lacks a clear "shortcoming → our solution" connector. (b) The contribution list in P3 is descriptive rather than comparative ("we propose X" without explaining why existing solutions fail). (c) The research gap is implicit rather than explicitly stated.
+
+### Abstract Outline (Revised)
+
+**Target structure (4-5 sentences):**
+
+**S1 (Problem):** "Instruction tuning of large language models requires extensive annotated data and prolonged training, creating a need for efficient data selection methods that preserve task performance while reducing computational cost."
+
+**S2 (Gap):** "Existing data selection methods either rely on static features that ignore model feedback, prioritize directional diversity without considering sample learnability, or use reference models with high computational overhead."
+
+**S3 (Method):** "We propose OptBatch, an online batch selection method that combines loss-probability stratified sampling — to maintain distribution coverage across difficulty levels — with a second-moment normalized gradient diversity maximization criterion that selects maximally separated samples within each stratum."
+
+**S4 (Key result):** "Evaluated on three instruction-tuning datasets (NetLit, LLaMaQA, WikiMatrix) with LLaMa-3-8B and ChatGLM-3-6B models, OptBatch achieves lower loss than full-dataset training at 20-50% pruning rates, with consistent improvements over CCS, InfoBatch, and Online Hard baselines."
+
+**S5 (Bounded implication):** "These results suggest that batch-level diversity and learnability-aware sampling can reduce instruction-tuning costs without sacrificing model quality, though downstream task validation and statistical significance analysis remain important next steps."
+
+### Introduction Outline (Revised, 4 paragraphs)
+
+**P1 (Stakes and problem):** 
+- Role: Establish the practical importance of instruction tuning and the cost bottleneck.
+- Key claim: LLM instruction tuning is expensive; data selection can reduce cost.
+- Evidence anchor: Reference Ouyang et al. (2022) for instruction tuning; reference data pruning literature (Abbas et al., Tirumala et al.).
+- **Transition sentence to P2:** "However, existing approaches have fundamental limitations that we identify next."
+
+**P2 (Gap analysis — restructured from current literature-survey style):**
+- Role: Identify two specific failure modes of prior work.
+- Gap 1: "Offline methods (loss-based, influence-based, embedding-based) compute importance scores once and do not adapt as the model learns, causing stale selection."
+- Gap 2: "Online methods either rely on expensive reference models or emphasize directional diversity without ensuring that selected samples are learnable — i.e., neither too easy (redundant) nor too hard (noisy)."
+- Reference anchor: Mindermann et al. 2022 (reference-model approach); Hong et al. 2024 (orthogonal diversity limitation).
+- **Transition:** "These limitations motivate a batch-level selection strategy that jointly considers coverage, diversity, and learnability."
+
+**P3 (Proposed idea and method intuition):**
+- Role: Explain the high-level approach before technical details.
+- Key claims: (1) stratified sampling by loss probability ensures coverage; (2) maximizing L2 distance of normalized gradients within strata ensures diversity; (3) second-moment gradient normalization (from Adam) stabilizes selection across training steps.
+- **One-sentence intuition:** "OptBatch treats each batch as a stratified sample and greedily selects a diverse coreset that maximizes pairwise gradient distances while maintaining representation across difficulty levels."
+
+**P4 (Contributions and paper roadmap):**
+- Role: List 3 contributions concisely.
+- C1-1: "A loss-probability stratified sampling algorithm that preserves coverage across difficulty levels within each batch."
+- C1-2: "A diversity-maximizing selection criterion using second-moment normalized gradients, with a proof of gradient Lipschitz continuity."
+- C1-3: "Empirical evaluation on three datasets and two LLMs showing consistent loss reduction at 20-90% pruning rates, with 20-50% computational savings."
+
+### Storyline Alternative
+
+**Alternative Candidate — Problem-Solution-Evidence structure** (recommended for clarity):
+1. **Problem paragraph:** Start with a concrete scenario: "Fine-tuning a 8B-parameter LLM on 100M instruction samples requires weeks of GPU time and significant resources..." — makes the problem tangible.
+2. **Prior work paragraph:** Frame prior work as a taxonomy of failures (stale selection, expensive reference models, insufficient diversity), each with a concrete citation.
+3. **Solution paragraph:** Present OptBatch as the synthesis that addresses all three failures simultaneously, with a figure-driven walkthrough.
+4. **Evidence paragraph:** Preview key empirical results with numbers, then state contributions succinctly.
+
+This alternative storyline better satisfies the three alignment checks:
+- Problem alignment: The concrete scenario directly motivates why computational efficiency matters.
+- Variable alignment: "Loss probability," "normalized gradient distance," "stratum" appear naturally.
+- Contribution-evidence alignment: Evidence preview anchors reader expectations.
+
+## Priority Revision Plan
+The following revision plan is organized by priority level (P0 = immediate, publication-critical; P1 = important, strongly recommended; P2 = quality improvement).
+
+### P0 — Publication-Critical Items (Must fix before acceptance)
+
+| # | Issue | Action | Expected Effort | Impact |
+|---|-------|--------|----------------|--------|
+| P0.1 | "Hessian gradient" misnomer | Rename to "second-moment normalized gradient" throughout; revise Section 3.2 title and Algorithm 1 caption | 1 hour | Eliminates a major terminology error that undermines credibility |
+| P0.2 | Missing variance / significance | Add 3-seed runs for all experiments; report mean±std; add paired significance test for main comparisons | 3-5 GPU-days | Transforms suggestive rankings into statistically grounded evidence |
+| P0.3 | Loss-only evaluation for 2/3 datasets | Add accuracy/F1 for LLaMaQA; add multiple-pruning-rate BLEU for WikiMatrix; report downstream metrics in addition to loss | 2-3 GPU-days | Directly addresses the gap between claimed and measured task performance |
+
+### P1 — Strongly Recommended (Should fix in major revision)
+
+| # | Issue | Action | Expected Effort | Impact |
+|---|-------|--------|----------------|--------|
+| P1.1 | Missing component ablation | Run ablation table with 5 variants (see Actionable Suggestions Suggestion 3) on WikiMatrix with LLaMa3 at 70% pruning | 2-3 GPU-days | Isolates which component drives gains; strengthens scientific contribution |
+| P1.2 | Weak theoretical bound | Either remove Eq. (7) and keep only Lipschitz continuity claim, or add full derivation connecting r-cover to gradient norm bound | 1-2 days | Removes formal vulnerability |
+| P1.3 | Limited baseline set | Add LESS as a baseline on LLaMaQA with LLaMa3 at 70% pruning | 1-2 GPU-days | Addresses reviewer concern about missing state-of-the-art comparison |
+
+### P2 — Quality Improvement (Nice-to-have)
+
+| # | Issue | Action | Expected Effort | Impact |
+|---|-------|--------|----------------|--------|
+| P2.1 | NetLit evaluation rigor | Add sample sizes, confidence intervals, and inter-annotator agreement (Cohen's kappa) for GPT-4 and human evaluations | 1 day | Improves evaluation credibility |
+| P2.2 | Introduction narrative | Restructure to Problem→Gap→Solution→Evidence arc (see Storyline Options section) | 2-3 hours | Improves readability and reviewer engagement |
+| P2.3 | Typos and writing polish | Fix "diveristy," "seletion," and other typos; tighten verbose sentences | 1 hour | Professional presentation |
+
+### Revision Order (Recommended execution sequence)
+
+```text
+Step 1 (Day 1): Terminology fix (P0.1) + typos (P2.3) — quick wins
+Step 2 (Day 2-5): Multi-seed runs + significance tests (P0.2) — critical
+Step 3 (Day 5-7): Downstream metrics for LLaMaQA/WikiMatrix (P0.3)
+Step 4 (Day 7-10): Component ablation experiment (P1.1)
+Step 5 (Day 10-12): Baseline addition (P1.3) + theoretical revision (P1.2)
+Step 6 (Day 12-14): Introduction rewrite (P2.2) + evaluation rigor (P2.1)
+```
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup (Data/Model/Protocol) | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|----------------------------|---------|--------------|-----------------|-------------------|
+| E1 | OptBatch vs. baselines across datasets | ChatGLM3, pruning rate 70%, NetLit/LLaMaQA/WikiMatrix | Cross-entropy loss | OptBatch lowest loss on NetLit & WikiMatrix; competitive on LLaMaQA | C1, C3 | No variance; loss-only; only one pruning rate |
+| E2 | OptBatch across pruning rates | ChatGLM3, NetLit, α=20/50/70/90% | Cross-entropy loss | α=50% optimal; α=90% near α=20% loss | C3 | Single dataset; loss-only; no downstream metrics |
+| E3 | OptBatch across models | LLaMaQA, pruning 70%, LLaMa3 vs. ChatGLM3 | Cross-entropy loss | OptBatch lowest loss on both models | C3 | Single dataset; loss-only; no variance |
+| E4 | Feature selection (embedding vs. gradient norm vs. normalized gradient) | NetLit, ChatGLM3, pruning 70% | Cross-entropy loss | Normalized gradient best | C2 | Only one dataset/pruning rate; no analysis of interaction with selection strategy |
+| E5 | Reference-based metrics on LLaMaQA | LLaMa3 & ChatGLM3, pruning 70%, LLaMaQA | BLEU-4, ROUGE-1/2/L | OptBatch highest across all 4 metrics (both models) | C3 | Single pruning rate; no variance; marginal gains (~1-2 points BLEU) |
+| E6 | Reference-based metrics on WikiMatrix | LLaMa3 only, pruning 70%, WikiMatrix | BLEU-4, ROUGE-1/2/L | OptBatch highest across all 4 metrics | C3 | Single model/pruning rate; no variance |
+| E7 | GPT-4 evaluation (role-playing personality) | NetLit, ChatGLM3, pruning 70% | GPT-4 score (1-5) | OptBatch 60.5% high-score vs. CCS 52.6%, InfoBatch 43.5% | C3 | No confidence intervals; no inter-annotator agreement; single dataset |
+| E8 | Human evaluation (role-playing) | NetLit, ChatGLM3, pruning 70% | Human score (1-5) | OptBatch 61.8% high-score vs. CCS 47.5%, InfoBatch 47.9% | C3 | Sample size not reported; single dataset |
+| E9 | FLOPs efficiency analysis | NetLit, ChatGLM3, α=70% | FLOPs computation | ~30% FLOPs reduction vs. full batch | C3 | Analytical estimate only; no actual wall-clock timing reported |
+| E10 | OpenOrca experiment (Appendix C) | LLaMa3, OpenOrca, pruning 80% | Cross-entropy loss | All methods near-identical loss (pre-exposure suspected) | (none) | Authors acknowledge data leakage concern; no analysis |
+
+### Research-Theme Gap Diagnosis
+
+The current experiment package has three structural gaps:
+
+**Gap 1 — Metric insufficiency for core claims:** The paper's primary claim is that OptBatch "outperforms full dataset training" while "reducing computational cost by 20-40%." However, loss reduction is used as the primary evidence for most experiments (E1-E4, E10). Loss correlates with task performance but does not guarantee it, especially for generative instruction tuning where BLEU/ROUGE capture only n-gram overlap and may miss semantic quality. The GPT-4 and human evaluations (E7-E8) address this partially for NetLit but only cover a single task (role-playing) and lack statistical rigor.
+
+**Gap 2 — No causal attribution evidence:** Because no component ablation exists (noted in W4), the paper cannot attribute observed gains to any specific design choice. The gains could come from stratified sampling alone, from diversity maximization alone, from second-moment normalization alone, or from interactions between them. Without this decomposition, the scientific contribution is weakened — the paper demonstrates that *a combination of techniques* works, but not *why*.
+
+**Gap 3 — Missing head-to-head with closest instruction-tuning baseline:** LESS [Xia et al., 2024a] is cited in the Introduction but not included as a baseline. LESS is directly comparable because it also uses gradient-based influence estimation for instruction tuning data selection. Its absence means the "state-of-the-art" claim in the abstract is unsupported.
+
+### Proposed Research Experiments (P0/P1/P2)
+
+**P0 Experiment — Component Ablation (Priority: Critical)**
+| Field | Detail |
+|-------|--------|
+| Target Claim | C1 (stratified sampling), C2 (diversity + normalization) |
+| Hypothesis | All three components contribute, but stratification provides the largest gain |
+| Minimal Design | 5 variants: (1) Full OptBatch, (2) w/o stratified sampling (uniform random), (3) w/o max-distance selection (random within strata), (4) w/o second-moment normalization (raw gradient norm), (5) Only stratified sampling |
+| Controls/Baselines | Same optimizer, batch size, model (LLaMa3), dataset (WikiMatrix), pruning (70%) |
+| Metrics | Cross-entropy loss, BLEU-4 |
+| Success Criterion | At least one component shows a statistically significant ablation delta > 0.1 loss/BLEU |
+| Estimated Cost | ~2-3 GPU-days (16×A800) |
+| Expected Gain | Determines which component is essential; necessary for scientific credibility |
+
+**P0 Experiment — Multi-Seed Variance & Significance (Priority: Critical)**
+| Field | Detail |
+|-------|--------|
+| Target Claim | C3 (empirical superiority) |
+| Hypothesis | OptBatch gains are statistically significant (p < 0.05) against best baseline |
+| Minimal Design | All main experiments (E1-E6) repeated with 3 random seeds; report mean±std; paired t-test or bootstrap CI |
+| Controls/Baselines | Identical seed sets across methods |
+| Metrics | Loss, BLEU-4, ROUGE-L |
+| Success Criterion | Gains are significant at p<0.05 or 95% CI does not include zero |
+| Estimated Cost | ~5-7 GPU-days |
+| Expected Gain | Transforms observational comparisons into statistically grounded evidence |
+
+**P1 Experiment — Downstream Task Accuracy (Priority: High)**
+| Field | Detail |
+|-------|--------|
+| Target Claim | C3 (generalization and practical value) |
+| Hypothesis | Loss reduction translates to improved task accuracy |
+| Minimal Design | Add accuracy/F1 for LLaMaQA (QA task); add MMLU or MT-Bench evaluation for all methods at 70% pruning |
+| Controls/Baselines | Same as main experiments |
+| Metrics | Accuracy, F1, MT-Bench score |
+| Success Criterion | OptBatch achieves highest or statistically tied accuracy |
+| Estimated Cost | ~3-5 GPU-days |
+| Expected Gain | Bridges loss→performance gap; strengthens practical impact claim |
+
+**P2 Experiment — LESS Baseline Comparison (Priority: Medium)**
+| Field | Detail |
+|-------|--------|
+| Target Claim | "Surpasses previous state-of-the-art methods" (Abstract) |
+| Hypothesis | OptBatch outperforms LESS on LLaMaQA |
+| Minimal Design | Implement LESS selection for LLaMaQA data; compare loss/BLEU at 70% pruning |
+| Controls/Baselines | Same budget/optimizer; use LLaMa3 |
+| Metrics | Loss, BLEU-4 |
+| Success Criterion | OptBatch achieves lower loss or comparable BLEU |
+| Estimated Cost | ~2-3 GPU-days |
+| Expected Gain | Validates SOTA claim; addresses expected reviewer question |
+
+### ASCII Diagram — Experiment Upgrade Plan
+
+```text
+Current Experiment Package
+├── Loss-only evaluation (E1-E4, E10)     ← Weakness: insufficient for claims
+├── BLEU/ROUGE (E5-E6)                    ← Missing variance
+├── GPT-4/Human eval (E7-E8)              ← Missing CIs, sample sizes
+└── FLOPs estimate (E9)                   ← Missing wall-clock validation
+
+Upgrade Plan (P0 → P1 → P2)
+P0 (Critical):
+├── Add 3-seed variance (all experiments)
+├── Add significance tests
+└── Add component ablation table
+
+P1 (High):
+├── Add downstream accuracy (LLaMaQA)
+├── Add MMLU/MT-Bench eval
+└── Add CIs to GPT-4/human evaluations
+
+P2 (Medium):
+├── Add LESS baseline
+└── Add wall-clock timing (validate FLOPs model)
+```
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+### Scoring Rationale
+
+The scores are determined by three primary dimensions, ranked by importance:
+
+**1. Research Value & Novelty (weight: high):** The paper addresses a practically important problem with a reasonable multi-component design. However, the "Hessian gradient" misnomer inflates the apparent contribution, and the three individual components (stratified sampling, max-distance selection, second-moment normalization) are each individually known techniques. The key claimed novelty — batch-level "learnability" optimization through Hessian guidance — is not convincingly demonstrated because (a) the Hessian claim is terminologically incorrect, (b) no component ablation isolates what is novel, and (c) external comparison is deferred. **Score for this dimension: 5/10.**
+
+**2. Validity & Soundness (weight: high):** The experimental design has significant gaps: exclusive reliance on loss for most evaluations, no variance/statistical testing, no component ablation, and a theoretical bound that is not properly derived. Without these, the paper's central claims are not adequately supported. **Score for this dimension: 4/10.**
+
+**3. Reproducibility & Completeness (weight: medium):** The method description is fairly detailed and the algorithm pseudocode is provided. However, missing implementation details (e.g., exact K used for strata, how the Hessian gradient is computed in practice, which layers are used) and the absence of variance reporting limit full reproducibility. **Score for this dimension: 5/10.**
+
+### Final Scores
+
+| Dimension | Score (/10) |
+|-----------|-------------|
+| Research Value & Novelty | 5 |
+| Validity & Soundness | 4 |
+| Reproducibility & Completeness | 5 |
+| **Final Score (weighted composite, emphasizing novelty + research value)** | **5/10** |
+
+### Interpretation
+
+- **Final Score: 5/10** — The paper addresses an important problem and has reasonable technical intuition, but the current evidence is insufficient to support the strength of the claims made. The "Hessian gradient" terminology is misleading, the experimental evaluation lacks statistical rigor, and the theoretical contribution is incomplete.
+- **Post-Revision Target: [6, 7]/10** — If the authors (a) fix the "Hessian" terminology, (b) add multi-seed variance and significance tests, (c) include downstream task metrics for all datasets, (d) add a proper component ablation, and (e) either fix or remove the unsupported theoretical bound, the paper could reach a solid 6-7/10. This assumes the core method works as described and the ablated components show meaningful individual contributions.
+
+### Revision Feasibility
+
+The P0 items (terminology fix, variance reporting, downstream metrics) are all feasible within 1-2 weeks of additional GPU time. The P1 items (ablation, theoretical revision, baseline addition) are also feasible but require careful experiment design. The P2 items are minor polish. Overall, the paper's contribution is **recoverable** with moderate additional work.
+
+### Paper Coverage Audit
+
+| Page | Section | Annotation Count | Coverage Status |
+|------|---------|-----------------|-----------------|
+| 1 | Abstract + Introduction (P1-P3) | 0 | Covered in report text; annotations deferred pending retrieval-disabled mode resolution |
+| 2 | Introduction (P3) + 2.1 Gradient Norm | 0 | Covered in report |
+| 3 | 2.2 Adaptive Moment Estimation + 3 Method intro | 0 | Covered in report |
+| 4 | 3.1 Lipschitz + 3.2 Hessian Gradient + Algo 1 | 0 | Covered in report |
+| 5 | 3.3 Online Batch Selection + 4.1 Setup | 0 | Covered in report |
+| 6 | 4.2 Main Results (Figures 3-6) | 0 | Covered in report |
+| 7 | 4.2 Results (continued) + 4.3 Evaluation | 0 | Covered in report |
+| 8 | Tables 1-2 + 4.4 Efficient Performance | 0 | Covered in report |
+| 9 | 5 Related Work + 6 Conclusion | 0 | Covered in report |
+| 10-12 | References | 0 | Non-substantive |
+| 12-17 | Appendices A-D | 0 | Non-substantive for main claims |
+| **Total** | | **0** | Report covers all substantive sections |
+
+### Note on Annotation Count
+
+Due to Retrieval-Disabled Mode (external paper search unavailable in this run), the system gate requiring 3 paper_search calls before pdf_annotate is active, preventing PDF annotation creation. All substantive review findings are delivered through this final report instead. The report has been structured to provide paragraph-level coverage equivalent to PDF annotations, with explicit location anchors (Page N - Section) throughout.

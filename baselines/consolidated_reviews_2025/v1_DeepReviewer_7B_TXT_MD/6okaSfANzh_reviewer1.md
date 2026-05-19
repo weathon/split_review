@@ -1,0 +1,53 @@
+### Summary
+
+This paper proposes a cascade framework to reduce the cost of using large language models (LLMs) in reasoning tasks. The framework uses a cheaper LLM to generate initial answers and then employs a more expensive LLM to solve difficult questions. The authors introduce two methods for detecting answer consistency: one based on answer consistency and the other based on answer consistency verification. They conduct experiments on six reasoning datasets, demonstrating that their proposed LLM cascade achieves comparable performance to using solely the stronger LLM while significantly reducing costs.
+
+### Soundness
+
+3 good
+
+### Presentation
+
+3 good
+
+### Contribution
+
+2 fair
+
+### Strengths
+
+1. This paper proposes a cascade framework to reduce the cost of using large language models (LLMs) in reasoning tasks. The idea is straightforward and easy to follow.
+2. The authors conduct experiments on six reasoning datasets to verify the performance of their proposed method.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+1. The novelty of this paper is limited. The idea of using a cheaper LLM to solve easy tasks and a more expensive LLM to solve difficult tasks is not new. The authors should compare their method with existing methods, such as the one in "Self-Consistency rectifies itself". The paper lacks a thorough comparison with existing methods, particularly those that also leverage consistency for routing decisions. The authors should clarify how their approach differs in terms of both methodology and performance, especially considering that the core idea of using consistency to determine when to invoke a stronger model is already present in prior work. A more detailed analysis of the differences in the consistency mechanisms and their impact on the final performance is needed.
+2. The authors only compare the cost of using only the stronger LLM and their proposed method. It is better to also compare the cost of using only the cheaper LLM. The paper should include a comparison with a baseline that uses the cheaper LLM for all tasks. This is crucial for understanding the trade-offs between cost and performance. The authors need to demonstrate that their method provides a better cost-performance trade-off than simply using the cheaper LLM, even if it means sacrificing some accuracy. This comparison is essential for evaluating the practical utility of the proposed approach.
+3. The authors only evaluate the performance of their proposed method on reasoning datasets. It would be better to also evaluate the performance on other tasks, such as translation. The evaluation is limited to reasoning tasks, which may not fully capture the general applicability of the proposed method. The authors should evaluate their method on a more diverse set of tasks, including tasks that require different types of reasoning or knowledge, such as translation or summarization. This would provide a more comprehensive assessment of the method's strengths and weaknesses.
+
+### Suggestions
+
+The paper would benefit significantly from a more rigorous comparison with existing methods that utilize consistency for routing decisions. Specifically, the authors should implement and compare their approach against methods like "Self-Consistency rectifies itself" and analyze the differences in the consistency mechanisms used. This comparison should not only focus on the final performance but also on the computational cost and the number of LLM calls required. A detailed analysis of how the proposed method's consistency measure differs from existing methods and how these differences impact the routing decisions and overall performance is crucial. The authors should also discuss the limitations of their approach in comparison to these existing methods, highlighting the scenarios where their method performs better or worse. This would provide a more nuanced understanding of the contribution of their work.
+
+To address the lack of comparison with a baseline using only the cheaper LLM, the authors should include experiments that evaluate the performance of the cheaper LLM across all tasks. This would allow for a direct comparison of the cost-performance trade-off between the proposed method and the cheaper LLM. The authors should also analyze the cases where the proposed method performs worse than the cheaper LLM and discuss the reasons for these performance differences. This analysis should include a discussion of the types of tasks where the proposed method is most effective and the types of tasks where it is less effective. Furthermore, the authors should explore the possibility of using the cheaper LLM for tasks where it performs well and the more expensive LLM for tasks where it excels, potentially leading to a more cost-effective and accurate system.
+
+Finally, the authors should expand the evaluation of their method to include a more diverse set of tasks beyond reasoning. This could include tasks such as translation, summarization, or question answering on different domains. This would provide a more comprehensive assessment of the method's general applicability and robustness. The authors should also analyze the performance of their method on tasks that require different types of reasoning or knowledge. This analysis should include a discussion of the types of tasks where the proposed method performs well and the types of tasks where it is less effective. This would provide a more complete picture of the strengths and weaknesses of the proposed method and its potential for real-world applications.
+
+### Questions
+
+See weaknesses.
+
+### Rating
+
+5: marginally below the acceptance threshold
+
+### Confidence
+
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+**********

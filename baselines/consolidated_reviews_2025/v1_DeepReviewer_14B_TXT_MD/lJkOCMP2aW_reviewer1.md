@@ -1,0 +1,54 @@
+### Summary
+
+This paper proposes a new model called Pathformer for time series forecasting. The main idea is to use a multi-scale transformer architecture with adaptive pathways to capture the diverse variations and fluctuations in real-world time series data. The model divides the time series into patches of different sizes to view the data at different temporal resolutions, and uses dual attention to capture both global correlations and local details. The adaptive pathways allow the model to adjust the multi-scale modeling process based on the input data, selecting the optimal patch sizes and attention mechanisms for each layer. The paper demonstrates that Pathformer achieves state-of-the-art performance on eleven real-world datasets and exhibits strong generalization abilities under various transfer scenarios.
+
+### Soundness
+
+2 fair
+
+### Presentation
+
+2 fair
+
+### Contribution
+
+2 fair
+
+### Strengths
+
+1. The paper proposes a novel multi-scale transformer architecture that integrates both temporal resolution and temporal distance for multi-scale modeling, which is a unique approach compared to existing methods.
+
+2. The paper is well-written and easy to follow.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+1. The motivation of the paper is not clear. The authors claim that the incompleteness of multi-scale modeling and the fixed multi-scale modeling process are the two main challenges in Transformers for time series forecasting. However, it is not explained why these are the main challenges and how they affect the performance of time series forecasting. For example, the authors could provide some examples of time series data that exhibit different scales and fluctuations, and show how existing methods fail to capture these characteristics. Also, the authors should explain the meaning of temporal resolution and temporal distance more clearly, and how they relate to the multi-scale modeling problem.
+
+2. The technical contribution is limited. The multi-scale division and dual attention mechanisms are similar to existing methods in CNN and Transformers. The main novelty seems to come from the adaptive pathways, but the details of how they work are not very clear. For example, how are the pathway weights generated and updated? How do they ensure the sparsity and diversity of the selected patch sizes? The authors should provide more analysis and explanation of the adaptive pathways mechanism, and compare it with other adaptive methods in the literature.
+
+### Suggestions
+
+The paper needs to strengthen its motivation by providing concrete examples of time series data that exhibit multi-scale characteristics and demonstrating how existing methods struggle with these. For instance, the authors could show how a purely global model fails to capture rapid local fluctuations, or how a fixed multi-scale model might miss important temporal dynamics that vary across the time series. The concepts of temporal resolution and temporal distance should be defined more rigorously, perhaps with mathematical formulations, to clarify their role in the proposed multi-scale modeling approach. It would be beneficial to illustrate how different patch sizes relate to different temporal resolutions and how the dual attention mechanism captures both local and global dependencies at these resolutions. Furthermore, the authors should provide a more detailed explanation of how the adaptive pathways address the limitations of fixed multi-scale models, including a discussion of the trade-offs between model complexity and performance.
+
+To enhance the technical contribution, the authors should provide a more in-depth analysis of the adaptive pathway mechanism. Specifically, the paper should detail the mathematical formulation of how pathway weights are generated and updated, including the specific functions used and the parameters involved. The authors should also explain how the model ensures sparsity and diversity in the selected patch sizes, and how these properties contribute to the model's performance. A comparison with other adaptive methods, such as those using reinforcement learning or evolutionary algorithms, would help to contextualize the novelty and effectiveness of the proposed approach. It is crucial to demonstrate that the adaptive pathways are not just a simple selection mechanism but rather a sophisticated method that dynamically adjusts the model's architecture based on the input data.
+
+Finally, the paper should include more comprehensive experimental results to support the claims made. This includes a more detailed ablation study that systematically evaluates the impact of each component of the proposed model, such as the multi-scale division, dual attention, and adaptive pathways. The authors should also provide a more thorough comparison with state-of-the-art methods, including a discussion of the strengths and weaknesses of each approach. The experimental results should be presented with clear visualizations and statistical analysis to demonstrate the significance of the proposed method. Furthermore, the authors should discuss the computational cost of the proposed method and compare it with other methods, which is important for practical applications.
+
+### Questions
+
+Please refer to the weaknesses.
+
+### Rating
+
+5: marginally below the acceptance threshold
+
+### Confidence
+
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+**********

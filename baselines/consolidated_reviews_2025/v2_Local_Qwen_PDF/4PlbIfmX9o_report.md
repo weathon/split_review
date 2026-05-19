@@ -1,0 +1,86 @@
+## Summary
+# Final Review Report
+
+## Summary
+This paper proposes GOODRL (Graph assisted Offline-Online Deep Reinforcement Learning), a novel approach for Dynamic Workflow Scheduling (DWS) in cloud computing. The authors address the challenges of heterogeneous machine configurations, unpredictable workflow arrivals, and evolving environments by introducing three key innovations: (1) a task-specific graph representation with a Graph Attention Actor Network for pairwise action scoring; (2) a system-oriented graph representation with a Graph Attention Critic Network for holistic state evaluation; and (3) an offline-online RL framework combining imitation learning, gradient control, and decoupled high-frequency critic training. Experiments on simulated cloud environments demonstrate that GOODRL achieves lower mean flowtime compared to heuristic baselines (EST, PEFT, HEFT), genetic programming hyper-heuristics (GPHH), and existing DRL methods (ERL-DWS), while maintaining stability under dynamic workload fluctuations.
+
+## Strengths
+1. **Clear Problem Formulation and Motivation:** The paper effectively identifies the limitations of static scheduling heuristics and existing GNN-based methods in handling the dynamic, open-ended nature of cloud workflow scheduling. The motivation for decoupling actor and critic graph representations is well-grounded in the distinct information requirements of action selection versus state evaluation.
+2. **Novel Dual-Graph Architecture:** The introduction of a task-specific graph for the actor (enabling pairwise action scoring without mean-pooling dilution) and a system-oriented graph for the critic (capturing long-range dependencies via self-attention) represents a thoughtful architectural design tailored to the DWS problem.
+3. **Comprehensive Experimental Evaluation:** The experiments cover a wide range of scenarios, including offline and online settings, varying workflow arrival rates, and different machine configurations. The inclusion of ablation studies for both network components and online learning techniques provides valuable insights into the contribution of each module.
+4. **Practical Adaptability:** The offline-online learning framework, particularly the gradient control and decoupled critic training, demonstrates a practical approach to maintaining policy stability in live scheduling environments, which is a significant challenge in real-world deployment.
+
+## Weaknesses
+1. **Overgeneralization of Prior GNN Limitations:** The introduction claims that standard GNNs suffer from "fixed graph structures" and "unmodified RL methods" that limit scalability. This is a broad generalization, as several recent works apply GNNs to dynamic scheduling with evolving graphs. The specific failure mode of standard GNNs in the DWS context (e.g., computational overhead for frequent graph reconstruction) is not explicitly detailed.
+2. **Inconsistent Online Improvement Claims:** The text states that "Ours-Online consistently improves upon Ours-Offline," but Table 2 shows scenarios where the offline policy actually achieves a lower mean flowtime. This overstatement undermines the credibility of the experimental analysis.
+3. **Biased Advantage Estimation in Online Learning:** Algorithm 2 calculates the advantage using a truncated return over $T_w$ steps without a bootstrap term ($\gamma^{T_w} V_\phi(s_{i+T_w})$). This omission introduces a bias in the advantage estimation, which can degrade policy performance, especially if the time window is short relative to workflow completion times.
+4. **Lack of Limitations Discussion:** The conclusion summarizes contributions and future work but omits a discussion of current limitations (e.g., reliance on simulated environments, specific workflow patterns, or computational overhead of pairwise graph construction), reducing scientific transparency.
+
+## Key Issues
+1. **Methodological Bias in Online Advantage Calculation (Major):** The online learning algorithm (Algorithm 2) computes the advantage as $\hat{A}_i = R_i - V_\phi(s_i)$, where $R_i$ is a truncated return over $T_w$ steps. Without adding the bootstrap term $\gamma^{T_w} V_\phi(s_{i+T_w})$, the advantage estimate is biased, ignoring the expected future return beyond the window. This can lead to suboptimal policy updates.
+2. **Factual Inconsistency in Online Results Claim (Major):** The manuscript claims that online learning "consistently improves" upon offline performance. However, Table 2 shows cases where the offline policy outperforms the online one (e.g., scenario ⟨6×4, 5.4, 10k⟩). This contradiction needs to be addressed to maintain factual accuracy.
+3. **Aggressive Gradient Control Rationale (Minor):** The gradient control mechanism sets the policy gradient to zero when it exceeds a dynamic threshold. While this ensures stability, completely zeroing the gradient (rather than clipping it) may stall learning during high-variance phases. The rationale for this aggressive choice over standard clipping is not explained.
+
+## Actionable Suggestions
+1. **Fix Online Advantage Calculation:** Update Algorithm 2, Line 17 to include the bootstrap term: `Calculate Advantage: Â_i = R_i + γ^Tw * V_φ(s_{i+Tw}) - V_φ(s_i);`. This ensures unbiased temporal-difference learning in the online setting.
+2. **Bound Online Improvement Claims:** Revise the text discussing Table 2 to reflect that online learning provides *average* or *scenario-dependent* improvements. Acknowledge cases where the offline policy is already near-optimal, and frame online learning as a mechanism for adaptability in high-arrival-rate settings rather than guaranteed monotonic improvement.
+3. **Clarify Gradient Control Rationale:** Add a brief justification for zeroing the gradient when it exceeds the threshold. Explain whether this prioritizes operational stability over rapid adaptation, or consider mentioning standard gradient clipping as an alternative that was evaluated.
+4. **Add Limitations Discussion:** Insert one concise sentence in the conclusion summarizing primary limitations (e.g., reliance on simulated environments, specific workflow patterns, or computational overhead of pairwise graph construction) before introducing future work.
+5. **Strengthen Ablation Evidence in Main Text:** Include key quantitative deltas (e.g., percentage reduction in loss or flowtime) directly in the main text ablation summary to substantiate "significant" claims without requiring appendix navigation.
+
+## Storyline Options + Writing Outlines
+### Abstract Outline (Complete)
+- **S1 (Problem & Domain):** Dynamic workflow scheduling (DWS) in cloud computing faces substantial challenges due to heterogeneous machine configurations, unpredictable workflow arrivals, and constantly evolving environments.
+- **S2 (Significance/Challenge):** Existing methods often assume homogeneous setups or static conditions, limiting their flexibility and adaptability in real-world scenarios.
+- **S3 (Prior Gap):** Current GNN-based approaches struggle with the open-ended nature of DWS, as standard architectures assume fixed graph topologies and share representations between actor and critic networks, forcing a compromise between local action differentiation and global state evaluation.
+- **S4 (Proposed Method):** We propose GOODRL, a Graph assisted Offline-Online Deep Reinforcement Learning approach featuring a task-specific graph for pairwise actor scoring, a system-oriented graph for holistic critic evaluation, and an offline-online training framework with gradient control.
+- **S5 (Key Result & Bounded Implication):** Experiments on diverse offline and online scenarios demonstrate that GOODRL consistently achieves lower mean flowtime compared to selected baselines, while maintaining stable performance under fluctuating workflow arrival rates.
+
+### Introduction Outline (Complete)
+- **P1 (Big Picture & Problem):** Define DWS, its DAG-based workflow structure, and the goal of minimizing mean flowtime across heterogeneous machines. Highlight the dynamic nature (unpredictable arrivals, evolving environments).
+- **P2 (Gap in Prior Work):** Critique static heuristics (PDRs) and GPHH for their inability to adapt in real-time. Narrow the critique of GNNs to their specific failure modes in DWS (e.g., overhead of frequent graph reconstruction, inability to handle open-ended arrivals without retraining).
+- **P3 (Proposed Solution & Contributions):** Introduce GOODRL. Explicitly state the three innovations: (1) Task-specific graph + Actor Network for pairwise action scoring; (2) System-oriented graph + Critic Network for long-range dependency modeling; (3) Offline-online RL method with gradient control and decoupled critic training.
+- **P4 (Evidence Preview):** Briefly summarize experimental results, noting consistent mean flowtime reductions and robust adaptability in online scenarios, while acknowledging the simulation-based evaluation scope.
+
+## Priority Revision Plan
+| Priority | Issue | Action | Expected Impact |
+|---|---|---|---|
+| **P0 (Critical)** | Biased advantage estimation in Algorithm 2. | Add bootstrap term $\gamma^{T_w} V_\phi(s_{i+Tw})$ to advantage calculation. | Fixes methodological bias, ensuring valid online policy updates. |
+| **P0 (Critical)** | Factual inconsistency in online results claim. | Revise text to reflect scenario-dependent improvements; acknowledge offline superiority in some cases. | Restores factual accuracy and reviewer trust. |
+| **P1 (Major)** | Overgeneralization of prior GNN limitations. | Narrow critique to specific DWS failure modes (e.g., graph update overhead). | Strengthens novelty argument and reduces reviewer pushback. |
+| **P1 (Major)** | Aggressive gradient control rationale. | Justify zeroing gradient vs. clipping; explain stability trade-off. | Clarifies design choice and defends against stalled-learning concerns. |
+| **P2 (Minor)** | Lack of limitations discussion. | Add one sentence on current boundaries (simulation, patterns) in conclusion. | Improves scientific transparency and defensibility. |
+| **P2 (Minor)** | Ablation claims lack quantitative deltas. | Include key improvement percentages in main text. | Strengthens evidence without requiring appendix navigation. |
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|---|---|---|---|---|---|---|
+| E1 | Offline performance vs baselines | 12 scenarios (1k-5k workflows), 5x5/6x4 machines | Mean flowtime | GOODRL ranks 1st avg (1.17) | C1, C2 | No variance/std reported in main text |
+| E2 | Online performance vs baselines | 6 scenarios (5k-20k workflows) | Mean flowtime | Ours-Online ranks 1st avg (1.17) | C3 | Claim of "consistent improvement" contradicted by data |
+| E3 | Actor ablation (TSEM) | Imitation learning loss | Cross-entropy loss | Pairwise + focused embedding best | C1 | Only loss reported, no flowtime impact |
+| E4 | Critic ablation (SOEM) | Value loss | MSE | Bi-directional + self-attention best | C2 | Only loss reported |
+| E5 | Online learning ablation | Gradient control, decoupled critic | Flowtime improvement | Both techniques stabilize learning | C3 | Small gains (1-2%) |
+| E6 | Scalability/Transferability | Varied patterns/rates, FJSS | Flowtime | Handles changes without retraining | Generalization | FJSS is static, not fully dynamic |
+
+### Research-Theme Gap Diagnosis
+The core research value lies in the dual-graph architecture and online adaptation stability. However, the evidence for online adaptation is thin (small gains, inconsistent across scenarios), and the advantage calculation bias threatens the validity of the online learning claim.
+
+### Proposed Research Experiments
+| Target Claim | Hypothesis | Minimal Design | Controls | Metrics | Success Criterion | Cost | Gain |
+|---|---|---|---|---|---|---|---|
+| C3 (Online Stability) | Bootstrap term fixes bias | Add $\gamma^{T_w} V(s_{i+Tw})$ to Alg 2 | Current biased version | Flowtime, Advantage variance | Stable improvement over offline | Low | High (Validity) |
+| C3 (Online Adaptation) | Online learning helps in high-variance settings | Test with sudden arrival rate shifts | Static offline policy | Flowtime drop/recovery time | Faster recovery than offline | Low | High (Robustness) |
+| C1/C2 (Architecture) | Dual-graph reduces inference overhead | Measure graph construction time | Single shared graph | Inference latency | Competitive latency | Low | Medium (Practicality) |
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score:** 6/10
+**Post-Revision Target:** [7, 8]/10
+
+**Rationale:** The paper presents a well-motivated and architecturally sound approach to dynamic workflow scheduling, with a clear dual-graph design that addresses specific limitations of prior GNN-based methods. The experimental evaluation is comprehensive, covering offline and online scenarios with relevant baselines. However, the score is held back by a methodological bias in the online advantage calculation (Algorithm 2), factual inconsistencies in the online improvement claims, and overgeneralizations regarding prior GNN limitations. Fixing the advantage bias and bounding the claims will significantly improve the paper's validity and defensibility, justifying a post-revision target of 7-8/10.

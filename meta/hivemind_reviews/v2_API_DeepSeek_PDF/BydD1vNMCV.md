@@ -1,0 +1,266 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper proposes using the stochastic neural network (StoNet) as a bridge between linear models and deep neural networks (DNNs) for statistical inference. The StoNet reformulates a DNN as a composition of linear/logistic regressions with additive Gaussian noise at each layer. The authors make three main contributions: (C1) adapting Lasso-based sparse learning theory from linear models to the StoNet, establishing consistency of structure selection and uncertainty quantification via Eve's law; (C2) leveraging the asymptotic equivalence between StoNet and DNN to justify the consistency of Lasso-penalized DNN training—a widely-used practice lacking theoretical justification; and (C3) proposing a post-StoNet procedure for prediction uncertainty quantification in large-scale DNNs by fitting a sparse StoNet on the last-hidden-layer representation.
+
+The paper is primarily theoretical with supporting experiments on synthetic data, CoverType feature selection, CIFAR10 calibration, and four UCI regression datasets. Strengths include rigorous theoretical development with explicit convergence rates, a novel bridging concept between linear models and deep learning, and promising calibration improvement on CIFAR10. However, there are notable concerns: the prediction interval construction uses non-standard interval averaging instead of proper multiple imputation pooling; the comparison baselines for uncertainty quantification are incomplete (missing MC dropout, deep ensembles); the regression experiments show uneven coverage that weakens "superiority" claims; and the strong theoretical assumptions (extremely small noise variances that vanish with depth) limit practical transferability. Novelty and comparison conclusions are deferred for manual literature verification due to retrieval unavailability in this run.
+
+## Strengths
+1. **Novel theoretical bridging concept**: The idea of using a stochastic neural network (StoNet) to transfer sparse learning theory from linear models to DNNs is conceptually elegant. Theorem 1 provides explicit convergence rates for the IRO estimator under Lasso penalty, and Corollary 1 extends these results to justify the widely-used practice of Lasso-penalized DNN training, which previously lacked theoretical grounding.
+
+2. **Rigorous mathematical development**: The paper develops its theory with careful attention to assumptions (A1-A7), provides explicit convergence rates depending on network widths, depths, noise variances, and sample size, and proves consistency for both parameter estimation and structure selection. The proof strategy of decomposing the StoNet into independent layer-wise regressions via the Markov structure (Eq. 4) is a clever technical contribution.
+
+3. **Impressive calibration results on CIFAR10**: The post-StoNet procedure achieves substantially lower Expected Calibration Error (ECE) compared to temperature scaling and matrix scaling across three architectures (DenseNet40, ResNet110, WideResNet-28-10). For DenseNet40, ECE drops from 0.0117 (temperature scaling) to 0.0047 (post-StoNet)—a 60% reduction. These results are reported with standard deviations over 10 runs, indicating statistical reliability.
+
+4. **Prediction intervals shorter than conformal**: On four UCI regression datasets, post-StoNet produces 90% prediction intervals that are 10-16% shorter than split conformal prediction while maintaining comparable coverage. The improvement is consistent across dataset sizes (from 1,599 to 515,345 samples), suggesting good scalability.
+
+5. **Clear contribution structure**: The paper is well-organized with three explicit contribution claims in the introduction, each mapped to specific theoretical results (Theorem 1, Corollary 1) and experimental validations. The notation is carefully defined and the mathematical presentation is clear for readers familiar with high-dimensional statistics.
+
+6. **Comprehensive appendices**: The supplementary material provides detailed assumptions, full proofs, algorithm pseudocode, hyperparameter settings, and additional experimental results, supporting reproducibility.
+
+## Weaknesses
+1. **Prediction interval averaging is not statistically standard (Major).** The procedure in Section 4 averages the endpoints of $m$ Wald intervals (step iii) rather than using Rubin's multiple imputation pooling rules. This non-standard approach lacks theoretical coverage guarantees and could produce intervals that are either too narrow (if between-imputation variance is non-negligible) or unnecessarily wide.
+
+2. **Incomplete uncertainty quantification baselines (Major).** The regression experiments compare post-StoNet only to split conformal prediction. Widely-used UQ methods—deep ensembles (Lakshminarayanan et al., 2017), MC dropout (Gal & Ghahramani, 2016), and Bayesian neural networks—are not included. On CIFAR10, only temperature/matrix scaling are compared but not deep ensembles or MC dropout. This makes the "superiority" claim premature and incomplete.
+
+3. **Strong theoretical assumptions limit practical applicability (Major).** Assumption A1-(v) requires noise variances $\sigma_k^2$ to satisfy $d_{h+1}(\prod_{i=k+1}^h d_i^2)d_k\sigma_k^2 \prec 1/h$, which forces $\sigma_k^2$ to be astronomically small in practice (e.g., $10^{-14}$ for early layers in the synthetic experiments). This raises the question of whether the StoNet's stochastic augmentation provides any meaningful statistical advantage over a deterministic DNN when $\sigma^2$ is essentially zero.
+
+4. **No quantitative variable selection assessment (Minor-Major).** The synthetic example claims StoNet "correctly identifies" true variables, but this is assessed qualitatively from regularization paths. No quantitative metrics (true positive rate, false discovery rate, selection accuracy at $\lambda$ chosen by cross-validation) are reported. The variable selection performance across the three $\sigma^2$ settings is not compared numerically.
+
+5. **CoverType feature selection lacks validation and comparison (Minor).** Section 6.1 shows feature gradient paths on CoverType but does not (a) report which features are selected at optimal $\lambda$, (b) validate against domain knowledge, or (c) compare against simpler feature selection methods (Lasso on raw features, random forest importance). The analysis is purely illustrative and does not add strong evidence for the method's utility.
+
+6. **Conclusion overclaims without bounds (Minor).** The conclusion states "significantly improves prediction uncertainty quantification" without statistical significance tests. It also claims superiority over "other post processing calibration methods" but only tested temperature/matrix scaling on CIFAR10.
+
+7. **Related work omits Bayesian deep learning (Minor).** The related works section discusses stochastic neural networks and the NTK line but does not cover Bayesian neural networks, MC dropout, or deep ensembles as alternative UQ approaches. This omission weakens the positioning of the post-StoNet contribution.
+
+8. **Extension claim to CNNs is unsupported (Minor).** The text claims results "can be extended to convolutional neural network" without addressing that weight sharing and pooling operations break the independence assumptions used in the proofs.
+
+## Key Issues
+### Issue 1: Non-standard prediction interval construction (P0 — Must fix)
+**Location:** Page 6 — Section 4, Prediction Interval procedure step (iii)
+**Risk:** Invalid uncertainty quantification claims
+The procedure averages $m$ Wald interval endpoints instead of using proper multiple imputation pooling (Rubin's rules). This is not a standard statistical procedure and lacks theoretical coverage guarantees. If the $m$ imputations have non-negligible between-imputation variance, the averaged interval can be too narrow, falsely suggesting higher precision. Given that uncertainty quantification is a core contribution, this must be corrected.
+
+### Issue 2: Incomplete uncertainty quantification baselines (P0 — Must fix)
+**Location:** Page 9 — Section 6.2, Table 2 and Table 3
+**Risk:** Overclaimed "superiority" over conformal methods
+The paper compares post-StoNet only to split conformal (regression) and temperature/matrix scaling (classification). Deep ensembles and MC dropout—the most widely-used UQ methods—are absent. Without these baselines, the claim that post-StoNet "significantly improves prediction uncertainty quantification" is not supported. Moreover, Table 3 shows post-StoNet has lower coverage than split conformal on Protein (89.41% vs 90.04%), which contradicts the superiority narrative.
+
+### Issue 3: Practical tension between theoretical assumptions and experimental practice (P0 — Must fix)
+**Location:** Page 3 — Lemma 1, Assumption A1-(v), and Appendix G hyperparameter settings
+**Risk:** Theoretically-guaranteed equivalence may not hold in finite samples with practical $\sigma^2$ choices
+Assumption A1-(v) requires noise variances to satisfy $d_{h+1}(\prod_{i=k+1}^h d_i^2)d_k\sigma_k^2 \prec 1/h$, forcing $\sigma_k^2$ to be extremely small (e.g., $10^{-14}$ for early layers in the two-hidden-layer synthetic example). At these values, the StoNet is practically deterministic, which (a) makes the "stochastic" augmentation a mathematical device rather than a meaningful Bayesian regularization, and (b) raises questions about whether the asymptotic equivalence holds at realistic sample sizes.
+
+### Issue 4: No quantitative variable selection metrics (P1 — Should fix)
+**Location:** Page 7 — Section 5, variable selection results
+**Risk:** Variable selection claims are not empirically verified
+The synthetic data analysis shows regularization paths but does not report true positive rate, false discovery rate, or selection accuracy at the operating $\lambda$. The paper claims StoNet "correctly identifies" true variables, but this conclusion is drawn from visual inspection of gradient paths rather than from the threshold rule in Theorem 1(iii). The three $\sigma^2$ settings (half, single, double) are not compared quantitatively.
+
+### Issue 5: Conclusion overclaims without statistical testing (P1 — Should fix)
+**Location:** Page 9 — Section 7 Conclusion
+**Risk:** Reduced credibility due to unsupported strong language
+The conclusion uses phrases like "significantly improves" and "superiority" without formal statistical significance tests. On the Protein dataset, split conformal actually achieves higher coverage (90.04% vs 89.41%), which the paper does not acknowledge. A more measured conclusion would strengthen the paper's credibility.
+
+## Actionable Suggestions
+### S1: Fix prediction interval construction (Must, P0)
+**Target:** Page 6, Section 4, step (iii)
+**Action:** Replace the interval-averaging approach with Rubin's multiple imputation pooling rules:
+- Pooled estimate: $\bar\mu_j(z) = \frac{1}{m}\sum_{t=1}^m \mu_j(z,\hat\theta^{(t)})$
+- Within-imputation variance: $\bar W = \frac{1}{m}\sum_{t=1}^m (\hat\Sigma_{h+1,j}^{(t)} + \hat\varsigma_{h+1,j}^{2(t)})$
+- Between-imputation variance: $B = \frac{1}{m-1}\sum_{t=1}^m (\mu_j(z,\hat\theta^{(t)}) - \bar\mu_j(z))^2$
+- Total variance: $T = \bar W + (1 + 1/m)B$
+- Interval: $\bar\mu_j(z) \pm t_{0.975, df} \sqrt{T}$ where $df = (m-1)(1 + \bar W/((1+1/m)B))^2$
+**Expected benefit:** Theoretically justified coverage properties, connection to the well-established multiple imputation literature.
+
+### S2: Add deep ensembles and MC dropout baselines (Must, P0)
+**Target:** Page 9, Section 6.2 (Tables 2 and 3)
+**Action:** 
+- For CIFAR10: Add MC dropout (Gal & Ghahramani, 2016) and deep ensembles (Lakshminarayanan et al., 2017) to Table 2, reporting ACC, NLL, and ECE.
+- For UCI regression: Add MC dropout and deep ensembles to Table 3, reporting coverage and interval length.
+- Add one paragraph discussing relative strengths: "Deep ensembles [X] typically provide well-calibrated uncertainty estimates but require training $M$ independent models. Post-StoNet is more computationally efficient (single DNN + one lightweight StoNet fit) and achieves competitive calibration."
+**Expected benefit:** Completes the empirical positioning and allows a fair assessment of post-StoNet's practical value.
+
+### S3: Quantify variable selection performance (Should, P1)
+**Target:** Page 7, Section 5 (Table 1 area)
+**Action:** 
+- Report true positive rate (TPR) and false discovery rate (FDR) for variable selection at the $\lambda$ chosen by the threshold rule from Theorem 1(iii), for all three $\sigma^2$ settings.
+- Add a new table row: "Setting | TPR | FDR | Selection Accuracy" for both models (8) and (9).
+**Expected benefit:** Empirically validates Theorem 1(iii) and quantifies sensitivity to $\sigma^2$.
+
+### S4: Add statistical significance tests for coverage (Should, P1)
+**Target:** Page 9, Table 3
+**Action:** Report the mean difference in coverage (post-StoNet minus split conformal) along with a paired t-test p-value across the 20 random splits. Add a column: "Coverage $\Delta$" and "p-value".
+**Expected benefit:** Shows whether coverage differences are statistically meaningful or noise.
+
+### S5: Add limitations paragraph to conclusion (Nice-to-have, P2)
+**Target:** Page 9, Section 7 Conclusion
+**Action:** Add two sentences: "The StoNet framework relies on small noise variances to maintain DNN equivalence, which limits its direct application to very deep or transformer-based architectures. The post-StoNet procedure assumes the last-layer representation is approximately linear; for problems where this does not hold, a deeper or kernelized post-StoNet may be needed."
+**Expected benefit:** Improves scientific transparency and helps practitioners understand scope.
+
+### S6: Improve related work organization (Nice-to-have, P2)
+**Target:** Page 2, Related Works paragraph
+**Action:** Restructure into thematic axes: (a) stochastic neural networks and noise injection, (b) uncertainty quantification methods (BNNs, MC dropout, ensembles, conformal), (c) linear-model bridging (NTK, this work). Add explicit differentiation statements for each axis.
+**Expected benefit:** Positions the paper's contribution more clearly within the broader UQ landscape.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Assessment
+The current introduction follows: (P1) Big picture: deep learning successes vs. statistical inference limitations -> (P2) Proposed solution: StoNet as a bridge -> (P3) Contribution list. The main gap is that P1 moves directly from "deep learning has issues" to "can we bridge linear models and DNNs?" without specifying *why existing solutions (Bayesian NNs, ensembles, MC dropout) are insufficient*. This weakens narrative engagement.
+
+### Abstract Outline (Complete)
+
+**S1** (Problem): Deep learning lacks principled statistical inference tools for uncertainty quantification and structure selection.  
+**S2** (Challenge): Overparameterization leads to overfitting, poor interpretability, and miscalibrated uncertainty. Existing UQ methods lack theoretical guarantees.  
+**S3** (Prior gap): Prior stochastic neural network variants (dropout, noisy activations) do not provide a clear path for adapting linear-model theory to deep learning.  
+**S4** (Proposed solution): We explore the stochastic neural network (StoNet), which decomposes deep learning into layer-wise linear/logistic regressions with latent noise. This allows transfer of Lasso-based sparse learning theory from linear models.  
+**S5** (Key result): Under mild conditions, sparse StoNet achieves consistent structure selection and recursive uncertainty quantification. By asymptotic equivalence, these results justify Lasso-penalized DNN training. On CIFAR10 and four UCI datasets, post-StoNet produces prediction intervals shorter than conformal at comparable coverage.  
+
+**Evidence anchors:** Theorem 1 (consistency), Corollary 1 (DNN Lasso), Table 2 (CIFAR10 ECE), Table 3 (UCI intervals).
+
+### Introduction Outline (Complete)
+
+**P1** — Establish stakes and problem (revised):
+Role: Define deep learning's success, identify the overparameterization problem, and explain why existing UQ/interpretability methods are insufficient.  
+Key claim: "Bayesian neural networks require costly posterior inference, MC dropout lacks calibration guarantees, and deep ensembles are computationally expensive. A unified framework for statistical inference in DNNs remains elusive."  
+Transition: "This paper shows that the stochastic neural network (StoNet) provides such a framework by bridging linear models and deep learning."
+
+**P2** — Introduce StoNet and bridge concept:
+Role: Present StoNet as composition of linear/logistic regressions with latent noise. Explain asymptotic equivalence to DNN. State that this bridge property is new.  
+Key claim: "The StoNet was first proposed for dimension reduction [Liang et al., 2022] and SVR extension [Sun & Liang, 2022b]; its use as a platform for transferring linear-model theory to deep learning is first explored here."  
+Transition: "This platform enables three concrete contributions..."
+
+**P3** — Contribution list (revised for bounded wording):
+Bullet 1: Theorem 1 — Lasso-based sparse StoNet is consistent in structure selection and enables recursive UQ via Eve's law.  
+Bullet 2: Corollary 1 — Extends consistency to Lasso-penalized DNN training, providing first theoretical justification for this common practice.  
+Bullet 3: Post-StoNet procedure for large-scale DNN calibration; on CIFAR10, ECE drops 60% vs temperature scaling; on UCI data, intervals are 10-16% shorter than split conformal.
+
+**P4** — Related work (restructured):
+Axis 1: Stochastic neural networks (DBNs, DBMs, dropout, noisy activations) — "not clear if these provide valid probabilistic approximation for DNNs or enable UQ" (as in original).  
+Axis 2: UQ methods in deep learning (BNNs, MC dropout, ensembles, conformal) — "post-StoNet differs by providing consistent structure selection and recursive variance propagation through the network hierarchy."  
+Axis 3: Linear-model bridging (NTK theory) — "focuses on loss landscapes, not statistical inference."
+
+### Title Suggestion
+Current: "Statistical Inference for Deep Learning via Stochastic Modeling"  
+Suggested: "Bridging Linear Models and Deep Learning: Statistical Inference via Stochastic Neural Networks"  
+Rationale: Explicitly communicates the bridge concept and the paper's main methodological contribution.
+
+## Priority Revision Plan
+```text
+ASCII Diagram — Revision Strategy Roadmap
+
+[Issue 1: Non-standard interval construction]
+    -> [Fix: Replace with Rubin's pooling rules]
+    -> [Impact: Valid coverage guarantees; stronger UQ claims]
+
+[Issue 2: Incomplete UQ baselines] 
+    -> [Fix: Add deep ensembles + MC dropout to Tables 2 & 3]
+    -> [Impact: Fair positioning; stronger empirical evidence]
+
+[Issue 3: Theory-practice gap on sigma^2]
+    -> [Fix: Add practical guidance paragraph + ablation on sigma^2 sensitivity]
+    -> [Impact: Practitioners can apply StoNet correctly]
+
+[Issue 4: No quantitative selection metrics]
+    -> [Fix: Add TPR/FDR table for synthetic data]
+    -> [Impact: Theorem 1(iii) empirically validated]
+
+[Issue 5: Conclusion overclaims]
+    -> [Fix: Replace 'superiority' with bounded comparative statements]
+    -> [Impact: Improved scientific credibility]
+```
+
+### P0 — Must fix before resubmission (publication-critical)
+| Priority | Issue | Effort | Impact |
+|----------|-------|--------|--------|
+| P0 | Fix prediction interval aggregation (Rubin's rules) | Low (text + formula change) | High — core UQ methodology |
+| P0 | Add deep ensembles + MC dropout baselines | Medium (run 5-10 extra experiments) | High — complete empirical positioning |
+
+### P1 — Should fix (strongly recommended)
+| Priority | Issue | Effort | Impact |
+|----------|-------|--------|--------|
+| P1 | Add quantitative variable selection metrics | Low (compute TPR/FDR from existing runs) | Medium — validates Theorem 1(iii) |
+| P1 | Add statistical significance tests for coverage | Low (compute from existing 20 splits) | Medium — strengthens empirical rigor |
+| P1 | Revise conclusion to bounded language | Low (text change) | Medium — improves credibility |
+
+### P2 — Nice to have (quality improvement)
+| Priority | Issue | Effort | Impact |
+|----------|-------|--------|--------|
+| P2 | Add limitations paragraph | Low (text addition) | Low-Medium |
+| P2 | Restructure related work thematically | Medium | Medium |
+| P2 | Add sigma^2 sensitivity ablation | Medium | Medium — helps practitioners |
+| P2 | Add CoverType feature list with validation | Low | Low-Medium |
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|-----------|-------|---------|-------------|----------------|-------------------|
+| E1 (Sec 5) | Validate variable selection on synthetic DNN data | Models (8)-(9), n=500 train, 20 features, 5 true; StoNet with 20-500-1 / 20-500-100-1; 3 $\sigma^2$ settings | Visualization of regularization paths (avg. gradient vs $\log\lambda$) | True variables identified qualitatively | C1 | No quantitative TPR/FDR; no comparison to threshold rule from Thm 1(iii) |
+| E2 (Sec 5) | Validate prediction interval coverage on synthetic data | Same as E1; 100 train datasets, 500 test points each | Coverage rate of 95% PI (Table 1) | Coverage near 95%; better with smaller $\sigma^2$ | C1 (UQ part) | Only 3 $\sigma^2$ settings; no interval length reported |
+| E3 (Sec 5) | DNN Lasso variable selection (Corollary 1) | Same structures as E1, DNN with SGD+momentum | Regularization path visualization | True variables identified | C2 | Same lack of quantification as E1 |
+| E4 (Sec 6.1) | Feature selection on CoverType | n=581,012, p=54; DNN 1000-500; Lasso path | Test accuracy vs $\log\lambda$, feature gradients (Figure 3) | Important features identified | C2 (applied) | No ground truth; no comparison to Lasso/RF; no selected feature list reported |
+| E5 (Sec 6.2) | Calibration on CIFAR10 (Classification) | DenseNet40/ResNet110/WideResNet; 45K train/5K val; post-StoNet 1-layer, 100 hidden | ACC, NLL, ECE (Table 2) | ECE: 0.0047 vs 0.0117 (Temp. scaling, DenseNet40) | C3 | Missing deep ensembles and MC dropout; small accuracy drop not discussed |
+| E6 (Sec 6.2) | Prediction intervals on UCI (Regression) | 4 datasets (Wine/Power/Protein/Year); DNN 1000-100; post-StoNet; split conformal baseline | Coverage rate, interval length (Table 3) | 10-16% shorter intervals at comparable coverage | C3 | Only split conformal baseline; coverage not uniformly higher (Protein case); no significance tests |
+
+### Research-Theme Gap Diagnosis
+
+**Gap 1 (New Knowledge — validity):** The central UQ claim (C3) is incompletely validated. The post-StoNet produces shorter intervals than split conformal, but (a) the interval construction method is non-standard, (b) stronger UQ baselines (deep ensembles, MC dropout) are absent, and (c) on Protein, coverage is slightly below the nominal level and below split conformal. This undermines the "superiority" narrative.
+
+**Gap 2 (Reproducibility — reuse):** The theoretical results (C1, C2) depend on Assumptions A1-A6, particularly the extremely small noise variance requirement. A practitioner reading the paper cannot easily determine: (a) how to set $\sigma_i^2$ for a new architecture, (b) what diagnostics indicate the asymptotic equivalence holds in finite samples, or (c) whether the StoNet training algorithm is robust to $\sigma_i^2$ misspecification.
+
+**Gap 3 (Impact on practice):** The CoverType example (Sec 6.1) is too brief and lacks validation to serve as a convincing demonstration of practical utility. The paper would benefit from a more thorough case study where the selected features are validated against domain knowledge or compared against alternatives.
+
+### Proposed Research Experiments
+
+```text
+ASCII Diagram — Experiment Upgrade Plan
+
+P0 (this week):
+[Add deep ensembles + MC dropout to CIFAR10] -> [Rebuild Tables 2 & 3]
+    -> [Expected: Post-StoNet remains competitive on ECE, may trail ensembles on NLL]
+    -> [If yes: weaker 'superiority' claim; bounded wording needed]
+
+P1 (before resubmission):
+[Add TPR/FDR for synthetic selection] -> [Add significance tests for UCI coverage]
+    -> [Expected: Theorem 1(iii) confirmed for small sigma^2]
+    -> [Expected: Coverage differences not significant (p>0.05) for most datasets]
+
+P2 (optional):
+[Sigma^2 sensitivity ablation] -> [CoverType feature list + domain validation]
+    -> [Expected: Performance degrades slowly for moderate sigma^2 increases]
+    -> [Expected: Consistent with known ecological drivers]
+```
+
+| Exp ID | Target Claim | Hypothesis | Minimal Design | Controls | Metrics | Success Criterion | Est. Cost | Expected Gain |
+|--------|-------------|-----------|---------------|---------|---------|------------------|-----------|---------------|
+| P0-E1 | C3 (UQ superiority) | Post-StoNet ECE competitive with deep ensembles on CIFAR10 | Train 5-ensembles for each architecture; compute MC dropout with 50 forward passes | Same train/val split as Table 2 | ECE, NLL, ACC, inference time | Post-StoNet ECE within 0.002 of best method | 1-2 GPU-days | Completes empirical positioning; supports or tempers C3 |
+| P0-E2 | C3 (UQ for regression) | Post-StoNet intervals comparable or shorter than deep ensemble intervals | Train 5-ensemble for each UCI dataset; 50-dropout MC | Same 20 random splits as Table 3 | Coverage, interval length, wall-clock time | Interval length ≤ ensemble at same coverage | 2-3 GPU-days | Comprehensive UQ baseline comparison |
+| P1-E1 | C1 (selection consistency) | Theorem 1(iii) threshold rule achieves high TPR/low FDR on synthetic data | Compute $\|\hat\theta_i\| > c\sqrt{r_n}$ for grid of $c$ values from existing StoNet runs | 100 training datasets per model (already generated) | TPR, FDR, MCC | TPR > 0.90, FDR < 0.10 at optimal $c$ | <1 hour (compute from saved checkpoints) | Quantitative validation of Theorem 1(iii) |
+| P1-E2 | C3 (interval validity) | Coverage differences between post-StoNet and split conformal are not statistically significant | Paired t-test on 20 split coverage rates per dataset | 20 random splits (already available) | p-value, Cohen's d | p > 0.05 for all datasets | <1 hour | Prevents overclaiming on non-significant differences |
+| P2-E1 | C1 (practicality) | StoNet performance degrades gracefully with moderately larger $\sigma^2$ | Rerun synthetic experiment with $\sigma^2$ increased 10x and 100x | Keep all other hyperparameters fixed | Selection TPR/FDR, coverage | TPR drop < 10% at 10x $\sigma^2$ | 1 GPU-day | Provides practical guidance for $\sigma^2$ setting |
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 6/10**
+
+**Scoring rationale:** The paper presents a novel theoretical framework for adapting sparse learning theory to deep learning via the StoNet bridge, and provides rigorous consistency guarantees (Theorem 1, Corollary 1). The CIFAR10 calibration results are genuinely impressive (ECE as low as 0.0047). However, three factors limit the current score:
+
+1. **Methodological validity concern (score weight: high):** The prediction interval construction uses a non-standard averaging approach (step iii) rather than proper multiple imputation pooling, which directly affects the core UQ contribution (C3). Fixing this is straightforward but essential.
+
+2. **Incomplete empirical positioning (score weight: medium-high):** The "superiority" claims over conformal methods are based on an incomplete set of baselines. Deep ensembles and MC dropout—which are the most commonly used UQ methods—are not included. The regression results show uneven coverage (post-StoNet has lower coverage on Protein), which is not adequately discussed.
+
+3. **Theory-practice gap (score weight: medium):** The theoretical assumptions (especially A1-v on noise variances) are so restrictive that the practically-used $\sigma^2$ values are essentially zero. This raises questions about whether the StoNet's stochastic component provides any meaningful advantage over deterministic DNNs in practice.
+
+The paper's theoretical contributions (C1, C2) are solid and well-presented, and the CIFAR10 calibration results suggest practical value. With the recommended fixes (proper interval pooling, additional baselines, bounded claims), the paper could reach a higher score.
+
+**Post-Revision Target: [7, 7.5]/10**
+
+**Post-revision rationale:** If the authors (a) fix the interval construction to use Rubin's rules, (b) add deep ensembles and MC dropout baselines, (c) add quantitative variable selection metrics, (d) revise the conclusion to bounded wording, and (e) add a limitations paragraph, the validity concerns would be substantially addressed. The theoretical contributions would remain strong, and the empirical evidence would be more complete. A score in the 7-7.5 range reflects a solid paper with some novel theoretical contributions and interesting empirical results, but not breakthrough-level novelty (which would require demonstration of a fundamentally new capability or significantly stronger empirical results against a complete set of baselines).
+
+**Novelty note:** External literature verification was unavailable in this run (Retrieval-Disabled Mode). The novelty verdicts for contributions C1-C3 are provisionally set to "unclear" and require manual literature verification against related work (sparse DNN training with Lasso, linear-model bridging methods, and uncertainty quantification approaches). The self-citations in the paper (Liang et al. 2022, Sun & Liang 2022b) indicate that the StoNet itself is not new—the claimed novelty is in using it as a "bridge." A manual review of the related literature is needed to verify whether the consistency theory for Lasso-penalized DNNs (C2) is indeed the first of its kind, and whether the post-StoNet UQ approach is genuinely distinct from existing methods.

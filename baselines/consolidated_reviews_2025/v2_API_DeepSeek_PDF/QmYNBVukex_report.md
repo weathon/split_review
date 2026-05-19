@@ -1,0 +1,263 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper (accepted at ICLR 2024) addresses the problem of data selection for pre-fine-tuning LLMs — the process of warming up a pre-trained model on unlabeled open data before task-specific fine-tuning. The authors propose GOT-D (Gradients of Optimal Transport for Data Selection), which selects samples based on their ability to shift the pre-training distribution toward the target distribution, rather than simply matching the target distribution as prior methods do. The core technical idea is to use the gradient of the Optimal Transport distance between candidate and target data, derived from the OT dual solution, to rank samples by their marginal contribution to reducing distributional distance. The method is evaluated on three settings (NLG detoxification, domain-specific NLU, and general NLU/GLUE) and shows consistent improvements over baselines (DSIR, DAPT, TAPT/c), especially under low selection budgets (10K-50K samples). The paper also provides a theoretical analysis (Lemma 1, Theorem 1) connecting the OT-based selection to an upper bound on test loss.
+
+**Core contribution:** GOT-D is among the first principled, scalable data selection methods designed specifically for the low-budget pre-fine-tuning setting, explicitly accounting for the pre-training distribution. The method is fast (<1 GPU hour for millions of candidates) and open-sourced.
+
+## Strengths
+1. **Well-motivated problem framing.** The paper identifies a genuine practical gap: existing data selection methods for LLMs either target small-scale settings or continued pre-training at scale, leaving the low-budget pre-fine-tuning regime under-addressed. The distinction between "distribution matching" (selecting data similar to the target) and "distribution shifting" (selecting data that compensates for pre-training gaps) is conceptually clear and practically important.
+
+2. **Principled theoretical foundation.** The paper provides a formal derivation (Lemma 1, Theorem 1) connecting data selection to an upper bound on test loss via OT distance. While the theory has limitations (discussed in Weaknesses), the attempt to ground the selection criterion in test-loss bounds is a significant step beyond heuristic or purely empirical selection methods.
+
+3. **Strong empirical breadth.** The evaluation covers three distinct settings (detoxification/NLG, domain-specific NLU, general NLU) with multiple datasets, selection budgets, and model sizes (124M GPT-2 to 2.7B GPT-Neo). The consistent advantage of GOT-D over baselines across these diverse scenarios provides reasonable evidence for the method's generalizability.
+
+4. **Computational efficiency.** The method solves a single regularized OT problem to obtain gradients, completing selection from 2M candidates in minutes on one GPU. This is orders of magnitude faster than model-based data valuation methods (Shapley, influence functions) and compares favorably to DSIR (hours on CPU) and TAPT/c (hours on GPU).
+
+5. **Open-sourced code and reproducible pipeline.** The paper provides a complete code repository and detailed experimental configurations in the appendix, supporting reproducibility.
+
+6. **Clear pedagogical example.** The cat/dog distribution illustration (Figure 3) effectively communicates why distribution-matching fails under pre-training distribution mismatch, making the core intuition accessible.
+
+## Weaknesses
+1. **Critical assumption (DS ≈ DP) under-justified.** The entire theoretical framework depends on the candidate dataset DS being a close proxy for the pre-training distribution DP. The paper asserts this is "generally safe" for off-the-shelf LLMs, but many modern LLMs (GPT-3/4, PaLM, LLaMA) use proprietary or heavily filtered data mixtures that differ substantially from public datasets. If OT(DP, DS) is large, the O(ε) term in Theorem 1 dominates and the selection guarantee breaks. The paper provides no empirical estimate of ε for any of the models evaluated (GPT-2, BERT, GPT-Neo).
+
+2. **Lemma 1 proof gap.** The proof (Appendix B.1) assumes the pre-trained model is at an exact local minimum (gradient exactly zero). In practice, pre-trained models are not trained to exact convergence; the residual gradient on DP may be non-negligible. The claim that fine-tuning "equates to minimizing loss on λ·DU + (1−λ)·DP" is therefore an approximation whose quality is not bounded.
+
+3. **Differentiability overstatement.** Theorem 1 and Remark 1 use a first-order Taylor expansion of the OT distance. However, exact OT (as a linear program) is not everywhere differentiable — it is concave in the source measure and has subgradients but not unique gradients at non-differentiable points. The method as implemented uses entropy-regularized OT (Sinkhorn divergence), which is differentiable, but the theory is presented for exact OT, creating a gap between theoretical claims and practical implementation.
+
+4. **Empirical significance not established.** While GOT-D consistently achieves higher average scores, several individual task differences are within one standard deviation (e.g., CoLA, MNLI, QQP in Table 4; RCT, Helpfulness, IMDB in Table 2). No statistical significance tests (paired t-test, Wilcoxon) are reported. The improvement over DAPT/DSIR is often in the 0.5-1% range, which is practically meaningful but could be driven by a few tasks rather than consistent across all settings.
+
+5. **Utility-toxicity tradeoff under-explored.** In the detoxification experiment (Table 1), GOT-D achieves the best toxicity reduction but at a utility cost — and notably, random selection achieves the best utility while still reducing toxicity. The paper describes the utility decline as "minor" (0.422 → 0.408) but this is a 3.3% relative drop, and perplexity actually increases. The Pareto-frontier analysis between toxicity and utility is missing.
+
+6. **Limited model scale in core experiments.** The main experiments use GPT-2 (124M) and BERT-base (110M). The only larger-model experiments are in Appendix E (GPT-2 XL 1.5B, GPT-Neo 2.7B) and use a different evaluation protocol (zero-shot classification). Claims about applicability to "LLMs" (typically models ≥7B parameters) are extrapolative without experiments at that scale.
+
+7. **Missing discussion of failure cases.** The paper mentions one limitation (tasks requiring knowledge far from pre-training) but does not discuss when GOT-D might fail relative to baselines. For instance, if the candidate set is dominated by low-quality sources, the OT gradient could select noisy samples that harm performance. No negative results or edge-case analyses are reported.
+
+## Key Issues
+### Issue 1 (Major): Theory-Practice Gap in OT Gradient Derivation
+**Location:** Page 5, Theorem 1 and Remark 1
+**Risk:** Invalidity of optimality claim under exact OT
+The paper uses a first-order Taylor expansion of OT(λ·DU + (1−λ)·DS, DR) to justify the gradient-based selection rule. However, exact OT as a linear program is not everywhere differentiable — it is concave in the source marginal and has subgradients but not unique gradients at points where the optimal coupling is degenerate. The practical implementation uses entropy-regularized OT (Sinkhorn divergence, Cuturi 2013), which is smooth and differentiable. The theorem should explicitly state that the optimality guarantee applies to the entropy-regularized variant. Without this clarification, the theoretical claim is technically imprecise.
+**Severity:** Major — fixable by adding a sentence referencing Sinkhorn regularization.
+
+### Issue 2 (Major): Lemma 1 Relies on Exact Convergence Assumption
+**Location:** Page 4, Lemma 1; Appendix B.1
+**Risk:** Overstated theoretical precision
+The proof assumes ∂L(DP)/∂θ|θ0 = 0, which requires the pre-trained model to be at an exact local minimum of the pre-training loss. Modern LLMs are not trained to exact convergence (typically stopped early based on validation loss). For models trained with finite steps, the residual gradient can be non-zero, and the "effective data distribution" characterization becomes approximate, not exact. The paper should bound the error of this approximation.
+**Severity:** Major — fixable by adding an error bound and softening the lemma statement.
+
+### Issue 3 (Major): Statistical Significance Not Established
+**Location:** Page 8, Tables 2-3; Page 9, Table 4
+**Risk:** Overclaimed confidence in results
+Several task-level improvements are within one standard deviation of baseline results. No paired significance tests are reported. The average gain across 8 domain tasks (1.13% with 150K budget) is modest, and the advantage is concentrated on a few tasks (ACL-ARC, ChemProt, Sci-ERC) while near-tied on others (RCT, AGNews, IMDB). The paper should report significance levels and discuss which comparisons are robust vs. within noise.
+**Severity:** Major — fixable by adding statistical tests and cautious interpretation.
+
+### Issue 4 (Major): Utility-Toxicity Tradeoff Not Acknowledged
+**Location:** Page 7, Table 1 and Results paragraph
+**Risk:** Selective reporting
+Random selection achieves better utility preservation (Avg. Acc. 42.9 vs GPT-2 baseline 42.2) while still reducing toxicity, but this is presented as a baseline comparison without analyzing the Pareto frontier. The paper's claim of "only a minor decline" understates the 3.3% relative accuracy drop. A proper multi-objective analysis would strengthen credibility.
+**Severity:** Major — fixable by adding Pareto analysis and hedging claims.
+
+### Issue 5 (Moderate): DS≈DP Assumption Unvalidated
+**Location:** Page 3, Problem Formulation
+**Risk:** Theoretical guarantee may not apply in practice
+The paper assumes OT(DP, DS) ≤ ε without estimating ε for any model used in experiments. For GPT-2 (pre-trained on WebText), the candidate set is OWTC — a reasonable proxy. For BERT (pre-trained on BookCorpus+Wikipedia), the 7-domain candidate set (AmazonReviews, Pubmed, arxiv, OWTC, RealNews, Wikipedia, BookCorpus) may differ substantially. No diagnostic of proxy quality is provided.
+**Severity:** Moderate — fixable by adding ε estimates for each experimental setting.
+
+## Actionable Suggestions
+### S1: Clarify the OT Differentiability Condition (Must)
+**Issue addressed:** Key Issue 1 (Theory-practice gap)
+Replace the exact OT formalism in Theorem 1 with explicit reference to entropy-regularized OT (Sinkhorn divergence, Cuturi 2013, used in the implementation via ott-jax). In Remark 1, add: "When using entropy-regularized OT (Sinkhorn divergence), the distance is smooth and everywhere differentiable; the gradient is therefore uniquely defined and the first-order Taylor approximation is valid." This closes the gap between theoretical claim and implementation without changing the algorithm.
+
+### S2: Add Error Bound to Lemma 1 (Must)
+**Issue addressed:** Key Issue 2 (Convergence assumption)
+In Appendix B.1, add a bound: "If the pre-trained model satisfies ||∇L(DP)|| ≤ δ at θ0, then the effective data distribution characterization holds up to an additive error of O(μ·δ) in the parameter space." In the main text, qualify Lemma 1 as "approximate" and add a brief discussion of when the approximation is accurate.
+
+### S3: Report Statistical Significance (Must)
+**Issue addressed:** Key Issue 3
+For Tables 2-4, add: (a) paired Wilcoxon signed-rank test p-values comparing GOT-D to each baseline across all tasks, (b) a compact indicator (*p<0.05, **p<0.01) next to method names in tables. For tasks where individual differences are within noise, explicitly state this in the text. The current text ("consistently surpasses," "significant") should be hedged for tasks where the difference is not statistically significant.
+
+### S4: Provide Utility-Toxicity Pareto Analysis (Must)
+**Issue addressed:** Key Issue 4
+Add a supplementary figure plotting (Utility, 1−Toxicity) for each method and budget, with the Pareto frontier highlighted. In the Results paragraph, replace "only a minor decline" with a balanced statement: "GOT-D achieves the best toxicity reduction at a modest utility cost (3.3% relative accuracy drop). Random selection achieves the best utility, suggesting a utility-toxicity tradeoff inherent to this setting."
+
+### S5: Estimate ε for Each Experiment (Nice-to-have)
+**Issue addressed:** Key Issue 5 (DS≈DP assumption)
+For each experimental setting, estimate ε = OT(DP, DS) by computing OT distance between small samples from the known pre-training data distribution (or its closest public proxy) and the constructed candidate set. Report these estimates in Appendix D.2. If ε is small for all settings, this substantially strengthens the theoretical claims. If not, add a discussion of why the method still works empirically despite the theoretical gap.
+
+### S6: Add 2-Epoch MLM Ablation (Nice-to-have)
+**Issue addressed:** Weakness 4 (Empirical robustness)
+Add a supplementary experiment training MLM for 2 epochs (vs. 1 epoch) on the domain adaptation tasks (Table 2 setting). Verify that GOT-D's advantage over baselines is not an artifact of the short training schedule. If the advantage persists, this strengthens the claim that the selection criterion is robust. If the gap narrows, discuss implications for the method's interaction with training duration.
+
+### S7: Embedding Choice Sensitivity Analysis (Nice-to-have)
+**Issue addressed:** Missing implementation detail
+Move the embedding ablation study (Appendix E.2, Table 17) to the main text or at least summarize the key finding: "The choice of embedding model affects absolute performance but GOT-D's relative advantage over baselines is consistent across distilled-BERT and Sentence Transformer embeddings." This addresses the concern that the method might be sensitive to an engineering choice.
+
+### S8: Revise Conclusion Structure (Must)
+**Issue addressed:** Weakness 7
+Restructure the conclusion into three explicit parts: (1) validated findings under bounded conditions, (2) known limitations, (3) prioritized future work. Remove the "showcased the superiority" framing — replace with specific, bounded claims.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Assessment
+
+The current storyline structure is:
+1. **(Page 1 Intro Para 1):** LLMs need fine-tuning → curated data is costly → two-stage pre-fine-tuning as solution.
+2. **(Page 2 Intro Para 2):** Prior data selection methods have limitations → they match target distribution → overlook pre-training distribution.
+3. **(Page 2 Intro Paras 3-4):** Challenge list (G1-G4) → GOT-D introduction.
+4. **(Page 2-3 Intro Para 5):** High-level method description + result preview.
+
+**Strengths:** Clear problem framing, explicit challenge enumeration, logical flow from problem to solution.
+**Weakness:** The gap between "distribution matching fails" (Para 2) and "OT gradient selection" (Para 4) is conceptually abrupt — the reader is told that existing methods fail, then immediately given an OT-based solution without understanding *why* OT is the right tool.
+
+### Proposed Restructured Storyline
+
+**Recommended structure** (big picture → gap → tool → solution → evidence):
+
+- **P1 (Big Picture):** LLMs are ubiquitous but task adaptation is expensive → curated data scarcity is a bottleneck for emerging tasks.
+- **P2 (Gap):** Prior data selection for pre-training/continued pre-training uses distribution-matching → this is suboptimal for low-budget fine-tuning because the pre-trained model already reflects the pre-training distribution; matching target distribution alone wastes budget on already-covered samples.
+- **P3 (Key Insight + Tool):** The solution is to shift the pre-training distribution toward the target → OT distance provides a natural measure of distributional alignment → its gradient shows the direction of maximal alignment per sample.
+- **P4 (Method Preview):** GOT-D solves one regularized OT problem → ranks by gradient → selects top negative-gradient samples → completes in minutes.
+- **P5 (Evidence Preview):** Validated across detoxification (30% toxicity reduction), domain NLU (+1.13%), GLUE (+1.04%/+3.13%), and zero-shot (13.9%) → code open-sourced.
+
+### Abstract Outline (Complete)
+
+**S1 (Problem):** "Fine-tuning LLMs for emerging tasks is hindered by the scarcity of curated labeled data, making it essential to leverage vast unlabeled open data efficiently."
+
+**S2 (Gap):** "Existing data selection methods prioritize samples matching the target distribution, but this ignores the pre-training distribution — selected data may already be well-represented, yielding marginal gains under low budgets."
+
+**S3 (Method):** "We propose GOT-D, which selects samples that shift the pre-training distribution toward the target by using gradients of the Optimal Transport distance between candidate and target data."
+
+**S4 (Result):** "Across NLU, NLG, and zero-shot tasks with models up to 2.7B parameters, GOT-D consistently outperforms existing selection methods — e.g., 30% toxicity reduction with 10K samples, 1.13% average F1 gain on 8 domain tasks, 13.9% zero-shot improvement."
+
+**S5 (Scope):** "The method scales to millions of candidate samples within one GPU hour. We provide theoretical grounding and open-source code."
+
+### Introduction Outline (Complete)
+
+**P1 — Establish Stakes:**
+"Pre-trained LLMs underpin modern AI, but adapting them to new tasks requires costly fine-tuning. For emerging applications (safety alignment, customer service, domain-specific QA), curated labeled data is expensive and slow to produce. A practical alternative is two-stage fine-tuning: first warm up on relevant unlabeled data (pre-fine-tuning), then fine-tune on curated samples."
+*Transition →: However, selecting the right unlabeled data is non-trivial.*
+
+**P2 — Identify the Gap:**
+"Existing data selection methods fall into two camps: small-scale methods (coresets, Shapley) that do not scale to LLM datasets, and large-scale methods (DSIR, DAPT) that match the selected data distribution to the target task. The latter overlooks a key fact: the model is already shaped by its pre-training distribution. Samples matching the target but already covered by pre-training contribute little during fine-tuning, especially under low selection budgets."
+*Transition →: This calls for a selection criterion that accounts for the pre-training distribution.*
+
+**P3 — Key Insight and Tool:**
+"Our key insight is that the optimal fine-tuning data should shift the pre-training distribution toward the target, not merely match the target. Optimal Transport (OT) distance provides a natural measure of distributional alignment, and its gradient — computed from the OT dual solution — reveals per-sample contribution to reducing the distributional gap. By selecting samples with the largest negative gradients, we maximize the shift toward the target."
+*Transition →: We formalize this intuition below.*
+
+**P4 — Method and Theory Preview:**
+"Under mild assumptions (light fine-tuning, candidate set approximates pre-training distribution), we prove that gradient-based selection minimizes an upper bound on test loss. The practical algorithm solves a single entropy-regularized OT problem, ranks samples by gradient value, and runs in minutes on one GPU."
+*Transition →: We validate this approach across diverse settings.*
+
+**P5 — Contribution Summary:**
+"Our contributions are: (1) a principled data selection method for pre-fine-tuning that accounts for pre-training distribution, (2) theoretical connection between OT gradient selection and test loss bound, (3) extensive empirical validation across NLU, NLG, and zero-shot tasks, (4) efficient implementation scaling to millions of samples in one GPU hour."
+
+## Priority Revision Plan
+Ranked by severity-impact-fixability (highest priority first):
+
+| Priority | Issue | Action | Effort | Impact | Section |
+|----------|-------|--------|--------|--------|---------|
+| **P0** | Lemma 1 convergence gap | Add error bound; soften claim to "approximate" | Low (text edit) | High (theoretical rigor) | Page 4 + Appendix B.1 |
+| **P0** | OT differentiability overstatement | Reference entropy-regularized OT explicitly | Low (text edit) | High (theoretical precision) | Page 5, Theorem 1/Remark 1 |
+| **P0** | Missing statistical significance | Add paired Wilcoxon tests; add * indicators to tables | Medium (recompute from existing seeds) | High (evidence credibility) | Page 8-9, Tables 2-4 |
+| **P1** | Utility-toxicity tradeoff | Add Pareto analysis; revise text to acknowledge tradeoff | Medium (add figure + text edits) | Medium (honest reporting) | Page 7, Table 1 |
+| **P1** | DS≈DP assumption unvalidated | Estimate ε for each experimental setting | Medium (compute OT on held-out proxy samples) | Medium (theoretical support) | Page 3, Section 2.1 |
+| **P2** | Conclusion too brief | Restructure into validated findings + limitations + future work | Low (text edit) | Medium (reader takeaway) | Page 9, Section 4 |
+| **P2** | 1-epoch MLM concern | Add 2-epoch ablation for domain tasks | Medium (extra experiment) | Medium (robustness) | Page 7-8, Section 3.2 |
+
+### Revision Cadence
+
+**Stage 1 (immediate, <1 day):** P0 text edits (Lemma 1 softening, OT differentiability clarification, conclusion rewrite, utility tradeoff language). These improve rigor without new experiments.
+
+**Stage 2 (this week):** P0+P1 experiments (statistical significance tests, ε estimation for DS≈DP, 2-epoch MLM ablation). These address the core validity concerns.
+
+**Stage 3 (before resubmission):** P2 extensions (Pareto analysis of utility-toxicity, embedding sensitivity discussion in main text).
+
+### Expected Impact After Revisions
+
+- **Lemma 1 and Theorem 1 fixes:** Eliminate the theory-practice gap and make the foundation defensible under scrutiny.
+- **Statistical significance tests:** Convert "claims of superiority" into "statistically supported improvements" — this is the single highest-ROI change for the experimental sections.
+- **DS≈DP estimates:** Either validate or bound the core assumption, which determines whether the theory section is decorative or foundational.
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|-----------|-------|---------|-------------|-----------------|-------------------|
+| E1: Detox (Sec 3.1) | Reduce GPT-2 toxicity via pre-fine-tuning on unlabeled data | GPT-2 (124M), OWTC candidate, 10K/20K budgets, Perspective + Moderation API | Exp Max Toxicity, Toxicity Prob, PPL, Avg Acc | GOT-D best toxicity reduction (0.62→0.41), utility drops 0.422→0.408 | G1 (Task Effectiveness) | Single model, no significance test, utility-toxicity tradeoff not analyzed |
+| E2: Domain Adapt 150K (Sec 3.2) | Improve BERT on 8 domain-specific NLU tasks | BERT-base, 150K selection budget, 4 domains, 1 epoch MLM | Macro/Micro F1 (8 tasks) | GOT-D avg +1.13% over vanilla BERT; best on 3/8 tasks | G2 (Data Efficiency) | 1 epoch may disfavor baselines; no significance test |
+| E3: Domain Adapt 50K constrained (Sec 3.2) | Same as E2 with stricter budget | BERT-base, 50K selection, 5K target training | Macro/Micro F1 | GOT-D avg +0.76% over vanilla BERT | G2, G4 (Generalizability) | DAPT replaced with TAPT/c — not a controlled comparison |
+| E4: GLUE (Sec 3.3) | Improve BERT on 8 general NLU tasks | BERT-base, 50K selection, full/5K target data | GLUE scores (accuracy/Matthews) | GOT-D avg +1.04% (full) and +3.13% (5K) over vanilla | G2, G4 | Per-task improvements within 1σ for several tasks |
+| E5: Zero-shot AG News (App E) | Zero-shot classification after pre-fine-tuning | GPT-2 XL (1.5B), 5K-80K budgets | Accuracy | GOT-D +13.9% at 40K budget, best across all budgets | G1, G2 | Single dataset, single model variant |
+| E6: Zero-shot BoolQ (App E) | Zero-shot QA after pre-fine-tuning | GPT-Neo (2.7B), 40K budget | Accuracy | GOT-D +6.6%, DSIR +2.2%, TAPT/c +0.1% | G1, G2, G4 | Single dataset at single budget |
+
+### Research-Theme Gap Diagnosis
+
+1. **New Knowledge (theoretical):** The paper's key theoretical claim (gradient-based OT selection minimizes test loss bound) is partially supported but has formal gaps (differentiability, convergence assumption). The core insight — pre-training distribution matters — is valuable but not fully new (Hernandez et al. 2021 already modeled the effective data mixture).
+
+2. **Reproducibility:** The paper provides code and detailed hyperparameters, supporting reproducibility. However, the critical DS≈DP assumption is not operationalized (no diagnostic for proxy quality), which limits reproducibility across different LLMs with different pre-training data.
+
+3. **Potential to change practice:** The method is fast, principled, and open-sourced, making it immediately useful for practitioners doing LLM fine-tuning with limited budgets. This is the paper's strongest quality. The gap between current experimental scale (≤2.7B models) and practical deployment (≥7B models) needs bridging.
+
+### Proposed Research Experiments
+
+**P0 Experiment: Statistical Significance Package**
+- **Target Claim:** "GOT-D consistently outperforms baselines"
+- **Hypothesis:** GOT-D's average improvements are statistically significant across tasks
+- **Minimal Design:** For Tables 2-4, run paired Wilcoxon signed-rank tests comparing GOT-D to each baseline across all tasks (using the 5-run means). Report p-values and effect sizes (Cohen's d).
+- **Controls/Baselines:** DSIR (primary), DAPT/TAPT/c (secondary)
+- **Metrics:** p < 0.05 threshold, rank-biserial correlation for effect size
+- **Success Criterion:** At least 3 of 4 experimental settings show p < 0.05
+- **Cost:** 1-2 hours (using existing seed data, no new training needed)
+- **Gain:** Converts qualitative "consistently surpasses" into statistically grounded claims
+
+**P1 Experiment: DS≈DP Proxy Quality Diagnostic**
+- **Target Claim:** "DS can be used as a proxy for DP"
+- **Hypothesis:** OT(proxy_DS, approximate_DP) is small (<0.1 on normalized embedding space)
+- **Minimal Design:** For each setting (BERT, GPT-2, GPT-Neo), compute OT between the known/assumed pre-training data distribution and the constructed candidate set using the same embedding pipeline. For BERT: compare Wikipedia+BookCorpus mixture vs 7-domain candidate. For GPT-2: compare OWTC vs OWTC (should be near-zero).
+- **Metrics:** OT distance (Sinkhorn, normalized)
+- **Success Criterion:** ε ≤ 0.1 for all settings
+- **Cost:** 1-2 hours (one OT solve per setting)
+- **Gain:** Validates or bounds the core theoretical assumption
+
+**P1 (Alternative) Experiment: Matched-Epoch MLM Ablation**
+- **Target Claim:** "GOT-D advantage is due to better selection, not training schedule artifact"
+- **Hypothesis:** GOT-D advantage persists when MLM is trained for 2 epochs
+- **Minimal Design:** Repeat Table 2 (150K budget, 8 domain tasks) with 2-epoch MLM training for GOT-D, DSIR, and DAPT
+- **Metrics:** Macro/Micro F1, average gain over vanilla BERT
+- **Success Criterion:** GOT-D maintains average advantage ≥0.5% over DSIR
+- **Cost:** 2-3 GPU days
+- **Gain:** Confirms that 1-epoch results are not an artifact
+
+**P2 Experiment: Larger Model Validation**
+- **Target Claim:** "Method generalizes to large LLMs"
+- **Hypothesis:** GOT-D improves performance on a 7B+ model on at least one task
+- **Minimal Design:** Select one task (e.g., AG News zero-shot) and one 7B model (e.g., LLaMA-2-7B) with a 40K selection budget. Compare GOT-D vs DSIR vs vanilla.
+- **Metrics:** Zero-shot accuracy
+- **Success Criterion:** GOT-D > DSIR > vanilla on held-out test set
+- **Cost:** 4-8 GPU hours (embedding + OT + evaluation)
+- **Gain:** Substantially strengthens the "LLM" claim in the title and framing
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 6.5/10**
+
+**Rationale:** This score reflects the paper's genuine strengths (well-motivated problem, principled approach, broad empirical evaluation, strong computational efficiency) weighed against its formal weaknesses (theory-practice gaps in the derivations, unvalidated core assumption, lack of statistical significance analysis, limited model scale). The research value is solid — the method is practically useful and the core insight (account for pre-training distribution) is sound. The novelty is moderate: the idea of using OT gradients for data selection is technically new in this setting, but the theoretical framing has precedents (Hernandez et al. 2021 on effective data mixture; Kang et al. 2023 on OT for performance prediction). The paper would benefit from addressing the theory-practice gap and adding statistical rigor.
+
+**Scoring breakdown:**
+- **Research value / Contribution:** 7/10 — Practical, fast, general method for an important problem
+- **Novelty:** 6/10 — New application of OT gradients to pre-fine-tuning, but theoretical building blocks are established
+- **Validity / Soundness:** 6/10 — Core intuition is sound but formal derivations have gaps; empirical evidence lacks statistical rigor
+- **Reproducibility:** 7/10 — Code provided, hyperparameters detailed, but DS≈DP proxy construction not fully specified
+- **Clarity / Writing:** 7/10 — Generally well-written, clear motivation and examples, but conclusion is too brief
+
+**Post-Revision Target:** [7.5, 8.5]/10
+
+If the authors address the P0 issues (Lemma 1 approximation bound, OT differentiability clarification, statistical significance tests), add the DS≈DP proxy diagnostic (P1), and restructure the conclusion, the paper's rigor and credibility would substantially improve. The method itself is sound and useful; the main gap is between the strength of the claims and the precision of the supporting evidence. A targeted revision could move this from a solid paper to a strong one.

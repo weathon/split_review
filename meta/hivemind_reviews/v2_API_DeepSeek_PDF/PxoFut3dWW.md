@@ -1,0 +1,177 @@
+## Summary
+This paper presents Wanda (Pruning by Weights and Activations), a simple and efficient unstructured and structured pruning method for large language models (LLMs). The core idea is to prune weights based on a combined importance score: the product of each weight's magnitude and the L2 norm of its corresponding input activation, estimated from a small calibration set. Pruning is performed per output neuron (row-wise in the weight matrix), ensuring a balanced sparsity distribution. Wanda requires no retraining or weight update—the pruned model can be used immediately after a single forward pass.
+
+The method is evaluated on LLaMA (7B–65B) and LLaMA-2 (7B–70B) families across zero-shot tasks and perplexity on WikiText, at 50% unstructured sparsity as well as structured 4:8 and 2:4 sparsity patterns. Wanda consistently and substantially outperforms magnitude pruning (the standard baseline), and remains competitive with SparseGPT (a state-of-the-art second-order pruning method) while being orders of magnitude faster—metric computation takes seconds rather than minutes. Additional experiments across OPT, BLOOM, and Pythia model families show similar trends. Fine-tuning (LoRA or full) can recover much of the pruned performance gap.
+
+The paper is well-written, the method is clearly motivated by the emergent outlier feature phenomenon in LLMs, and the experiments are thorough in terms of model scale and sparsity types. The main scientific weaknesses are: (1) the L2 norm choice is justified only by speculation, (2) the per-output grouping lacks mechanistic explanation for why it specifically helps LLMs, (3) some comparative claims are stated without statistical testing, and (4) the conclusion lacks limitations and synthesis. Retrieval-Disabled Mode is active, so novelty/comparison conclusions are deferred for manual verification.
+
+## Strengths
+**S1. Clean, Intuitive Method Design.** Wanda's core idea—multiplying weight magnitude by input activation norm and pruning per output neuron—is elegant in its simplicity. The motivating example (two-input neuron with asymmetric features) clearly illustrates why magnitude pruning alone fails for LLMs. The method can be implemented in a few lines of PyTorch code (Algorithm 1).
+
+**S2. Computational Efficiency.** Wanda requires only a single forward pass with 128 calibration samples and no weight updates. Computing the pruning metric is 300× faster than SparseGPT (e.g., 0.54s vs 203s for LLaMA-7B), making it practical for iterative pruning or sparsity search.
+
+**S3. Broad and Thorough Evaluation.** The paper evaluates on two major LLM families (LLaMA and LLaMA-2) across three sparsity types (unstructured, 4:8, 2:4) and multiple model sizes (7B–70B). Additional experiments on OPT, BLOOM, and Pythia (Appendix B) demonstrate generality beyond one architecture. Results include both zero-shot accuracy (7 tasks) and perplexity.
+
+**S4. Well-Designed Ablation Study.** Table 7 systematically ablates pruning metric (magnitude / SparseGPT / Wanda) × comparison group (layer / input / output) to isolate the contribution of each design choice. This strengthens the claim that both the metric and the per-output grouping matter.
+
+**S5. Insightful Weight-Update Analysis.** Table 8 studies conditions under which weight update helps or does not help, revealing that at moderate sparsity Wanda already finds effective sub-networks. This is a non-trivial empirical finding about the nature of sparsity in LLMs.
+
+**S6. Robustness Analysis.** Figure 2 and Table 18 demonstrate Wanda's robustness to calibration sample size and seed variability, often with lower variance than SparseGPT. This is practically important for real-world deployment.
+
+## Weaknesses
+**W1. Heuristic Justification for L2 Norm Choice (Page 3 – Pruning Metric).** The paper states that "L2 norm tends to work better than other norm functions... possibly because L2 norm is generally a smoother metric" without presenting supporting evidence. This is a minor but unnecessary weakness that can be fixed with a brief ablation or by weakening the claim.
+
+**W2. Missing Mechanistic Explanation for Per-Output Grouping (Page 3–4 – Comparison Group).** The finding that per-output pruning is superior to layer-wise pruning for LLMs but not for image classifiers is presented as an empirical curiosity. No hypothesis is offered for *why* LLMs specifically benefit from output-balanced sparsity. This limits the paper's scientific depth.
+
+**W3. Unsquared vs Squared Metric Derivation Discrepancy (Page 4 – Remark).** The derivation from SparseGPT's metric yields a squared importance score (|W_ij| * ||X_j||_2)^2, but Wanda uses the unsquared version. While rank order is preserved, the derivation should clarify this step explicitly.
+
+**W4. "On Par" Claim Without Statistical Significance (Page 6 – Language Modeling).** The claim that Wanda "performs on par with SparseGPT" at 50% sparsity is based on perplexity differences of 0.01–0.04, but no formal statistical test is reported. Appendix D.2 partially addresses this with 5-seed variance, but the main text should reference this.
+
+**W5. Overclaim of "Unique to LLMs" (Page 2 – Introduction).** The phrase "a property unique to LLMs" regarding emergent large-magnitude features is too strong. Large-magnitude features are *prominent* in LLMs but have analogs in smaller transformers; the claim of uniqueness requires broader literature evidence.
+
+**W6. Conclusion Lacks Synthesis and Limitations (Page 9 – Conclusion).** The conclusion re-describes the method but does not synthesize validated findings, acknowledge limitations, or bound the claims (e.g., degradation at >60% sparsity, no theoretical guarantees). The final sentence about sparse training is a new idea introduced in the conclusion rather than a validated finding.
+
+**W7. Large-Sparse vs Small-Dense Comparison Missing Hardware Caveat (Page 5 – Zero-Shot Tasks).** The comparison between large sparse and small dense models does not acknowledge that unstructured sparsity does not reduce memory footprint without specialized sparse hardware, which is critical for practical recommendations.
+
+**W8. Novelty/Comparison Conclusions Deferred.** Due to Retrieval-Disabled Mode, no external literature verification was possible. The novelty of Wanda relative to prior activation-aware pruning methods or its positioning against SparseGPT improvements cannot be independently verified in this review. This is recorded as a deferred item for manual verification.
+
+## Key Issues
+The following issues are ranked by severity (research-value impact × validity risk):
+
+**Issue 1: Missing Mechanistic Explanation for Per-Output Grouping (Severity: Major).**
+*Page 3–4 – Comparison Group.* The paper's second core component—per-output comparison—is presented as a purely empirical finding. The authors show it works for LLMs but not for image classifiers, without offering any hypothesis. This limits the paper from "empirical report" to "scientific contribution." *Fix:* Add a paragraph hypothesizing that output-balanced pruning protects the diverse output representations LLMs rely on, especially given outlier features that are output-specific.
+
+**Issue 2: L2 Norm Choice Without Evidence (Severity: Major).**
+*Page 3 – Pruning Metric.* A design decision that affects all results is justified by a single speculative sentence. This undercuts the scientific rigor of an otherwise well-designed study. *Fix:* Add a small ablation comparing L1, L2, and L_inf norms (even on one model) in an appendix, or weaken the claim to "we adopt L2 as it performed well in pilot experiments."
+
+**Issue 3: "On Par" Without Statistical Testing (Severity: Minor).**
+*Page 6 – Language Modeling.* The central comparative claim ("Wanda performs on par with SparseGPT") would benefit from quantitative significance framing. *Fix:* Reference the 5-seed robustness analysis (Appendix D.2) in the main text and note that the gap is within calibration noise.
+
+**Issue 4: Conclusion Is a Summary, Not a Synthesis (Severity: Minor).**
+*Page 9 – Conclusion.* The conclusion re-describes the method rather than extracting principled insights or acknowledging limitations. *Fix:* Restructure to: (a) validated findings, (b) bounded limitations (degradation at high sparsity, no guarantees), (c) specific future direction.
+
+**Issue 5: Large-Sparse vs Small-Dense Missing Practical Caveat (Severity: Minor).**
+*Page 5 – Zero-Shot Tasks.* The comparison may encourage readers to overvalue unstructured pruning for deployment. *Fix:* Add a sentence noting that unstructured sparsity requires hardware support for actual speedups.
+
+## Actionable Suggestions
+### Suggestion 1 (Must): Add L2 Norm Ablation (Addresses Issue 1)
+Add a small ablation experiment comparing L1, L2, and L_inf norms for computing the activation norm in Equation 1. This can be done on LLaMA-7B at 50% unstructured sparsity and reported in the Appendix. In the main text, replace the speculative justification ("possibly because L2 norm is generally a smoother metric") with a factual statement referencing the ablation.
+
+### Suggestion 2 (Must): Provide Mechanistic Hypothesis for Per-Output Pruning (Addresses Issue 2)
+In Section 3 ("Comparison Group"), add 2–3 sentences offering a hypothesis for why per-output grouping is beneficial for LLMs. For example: "We conjecture that LLMs rely on a broad set of output features, each carrying distinct semantic information. Layer-wise pruning risks collapsing some output dimensions entirely, which is especially harmful when a small fraction of output features carry critical outlier activations. Per-output grouping guarantees every output retains the same fraction of its inputs, preserving the diversity of output representations."
+
+### Suggestion 3 (Must): Tie the Squared/Unsquared Derivation (Addresses Issue 3)
+In the Remark section (Page 4), after the reduction derivation, add: "Since the square function is monotonic for non-negative inputs and the comparison is performed within each output row (where weights compete only against each other), the squared and unsquared versions produce identical rank order. We use the unsquared version for simplicity."
+
+### Suggestion 4 (Should): Add Statistical Context to "On Par" Claims (Addresses Issue 4)
+In Section 4.2 (Language Modeling), after stating that Wanda "performs on par" with SparseGPT, add: "A 5-seed robustness analysis (Appendix D.2) confirms these differences are within the calibration sampling noise (e.g., LLaMA-7B: 7.25±0.01 vs 7.25±0.03)."
+
+### Suggestion 5 (Should): Add Hardware Caveat to Large-Sparse vs Small-Dense Comparison (Addresses Issue 5)
+In Section 4.1, after the large-sparse vs small-dense comparison, add: "Note that unstructured sparsity does not reduce memory footprint or improve latency without dedicated sparse computation kernels; actual deployment benefits depend on hardware support."
+
+### Suggestion 6 (Should): Restructure Conclusion (Addresses Issue 6)
+Replace the current conclusion with three paragraphs: (a) validated findings (what Wanda achieves and under which conditions), (b) bounded limitations (performance degrades at >60% sparsity, metric is heuristic without theoretical guarantees), (c) specific future directions (sparse training integration, extending to other architectures). See the annotation on Page 9 – Conclusion for a concrete draft.
+
+### Suggestion 7 (Nice-to-Have): Tone Down Overclaims
+Replace "unique to LLMs" with "especially prominent in LLMs" or "observed in LLMs" (Page 2). Replace "surprisingly effective" with "effective" (Page 2). Replace "novel" superscriptions with more specific descriptions of what is new (Abstract).
+
+## Storyline Options + Writing Outlines
+### Current Storyline Analysis
+
+The current Introduction follows this paragraph structure:
+- **P1:** LLMs are important but expensive → quantization has made progress (background)
+- **P2:** Pruning has been neglected for LLMs → existing methods need retraining or heavy updates (gap)
+- **P3:** Magnitude pruning fails on LLMs (motivation)
+- **P4:** Wanda method overview (solution)
+
+**Problem:** P1 devotes ~60% of its space to quantization, which is not the paper's topic. The gap between "quantization works" and "pruning neglected" is not bridged cleanly. The paper does not explicitly answer "why should we care about pruning if quantization already works?"
+
+### Recommended Revised Storyline
+
+**Abstract Outline (5-sentence):**
+- **S1 (Problem):** LLMs are large and expensive; pruning can reduce their size but existing methods require costly retraining or weight updates. 
+- **S2 (Gap):** No simple, one-shot pruning method exists that works for billion-scale LLMs without modifying surviving weights.
+- **S3 (Method):** We introduce Wanda, which prunes weights based on the product of their magnitude and input activation norm, on a per-output basis, using only 128 calibration samples in a single forward pass.
+- **S4 (Result):** On LLaMA and LLaMA-2, Wanda substantially outperforms magnitude pruning and matches SparseGPT while being 300× faster.
+- **S5 (Implication):** This demonstrates that effective sparse sub-networks exist exactly within LLM weights without needing adjustment.
+
+**Introduction Outline (4 paragraphs):**
+- **P1 (Big Picture + Gap):** LLMs achieve breakthrough performance but their size creates deployment challenges. Network pruning is a classical compression solution, yet it has been surprisingly underexplored for LLMs because most pruning methods rely on retraining or computationally intensive weight updates—procedures that are prohibitive at billion-parameter scale.
+  *Transition: "The recent SparseGPT method made progress by removing the need for retraining, but it still requires solving a costly second-order reconstruction problem."*
+  
+- **P2 (Prior Attempt and Its Limitation):** SparseGPT demonstrates that LLMs can be pruned without retraining, but its weight update procedure, based on Hessian inversion, remains expensive. Meanwhile, the simpler approach of magnitude pruning catastrophically fails on LLMs even at low sparsity (e.g., OPT-13B perplexity explodes from 10.13 to 9e3 at 20% sparsity). This raises a question: can we prune LLMs effectively with a cheap, one-shot method?
+  *Transition: "We find that the key missing ingredient is accounting for input activations, not just weights."*
+  
+- **P3 (Core Insight + Method Intuition):** LLMs exhibit emergent large-magnitude hidden-state features—a small fraction of feature dimensions carry values orders of magnitude above the rest. These features are critical for model performance. Standard magnitude pruning ignores this asymmetry: a weight with small magnitude may connect to a huge activation, so removing it destroys more information than removing a larger weight connected to a small activation. Wanda's metric—|weight| × ||activation||₂—captures this. Paired with per-output pruning to protect output diversity, it yields effective sub-networks in one forward pass.
+  *Transition: "We now validate this approach empirically."*
+  
+- **P4 (Results Preview + Contributions):** Our experiments on LLaMA and LLaMA-2 families (7B–70B) show that Wanda (i) outperforms magnitude pruning by a large margin across all sparsity types, (ii) matches SparseGPT at 50% sparsity while requiring no weight updates, (iii) is 300× faster to compute, and (iv) reveals that LLMs contain exact sparse sub-networks that do not need weight adjustments. Code is available.
+
+### Alternative Storyline Option
+
+- **A1 (Problem-First):** Start with a concrete dramatic example—magnitude pruning at 20% sparsity makes perplexity explode on OPT-13B—then step back to introduce the general context and explain why this happens. This is more attention-grabbing but may be less conventional for an ICLR paper.
+
+## Priority Revision Plan
+Priority levels: **P0** = submission-critical, **P1** = strongly recommended, **P2** = quality improvement.
+
+| Priority | Action | Section | Effort | Impact |
+|----------|--------|---------|--------|--------|
+| **P0** | Add L2-vs-L1-vs-L_inf ablation to Appendix; replace speculation with factual statement | Page 3 – Pruning Metric | Low (one model, one sparsity) | High (improves scientific rigor of core design) |
+| **P0** | Add mechanistic hypothesis for per-output grouping advantage | Page 3–4 – Comparison Group | Low (2-3 sentences) | High (strengthens scientific depth) |
+| **P0** | Clarify squared/unsquared metric relationship in derivation | Page 4 – Remark | Very low (1 sentence) | Medium (prevents reader confusion) |
+| **P1** | Add statistical significance framing to "on par" claim; reference Appendix D.2 | Page 6 – Language Modeling | Very low (1 sentence) | Medium (improves defensibility) |
+| **P1** | Add hardware caveat to large-sparse vs small-dense comparison | Page 5 – Zero-Shot Tasks | Very low (1 sentence) | Medium (prevents misinterpretation) |
+| **P1** | Restructure conclusion to include validated findings, limitations, and bounded future directions | Page 9 – Conclusion | Medium (rewrite 1 paragraph) | High (leaves strong final impression) |
+| **P2** | Tone down overclaims ("unique to LLMs" → "especially prominent") | Page 2 – Introduction | Very low | Low (defensive positioning) |
+| **P2** | Name SparseGPT explicitly in Abstract instead of "recent method" | Page 1 – Abstract | Very low | Low (precision) |
+
+### Revision Order (Recommended Execution Sequence)
+
+1. **Day 1 (P0 items):** Squared/unsquared clarification (2 min) → L2 ablation experiment (2 hours) → Per-output hypothesis sentences (30 min)
+2. **Day 2 (P1 items):** Rewrite conclusion (1 hour) → Add statistical reference and hardware caveat (15 min)
+3. **Day 3 (P2 items):** Language polishing—tone down overclaims, name SparseGPT in abstract (30 min)
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|-------|---------|-------------|----------------|-------------------|
+| E1 | Zero-shot comparison with baselines (50% unstr., 4:8, 2:4) | LLaMA/LLaMA-2 7B–70B, 7 zero-shot tasks | Mean accuracy | Wanda > magnitude; Wanda ≈ SparseGPT | C1: competitive one-shot pruning | No significance tests; single calibration set |
+| E2 | Language modeling perplexity (50% unstr., 4:8, 2:4) | Same models, WikiText validation | Perplexity | Wanda ≈ SparseGPT; Wanda >> magnitude | C1, C3: exact sub-networks exist | Variance reported only in appendix |
+| E3 | Pruning speed comparison | LLaMA 7B–65B | Wall-clock seconds | Wanda 300× faster than SparseGPT | C2: efficiency | Only metric computation, not total pipeline |
+| E4 | Inference speedup (2:4 structured) | LLaMA-65B, A6000, CUTLASS | Layer latency, end-to-end latency | 1.6× layer speedup, 1.24× end-to-end | C2: practical speedup | Single GPU, single batch size |
+| E5 | Fine-tuning recovery (LoRA and full) | LLaMA-7B, C4 data, 3 sparsity types | Zero-shot accuracy, PPL | Full FT: 54→58% (gap reduced to 1.84%) | C1: pruned models are recoverable | Limited budget; pretraining data access required |
+| E6 | Ablation: metric × comparison group | LLaMA-7B, 50% unstructured | Perplexity | (output,1) best for Wanda metric | Both metric and grouping matter | Single model, single sparsity |
+| E7 | Robustness to calibration samples | LLaMA-7B, LLaMA-2-7B | Perplexity | Wanda stable from 1–2048 samples | C1: robust metric | Evaluate perplexity only, not zero-shot |
+| E8 | Weight update analysis | LLaMA-7B, multiple sparsities | Perplexity | Weight update not needed at moderate sparsity | C3: exact sub-networks | Limited to LLaMA-7B |
+| E9 | Cross-model evaluation (OPT, BLOOM, Pythia) | 6–7 model sizes, 50% sparsity | Perplexity | Wanda generally competitive | C1: generalizable | Some OPT gaps at small sizes |
+
+### Proposed Research Experiments (P0/P1/P2)
+
+| ID | Target Claim | Hypothesis | Minimal Design | Controls/Baselines | Metrics | Success Criterion | Est. Cost | Quality Gain |
+|----|-------------|-----------|---------------|-------------------|---------|------------------|-----------|-------------|
+| **P0** | L2 norm choice | L2 ≥ L1/L_inf for activation magnitude aggregation | LLaMA-7B, 50% unstr., compare L1/L2/L_inf norms in Eq.1 | Same model, calibration data, sparsity | Perplexity | L2 within 0.1 PPL of best | 2 GPU hours | Scientific rigor for core design |
+| **P0** | Per-output mechanistic hypothesis | Output-balanced pruning preserves representation diversity | Analysis experiment: measure output feature collapse under layer-wise vs per-output pruning | LLaMA-7B, 50% sparsity | Output feature rank, PPL after layer-wise pruning | Per-output shows less feature collapse | 4 GPU hours | Scientific depth |
+| **P1** | Statistical reliability of "on par" claim | Wanda and SparseGPT differences are within noise | 10 calibration seeds, LLaMA-7B/13B, 50% unstr. | Paired calibration sets | PPL mean ± std, paired t-test | p > 0.05 for Wanda vs SparseGPT | 8 GPU hours | Defensibility of main claim |
+| **P2** | Higher-sparsity analysis | Wanda catches up to SparseGPT at 60%+ with simple extension | LLaMA-7B/13B, 60% and 70% unstructured | Standard Wanda + optional weight update | Perplexity | Better than Table 19/20 results | 4 GPU hours | Completeness |
+
+### Research-Theme Gap Diagnosis
+
+- **New Knowledge:** The paper's core finding—that LLMs contain exact sparse sub-networks—is well-supported by the weight-update analysis (Table 8). However, the paper does not explain *why* LLMs have this property.
+- **Reproducibility:** The method is highly reproducible (PyTorch code given, calibration data specified). Fine-tuning results may be harder to reproduce without access to equivalent compute.
+- **Potential to Change Practice:** High, if Wanda is adopted as a cheap preprocessing step for LLM deployment. The 300× speed advantage over SparseGPT is practically significant.
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 7/10**
+
+This score prioritizes research value and novelty as primary dimensions. The paper presents a clean, well-motivated, and thoroughly evaluated pruning method with significant practical advantages (speed, simplicity). The main limitations preventing a higher score are: (1) the core design choices (L2 norm, per-output grouping) lack mechanistic justification, (2) some comparative claims are stated without statistical rigor, and (3) novelty could not be independently verified via external literature (Retrieval-Disabled Mode). The paper is a solid contribution to LLM compression with high reproducibility and practical value.
+
+**Post-Revision Target: [7.5, 8.5]/10**
+
+If the authors address the P0/P1 items in the Priority Revision Plan—particularly adding L2 ablation, providing a mechanistic hypothesis for per-output pruning, clarifying the derivation, and restructuring the conclusion—the paper would be notably stronger. The upper bound of 8.5 assumes that independent literature verification confirms the novelty claims and that no overlapping prior work is identified.

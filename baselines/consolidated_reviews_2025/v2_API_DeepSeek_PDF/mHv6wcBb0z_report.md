@@ -1,0 +1,294 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper addresses the problem of **model collapse in Deep Canonical Correlation Analysis (DCCA)** for multi-view representation learning. The authors observe that DCCA-based methods initially perform well but suffer drastic performance degradation as training proceeds — a phenomenon they term "model collapse." They attribute this to the unconstrained expressive power of deep neural networks, which can learn to "create" spurious correlations between views rather than extracting genuine cross-view structure.
+
+The proposed method, **NR-DCCA**, augments the DCCA objective with a **noise regularization (NR) loss** that penalizes the discrepancy between the correlation of input noise with the data before and after the neural transformation. Theoretically, the paper proves that for linear CCA, full-rank transformations preserve noise correlations — and defines an analogous "full-rank" condition for neural networks as having zero NR loss. Empirically, NR-DCCA demonstrates stable training trajectories across synthetic datasets with controlled "common rates" and three real-world benchmarks (PolyMnist, CUB, Caltech101), outperforming both linear CCA and other DCCA variants.
+
+The paper has several notable strengths — a practically motivated problem, an intuitive and well-justified regularization strategy, and supporting theoretical analysis. However, there are significant concerns regarding: (1) the theoretical bridge from CCA to DCCA relies on a square-matrix assumption that does not hold in standard CCA; (2) causal claims about "full-rank" preventing collapse are empirically correlated but not formally proven; (3) real-world experiments lack statistical significance measures; (4) the synthetic benchmark, while clever, uses only a single configuration. Novelty comparisons are deferred due to the absence of external literature retrieval in this run.
+
+## Strengths
+**S1 — Well-motivated problem with practical significance.** The identification of "model collapse" in DCCA training is a genuinely useful observation. The paper demonstrates that this collapse is not merely a theoretical curiosity but materially degrades downstream performance, sometimes below simple CCA or feature concatenation. This motivation is clearly articulated and supported by empirical evidence in Figure 4.
+
+**S2 — Intuitive and principled regularization strategy.** The noise regularization idea is conceptually elegant: use the invariance of noise correlations under full-rank linear transformations as a diagnostic for healthy training, then penalize deviations from this invariance in DNNs. This connects an observable training signal (noise correlation growth) to a corrective objective in a natural way.
+
+**S3 — Theoretical scaffolding, despite gaps.** The paper goes beyond purely empirical work by attempting to formalize the connection between full-rank transformations and collapse-free behavior through Proposition 3, Proposition 4, and Theorem 1. The MPI-based reformulation of CCA (Proposition 2) is a technically interesting contribution in its own right.
+
+**S4 — Synthetic benchmark with controlled common rates.** The "God Embedding" + "common rate" framework provides a configurable testbed for MVRL methods. The ability to vary the overlap between views from 0% to 100% allows systematic evaluation of how well different methods handle varying degrees of shared information.
+
+**S5 — Generalizability demonstrated.** The noise regularization is shown to generalize to DGCCA (Appendix A.10), indicating the approach is not tied to the specific DCCA formulation but can be applied to other CCA-based deep architectures.
+
+**S6 — Broad baseline comparison.** The experiments compare against 11 baselines spanning multiple families (linear CCA, kernel CCA, DCCA variants with autoencoders/private encoders, information-theoretic MVTCAE), providing a reasonably comprehensive empirical landscape.
+
+## Weaknesses
+**W1 — Theoretical gap: square-matrix assumption (Critical).** Theorem 1 and the surrounding analysis assume Wk is a square matrix. In standard CCA, Wk ∈ R^{m×d_k} where m ≤ d_k is the output dimension — typically non-square. The equivalences in Propositions 3 and 4 rely on Wk^+ Wk = I, which only holds for full-rank square matrices. This assumption is not discussed, justified, or relaxed in the main text, making the theoretical bridge from CCA to DCCA incomplete. (See annotation on Page 6.)
+
+**W2 — Definition 2 does not prove collapse prevention (Major).** The paper defines "full-rank" of fk as ζ_k = 0 (Definition 2) and then asserts that model collapse "can be eliminated" because fk shares the same property as full-rank Wk. This is a definition, not a theorem. No formal bound relating ζ_k to performance degradation is provided. The empirical correlation (Figure 4b) is suggestive but does not constitute a proof that ζ_k → 0 implies collapse-free behavior. (See annotation on Page 6.)
+
+**W3 — Missing statistical rigor in real-world experiments (Major).** Real-world results (Table 3) are reported as single F1 scores without variance, confidence intervals, or significance tests. Given that 5-fold CV is used (stated in Section 5), mean±std reporting would require negligible extra effort. The absence of uncertainty quantification makes it impossible to assess whether NR-DCCA's improvements over baselines are statistically reliable, especially for small gaps (e.g., 0.991 vs 0.988 on 4-view PolyMnist). (See annotation on Page 9.)
+
+**W4 — Single synthetic configuration (Major).** The synthetic benchmark uses only K=2 views, d=100, n=4000 with a single random seed. While the "common rate" variation is informative, the paper claims a "comprehensive" evaluation framework but tests only one configuration. The ϕ_k transformations are described as "randomly generated MLPs" with unspecified architecture, activation, and seed, making exact reproduction difficult. (See annotation on Page 7.)
+
+**W5 — Introduction narrative is unfocused (Moderate).** The first introductory paragraph reads as a citation parade without a clear thesis or research gap. The paper's core motivation (model collapse) does not appear until the second paragraph, delaying reader engagement. The contribution list mixes claims of different nature (diagnosis, method, theory, benchmark) without prioritizing. (See annotations on Pages 1-2.)
+
+**W6 — Related work is a chronological list (Moderate).** Sections 2.1-2.3 enumerate papers one-by-one rather than organizing by comparison axes. The gap statement ("model collapse has not been explored") is stated but not connected to each method's limitations. The noise regularization section (2.3) does not analyze why existing noise methods fail for DCCA. (See annotation on Page 3.)
+
+**W7 — NR loss implementation details in appendix (Moderate).** The computation of Corr(Xk, Ak) for high-dimensional data requires dimensionality reduction through the initial encoder (mentioned in Appendix A.6 but not in the main method). This is a non-trivial implementation choice that should be disclosed in the main paper. Additionally, the stochastic nature of the NR target (fresh noise each epoch) is not discussed regarding optimization stability. (See annotation on Page 5.)
+
+**W8 — Conclusion overclaims (Moderate).** The conclusion states model collapse is analyzed "for the first time" (unverifiable without literature search) and that NR-DCCA "inherits the merits of both CCA and DCCA" (overstates theoretical guarantees). The future work section is a generic wishlist without concrete hypotheses. (See annotation on Page 9.)
+
+**W9 — CCA definition lacks explicit covariance formulas (Minor).** Eq. (2) defines the correlation objective using Σ_{11}, Σ_{12}, Σ_{22} without defining their explicit forms in terms of data matrices. While familiar to CCA specialists, this reduces accessibility and reproducibility for the broader ML audience. (See annotation on Page 4.)
+
+**W10 — Missing baseline explanation for real-world experiments (Minor).** KCCA and PRCCA are missing from real-world results (shown as "-" in Table 3) without explanation. Readers cannot distinguish between computational infeasibility and intentional omission.
+
+## Key Issues
+### Ranked Top-6 Core Defects Board
+
+| Rank | Issue | Severity | Research-Value Impact | Validity Risk | Fixability | Confidence |
+|------|-------|----------|----------------------|--------------|------------|------------|
+| 1 | Square-matrix assumption in Theorem 1 | Major | High — undermines theoretical bridge | High — core proof relies on unrealistic assumption | Medium — can be relaxed with rank discussion | High |
+| 2 | ζ_k definition does not prove collapse elimination | Major | High — central causal claim unsupported | High — no formal bound between ζ_k and performance | Medium — add bound or temper claim | High |
+| 3 | Missing variance/statistics in real-world results | Major | Medium — reduces credibility of claimed gains | Medium — gap significance unclear | High — trivial to add std | High |
+| 4 | Single synthetic configuration | Major | Medium — limits generalizability claims | Low — still informative but not comprehensive | High — add 2-3 configurations | High |
+| 5 | Unfocused introduction narrative | Moderate | Low-Medium — weakens first impression | Low — no scientific invalidity | High — direct rewrite provided | High |
+| 6 | Conclusion overclaims | Moderate | Medium — risks rejection by informed reviewers | Low — fixable by rewording | High — replacement sentences provided | High |
+
+### Summary of Critical Risks
+
+The most significant risk is **theoretical validity**. The paper's central narrative — that noise regularization enforces "full-rank" networks which prevent collapse — rests on Theorem 1's equivalence between noise-invariance and full-rankness. This theorem requires square Wk, which is not satisfied by standard CCA. Without relaxing or justifying this assumption, the theoretical justification is incomplete. If a reviewer identifies this gap, the paper's contribution could be significantly downgraded from "theoretically justified method" to "heuristic with empirical support."
+
+The second major risk is **empirical rigor**. The absence of variance reporting in real-world experiments means the claimed improvements cannot be assessed for statistical significance. Combined with the single synthetic configuration, the empirical case for "consistent outperformance" is weaker than the narrative suggests.
+
+## Actionable Suggestions
+### S1 — Relax the square-matrix assumption (Must, Priority P0)
+**Problem:** Theorem 1 requires square Wk, which does not hold in standard CCA (Wk ∈ R^{m×d_k}, m ≤ d_k).
+**Fix:** Add a paragraph after Theorem 1 that addresses this:
+"*Theorem 1 is stated for square Wk for analytical clarity. When Wk is non-square but has full row rank (rank(Wk) = m), the noise-invariance property in Proposition 3 still holds because Wk^+ Wk = I_m (the m×m identity) when Wk has full row rank. The contrapositive in Proposition 4 requires full column rank. A complete characterization for general rectangular matrices is provided in Appendix [X].*"
+**Expected benefit:** Closes the central theoretical gap without changing the method.
+
+### S2 — Bound ζ_k to performance (Nice-to-have, Priority P1)
+**Problem:** Definition 2 defines "full-rank" as ζ_k = 0 but does not prove this prevents collapse.
+**Fix:** Either (a) provide a bound: e.g., "If ζ_k ≤ ε for all k, then the condition number of the cross-view covariance is bounded by κ(ε)," or (b) temper the claim to: "*The empirical evidence (Figure 4b) shows a strong correlation between low ζ_k and stable downstream performance. Proving a formal bound is an important direction for future work.*"
+**Expected benefit:** Aligns claim strength with available evidence.
+
+### S3 — Report mean±std for real-world results (Must, Priority P0)
+**Problem:** Table 3 reports single F1 scores without variance.
+**Fix:** Re-run all real-world experiments with the same 5-fold CV setup (already used in Section 5) and report "mean ± std" in Table 3. Add a brief sentence: "*All real-world results are reported as mean ± standard deviation over 5-fold cross-validation.*"
+**Expected benefit:** Allows readers to assess statistical significance. Very low cost, high impact.
+
+### S4 — Expand synthetic benchmark (Nice-to-have, Priority P1)
+**Problem:** Only K=2, d=100, n=4000 configuration tested.
+**Fix:** Add 2-3 additional configurations: (a) K=3 views, (b) d=50 with n=2000, (c) non-Gaussian G (e.g., uniform). Report in a new appendix table. Add one sentence: "*Additional configurations (Appendix X) confirm that the trends in Figure 4 generalize across dataset scales and dimensionalities.*"
+**Expected benefit:** Strengthens generalizability claim.
+
+### S5 — Specify ϕ_k implementation in main paper (Must, Priority P1)
+**Problem:** ϕ_k is described as "addition of noise followed by a randomly generated MLP" only in Appendix A.7.
+**Fix:** Add to Section 5.1: "*Each nonlinear transformation ϕ_k is a 3-layer MLP with ReLU activations, where weights are randomly initialized (seed=42) and frozen. Gaussian noise N(0, 0.01) is added to the input before the MLP.*"
+**Expected benefit:** Enables exact reproduction.
+
+### S6 — Add noise correlation quantification (Nice-to-have, Priority P2)
+**Problem:** Figure 4b shows trends but does not report numerical values.
+**Fix:** Add a supplementary table showing noise correlation at epochs {1, 50, 100, 200} for each method under each common rate.
+**Expected benefit:** Supports the "always occurs" claim with concrete numbers.
+
+### S7 — Restructure Related Work (Nice-to-have, Priority P2)
+**Fix:** Reorganize Section 2 by comparison axes (supervision type, information preservation, training stability) rather than chronological listing. For each category, state one limitation that this paper addresses.
+**Expected benefit:** Improves positioning clarity.
+
+### S8 — Replace "first time" and "inherits merits" language (Must, Priority P1)
+**Fix (Conclusion):**
+- Replace "observed and analyzed ... for the first time" → "systematically characterized in this work."
+- Replace "inherits the merits of both CCA and DCCA" → "combines the representational power of deep networks with a regularization strategy inspired by CCA's noise-invariance property."
+**Expected benefit:** Removes unverifiable priority claims and overstatement.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Assessment
+
+The current introduction follows a "broad-to-specific" arc: MVRL importance (P1) → CCA/DCCA background (P1) → model collapse observation (P2) → solution idea (P2) → contribution list (P2). The main weakness is that the first paragraph is a high-level survey with no thesis statement, so readers do not know where the paper is heading until halfway through the introduction.
+
+**Alignment checks:**
+- Problem alignment: ✓ The stated challenge (model collapse) matches the proposed solution (noise regularization).
+- Variable alignment: ✓ Core concepts (full-rank, noise correlation, ζ_k) appear as key method objects.
+- Contribution-evidence alignment: Partially — contributions 1, 2, 3 are evidenced; contribution 4 (synthetic data) has only one configuration tested.
+
+### Alternative Storyline A (Recommended) — "Problem-First" Structure
+
+**Abstract Outline (S1-S5):**
+- S1 (Problem): "Multi-View Representation Learning (MVRL) aims to learn unified representations from multi-source data. Deep Canonical Correlation Analysis (DCCA) achieves strong performance but suffers from model collapse: downstream task performance degrades drastically as training proceeds, making training unreliable."
+- S2 (Gap): "Existing CCA-based methods avoid collapse but use linear transformations with limited capacity. DCCA variants offer capacity but collapse during training, and early stopping is impractical."
+- S3 (Solution): "We develop NR-DCCA, which augments the DCCA objective with a noise-regularization loss that penalizes changes in cross-view noise correlations through the network, preventing collapse."
+- S4 (Theory): "Theoretically, we prove that full-rank linear transformations preserve noise correlations; NR-DCCA enforces an analogous 'full-rank' condition on neural networks."
+- S5 (Results): "On synthetic benchmarks with controlled common rates and three real-world datasets, NR-DCCA consistently outperforms 11 baselines while maintaining stable training, and the noise regularization generalizes to DGCCA."
+
+**Introduction Outline (Paragraph-by-Paragraph):**
+
+- **P1 (Stakes + Gap):** "Multi-view data is ubiquitous in modern AI systems. A core challenge is learning representations that capture both shared and view-specific information. DCCA addresses this through correlation maximization with deep networks, achieving strong results. However, we identify a critical failure mode: as DCCA training proceeds, downstream performance sharply declines — a phenomenon we term model collapse." (Replaces current P1 which is a citation parade.)
+  
+- **P2 (Phenomenon + Analysis):** "Figure 4a shows this collapse on synthetic data: DCCA's R2 peaks at ~0.29 (epoch 20) and falls to ~0.19 (epoch 200), below simple CCA at 0.27. We hypothesize that collapse occurs because DNNs overfit the correlation objective by learning spurious cross-encoder correlations. CCA avoids this because its linear projections are constrained to be full-rank, preventing the model from 'creating' correlation between independent inputs." (New — provides concrete data and mechanism earlier.)
+
+- **P3 (Solution + Theory Preview):** "We propose NR-DCCA, which adds a noise-regularization term ζ_k = |Corr(fk(Xk), fk(Ak)) − Corr(Xk, Ak)| to the DCCA objective. Theoretically, we prove (Theorem 1) that for linear CCA, noise-invariance is equivalent to full-rankness. Minimizing ζ_k for neural networks enforces an analogous property. This is fundamentally different from prior noise injection methods (Poole et al., 2014; He et al., 2019) that target generalization or adversarial robustness, not collapse prevention." (More focused than current scattered narrative.)
+
+- **P4 (Contributions):** "Our contributions are: (1) identification and systematic characterization of model collapse in DCCA; (2) NR-DCCA with theoretical justification linking full-rankness to noise-invariance; (3) a configurable synthetic MVRL benchmark with controlled common rates; (4) empirical validation across 11 baselines and 4 dataset configurations." (Sharper than current four-bullet list.)
+
+### Alternative Storyline B — "Theory-First" Structure
+Start with Theorem 1 (noise-invariance ↔ full-rank), then show DCCA violates this, then propose NR loss to restore it. This is more compact but less accessible to general ML audience. Not recommended for ICLR because it front-loads technical machinery before motivating the problem.
+
+### Selected Storyline: **Alternative A** (Problem-First)
+This structure better serves the paper's message because it hooks the reader with a concrete problem (model collapse with visible evidence) before introducing the solution, making the theoretical development a *response to a practical need* rather than an abstract exercise.
+
+## Priority Revision Plan
+### P0 — Must Fix (Publication-Critical)
+
+| Step | Action | Affected Section | Effort | Expected Impact |
+|------|--------|-----------------|--------|-----------------|
+| P0.1 | Add paragraph relaxing square-matrix assumption (Wk^+ Wk = I for full row-rank case) | Section 4.2 (after Theorem 1) | Low (1 paragraph) | Closes central theoretical gap |
+| P0.2 | Report mean±std for all real-world results | Section 5.3 / Table 3 | Low (code already runs 5-fold CV) | Enables statistical assessment |
+| P0.3 | Move Corr computation dimensionality-reduction trick from appendix to main text | Section 4.1 | Low (1 sentence) | Reproducibility |
+| P0.4 | Replace "first time" and "inherits merits" language | Conclusion | Low (2 sentence edits) | Removes overclaiming |
+| P0.5 | Specify ϕ_k architecture (MLP depth, activation, seed) in main paper | Section 5.1 | Low (1 sentence) | Reproducibility |
+
+### P1 — Should Fix (Significant Quality Improvement)
+
+| Step | Action | Affected Section | Effort | Expected Impact |
+|------|--------|-----------------|--------|-----------------|
+| P1.1 | Add ζ_k → performance bound or temper claim to correlational | Section 4.2 / Conclusion | Medium | Aligns claim strength with evidence |
+| P1.2 | Expand synthetic benchmark (2-3 additional configs) | Section 5.1 / Appendix | Medium | Strengthens generalizability |
+| P1.3 | Restructure Related Work by comparison axes | Section 2 | Medium | Better positioning |
+| P1.4 | Rewrite Introduction P1 to focus on problem + gap | Section 1 | Low | Sharper narrative |
+
+### P2 — Nice-to-Have (Quality Polish)
+
+| Step | Action | Affected Section | Effort | Expected Impact |
+|------|--------|-----------------|--------|-----------------|
+| P2.1 | Add noise correlation numerical table | Section 5.2 / Appendix | Low | Supports visual trends |
+| P2.2 | Explain missing KCCA/PRCCA in real-world | Section 5.3 | Low | Transparency |
+| P2.3 | Add explicit covariance formula after Eq (2) | Section 3.2 | Low | Clarity |
+
+### ASCII Diagram — Revision Strategy Roadmap
+
+```text
+[Current manuscript]
+    │
+    ├── [P0.1] Square-matrix assumption gap → Add relaxation paragraph → Theoretical closure
+    ├── [P0.2] Missing variance → Add std to Table 3 → Statistical credibility
+    ├── [P0.3] Dim-reduction in appendix → Move to Section 4.1 → Reproducibility
+    ├── [P0.4] Overclaiming ("first time") → Replace with bounded wording → Defensibility
+    ├── [P0.5] ϕ_k unspecified → Add architecture details → Reproducibility
+    │
+    ├── [P1.1] ζ_k claim unproven → Add correlation remark or bound → Honest positioning
+    ├── [P1.2] Single synthetic config → Add 2-3 configs → Generalizability
+    ├── [P1.3] RW is list → Restructure by axes → Positioning clarity
+    └── [P1.4] Intro unfocused → Rewrite P1 → Reader engagement
+```
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|-------|---------|-------------|----------------|-------------------|
+| E1 | Synthetic: Does model collapse occur across common rates? | K=2, d=100, n=4000, 6 CR levels (0%-100%), 50 regression tasks | R2 (mean±std over tasks) | DCCA collapses (R2 drops from ~0.29 to ~0.19 at 40% CR); NR-DCCA stable (~0.29-0.30) | C1 (collapse identification), C2 (NR prevents collapse) | Single configuration (K=2, d=100, n=4000); ϕ_k details underspecified |
+| E2 | Synthetic: Does NR reduce noise correlation? | Same as E1, trained DCCA/DGCCA/NR variants | Corr(fk(Xk), fk(Ak)) over epochs | NR-DCCA keeps noise correlation near 0; all others increase | C2 (mechanism), C3 (theory validation) | No numerical table; only visual |
+| E3 | Real-world: PolyMnist (2-5 views) | MLP encoders, Ridge/SVC evaluation | F1 score | NR-DCCA improves as views increase (0.913→0.993 for 5 views); DCCA collapses (0.870→0.934) | C2 (generalizability) | No variance/CI; missing KCCA/PRCCA |
+| E4 | Real-world: CUB | Visual+text features, MLP encoders | F1 score | NR-DCCA 0.921 vs DCCA 0.805 | C2 (real-world effectiveness) | Small dataset (480 train); no variance |
+| E5 | Real-world: Caltech101 | HOG+GIST+SIFT features, MLP encoders | F1 score | NR-DCCA 0.625 vs DCCA 0.604 | C2 (real-world effectiveness) | Small margin; no variance |
+| E6 | Ridge regularization analysis (Appendix A.6.1) | Vary ridge hyperparameter r on CUB | F1 + feature covariance square sum | Ridge does not prevent collapse; NR-DCCA uses r=0 | C1 (ridge ≠ full-rank of transform) | Causal claim not formally proven |
+| E7 | α sensitivity (Appendix A.6.2) | Vary α on CUB | F1 over epochs | Wide range of α works; too large → slow convergence; too small → collapse remains | C2 (robustness to α) | Only one dataset tested |
+| E8 | DGCCA generalizability (Appendix A.10) | Same as E1-E5 for DGCCA variants | R2 / F1 | NR-DGCCA matches NR-DCCA trends | C2 (generalizability to DGCCA) | Same limitations as DCCA experiments |
+| E9 | t-SNE visualization (Appendix A.9) | CUB test set, 10 classes, 2D t-SNE | Visual cluster quality | NR-DCCA/NR-DGCCA best separates all classes | C2 (representation quality) | Qualitative only |
+
+### Research-Theme Gap Diagnosis
+
+1. **New Knowledge — Partial.** The identification of model collapse in DCCA is a genuine new observation. However, the mechanistic explanation (DNNs "create" spurious correlations) is intuitive rather than experimentally isolated. No experiment directly measures whether collapsed networks actually exhibit higher cross-encoder weight alignment or whether the Jacobian rank decreases during collapse.
+
+2. **Reproducibility — Moderate.** The code is provided, but key implementation details (ϕ_k architecture, Corr dimensionality-reduction strategy for PolyMnist) are only in the appendix. The absence of variance reporting makes independent verification of result significance difficult.
+
+3. **Impact on Practice — Potentially High.** If the noise regularization approach proves robust across diverse settings, it could become a standard training component for DCCA. However, the current evidence base (3 real-world datasets, 1 synthetic configuration) is too narrow to support this impact claim.
+
+### Proposed Research Experiments
+
+**P0 Experiment — Statistical Significance in Real-World Results**
+- **Target Claim:** C2 (NR-DCCA outperforms DCCA and baselines)
+- **Hypothesis:** NR-DCCA's improvements are statistically significant at p<0.05
+- **Minimal Design:** Rerun all real-world experiments with 5-fold CV, compute mean±std. Add paired t-test (or Wilcoxon) between NR-DCCA and best baseline for each dataset.
+- **Controls/Baselines:** All 11 baselines from current paper
+- **Metrics:** F1 (classification), R2 (regression)
+- **Success Criterion:** At least 4 out of 6 dataset configurations show p<0.05 after Bonferroni correction
+- **Cost:** Very low (code exists, just add aggregation)
+- **Expected Quality Gain:** High — addresses the most actionable weakness
+
+**P1 Experiment — Collapse Mechanism Isolation**
+- **Target Claim:** C1 (model collapse due to spurious cross-encoder correlations)
+- **Hypothesis:** Collapsed DCCA networks exhibit (a) higher cross-encoder weight norm alignment, (b) lower effective Jacobian rank than non-collapsed NR-DCCA networks
+- **Minimal Design:** During training of DCCA and NR-DCCA on PolyMnist (5-view), record at epochs {10, 50, 100, 200}: (i) cross-encoder weight correlation ||W_i^T W_j||_F for each layer pair, (ii) effective rank of Jacobian dfk/dXk. Compare trends.
+- **Controls:** Same architecture, same data, same training budget
+- **Metrics:** Weight alignment score, Jacobian effective rank, downstream F1
+- **Success Criterion:** Weight alignment increases and Jacobian rank decreases significantly for DCCA but not for NR-DCCA
+- **Cost:** Medium (1-2 days for implementation and analysis)
+- **Expected Quality Gain:** High — transforms the mechanism story from plausible hypothesis to validated explanation
+
+**P2 Experiment — OOD/Stress Test Robustness**
+- **Target Claim:** C2 (NR-DCCA is stable and prevents collapse)
+- **Hypothesis:** NR-DCCA maintains stable performance under distribution shift and input perturbations, while DCCA's collapse is exacerbated
+- **Minimal Design:** On PolyMnist (5-view), add: (a) Gaussian noise (σ=0.1, 0.3, 0.5) to test inputs, (b) missing view (mask one view during evaluation), (c) reduced training samples (10%, 25%, 50%). Measure F1 at epoch 200.
+- **Controls:** DCCA, DGCCA, DCCAE, MVTCAE
+- **Metrics:** F1 under perturbation, drop relative to clean performance
+- **Success Criterion:** NR-DCCA's F1 drop is ≤50% of DCCA's drop under each condition
+- **Cost:** Medium (2-3 days)
+- **Expected Quality Gain:** High — addresses real-world deployment concerns
+
+**P2 Experiment — Ablation: Where to Place Noise?**
+- **Target Claim:** C2 (noise on input, same shape as Xk)
+- **Hypothesis:** Adding noise at intermediate layers or with different distributions changes collapse-prevention effectiveness
+- **Minimal Design:** Compare 4 variants: (a) input noise (current), (b) latent noise (after first hidden layer), (c) output noise (after fk), (d) noise applied only to one view. Measure noise correlation trajectory and downstream F1.
+- **Controls:** No-noise DCCA baseline
+- **Metrics:** ζ_k trajectory, F1 at epoch 200
+- **Success Criterion:** Identify which variant minimizes ζ_k most stably
+- **Cost:** Low-Medium (1-2 days)
+- **Expected Quality Gain:** Medium — provides design guidance for practitioners
+
+### ASCII Diagram — Experiment Upgrade Plan
+
+```text
+Current Experiments
+    │
+    ├── Synthetic (E1, E2) ─── [P1.2] Add 2-3 configs
+    ├── Real-world (E3-E5) ─── [P0] Add std + significance tests
+    ├── Ridge analysis (E6) ─── Sufficient as is
+    ├── α sensitivity (E7) ─── Sufficient as is
+    ├── DGCCA (E8) ─── Sufficient as is
+    └── t-SNE (E9) ─── Qualitative, keep
+    │
+Proposed Additions
+    │
+    ├── [P0] Statistical significance on real-world
+    ├── [P1] Collapse mechanism isolation (weight alignment, Jacobian rank)
+    ├── [P2] OOD/stress test robustness
+    └── [P2] Noise placement ablation
+```
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 5.5 / 10**
+
+**Rationale:** The paper addresses a genuinely interesting problem (model collapse in DCCA) with an intuitive and empirically plausible regularization strategy. The theoretical analysis is ambitious and partly illuminating. However, the score is limited by three factors prioritized per the scoring policy (research value + novelty first):
+
+1. **Research value (moderate, not yet high).** The problem identification is useful, but the solution's practical impact is not yet convincingly demonstrated beyond a single synthetic configuration and three real-world datasets without statistical significance. The mechanism explanation (full-rank → noise-invariance) has a critical theoretical gap (square-matrix assumption) that weakens the claimed contribution.
+
+2. **Novelty (uncertain, deferred).** The "first" claim for model collapse observation and the "novel" regularization approach cannot be verified without external literature, which is unavailable in this run. Even internally, the contribution is a combination of existing ideas (noise regularization + CCA theory) rather than a fundamentally new paradigm.
+
+3. **Validity risks (moderate).** The theoretical bridge from CCA to DCCA is incomplete (square-matrix assumption). The empirical evidence lacks rigor (no variance, single synthetic config). Without addressing these, the core claims are only partially supported.
+
+The paper has clear potential and the recommended revision plan (especially the P0 items) would substantially strengthen it.
+
+---
+
+**Post-Revision Target: [6.5, 7.5] / 10**
+
+If the authors address all P0 items (relax square-matrix assumption, add variance/std reporting, move key implementation details from appendix to main text, remove overclaiming) and at least two P1 items (expand synthetic benchmark, add collapse mechanism isolation experiment), the paper would achieve a score in this range. The upper bound (7.5) assumes that the theoretical gap is convincingly closed and the additional experiments confirm the current trends. A score above 8.0 would require external verification of the "first" status and a formal bound between ζ_k and performance, which are beyond the scope of a single revision cycle.

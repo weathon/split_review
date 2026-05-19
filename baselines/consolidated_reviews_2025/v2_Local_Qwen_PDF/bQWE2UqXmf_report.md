@@ -1,0 +1,109 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper introduces **Raidar**, a novel method for detecting AI-generated text by leveraging the rewriting behavior of large language models (LLMs). The core hypothesis is that LLMs exhibit an "invariance property" when rewriting AI-generated text, making fewer modifications compared to human-written text. Raidar calculates the editing distance (e.g., Levenshtein distance) between the original and rewritten text to classify the source. The method operates solely on discrete token outputs, making it compatible with black-box LLM APIs (e.g., GPT-3.5, GPT-4) where log-probabilities are unavailable. Experiments across six domains (News, Creative Writing, Student Essays, Code, Yelp Reviews, ArXiv Abstracts) demonstrate that Raidar significantly outperforms established baselines like DetectGPT and Ghostbuster, with F1 score improvements of up to 29 points. The paper also analyzes robustness against adversarial rephrasing, cross-model generalization, and input length sensitivity.
+
+**Key Contributions:**
+1. **Invariance Hypothesis:** Proposes that LLMs perceive AI-generated text as high-quality, leading to minimal rewriting modifications.
+2. **Black-Box Compatibility:** Introduces a feature-agnostic detection method relying on symbolic editing distance rather than internal model probabilities.
+3. **Empirical Validation:** Demonstrates strong in-distribution and out-of-distribution performance across diverse domains and generation models.
+
+**Overall Assessment:** The paper presents a clever, practical, and empirically strong approach to AI text detection. The black-box compatibility is a significant advantage over probability-based methods. However, the manuscript would benefit from tighter claim bounding, clearer mechanistic explanations, and a more balanced discussion of computational costs and limitations.
+
+## Strengths
+1. **Novel and Practical Detection Paradigm:** The core insight—that LLMs exhibit rewriting invariance for AI-generated text—is intuitive, empirically validated, and practically valuable. It shifts the detection paradigm from internal probability metrics to observable behavioral consistency.
+2. **Black-Box Compatibility:** By relying solely on discrete token outputs, Raidar is compatible with closed-source, API-only LLMs (e.g., GPT-4), addressing a critical limitation of state-of-the-art methods like DetectGPT that require white-box access.
+3. **Strong Empirical Performance:** The method demonstrates substantial F1 score improvements across six diverse domains, including challenging short-text scenarios (Yelp reviews) and structured data (Code). The out-of-distribution generalization to unseen generation models (e.g., LLaMA 2, Claude) further underscores its robustness.
+4. **Comprehensive Analysis:** The paper includes valuable analyses on adversarial rephrasing, rewriting model size sensitivity, and input length effects, providing a well-rounded evaluation of the method's boundaries and practicality.
+5. **Open Science:** The release of code and data facilitates reproducibility and encourages community benchmarking.
+
+## Weaknesses
+1. **Unvalidated Theoretical Claims:** The hypothesis that AI-generated text has "inherently lower loss" is asserted without direct measurement or proof. The method relies on editing distance as a proxy, but the connection between loss and rewriting stability is not formally established.
+2. **Computational Cost Overlooked:** The Equivariance and Uncertainty metrics require multiple sequential LLM calls (3+ per sample) and $O(K^2)$ distance calculations. The manuscript does not discuss the latency or API cost implications, which are critical for real-time deployment.
+3. **Speculative Analysis:** The explanation for the Yelp dataset performance drop under multi-prompt training ("We suspect it is due to...") is speculative. A more grounded hypothesis based on text length and prompt sensitivity is needed.
+4. **Adversarial Robustness Claims:** The claim that symbolic representations are "none differentiable" and thus resistant to gradient-based attacks is theoretically plausible but lacks empirical validation against text perturbation attacks.
+5. **Feature Hierarchy Ambiguity:** Table 1 shows Invariance consistently outperforms Equivariance and Uncertainty, but the text does not explain why Invariance is the dominant signal or when the other metrics provide complementary value.
+6. **Conclusion Limitations:** The conclusion is overly brief and omits a discussion of limitations (e.g., inference latency, domain boundaries), reducing the scientific maturity of the final narrative.
+
+## Key Issues
+1. **Claim-Evidence Mismatch on Loss:** The manuscript claims AI text has "inherently lower loss" (Page 3), but no loss values are reported. This is a theoretical assertion that should be reframed as an observable behavioral hypothesis (rewriting stability) to maintain scientific rigor.
+2. **Missing Computational Trade-off Analysis:** The Equivariance metric requires three LLM calls per sample. Without discussing latency/cost, the practicality of this metric for real-time detection is unclear. Authors should clarify the cost-performance trade-off.
+3. **Unsubstantiated Adversarial Robustness:** The claim that non-differentiable symbolic features prevent gradient-based attacks (Page 6) is not empirically tested. Reviewers may challenge this without evidence of adversarial resistance.
+4. **Speculative Explanation for Yelp Drop:** The analysis of the Yelp dataset performance drop under multi-prompt training relies on speculation ("We suspect..."). A grounded hypothesis based on short-text variance is required.
+5. **Feature Dominance Not Explained:** Invariance consistently outperforms Equivariance and Uncertainty (Table 1), but the manuscript does not explain why Invariance is the primary signal or when the other metrics are necessary.
+
+## Actionable Suggestions
+1. **Reframe Loss Hypothesis:** Replace "inherently lower loss" with "structural consistency" or "rewriting stability." Clarify that editing distance serves as a behavioral proxy for model preference, avoiding unmeasured internal states.
+2. **Add Computational Cost Discussion:** Include a paragraph or table comparing the inference latency and API cost of Invariance (1 call) vs. Equivariance (3 calls) vs. Uncertainty ($K$ calls). Position Invariance as the primary low-cost feature and others as robustness enhancers.
+3. **Ground Yelp Analysis:** Replace the speculative explanation for the Yelp performance drop with a hypothesis based on short-text variance. Note that short texts have less semantic buffer, making them more sensitive to prompt-induced stylistic shifts.
+4. **Soften Adversarial Claims:** Change "introduces extra burden and cost for gradient-based adversarial attempts" to "theoretically complicates gradient-based attacks." If possible, add a small ablation testing against simple text perturbations.
+5. **Clarify Feature Hierarchy:** Explicitly state that Invariance is the dominant detection signal across domains, while Equivariance and Uncertainty provide complementary robustness in adversarial or OOD settings.
+6. **Expand Conclusion:** Add a concise sentence acknowledging limitations (e.g., inference latency, prompt sensitivity) and suggest future work (e.g., automated prompt optimization, cross-lingual detection).
+
+## Storyline Options + Writing Outlines
+### Abstract Outline (Complete)
+- **S1 (Problem & Domain):** AI-generated text detection is critical for mitigating LLM risks, but existing methods rely on internal probabilities unavailable in black-box models.
+- **S2 (Gap):** Probability-based detectors (e.g., DetectGPT) require white-box access and are vulnerable to spurious features, limiting their practical deployment.
+- **S3 (Method):** We introduce Raidar, a black-box compatible method that detects AI text by measuring the editing distance between original and LLM-rewritten text.
+- **S4 (Key Result):** Raidar improves F1 scores by up to 29 points over baselines across six domains and generalizes to unseen generation models.
+- **S5 (Implication):** Our findings reveal a structural invariance in machine-generated text, offering a robust, feature-agnostic detection paradigm.
+
+### Introduction Outline (Complete)
+- **P1 (Motivation):** Establish the societal/security risks of LLMs and the necessity of reliable detection for governance and auditing.
+- **P2 (Gap):** Critique prior work: black-box incompatibility of probability-based methods and susceptibility to spurious correlations.
+- **P3 (Solution & Hypothesis):** Introduce Raidar and the invariance hypothesis: LLMs modify AI text less than human text due to structural consistency.
+- **P4 (Evidence Preview):** Summarize key results: strong in-distribution/OOD performance, robustness to adversarial rephrasing, and black-box compatibility.
+- **P5 (Contributions):** Explicitly list contributions: (1) invariance-based detection framework, (2) black-box compatible symbolic features, (3) comprehensive empirical validation across domains/models.
+
+## Priority Revision Plan
+| Priority | Action Item | Expected Impact | Effort |
+|---|---|---|---|
+| **P0** | Reframe "lower loss" hypothesis to "rewriting stability" and remove unmeasured claims. | Improves theoretical rigor and defensibility. | Low |
+| **P0** | Add computational cost discussion for Equivariance/Uncertainty metrics. | Addresses practicality concerns for real-time deployment. | Low |
+| **P1** | Ground the Yelp performance drop analysis with a short-text variance hypothesis. | Replaces speculation with scientific reasoning. | Low |
+| **P1** | Clarify feature hierarchy: Invariance as primary, others as robustness enhancers. | Improves narrative clarity and result interpretation. | Low |
+| **P2** | Soften adversarial robustness claims to "theoretically resistant" unless empirical attacks are added. | Prevents overclaiming on unvalidated defenses. | Low |
+| **P2** | Expand conclusion to include limitations and future work directions. | Enhances scientific maturity and completeness. | Low |
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|---|---|---|---|---|---|---|
+| E1 | In-distribution detection across 6 domains | News, Creative, Essay, Code, Yelp, ArXiv | F1 | Raidar outperforms baselines by up to 29 pts | Strong | No variance reporting |
+| E2 | Out-of-distribution generalization | Train on one domain, test on another | F1 | Significant gains over Ghostbuster | Strong | Limited domain pairs |
+| E3 | Cross-model robustness | Detect Ada, Davinci, GPT-3.5, GPT-4, LLaMA 2 | F1 | Effective across models | Strong | Rewriting model fixed to GPT-3.5 |
+| E4 | Adversarial rephrasing robustness | Evasive prompts vs multi-prompt training | F1 | Multi-prompt training mitigates evasion | Moderate | Simple adversarial prompts only |
+| E5 | Rewriting model size sensitivity | Ada, Davinci, GPT-3.5, LLaMA 2 as rewriters | F1 | Larger models improve detection | Moderate | Cost not analyzed |
+
+### Research-Theme Gap Diagnosis
+- **Computational Trade-offs:** Lack of latency/cost analysis limits practical deployment claims.
+- **Adversarial Validation:** No empirical testing against gradient-based or semantic perturbation attacks.
+- **Statistical Reliability:** Missing variance/std over multiple seeds reduces confidence in small margins.
+
+### Proposed Research Experiments (P0/P1/P2)
+| Target Claim | Hypothesis | Minimal Design | Controls/Baselines | Metrics | Success Criterion | Est. Cost | Expected Gain |
+|---|---|---|---|---|---|---|---|
+| Computational Practicality | Invariance offers best cost-performance trade-off | Measure latency/API cost for Invariance vs Equivariance | DetectGPT (white-box) | Latency, Cost, F1 | Invariance < 2s/sample | Low | Validates real-time feasibility |
+| Adversarial Robustness | Symbolic features resist text perturbations | Apply BERT-attack/TextFooler to inputs | DetectGPT, Ghostbuster | F1 drop | Smaller drop than baselines | Medium | Empirically validates robustness claim |
+| Statistical Reliability | Gains are stable across seeds | Run E1-E3 over 3 random seeds | Baselines | Mean±Std F1 | Std < 2 pts | Low | Improves result credibility |
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score:** 7.5/10
+
+**Rationale:** The paper presents a highly practical and empirically strong method for black-box AI text detection. The core insight (rewriting invariance) is novel, intuitive, and effectively validated across diverse domains. The significant performance gains over baselines like DetectGPT and Ghostbuster demonstrate clear research value. However, the score is moderated by unvalidated theoretical claims (e.g., "lower loss"), lack of computational cost analysis, and speculative explanations in the analysis section. Addressing these weaknesses would substantially improve the manuscript's scientific rigor.
+
+**Post-Revision Target:** [8.5, 9.0]/10
+
+**Path to Target:** 
+1. Reframe unmeasured loss claims to observable behavioral hypotheses.
+2. Add a concise discussion on inference latency and API costs.
+3. Ground the Yelp performance drop analysis with a short-text variance hypothesis.
+4. Include variance reporting over multiple seeds for statistical reliability.

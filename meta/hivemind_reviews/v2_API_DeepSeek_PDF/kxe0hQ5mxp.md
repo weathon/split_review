@@ -1,0 +1,252 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper studies the role of activation functions in catastrophic forgetting for continual learning. The authors make two core claims: (C1) a theoretical insight that **sparse gradients** (in addition to sparse representations) are essential for reducing forgetting in nonlinear networks, formalized through a Neural Tangent Kernel (NTK) analysis; and (C2) a methodological contribution of **elephant activation functions** (bell-shaped, $1/(1+|x/a|^d)$) that simultaneously produce sparse activations and sparse gradients; and (C3) empirical demonstration that replacing classical activations with elephant functions improves continual learning performance across streaming regression, class-incremental learning (Split MNIST), and reinforcement learning with limited replay.
+
+**Strengths:** The paper addresses a timely and under-explored question — connecting architectural design (activation functions) to continual learning behavior. The NTK-based analysis provides a principled lens for understanding how local elasticity relates to gradient sparsity. The empirical results across three distinct settings (regression, classification, RL) show consistent improvements over standard architectures, and the constrained evaluation protocol (single-pass, no replay, no task boundaries) is genuinely challenging.
+
+**Core Weaknesses:** (1) The theoretical guarantee (Theorem 4.4) requires $d \to \infty$ while experiments use $d=4$ or $d=8$, leaving a substantial gap between theory and practice. (2) The "single pass" framing is misleading because $E=10$ gradient updates per sample are used. (3) The key implementation detail — replacing only the *last hidden layer* with elephant activations, not all layers — is relegated to an appendix footnote, and the failure of full-layer replacement is not discussed. (4) The related-work section is organized as a citation list rather than a comparative analysis. (5) Novelty claims cannot be fully verified without external retrieval (deferred to manual verification).
+
+**Overall:** The paper has a compelling intuition and shows promising empirical results, but the gap between theoretical framing and practical implementation, combined with several overclaims, needs to be addressed before publication.
+
+## Strengths
+**S1. Timely research direction.** The paper investigates an important and relatively under-explored question: how architectural choices, specifically activation functions, affect catastrophic forgetting. This complements the dominant algorithm-centric approach in continual learning research (replay, regularization, parameter isolation) and aligns with recent findings on the role of network width and architecture in forgetting (Mirzadeh et al. 2022a,b).
+
+**S2. Clean theoretical motivation.** The NTK-based framework (Properties 2.1-2.3) provides an intuitive foundation for understanding why gradient sparsity matters for local elasticity. The derivation of Lemma 3.1 clearly shows that nonlinear approximations introduce an extra gradient-gradient term in the NTK that sparse representations alone cannot zero out. This theoretical analysis is self-contained and logically connects to the proposed solution.
+
+**S3. Consistent empirical gains across diverse settings.** The experiments cover three distinct continual learning paradigms: streaming regression, class-incremental learning, and reinforcement learning. In each setting, elephant activation functions consistently outperform standard activations under identical constraints. The Split MNIST results (Table 2) show a clear advantage: EMLP (80.2%) vs. MLP (62.1%) at 10K neurons, both single-pass with no replay or task boundaries.
+
+**S4. Strict and well-motivated evaluation protocol.** The class-incremental setting imposes four simultaneous restrictions (single-pass, no task boundaries, no pre-training, no replay buffer), which is notably more challenging than typical continual learning benchmarks. This demonstrates the method's potential for real-world streaming applications where data arrives continuously and storage is limited.
+
+**S5. Transparent baseline creation (Streaming EWC).** The authors construct Streaming EWC as a baseline that adapts Online EWC to the single-sample setting, which is a reasonable adaptation. This shows awareness of the evaluation challenges and provides a stronger baseline than naive MLP/CNN training.
+
+**S6. Low computational overhead.** Since the method only changes the activation function, it adds negligible computational cost during both training and inference. This practical advantage is important for deployment in resource-constrained settings.
+
+## Weaknesses
+**W1. Theory-practice gap in Theorem 4.4.** The core theoretical guarantee (local elasticity, Property 2.3) is proven only in the limit $d \to \infty$ where the elephant function becomes a rectangular/indicator function. All experiments use finite $d$ values (4 for classification/RL, 8 for regression). The paper acknowledges this gap in Remark 4.5 but provides no bound on how fast the NTK decays as a function of $d$ for finite values. This weakens the theoretical claim significantly — the experiments show that ENNs *approximately* achieve local elasticity for small $d$, but the theory does not explain why.
+
+**W2. The "single pass" claim is misleading.** The paper repeatedly emphasizes "one single pass" and "each sample only occurs once" throughout the abstract and introduction. However, the streaming regression experiment uses $E = 10$ gradient updates per incoming sample (Appendix C.1, Table 4), meaning each sample is effectively used 10 times. While this differs from a replay buffer (past samples are not stored), it contradicts the "single update per sample" interpretation most readers would assume. The main text does not mention $E=10$, creating a transparency issue.
+
+**W3. Critical implementation detail hidden in appendix.** The appendix (footnote on Page 17) reveals that elephant activations are applied *only to the last hidden layer*, not all layers, because replacing all activations hurts performance due to "loss of plasticity." This is a substantial architectural restriction that fundamentally changes how the method should be understood. The main text's phrasing ("by simply replacing classical activation functions with elephant activation functions") implies full replacement. The loss of plasticity is an important negative result that merits main-text discussion.
+
+**W4. Related work is a citation list, not a comparative analysis.** The "Architecture-based continual learning" paragraph (Page 9) lists over 15 citations with minimal categorization. It does not organize methods by mechanism (weight isolation, dynamic expansion, biologically-inspired), does not state limitations of each category, and does not explain how elephant activations differ from or improve upon them. The "Sparse representations" paragraph similarly reads as an undifferentiated list.
+
+**W5. Overclaims and imprecise language.** Multiple instances: (a) abstract says "excellent performance on Split MNIST" — the best accuracy is 85.0% (ECNN, 10K neurons), which is far below standard supervised performance (~99%) and below FlyModel (91%), so "excellent" is relative and should be quantified. (b) "many classical activation functions fail to even approximate a simple sine function" — this is true in the streaming setting but reads as a general statement about function approximation. (c) "no methods are designed for or have been tested in the above setting" — task-free continual learning methods exist and are cited (Aljundi et al. 2019a).
+
+**W6. RL experiment confounds.** The comparison EMLP (m=32) vs MLP (m=32) vs MLP (m=1e4) does not include EMLP (m=1e4), so it cannot distinguish whether the improvement comes from the activation function or from an interaction between the activation function and the smaller buffer dynamics. The Pixelcopter exception (where EMLP underperforms MLP with large buffer) is noted but not analyzed.
+
+**W7. No discussion of hyperparameter sensitivity.** The elephant function has two critical hyperparameters: $a$ (width) and $\sigma_{\text{bias}}$ (initialization scale). The appendix mentions "[there] is a lack of a theoretical way to set $\sigma_{\text{bias}}$ or $a$" and that the best values "seem to depend on the input data distribution." This sensitivity is a practical limitation that should be discussed in the main text.
+
+**W8. Limited comparison on harder benchmarks.** Split CIFAR10 results (Table 6) show EMLP at only 19.7-23.9% accuracy, and ECNN at 19.2-24.3%. While these outperform MLP baselines (15.1-17.3%), the absolute performance is low, suggesting the method struggles with more complex visual features. This limits the practical applicability claim.
+
+## Key Issues
+### Issue 1 (Critical): Large theory-practice gap in the core theoretical result
+
+**Evidence:** Theorem 4.4 proves local elasticity for $d \to \infty$ (rectangular function), but experiments use $d=4$ or $d=8$. No finite-$d$ bound or convergence rate is provided. The condition $|V(x-x_t)| \succ 2a \cdot \mathbf{1}_m$ requires the pre-activation difference to exceed $2a$ in *all* $m$ hidden dimensions simultaneously, which becomes increasingly unlikely as the hidden size grows (e.g., $m=1000$).
+
+**Impact:** The main theoretical contribution does not directly support the experimental regime. Readers cannot determine whether the empirical success is due to the specific form of the elephant function or to other factors (e.g., the multi-update training strategy $E=10$, or the special bias initialization).
+
+**Required fix (Must):** (a) Add a finite-$d$ analysis showing how $\langle \nabla_w f_w(x), \nabla_w f_w(x_t) \rangle$ scales with $d$. (b) Provide a probabilistic bound on how often the condition $|V(x-x_t)| \succ 2a \cdot \mathbf{1}_m$ is satisfied under realistic initialization. (c) If such analysis is infeasible, reframe the theory as a *motivation* rather than a *proof*, and add a statement that the exact guarantee only holds asymptotically.
+
+### Issue 2 (Major): Hidden implementation restriction weakens the method claim
+
+**Evidence:** Appendix C, Page 17 footnote: "For all ENNs, we only replace the activation functions of the last hidden layer with elephant activation functions. The initial experiments with EMLPs on Split MNIST show that replacing all activation functions with elephant functions hurts performance, probably due to loss of plasticity."
+
+**Impact:** The main narrative ("by simply replacing classical activation functions") suggests a general-purpose activation replacement. The restriction to the last layer only, and the failure of full-layer replacement, significantly narrows the scope of the contribution. This should be front-and-center in the main text.
+
+**Required fix (Must):** (a) Move this finding to Section 4 (Method). (b) Explicitly revise language throughout (abstract, introduction, conclusion) to specify "replace the last-layer activation function." (c) Discuss why plasticity is lost when all layers use elephant activations, and whether this is a fundamental limitation or can be mitigated.
+
+### Issue 3 (Major): "Single pass" is imprecisely defined
+
+**Evidence:** The abstract and introduction emphasize "one single pass" / "each sample only occurs once." Appendix Table 4 shows $E=10$ (update epochs per sample). The main text does not report this value.
+
+**Impact:** Readers may incorrectly interpret "single pass" as "one gradient update per sample," which would make $E=10$ appear deceptive. The fairness of baseline comparisons depends on whether all methods use the same $E$, which is unclearly reported.
+
+**Required fix (Must):** (a) State $E$ explicitly in every experiment description in the main text. (b) Clarify that "single pass" means each sample is visited once for initiating training, but multiple gradient steps are taken per sample. (c) Verify and report that baselines also use the same $E$.
+
+### Issue 4 (Major): Causal mechanism not isolated
+
+**Evidence:** The paper claims that elephant activations reduce forgetting through dual sparsity (activation + gradient). However, no ablation study separates the effect of sparse activations from sparse gradients. The comparison against SR-NN (which generates sparse activations but not sparse gradients) partially addresses this, but the comparison is confounded by $E=10$ and the different network architectures.
+
+**Required fix (Nice-to-have):** Add an ablation study with a modified elephant function that has sparse activations but non-sparse gradients (e.g., by using a smooth approximation that maintains activation sparsity while reducing gradient sparsity). This would directly test whether gradient sparsity is the key mechanism.
+
+### Issue 5 (Moderate): Novelty unverifiable without literature search
+
+**Evidence:** Retrieval-Disabled Mode is active for this run (external paper search unavailable). The paper claims novelty for (a) the insight that gradient sparsity matters, (b) the elephant activation function design, and (c) the demonstration that simple activation replacement suffices for competitive CL performance. These claims cannot be independently verified.
+
+**Required fix (Must):** The authors should conduct and include a thorough related-work search to demonstrate that no prior activation function achieves dual sparsity for continual learning purposes. In the revision, add a comparative table of existing activation functions (ReLU variants, Swish, GELU, etc.) showing their sparsity properties for both activations and gradients.
+
+## Actionable Suggestions
+### Suggestion 1 (Must): Move hidden implementation details to main text
+The finding that only the last hidden layer uses elephant activations (and full replacement hurts performance) is the single most important practical constraint. It must be in the main text, not in an appendix footnote. Add a paragraph to Section 4:
+
+> "**Implementation note.** In practice, we find that applying elephant activations to all layers degrades performance, likely due to loss of plasticity. All experiments in this paper therefore apply elephant activations only to the last hidden layer, while earlier layers use standard activations (e.g., ReLU). Understanding why full-layer replacement fails and whether this limitation can be overcome is an important direction for future work."
+
+### Suggestion 2 (Must): Clarify the "single pass" terminology
+Replace every occurrence of "single pass" with a precise description. Suggested phrasing:
+
+> "**Streaming setting.** Each sample is visited exactly once to initiate training, but multiple gradient updates ($E=10$) are applied to the same sample before moving to the next. This local multi-update strategy improves sample efficiency and is applied equally to all compared methods."
+
+### Suggestion 3 (Must): Bound the theory-practice gap
+Revise Theorem 4.4 and its discussion to explicitly acknowledge the finite-$d$ gap. Add a new remark:
+
+> **Remark.** Theorem 4.4 establishes exact local elasticity only in the asymptotic regime $d \to \infty$. For finite $d$ (e.g., $d=4$ or $8$ used in experiments), the elephant function is not a perfect rectangle, so its NTK does not become exactly zero for dissimilar inputs. However, as Figure 2 demonstrates empirically, the NTK decays rapidly even for modest $d$, and the rate of decay increases with $d$. A formal bound on the finite-$d$ NTK decay rate is left for future theoretical work.
+
+### Suggestion 4 (Must): Add control experiments for RL
+Add EMLP (m=1e4) to the RL experiments to distinguish the activation function effect from buffer-size interactions. Additionally, report the average return (with 95% CI) for each method-task pair in a table, quantifying gaps numerically rather than relying on visual curve inspection.
+
+### Suggestion 5 (Must): Add limitation section
+Add a dedicated limitations paragraph to the conclusion covering:
+- Hyperparameter sensitivity ($a$, $\sigma_{\text{bias}}$) with no principled selection method
+- Restriction to last-layer-only replacement
+- Low absolute performance on harder datasets (Split CIFAR10: <25%)
+- The finite-$d$ theoretical gap
+- Task-dependence of the RL benefit (Pixelcopter exception)
+
+### Suggestion 6 (Must): Restructure related work
+Reorganize into 3 comparison-driven paragraphs: (1) weight-isolation and dynamic expansion methods, (2) sparse representation methods, (3) local elasticity and memorization. Each paragraph should end with a sentence explicitly contrasting elephant activations.
+
+### Suggestion 7 (Nice-to-have): Add ablation for gradient sparsity mechanism
+To directly test whether gradient sparsity is the causal mechanism, design a variant of the elephant function where activation sparsity is maintained but gradient sparsity is reduced (e.g., by replacing the sharp drop-off with a smooth but non-zero transition region). Compare this variant against the full elephant function on the streaming regression task.
+
+### Suggestion 8 (Nice-to-have): Report hyperparameter search results
+Add a figure or table showing how test MSE on the regression task varies with $a$ and $d$ values, to give readers practical guidance for setting these hyperparameters in new applications.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Assessment
+
+The current narrative follows: Big Picture (catastrophic forgetting problem) $\to$ Gap (lack of architectural understanding) $\to$ Specific Focus (activation functions) $\to$ Theory (NTK properties) $\to$ Method (elephant functions) $\to$ Experiments (3 settings). The main issues are: (1) the introduction front-loads a literature review before establishing stakes, (2) contribution claims are scattered across two paragraphs on pages 1-2, and (3) the implementation restriction (last-layer-only) is hidden.
+
+### Recommended Storyline: "Insight-First, Implementation-Honest"
+
+This storyline leads with the key insight (gradient sparsity matters for local elasticity) and immediately bounds the implementation scope.
+
+### Abstract Outline (S1-S5)
+
+**S1 (Problem):** "Catastrophic forgetting remains a central obstacle in continual learning, yet most solutions address it through algorithmic modifications rather than architectural design."
+
+**S2 (Gap):** "We lack understanding of how specific architectural elements — in particular, activation functions — affect forgetting through their influence on training dynamics."
+
+**S3 (Insight):** "Through a Neural Tangent Kernel analysis, we show that sparse representations alone are insufficient for non-linear networks; sparse gradients are additionally required for local elasticity."
+
+**S4 (Method):** "We propose elephant activation functions, a bell-shaped family $1/(1+|x/a|^d)$ that simultaneously produces sparse activations and sparse gradients when applied to the final hidden layer."
+
+**S5 (Result):** "In streaming regression, class-incremental learning (Split MNIST: 80-85% accuracy, single-pass, no replay/task boundaries), and reinforcement learning with limited replay, elephant networks consistently outperform standard architectures, reducing forgetting without additional memory or algorithmic complexity."
+
+### Introduction Outline (Paragraph-by-Paragraph)
+
+**P1 (Stakes + Gap, ~6 sentences):** Open with the observation that CL methods are predominantly algorithmic. State that we lack understanding of architectural properties causing forgetting. Cite Mirzadeh et al. (2022a,b) as motivation for architectural investigation. Conclude by narrowing to activation functions as a concrete entry point.
+
+**P2 (Specific Gap + Method Preview, ~7 sentences):** Explain that activation functions affect both representations and gradients. State the paper's key finding: gradient sparsity matters alongside representation sparsity. Introduce elephant activation functions as achieving dual sparsity. Preview all three evaluation settings.
+
+**P3 (Contributions, ~4 sentences):** List three contributions: (C1) NTK-based analysis showing limitations of sparse representations alone, (C2) elephant activation function design and proof of dual sparsity, (C3) empirical demonstration across regression, classification, and RL.
+
+### Title Revision
+
+Current: "ELEPHANT NEURAL NETWORKS: BORN TO BE A CONTINUAL LEARNER"
+
+Proposed: "Elephant Activation Functions: Enabling Continual Learning through Sparse Representations and Sparse Gradients"
+
+Rationale: The original title is whimsical but does not communicate the paper's scientific content. The proposed title states the method (elephant activation functions), the mechanism (dual sparsity), and the problem (continual learning).
+
+## Priority Revision Plan
+### P0 Items (Must-do before resubmission)
+
+| Priority | Item | Effort | Impact | Annotation Reference |
+|----------|------|--------|--------|---------------------|
+| P0 | Move last-layer-only restriction to main text (Section 4) | Low | High | Page 17 footnote |
+| P0 | State $E$ and "single pass" definition explicitly in main text | Low | High | Page 5 streaming regression |
+| P0 | Add limitations paragraph to Conclusion | Low | High | Page 9 Conclusion |
+| P0 | Rewrite abstract with bounded language | Low | Medium | Page 1 Abstract |
+| P0 | Restructure related work by comparison axes | Medium | High | Page 9 Related Work |
+
+### P1 Items (Should-do)
+
+| Priority | Item | Effort | Impact |
+|----------|------|--------|--------|
+| P1 | Add finite-$d$ analysis or bound to Theorem 4.4 discussion | Medium | High |
+| P1 | Add EMLP (m=1e4) control to RL experiments | Low | Medium |
+| P1 | Add hyperparameter sensitivity analysis ($a$, $d$, $\sigma_{\text{bias}}$) | Low | Medium |
+| P1 | Rephrase overclaims ("excellent", "fail to even approximate", "no methods") | Low | Medium |
+
+### P2 Items (Nice-to-have)
+
+| Priority | Item | Effort | Impact |
+|----------|------|--------|--------|
+| P2 | Ablation study separating activation sparsity from gradient sparsity | High | High |
+| P2 | Report results on Split CIFAR100/Tiny ImageNet without pre-training | Medium | Medium |
+| P2 | Significance tests for Table 2 differences | Low | Medium |
+| P2 | Add broader suite of activation baselines (Swish, GELU, Mish) | Low | Medium |
+
+### Revision Timeline (Suggested)
+
+**Week 1:** P0 text revisions (abstract, introduction, conclusion, related work, limitations). Add $E$ and last-layer details to main text.
+
+**Week 2:** P1 experiments (RL controls, hyperparameter analysis). Reframe Theorem 4.4 discussion.
+
+**Week 3:** P2 optional improvements (ablation study, additional baselines, statistical tests).
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|-------|---------|-------------|----------------|-------------------|
+| E1 | Streaming regression: can ENNs approximate a sine function in single-pass streaming? | 1 hidden layer MLP (1000 neurons), $n=200$ samples, $E=10$, Adam, $d=8$ | Test MSE (1000 evenly spaced points) | EMLP: 0.0081 MSE; MLP best (Tanh): 0.4461 MSE; SR-NN: 0.4061 | C1 (sparse reps insufficient), C2 (ENNs work), C3 (local elasticity) | $E=10$ not stated in main text; baselines may benefit from different $E$ tuning |
+| E2 | Local elasticity visualization | Same as E1, NTK tracking at t=100,150,200 | NTK(x) decay | EMLP NTK decays rapidly; SR-NN NTK decays slowly | C3 (local elasticity with small $d$) | Qualitative only; no quantitative NTK decay metric |
+| E3 | Local elasticity editing demo | Pre-trained EMLP/MLP; edit prediction at x=1.5 from -1.0 to -1.5 | Function change visualization | EMLP edits locally; MLP changes globally | C3 (pointwise editing) | Single demonstration point; no systematic evaluation |
+| E4 | Class-incremental on Split MNIST | 5 tasks x 2 classes; MLP/CNN with ReLU vs EMLP/ECNN; single-pass, no replay, no task boundaries | Test accuracy (averaged over 5 runs) | EMLP 80.2%, ECNN 85.0% vs MLP 62.1% at 10K neurons | C2 (ENNs reduce forgetting) | FlyModel (91% with task boundaries) still better; CIFAR10/Tiny results low |
+| E5 | Class-incremental with pre-training (Embedding CIFAR10/100, Tiny ImageNet) | Pre-trained frozen ConvMixer embeddings; EMLP vs MLP vs SDMLP vs FlyModel | Test accuracy | EMLP outperforms MLP; competitive with SDMLP; FlyModel best | C2 (combinable with pre-training) | Relies on pre-trained features from external model |
+| E6 | RL with limited replay | DQN on MountainCar, Acrobot, Catcher, Pixelcopter; $d=4$, 1 hidden layer 1000 | Return curves (10 runs avg) | EMLP (m=32) > MLP (m=32) in all tasks; roughly matches MLP (m=1e4) in 3/4 tasks | C2 (CL benefit in RL) | No EMLP (m=1e4) control; Pixelcopter exception unexplained |
+
+### Research-Theme Gap Diagnosis
+
+**Reproducibility:** Partially sufficient. Key hyperparameters are listed in appendix tables, but $E$ (update epochs) should be in main text. The $a$ and $\sigma_{\text{bias}}$ values are swept across ranges, but the selection criterion is not specified (best test performance? last value?).
+
+**New knowledge:** The insight that gradient sparsity matters for local elasticity is the most novel conceptual contribution. However, the empirical separation of gradient sparsity from activation sparsity is not achieved, so the "new knowledge" claim is partially supported but not fully validated.
+
+**Impact on practice/understanding:** The paper shows that activation function choice can meaningfully affect CL performance without algorithmic modifications. This is practically useful but tempered by: (a) the restriction to last-layer replacement, (b) poor performance on harder datasets, (c) hyperparameter sensitivity.
+
+### Proposed Research Experiments
+
+**P0 Experiment: Gradient sparsity ablation (directly tests causal mechanism)**
+- **Target Claim:** Gradient sparsity (not just activation sparsity) causes forgetting reduction
+- **Hypothesis:** An activation function with sparse activations but non-sparse gradients will perform worse than the elephant function
+- **Design:** Create a "smooth elephant" variant: $Elephant_{\text{smooth}}(x) = 1/(1+|x/a|^d)$ with $d=2$ (gentler slope, non-sparse gradients). Compare vs $d=8$ (sparse gradients) at same activation sparsity level (adjust $a$ to match sparsity)
+- **Controls/Baselines:** Same network architecture, optimizer, $E$
+- **Metrics:** Test MSE (regression), accuracy (classification), NTK decay rate
+- **Success Criterion:** Smooth variant has worse CL performance despite matching activation sparsity
+- **Cost:** Low (1-2 GPU hours)
+- **Expected Gain:** Direct causal evidence for C1, strengthening the paper's theoretical narrative
+
+**P1 Experiment: Full-layer ablation**
+- **Target Claim:** ENNs benefit from last-layer-only replacement
+- **Design:** Compare EMLP variants: (a) last layer only (current), (b) all layers, (c) first layer only, (d) alternating layers
+- **Metrics:** Split MNIST accuracy + plasticity measure (ability to fit new data)
+- **Success Criterion:** Identify why full replacement fails (gradient starvation? representation collapse?)
+- **Cost:** Low
+- **Expected Gain:** Understanding of architectural constraints; potential mitigation
+
+**P1 Experiment: Hyperparameter robustness test**
+- **Target Claim:** ENNs are robust to hyperparameter choices
+- **Design:** Grid search over $a \times d \times \sigma_{\text{bias}}$ on regression task, report 2D heatmaps of test MSE
+- **Metrics:** MSE surface
+- **Success Criterion:** Identify stable region of hyperparameter space
+- **Cost:** Low-Medium
+- **Expected Gain:** Practical guidance for future users; addresses limitation W7
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 5.5 / 10**
+
+*Rationale:* The paper presents a compelling intuition and demonstrates consistent empirical improvements across three continual learning settings. However, the score is limited by: (1) a substantial gap between the theoretical guarantee ($d \to \infty$) and practical usage ($d=4,8$), (2) the hidden implementation restriction (last-layer-only replacement) which is not disclosed in the main text, (3) imprecise claims about "single pass" that are contradicted by $E=10$ in the appendix, (4) overclaims in abstract and introduction, and (5) unverifiable novelty claims (retrieval unavailable). The core research value — showing that activation function design can meaningfully affect forgetting — is real but incompletely validated. Scores emphasize novelty and research value as primary dimensions.
+
+**Post-Revision Target: [6.5, 7.5] / 10**
+
+*Rationale:* If the authors address the P0 items (move implementation details to main text, clarify $E$, add limitations, bound claims) and at least the P1 theory item (finite-$d$ discussion), the paper would present a cleaner, more honest narrative. The empirical results are reproducible and consistent. The main barrier to a higher score is the theory-practice gap, which may require additional theoretical analysis or more cautious framing.

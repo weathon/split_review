@@ -1,0 +1,56 @@
+### Summary
+
+This paper proposes a new method for offline reinforcement learning with sparse policies, called Fat-to-Thin Policy Optimization (FtTPO). The method is based on a two-stage actor-critic framework, where the first stage learns a fat (dense) policy and the second stage learns a thin (sparse) policy. The paper instantiates FtTPO with the general q-Gaussian family and verifies its effectiveness on a safety-critical treatment simulation and the standard D4RL MuJoCo benchmark.
+
+### Soundness
+
+3
+
+### Presentation
+
+3
+
+### Contribution
+
+2
+
+### Strengths
+
+1. The paper is well-written and easy to follow.
+2. The proposed method is simple and effective.
+3. The paper provides a detailed explanation of the method and its implementation.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+1. The proposed method is not novel. The two-stage learning framework is a common approach in reinforcement learning, and the use of q-Gaussian policies has been explored in previous works. The paper does not adequately differentiate its approach from these existing methods, particularly in terms of the specific mechanisms that enable it to handle out-of-support actions in offline settings. The novelty of the approach is further diminished by the lack of a clear explanation of how the proposed method addresses the unique challenges of offline RL with sparse policies, beyond what is already known about two-stage learning and q-Gaussian policies.
+2. The experimental results are not convincing. The proposed method is only compared with a few baselines, and the performance of the proposed method is not consistently better than the baselines. The paper lacks a thorough comparison with a wider range of state-of-the-art offline RL algorithms, particularly those that also utilize sparse policies or similar techniques. The limited scope of the experiments makes it difficult to assess the true potential and robustness of the proposed method. Furthermore, the paper does not provide a detailed analysis of the performance differences between the proposed method and the baselines, which would be necessary to understand the strengths and weaknesses of the approach.
+3. The paper does not provide a clear explanation of how the proposed method addresses the out-of-support action issue in offline RL. While the paper mentions that the method uses a fat policy to generate actions and a sparse policy to learn from them, it does not provide a detailed explanation of how this process mitigates the problem of out-of-support actions. The paper should provide a more rigorous analysis of the proposed method's ability to handle out-of-support actions, including a discussion of the theoretical underpinnings and empirical evidence.
+
+### Suggestions
+
+The paper needs to more clearly articulate the novelty of its approach in the context of existing two-stage learning frameworks and q-Gaussian policy methods. The authors should provide a more detailed explanation of how their method addresses the specific challenges of offline RL with sparse policies, particularly the issue of out-of-support actions. This explanation should go beyond simply stating that a fat policy is used to generate actions and a sparse policy is learned from them. The authors should provide a theoretical analysis of how the proposed method mitigates the problem of out-of-support actions, including a discussion of the properties of the q-Gaussian policy that enable it to handle this issue. Furthermore, the authors should compare their method with a wider range of state-of-the-art offline RL algorithms, including those that also utilize sparse policies or similar techniques. This comparison should not only include a performance comparison, but also a discussion of the strengths and weaknesses of each method. The authors should also provide a more detailed analysis of the performance differences between the proposed method and the baselines, including a discussion of the factors that contribute to the observed performance differences. This analysis should include a discussion of the hyperparameters used in the experiments and how they were selected. 
+
+To address the lack of clarity regarding the out-of-support action issue, the authors should provide a more detailed explanation of how the proposed method handles this problem. This explanation should include a discussion of the specific mechanisms that prevent the generation of out-of-support actions and how the method ensures that the learned policy remains within the support of the offline dataset. The authors should also provide a more detailed analysis of the action selection process, including the specific criteria used to select actions from the fat policy and how this process ensures that the generated actions are within the support of the offline dataset. The authors should also provide a more detailed explanation of how the sparse policy is trained to learn from the actions generated by the fat policy, including a discussion of the specific loss function used and how it ensures that the sparse policy learns from actions that are within the support of the offline dataset. 
+
+Finally, the authors should provide a more thorough analysis of the computational cost of the proposed method, including a discussion of the memory requirements and the inference time. This analysis should include a comparison of the computational cost of the proposed method with that of the baselines. The authors should also discuss the scalability of the proposed method to larger datasets and more complex environments. The authors should also provide a more detailed explanation of the implementation details of the proposed method, including the specific libraries and frameworks used. This explanation should include a discussion of the specific choices made in the implementation and how these choices affect the performance of the method.
+
+### Questions
+
+1. How does the proposed method address the out-of-support action issue in offline RL?
+2. How does the proposed method compare with existing methods for handling out-of-support actions in offline RL, such as Supported Policy Optimization (SPO)?
+3. What is the computational cost of the proposed method?
+
+### Rating
+
+5
+
+### Confidence
+
+4
+
+**********

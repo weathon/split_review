@@ -1,0 +1,82 @@
+## Summary
+# Final Review Report
+
+## Summary
+This paper presents Graph2Tac (G2T), a graph neural network designed for online theorem proving in the Coq proof assistant. The core challenge addressed is the inability of existing neural models to adapt to new mathematical definitions and lemmas in unseen Coq projects without retraining. G2T leverages a hierarchical mono-graph representation of Coq terms and introduces a novel definition embedding task that dynamically computes representations for unseen concepts in real time. Evaluated on a large-scale dataset of 120 Coq packages, G2T improves the theorem solving rate in unseen packages from 17.4% to 26.1%. The paper also provides a comprehensive comparison with symbolic and machine learning solvers (k-NN, CoqHammer, transformers), demonstrating that G2T and the k-NN solver are highly complementary, achieving a combined solving rate of 33.2%. The work is accompanied by strong reproducibility commitments and a candid discussion of threats to validity, including the discovery of inconsistent axioms in test packages that could artificially inflate results.
+
+## Strengths
+1. **Novel Online Learning Mechanism**: The introduction of a definition embedding task that dynamically computes representations for unseen mathematical concepts is a significant methodological contribution. It directly addresses the critical gap of domain adaptation in interactive theorem proving.
+2. **Comprehensive Empirical Evaluation**: The paper provides a thorough comparison across multiple solver families (GNN, k-NN, transformers, ATP-based). The package-level split based on topological ordering is a rigorous methodological choice that enforces the online learning setting.
+3. **Candid Threats to Validity**: The authors demonstrate high scientific integrity by explicitly discussing limitations, including the discovery of inconsistent axioms in test packages that could inflate results, and the variability introduced by single-instance model training.
+4. **Strong Reproducibility Commitment**: The provision of open-source code, dataset details, and hardware requirements (including consumer-grade CPU support) significantly lowers the barrier to entry for future research in this domain.
+
+## Weaknesses
+1. **Exploitation of Inconsistent Axioms**: The model's ability to exploit inconsistent axioms (e.g., `skip_axiom : False`) to prove 38.4% of theorems in the `tlc` package reveals a critical vulnerability in the evaluation framework. While these packages were excluded from main results, this "shortcut" learning behavior threatens the validity of the reported gains and indicates a need for automated consistency checks in benchmarking.
+2. **Single-Instance Training Variability**: The authors acknowledge that models were difficult to train reliably and only one instance of each model was trained. This prevents reporting variance or confidence intervals, making it difficult to assess the statistical reliability of the 26.1% solving rate.
+3. **Restrictive Tactic Representation**: By limiting tactic arguments to local hypotheses or global definitions, the model simplifies the search space but loses the ability to generate complex term arguments. This architectural limitation is not fully discussed as a trade-off in the main text, potentially misleading readers about the model's general applicability.
+4. **Overly Broad Contribution List**: The introduction lists seven contributions, which dilutes the impact of the core findings. Several items are secondary empirical observations or practical notes that should be consolidated into 3-4 high-impact points.
+
+## Key Issues
+1. **Validity Risk from Inconsistent Axioms**: The discovery that G2T-Anon-Update solved 38.4% of theorems in the `tlc` package using `skip_axiom : False` is a major validity concern. It demonstrates that the model can find logical contradictions rather than learning meaningful proof strategies. This behavior must be explicitly bounded, and future benchmarks should incorporate automated consistency filtering.
+2. **Statistical Reliability**: Training only one instance of each model due to instability prevents variance reporting. Without multi-seed results, the reported 26.1% solving rate lacks statistical grounding, and it is unclear whether the gain over the 17.4% baseline is robust across different initializations.
+3. **Claim-Evidence Alignment**: The statement that "the advantage of the graph model over the transformer is due to model speed and not prediction quality" is reductive. Prediction quality and search efficiency are intertwined in proof search. A more nuanced interpretation is needed, acknowledging that graph structures may provide more robust guidance even if raw call counts are similar.
+
+## Actionable Suggestions
+1. **Consolidate Contributions**: Reduce the seven contribution items in the introduction to three high-impact points: (1) the G2T architecture with hierarchical mono-graph representation, (2) the novel definition embedding task improving solving rates from 17.4% to 26.1%, and (3) the comprehensive evaluation demonstrating complementarity with k-NN (33.2% combined).
+2. **Explicitly Bound Generalization**: Clearly state that the reported gains apply to the 118 packages remaining after excluding `hott` and `tlc`. Discuss how performance on these excluded packages may differ and propose automated consistency checks as a standard preprocessing step for future benchmarks.
+3. **Nuance Speed vs. Quality Claims**: Revise the interpretation of G2T-Frozen-Def vs. transformer results to acknowledge that prediction quality and search efficiency are intertwined. Avoid definitive statements that graph advantages are solely due to speed.
+4. **Structure Threats to Validity**: Organize the threats to validity into a clear table or categorized bullet points (Evaluation Framework, Model Training, Comparison Fairness) and explicitly commit to multi-seed training in future work to address variability.
+5. **Ensure Active Links**: Replace all "[REDACTED]" placeholders with persistent URLs (e.g., GitHub, Zenodo DOIs) and explicitly report the random seeds used for training and evaluation.
+
+## Storyline Options + Writing Outlines
+### Abstract Outline (S1-S5)
+- **S1 (Problem)**: Interactive theorem proving in Coq requires agents to adapt to new definitions and lemmas unseen during training.
+- **S2 (Gap)**: Existing neural models struggle with this online setting, as static embeddings or textual representations fail to capture hierarchical dependencies.
+- **S3 (Method)**: We introduce Graph2Tac (G2T), a graph neural network that leverages a faithful graph representation of Coq terms to model the entire hierarchy of definitions leading to a proof goal.
+- **S4 (Mechanism)**: By introducing a novel definition embedding task, G2T dynamically computes representations for unseen mathematical concepts in real time.
+- **S5 (Result)**: Evaluated on a large-scale dataset of Coq packages, G2T improves the theorem solving rate in unseen packages from 17.4% to 26.1%, demonstrating that hierarchical graph representations effectively complement existing online solvers like k-nearest neighbors.
+
+### Introduction Outline (P1-P4)
+- **P1 (Big Picture & Motivation)**: Establish the importance of ITPs like Coq for formal verification and the laborious nature of manual proof writing. Introduce the need for ML-based tactic suggestion.
+- **P2 (Gap & Challenge)**: Highlight the domain adaptation challenge: models trained on one set of projects fail to generalize to new projects with custom definitions. Critique existing online models (e.g., k-NN) for lacking structured understanding of global definition hierarchies.
+- **P3 (Proposed Solution)**: Introduce G2T and its core mechanism: a mono-graph representation of Coq terms and a definition embedding task that adapts to new concepts in real time.
+- **P4 (Evidence & Contributions)**: Preview the empirical results (26.1% solving rate, complementarity with k-NN) and list the consolidated 3-4 key contributions.
+
+## Priority Revision Plan
+| Priority | Action | Expected Impact | Effort |
+|---|---|---|---|
+| **P0** | Consolidate contributions list to 3-4 high-impact points. | Improves narrative focus and reader comprehension. | Low |
+| **P0** | Explicitly bound generalization claims due to excluded packages (`hott`, `tlc`). | Enhances scientific credibility and prevents overclaiming. | Low |
+| **P1** | Nuance the interpretation of speed vs. prediction quality in results. | Provides a more accurate assessment of G2T's advantages. | Low |
+| **P1** | Structure threats to validity into clear categories and commit to multi-seed training. | Addresses statistical reliability concerns and improves transparency. | Medium |
+| **P2** | Replace "[REDACTED]" links with persistent URLs and report random seeds. | Facilitates immediate community adoption and reproducibility. | Low |
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|---|---|---|---|---|---|---|
+| E1 | G2T improves solving in unseen packages | 120 Coq packages, package-level split | Pass rate @ 10min | 26.1% vs 17.4% baseline | Definition task helps | Single-seed training |
+| E2 | G2T vs k-NN complementarity | Aggregated solver simulation | Combined pass rate | 33.2% combined | Solvers are complementary | Artificial time scaling |
+| E3 | G2T vs Transformer/CoqHammer | One-CPU budget, 10min limit | Pass rate over time | G2T > Transformer | Graph model effective | Baseline approximations |
+
+### Research-Theme Gap Diagnosis
+The core claim of online adaptation via hierarchical graph representations is well-supported, but the statistical reliability is weak due to single-instance training. Additionally, the model's vulnerability to inconsistent axioms highlights a gap in robustness evaluation.
+
+### Proposed Research Experiments
+| Target Claim | Hypothesis | Minimal Design | Controls | Metrics | Success Criterion | Cost | Gain |
+|---|---|---|---|---|---|---|---|
+| Statistical Reliability | G2T gains are robust across seeds | Train 3-5 G2T instances with different seeds | Same split/hardware | Mean±std pass rate | Variance < 2% | Medium | High |
+| Robustness to Axioms | Consistency filtering prevents shortcut learning | Pre-filter packages for `False` axioms | Unfiltered baseline | Pass rate on filtered set | No significant drop | Low | High |
+| Tactic Representation | Allowing term arguments improves complex proofs | Extend G2T to predict simple lambda terms | Current identifier-only | Pass rate on term-heavy packages | Gain > 1% | High | Medium |
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+Final Score: 6.5/10
+Post-Revision Target: [7.5, 8.5]/10
+
+**Rationale**: The paper presents a novel and well-motivated approach to online theorem proving in Coq, with strong empirical results and high reproducibility value. The definition embedding task is a clear methodological contribution. However, the score is moderated by critical validity concerns regarding the exploitation of inconsistent axioms, the lack of multi-seed variance reporting, and some reductive interpretations of the results. Addressing these issues through explicit bounding, structured threat discussions, and future multi-seed commitments would significantly strengthen the paper's scientific credibility.

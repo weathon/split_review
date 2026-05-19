@@ -1,0 +1,429 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper proposes **PiCO (Peer Review in LLMs based on Consistency Optimization)**, a fully unsupervised framework for evaluating and ranking large language models without human feedback. The core idea is to have LLMs answer unlabeled open-ended questions and then mutually evaluate each other's responses. Each model is assigned a learnable confidence weight, and the system optimizes these weights to maximize the correlation (consistency) between model ability weights and peer-assigned scores. An iterative elimination mechanism removes weak reviewers. Experiments on MT-Bench, Chatbot Arena, and AlpacaEval with 15 LLMs report Spearman correlations up to 0.90 with human ground truth, outperforming both unsupervised baselines (Majority Voting, PRD) and supervised methods (PRE, Claude-3 API).
+
+**Core Contributions (C1-C3):**
+- **C1**: Introduces a fully unsupervised peer-review mechanism where LLMs evaluate each other.
+- **C2**: Formalizes a constrained consistency optimization (maximizing Pearson correlation between ability weights w and scores G) to re-rank LLMs toward human preferences.
+- **C3**: Provides experimental validation on three crowdsourced datasets with multiple rank-based metrics.
+
+**Overall assessment**: The paper addresses an important problem (cost-effective, automated LLM evaluation) and presents an elegantly simple framework. However, the work has several critical weaknesses: (a) the consistency optimization has a circular dependency between w and G that could produce self-consistent but inaccurate rankings; (b) the toy experiment that "validates" the consistency assumption is near-tautological, as w is derived from ground-truth rankings; (c) the optimization algorithm is underspecified, hindering reproducibility; (d) the paper lacks explicit limitations and overclaims novelty relative to existing peer-review-based evaluation methods (PRE, PRD, ChatEval). External literature verification was unavailable in this run (Retrieval-Disabled Mode); novelty comparisons are deferred for manual verification.
+
+## Strengths
+**S1 — Well-motivated problem framing.** The paper identifies a genuine gap in LLM evaluation: existing benchmarks are costly, suffer from leakage, and may not capture human preferences; crowdsourced battle platforms are slow and face cold-start issues. The motivation for a fully unsupervised peer-review ranking method is clear and practically relevant.
+
+**S2 — Elegant and intuitive framework design.** The peer-review pipeline (LLMs answer questions → construct anonymous battle pairs → peer evaluation with learnable weights → consistency optimization → iterative weak reviewer elimination) is conceptually clean. The mapping from the peer-review analogy to the mathematical formulation is logically coherent.
+
+**S3 — Competitive empirical results.** On three established crowdsourced datasets (MT-Bench, Chatbot Arena, AlpacaEval), PiCO achieves Spearman correlations of 0.84–0.90, Kendall tau of 0.68–0.77, and Permutation Entropy of 0.94–1.17. These numbers consistently match or exceed both unsupervised baselines (Majority Voting, PRD) and supervised methods (PRE, Claude-3 API). The token consumption analysis shows PiCO is computationally comparable to baselines while requiring zero human annotation cost.
+
+**S4 — Comprehensive metric suite.** The evaluation uses five rank-based metrics (Spearman S, Kendall tau, Permutation Entropy, Count Inversions, Longest Increasing Subsequence), providing a multi-faceted assessment of ranking quality that is more thorough than single-metric evaluations.
+
+**S5 — Interesting bias analysis.** The Preference Gap (PG) analysis (Section 3.2, Figure 3) provides a clear visualization of evaluation bias and shows that learned confidence weights can reduce systematic bias from weak models. This analysis adds interpretability beyond raw ranking correlation numbers.
+
+**S6 — Stability validation.** Repeating the optimization with 1000 random seeds (Figure 6) and showing consistent loss convergence and weight distribution demonstrates the algorithm's numerical stability, an important property for practical deployment.
+
+**S7 — Code release.** The paper includes a GitHub repository link, supporting reproducibility.
+
+## Weaknesses
+The following weaknesses are identified from manuscript-grounded audit. They are ordered by severity and research-value impact.
+
+**W1 — Circular dependency in consistency optimization (Major, Validity Risk).** The optimization maximizes Pearson correlation between w (confidence weights) and G (aggregated scores), but G is computed using w itself (Eq. 6: G_j = sum(indicator * w_s)). This creates a circular dependency where w influences both sides of the correlation. The system could converge to self-consistent (w, G) pairs that are arbitrary rather than truth-tracking. The paper does not address this concern theoretically, nor does it provide experimental evidence that the optimization would not converge to different rankings given different starting conditions (convergence analysis in Figure 6 shows loss/weight distributions but not ranking stability).
+
+**W2 — Toy experiment is near-tautological (Major, Validity Risk).** The "Validation of Consistency Assumption" (Table 1) tests Forward/Backward/Uniform Weight settings where w is derived directly from ground-truth human ranking R*. Unsurprisingly, Forward Weight (w aligned with R*) outperforms Backward Weight (w anti-aligned with R*). This confirms only that if one already knows the ground-truth ranking, assigning weights accordingly produces good results—a largely trivial finding. The critical test (Random Weight + Consistency Optimization) shows stronger results than Forward Weight, which should be impossible if the consistency assumption is correct, but this paradox is not explained. The paper should either reframe the toy experiment as a sanity check or provide analysis explaining why optimized weights outperform ground-truth-aligned weights.
+
+**W3 — Underspecified optimization algorithm (Major, Reproducibility Risk).** The optimization in Eq. 8 is defined as argmax_w Consistency(G, w) without specifying: (a) whether w is updated via gradient methods (and if so, what gradient is used for Pearson correlation with respect to w when G depends on w); (b) what the convergence criterion is; (c) what learning rate / hyperparameters are used; (d) whether the optimization alternates between computing G and updating w, or is fully joint. Algorithm 1 (Appendix E) does not specify how the weight vector w is updated in line 28 ("Update weight vector w to maximize consistency"). This makes the method non-reproducible from the description alone.
+
+**W4 — Statistical depth of comparisons is insufficient (Major).** Table 2 reports mean±std over 4 seeds, but: (a) no significance tests are performed between PiCO and competing methods; (b) on several metrics, PiCO's gain over PRE is within one standard deviation (e.g., AlpacaEval S at 0.7: PiCO 0.83±0.03 vs PRE 0.81±0.01); (c) variances increase noticeably at 0.4 data volume but this instability is not discussed; (d) the claim of "consistently outperforms" should be qualified with statistical rigor.
+
+**W5 — Overclaiming of novelty without explicit positioning (Moderate).** The paper claims a "novel unsupervised evaluation direction" but related methods (PRE, PRD, ChatEval) already use LLMs as peer evaluators. The distinguishing factor (fully unsupervised vs. PRE's supervised qualification exam) is mentioned but not highlighted in the contribution statements. The novelty boundary relative to existing work needs sharper articulation. *External literature verification was unavailable in this run; novelty assessment is deferred for manual verification.*
+
+**W6 — Conclusion lacks limitation discussion (Moderate).** The conclusion does not discuss any limitations of the approach (circular optimization, need for ground-truth for validation, English-only evaluation, small model pool). Adding a multimodal extension claim without acknowledging current limitations creates an incomplete scientific picture.
+
+**W7 — Motivation-experiment mismatch on cold-start (Minor).** The Introduction raises the cold-start problem (new LLM with few ratings) as motivation, but the experiments evaluate PiCO with all 15 models simultaneously. The cold-start use case is not tested. An experiment where the method must rank models with limited pairwise comparison data would directly validate the claimed motivation.
+
+**W8 — Elimination threshold justification (Minor).** The 60% elimination threshold is derived from the loss minimum in Figure 5, but this uses training loss rather than held-out validation performance. The paper should cross-validate the threshold to ensure it generalizes rather than overfitting to the training data.
+
+## Key Issues
+This section distills the Top-5 core defects ranked by severity, research-value impact, validity risk, fixability, and confidence.
+
+### Ranked Error Board
+
+| Rank | Issue | Severity | Validity Risk | Impact on Research Value | Fixability | Confidence |
+|------|-------|----------|---------------|-------------------------|------------|------------|
+| 1 | Circular dependency: w→G and Consistency(w,G) both depend on w | Major | High — could produce arbitrary self-consistent rankings | High — core optimization flawed | Partial — needs theoretical analysis + controlled experiment | High |
+| 2 | Toy experiment near-tautological (w derived from R*) | Major | Medium — does not actually test the key claim | High — weakens the foundational evidence | Easy — reframe as sanity check, add proper test | High |
+| 3 | Optimization algorithm underspecified (no update rule, no hyperparameters) | Major | Medium — method non-reproducible from text | Medium | Easy — add exact optimization details | High |
+| 4 | Statistical depth insufficient (no significance tests, overlapping std) | Major | Medium — some claimed advantages may not be significant | Medium | Moderate — add bootstrap/permutation tests | High |
+| 5 | Overclaiming novelty re: PRE/PRD/LLM-as-Judge + missing limitations | Minor-Medium | Low-Medium | Medium | Easy — add explicit positioning + limitations section | Medium (requires lit review) |
+
+### Issue 1 — Circular Optimization (Deep Analysis)
+
+**Evidence anchor**: Page 2 (optimization paragraph), Page 5 (Eq. 8), Page 5 (Discussion).
+
+**Failure mechanism**: Equation (6) defines G_j = sum(1{A_j_i > A_k_i} * w_s). Equation (8) maximizes Consistency(G, w). Since G depends on w through Eq. (6), maximizing consistency between w and G is equivalent to maximizing a function where the same variable appears in both arguments. This is a form of self-consistency optimization that can converge to any fixed point of the (w → G → Consistency) mapping, without guarantee that this fixed point corresponds to the true human ranking.
+
+**Evidence**: The toy experiment (Table 1) shows "Random Weight + Consistency Optimization" outperforms Forward Weight (which uses ground-truth R* to set w). This is theoretically puzzling: if the optimization only maximizes consistency(w, G) where G depends on w, it should not be able to exceed a system where w is directly set to the ground truth. The fact that it does suggests the optimization may be exploiting the circularity—finding w and G that are highly correlated (because G is a function of w) even if they do not reflect ground truth.
+
+**Required fix**: (a) Provide a synthetic experiment where ground truth is known and the optimization is run to convergence from different initializations, checking whether the final ranking consistently recovers the ground truth. (b) Add a theoretical analysis of the optimization's fixed points and their relationship to the true ranking. (c) At minimum, acknowledge this circularity explicitly in the paper and discuss why it does not undermine the empirical findings.
+
+### Issue 2 — Toy Experiment (Deep Analysis)
+
+**Evidence anchor**: Page 4 (Validation of Consistency Assumption paragraph with Table 1).
+
+**Failure mechanism**: The experiment sets w proportional to the ground-truth human ranking R* (Forward Weight) or anti-proportional (Backward Weight). Then it uses these w values to compute G via Eq. (6), and measures correlation between the resulting ranking and the same R*. This is not a test of the consistency assumption—it is a test of whether the scoring function Eq. (6) propagates the weight signal. The actual hypothesis ("high-level LLMs can accurately evaluate others") is not tested by this experiment.
+
+**Required fix**: (a) Reframe as a "sanity check of the scoring mechanism" rather than as validation of the consistency assumption. (b) Add an experiment that tests the consistency assumption directly (e.g., compute correlation between model ability scores from an independent benchmark and evaluation accuracy on held-out response pairs). (c) Provide analysis of why consistency optimization outperforms Forward Weight.
+
+### Issue 3 — Optimization Underspecification (Deep Analysis)
+
+**Evidence anchor**: Page 5 (Eq. 8 + discussion paragraph), Algorithm 1 (Page 19, line 28).
+
+**Failure mechanism**: Line 28 of Algorithm 1 says "Update weight vector w to maximize consistency of w and G" without specifying the update rule. If the optimization uses gradient ascent, the gradient of Pearson correlation rho(w, G) with respect to w must account for the dependency of G on w via Eq. (6). This requires computing dG_j/dw_s = indicator * (partial derivative of the indicator function), which is non-trivial. Without this derivation, the reader cannot verify that the optimization is correctly implemented.
+
+**Required fix**: (a) Provide the exact gradient update rule for w. (b) Specify all hyperparameters (learning rate, number of iterations, convergence tolerance). (c) Describe whether w and G are updated simultaneously or alternatingly. (d) Add a simple numerical example (e.g., 3 models, 2 questions) showing how the optimization proceeds step-by-step.
+
+## Actionable Suggestions
+This section consolidates the highest-priority textual and methodological revisions required before the paper can be considered publication-ready.
+
+### A1. Clarify the optimization algorithm (Must)
+
+**Location**: Page 5, Consistency Optimization Stage + Algorithm 1 (Page 19).
+
+**Current problem**: No update rule, no hyperparameters, no convergence criterion.
+
+**Required action**: Replace the current underspecified description with:
+
+- **Update rule**: Provide the gradient of Pearson correlation rho(w, G) with respect to w. If using alternating optimization: (1) fix w, compute G via Eq. 6; (2) fix G, update w via gradient ascent on rho(w, G). If using joint optimization, provide the total derivative d(rho)/d w.
+- **Hyperparameters**: Learning rate (e.g., eta=0.01), optimizer (SGD/Adam), max iterations (e.g., T=1000), convergence tolerance (e.g., epsilon=1e-5).
+- **Algorithm pseudocode**: Replace line 28 in Algorithm 1 with the actual update step.
+
+**Acceptance criterion**: A reader with basic ML background can implement the consistency optimization solely from the paper's description.
+
+### A2. Reframe the toy experiment (Must)
+
+**Location**: Page 4, Validation of Consistency Assumption.
+
+**Current problem**: Presented as validating the consistency assumption, but actually just confirms that if w matches R*, the ranking matches R*.
+
+**Required action**: 
+- Rename the experiment to "Sanity check of the scoring mechanism" or "Does weight assignment affect ranking quality?"
+- Move the Random Weight + Consistency Optimization row to a separate experiment, with analysis of why it outperforms Forward Weight.
+- Add a new experiment: take two independent subsets of the LLM pool, learn w on one subset, and test whether the learned w predicts evaluation accuracy on the other subset. This would directly test the consistency assumption.
+
+**Mentor Revised Version for paragraph**:
+"We first conduct a sanity check to verify that the scoring function (Eq. 6) is responsive to weight assignment. We set w proportional to the ground-truth human ranking R* (Forward Weight), anti-proportional (Backward Weight), and uniformly (Uniform Weight). The Forward Weight yields higher correlation with R* than the other two settings, confirming that the scoring mechanism propagates weight information as expected. The more substantive question—whether the consistency assumption holds in practice—is tested by the Random Weight + Consistency Optimization row, where w is initialized randomly and optimized without access to R*. On MT-Bench, this achieves S=0.90, exceeding even the Forward Weight baseline (S=0.75). We discuss this counterintuitive result in Section X."
+
+### A3. Add a limitations section (Must)
+
+**Location**: Conclusion (Page 10) or a new subsection before Conclusion.
+
+**Required content**: At minimum, discuss:
+1. Circular dependency between w and G in the consistency optimization.
+2. Dependence on ground-truth rankings for validation of method performance.
+3. Limited evaluation scope (English chatbot tasks, 15 models).
+4. Potential feedback-loop effect in iterative reviewer elimination.
+5. Unknown scalability to larger model pools and non-English settings.
+
+### A4. Add statistical significance tests (Must)
+
+**Location**: Section 3.1, Page 6.
+
+**Required action**: Perform bootstrap or permutation tests comparing PiCO's ranking against each competitor's ranking for each dataset. Report p-values alongside the existing mean±std. Where differences are not statistically significant, state this explicitly.
+
+### A5. Add cold-start experiment (Nice-to-have)
+
+**Location**: Section 3 (new subsection).
+
+**Design**: Randomly hide a fraction (e.g., 20%, 40%) of pairwise comparisons for each LLM, simulating a cold-start scenario where only limited interaction data is available. Evaluate PiCO's ranking quality under these conditions. Compare to a baseline that uses only available uniform-weighted ratings.
+
+**Acceptance criterion**: Demonstrate that PiCO maintains S > 0.80 even when 40% of comparisons are withheld.
+
+### A6. Add explicit novelty positioning (Must)
+
+**Location**: Abstract, Introduction (contribution bullet), and Related Work.
+
+**Required action**: For each contribution claim, explicitly state how it differs from the closest prior work. Example for C1: "Unlike PRE, which requires a supervised qualification exam with human annotations, PiCO operates entirely without human feedback." For C2: "Our consistency optimization differs from PRD's win-rate-based weighting by directly maximizing the correlation between ability weights and peer-assigned scores, without requiring tournament-style comparisons."
+
+### A7. Report ranking variance across seeds (Nice-to-have)
+
+**Location**: Section 3.4, Page 9.
+
+**Required action**: From the 1000-seed stability experiment, compute the final ranking for each seed and report the variance in Spearman S and Kendall tau. Show a pairwise ranking agreement matrix across seeds to verify that convergence does not produce different rankings.
+
+## Storyline Options + Writing Outlines
+### Current Storyline Assessment
+
+The current narrative follows: **Benchmark limitations → Human evaluation cost → Peer-review analogy → PiCO framework → Consistency optimization → Experiments → Conclusion**. This is a reasonable structure, but suffers from three misalignments:
+
+1. **Problem-Solution alignment**: The cold-start problem is raised as motivation but never tested experimentally.
+2. **Variable alignment**: The "consistency assumption" is defined vaguely in the introduction (scholar analogy) and formalized differently in the method (Pearson correlation between w and G).
+3. **Contribution-evidence alignment**: The three contribution bullets claim novelty, optimization, and experiments, but the optimization's novelty is internally described as "straightforward implementation."
+
+### Recommended Storyline (Option A) — "Unsupervised Peer Review for LLM Ranking"
+
+**Narrative Arc**: 
+- Problem: LLM evaluation is costly and benchmark-reliant.
+- Gap: Existing LLM-as-judge methods still require human supervision (PRE) or tournament structures (PRD).
+- Idea: Fully unsupervised peer-review where models evaluate each other and consistency optimization discovers reliable rankings.
+- Evidence: Three datasets, 15 models, S=0.90.
+- Contribution: First fully unsupervised peer-review evaluation system.
+
+**Abstract Outline (4 sentences)**:
+- S1 (Problem + Challenge): "Large language model (LLM) evaluation currently relies on expensive human annotations or supervised LLM-as-judge pipelines that require curated qualification data."
+- S2 (Gap): "Prior work using LLMs as peer evaluators still depends on human feedback for calibration, making fully automated evaluation an open challenge."
+- S3 (Method): "We propose PiCO, a fully unsupervised peer-review framework: LLMs answer unlabeled questions, evaluate each other anonymously, and a consistency optimization learns per-model confidence weights to produce a ranking without any human labels."
+- S4 (Key Result + Implication): "On three crowdsourced datasets, PiCO achieves Spearman correlations up to 0.90 with human ground truth, outperforming both unsupervised baselines and supervised methods including PRE and Claude-3."
+
+**Introduction Outline (5 paragraphs)**:
+
+**P1 — Problem Establishment**: "LLMs are widely deployed, but their evaluation remains benchmark-centric and costly." (Current P1, but tighten citations and remove 'urgent need' rhetoric.)
+
+**P2 — Human Evaluation Gap**: "Crowdsourced battle platforms are the gold standard but are slow and expensive." (Current P2, add token/human-annotation cost numbers from Table 3.)
+
+**P3 — Prior Work Gap**: "Existing LLM-as-judge methods reduce but do not eliminate human involvement: PRE requires supervised qualification exams, PRD uses tournament structures, and single-model evaluators suffer from self-favoring bias." (New paragraph synthesizing related work into a clear gap statement.)
+
+**P4 — Solution Proposal**: "We propose PiCO, a fully unsupervised peer-review framework that learns evaluation weights solely from mutual assessment." (Current P3, but remove 'comprehensive, efficient, and performance' vagueness.)
+
+**P5 — Contribution Summary**: "We (1) demonstrate the first fully unsupervised peer-review evaluation system, (2) formalize a consistency optimization for ranking, and (3) validate on three datasets with strong results." (Reword contributions with explicit differentiation from PRE/PRD.)
+
+### Alternative Storyline (Option B) — "Consistency Assumption in LLM Peer Evaluation"
+
+This story centers the **consistency assumption** (strong models evaluate better and score higher) as the core insight, positioning the framework as a tool to test this hypothesis. The optimization is secondary to the research question: "Do LLMs exhibit the same consistency property as human peer reviewers?" This framing is more scientifically novel but would require different experiments (e.g., explicitly measuring correlation between model ability and evaluation accuracy).
+
+**Selected**: **Option A** is better aligned with the current manuscript content and experimental setup. Option B would require substantial rework of the experiments.
+
+### Writing Guidance for Each Introduction Paragraph
+
+**P1 (Problem Establishment)**: Replace "urgent need" with specific statement.  
+*Current*: "With the increasingly widespread application of these models, there is an urgent need for an effective evaluation method..."  
+*Revised*: "As LLMs are deployed in high-stakes applications, the cost of relying on potentially leaked benchmarks for evaluation grows. Current benchmarks measure confined capabilities (multiple-choice, retrieval) and may not reflect open-ended human preference."
+
+**P3 (Prior Work Gap)**: New paragraph needed.  
+*Draft*: "Recent work has explored using LLMs as evaluators. GPTScore and PandaLM use single-model evaluation but suffer from systematic biases. PRD and PRE employ multiple LLMs as peer reviewers; however, PRE's qualification exam requires human annotations, while PRD relies on tournament-style win-rate weighting. A fully unsupervised peer-review mechanism—where models evaluate each other without any human-labeled data—remains unexplored."
+
+**P5 (Contributions)**: Replace vague bullets.  
+*Revised*: 
+- "We propose an unsupervised peer-review framework for LLM evaluation that requires no human feedback, unlike PRE which depends on supervised qualification exams."
+- "We formalize a consistency optimization that maximizes the correlation between model ability weights and peer-assigned scores, and show that even this simple objective recovers human-aligned rankings."
+- "We demonstrate through experiments on three crowdsourced datasets that our method achieves Spearman correlations up to 0.90 with human ground truth, outperforming both supervised and unsupervised baselines."
+
+## Priority Revision Plan
+This plan is organized by priority level (P0 = absolute must-fix before resubmission; P1 = high importance; P2 = quality improvement).
+
+### P0 — Critical (must fix before resubmission)
+
+| Item | Weakness Ref | Action | Expected Impact | Effort |
+|------|-------------|--------|-----------------|--------|
+| P0.1 | W3 — Underspecified optimization | Provide exact update rule, hyperparameters, convergence criterion, and pseudocode for w optimization | Enables reproducibility | Low (writing) |
+| P0.2 | W2 — Toy experiment framing | Reframe as sanity check; analyze why consistency optimization outperforms Forward Weight | Removes misleading validation claim | Low (rewriting) |
+| P0.3 | W5 — Missing literature differentiation | Add explicit comparison to PRE/PRD in all contribution statements | Clarifies novelty boundary | Low (rewriting) |
+| P0.4 | W6 — Missing limitations | Add limitations subsection to Conclusion | Improves scientific integrity | Low (writing) |
+
+### P1 — High Priority
+
+| Item | Weakness Ref | Action | Expected Impact | Effort |
+|------|-------------|--------|-----------------|--------|
+| P1.1 | W1 — Circular dependency | Add theoretical analysis of fixed points; synthetic experiment with known ground truth | Addresses core validity concern | Medium |
+| P1.2 | W4 — Statistical depth | Add bootstrap/permutation significance tests for all main comparisons | Strengthens empirical claims | Medium |
+| P1.3 | W7 — Cold-start test | Add cold-start experiment withholding pairwise comparison data | Aligns experiments with motivation | Medium |
+| P1.4 | W8 — Elimination threshold validation | Cross-validate 60% threshold on held-out data | Ensures threshold generalizes | Low |
+
+### P2 — Quality Improvement
+
+| Item | Weakness Ref | Action | Expected Impact | Effort |
+|------|-------------|--------|-----------------|--------|
+| P2.1 | Stability | Report ranking variance across 1000 seeds | Strengthens stability claim | Low |
+| P2.2 | PG analysis | Report quantitative summary of bias reduction | Adds rigor to bias analysis | Low |
+| P2.3 | Appendix metrics | Add k-sensitivity analysis for Permutation Entropy | Strengthens metric section | Low |
+| P2.4 | Abstract | Add key numerical result (S=0.90) | Improves abstract impact | Low |
+
+### Revision Order
+
+1. **Conceptual fixes**: P0.2 (toy experiment reframe) + P0.3 (novelty positioning) + P0.4 (limitations) — mostly rewriting, no new experiments needed.
+2. **Reproducibility fixes**: P0.1 (optimization detail) — fill in the missing algorithmic specifications.
+3. **Validity fixes**: P1.1 (circular dependency analysis) + P1.2 (significance tests) — the most technically demanding.
+4. **Motivation-experiment alignment**: P1.3 (cold-start experiment) — new experiment but limited scope.
+5. **Polish items**: P2.1–P2.4 — lower-effort additions that improve presentation.
+
+### Expected Outcome After P0 Fixes
+
+After completing P0 items, the paper would have:
+- A clear, reproducible optimization algorithm.
+- An honest toy experiment that does not misleadingly claim validation.
+- Explicit positioning against related work.
+- A limitations section that addresses core concerns.
+
+These changes alone would significantly strengthen the paper's scientific defensibility.
+
+### ASCII Diagram — Revision Strategy Roadmap
+
+```text
+[Problem: Optimization underspecified]
+    -> [Fix P0.1: Add gradient update rule + hyperparameters]
+    -> [Expected impact: Reproducibility established]
+
+[Problem: Toy experiment is circular]
+    -> [Fix P0.2: Reframe as sanity check; add proper consistency test]
+    -> [Expected impact: Foundational evidence corrected]
+
+[Problem: Novelty positioning ambiguous]
+    -> [Fix P0.3: Explicit differentiation from PRE/PRD]
+    -> [Expected impact: Contribution boundary clarified]
+
+[Problem: No limitations section]
+    -> [Fix P0.4: Add limitations + future work]
+    -> [Expected impact: Scientific integrity improved]
+
+[Problem: Circular w-G dependency not addressed]
+    -> [Fix P1.1: Add theoretical analysis + synthetic experiment]
+    -> [Expected impact: Core validity concern mitigated]
+
+[Problem: No statistical significance]
+    -> [Fix P1.2: Add bootstrap/permutation tests]
+    -> [Expected impact: Empirical claims rigorous]
+
+[Problem: Cold-start motivation untested]
+    -> [Fix P1.3: Add cold-start experiment]
+    -> [Expected impact: Full story arc completed]
+```
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|-------|---------|-------------|-----------------|-------------------|
+| E1 | Validate consistency assumption (toy) | Forward/Backward/Uniform weights derived from R* on 3 datasets | S, tau | Forward > Uniform > Backward | C2 (weak) | Circular: w derived from R* |
+| E2 | Consistency optimization performance | Random init + optimization vs baselines on 3 datasets | S, tau, H | PiCO S=0.84-0.90, tau=0.68-0.77 | C1, C2, C3 | No significance tests; gains within std on some settings |
+| E3 | Data volume robustness | Subsampling D to 0.7 and 0.4 fractions | S, tau, H | PiCO generally robust at 0.7, some degradation at 0.4 | C3 | Variance increases at 0.4; not discussed |
+| E4 | Preference gap analysis | PG heatmap before/after weighting | PG metric | Learned w reduces evaluation bias | C2 | No quantitative summary; no cross-validation |
+| E5 | Reviewer elimination comparison | PiCO vs PRE elimination across elimination counts | PEN | PiCO better than PRE in most settings | C2, C3 | Uses training loss not validation; no sensitivity analysis |
+| E6 | Automatic elimination threshold | Average loss curve vs elimination count | Loss | Minimum at 60% removal | C2 | Only AlpacaEval shown; no cross-dataset replication in main figure |
+| E7 | Precision@K and RBP@K | PiCO vs baselines on Chatbot Arena | P@8,9,10; RBP@8,9,10 | PiCO best in all cases | C3 | Single dataset only |
+| E8 | Token consumption comparison | Input/output token counts for each method | Token counts | PiCO comparable to PRD/PRE | C3 | — |
+| E9 | Stability validation | 1000 seeds, loss and weight distributions | Loss, weight | Stable convergence | C2 | Only shows loss/weight, not ranking variance |
+| E10 | Comparison with MMLU/GSM8K | Benchmark rankings vs human preference | S, tau | MMLU S=0.53, GSM8K S=0.32, PiCO S=0.88 | C3 | — |
+
+### Research-Theme Gap Diagnosis
+
+The following core research-value claims are weakly supported:
+
+1. **New knowledge (unsupervised peer-review works)**: The paper demonstrates that consistency optimization produces rankings correlated with human judgment. However, the mechanism by which it works is unclear (does it exploit w-G circularity? Does it genuinely discover ability-based weights?). The "new knowledge" is primarily empirical, not mechanistic.
+
+2. **Reproducibility**: Not yet achievable—the optimization algorithm is underspecified (no update rule, no hyperparameters).
+
+3. **Impact on practice/understanding**: The method could reduce evaluation cost if adopted, but the paper does not test the realistic deployment scenario (cold-start, new models added incrementally). Practical impact claims remain unvalidated.
+
+### Proposed Research Experiments (P0/P1/P2)
+
+**P1.1 — Synthetic ground-truth experiment (P1)**  
+*Target Claim*: C2 (consistency optimization recovers true ranking)  
+*Hypothesis*: Given a synthetic LLM pool with known true abilities and simulated biased evaluations, the consistency optimization can recover the true ranking.  
+*Minimal Design*: Create synthetic data with known ground-truth ability scores alpha_j. Generate simulated evaluations where each reviewer's judgment is alpha_j * correct_label + noise. Run PiCO optimization and measure recovery of alpha_j.  
+*Controls*: Compare to uniform-weighted baseline, known-bias oracle.  
+*Metrics*: Spearman S between recovered ranking and true alpha ranking.  
+*Success Criterion*: S > 0.90 across 100 random synthetic pools.  
+*Estimated Cost*: Low (synthetic data, no LLM API calls).  
+*Expected Gain*: Validates that optimization is not merely exploiting circularity but can recover ground truth.
+
+**P1.2 — Cold-start experiment (P1)**  
+*Target Claim*: C1 (method addresses cold-start problem)  
+*Hypothesis*: PiCO can produce reasonable rankings even when only a fraction of pairwise comparisons are available.  
+*Minimal Design*: From the existing Chatbot Arena D set, randomly mask 20%, 40%, 60% of pairwise comparisons per model. Run PiCO on the masked data.  
+*Controls*: Uniform-weighted baseline, PRE (if available).  
+*Metrics*: S, tau, H vs human ground truth.  
+*Success Criterion*: S > 0.80 at 40% masking, S > 0.70 at 60% masking.  
+*Estimated Cost*: Low (reuse existing data).  
+*Expected Gain*: Validates cold-start motivation; strengthens practical impact claim.
+
+**P1.3 — Cross-dataset threshold validation (P1)**  
+*Target Claim*: C3 (elimination threshold generalizes)  
+*Hypothesis*: The 60% elimination threshold is optimal across all three datasets on held-out validation data.  
+*Minimal Design*: For each dataset, split Q into training (80%) and validation (20%). Learn w on training set for each elimination threshold (0-80% in 10% steps). Evaluate S on validation set.  
+*Controls*: Training loss vs validation S curves.  
+*Metrics*: S at each threshold.  
+*Success Criterion*: Validation S maximum occurs at 55-65% for all three datasets.  
+*Estimated Cost*: Low.  
+*Expected Gain*: Confirms threshold generalizability, addressing W8.
+
+**P2.1 — Ranking stability across seeds (P2)**  
+*Target Claim*: C2 (optimization stable)  
+*Hypothesis*: The final ranking is consistent across 1000 random seeds.  
+*Minimal Design*: From the existing 1000-seed experiment, compute the final ranking for each seed and report mean pairwise Kendall tau across seeds.  
+*Controls*: None needed.  
+*Metrics*: Pairwise Kendall tau, ranking variance.  
+*Success Criterion*: Mean pairwise tau > 0.95 across seeds.  
+*Estimated Cost*: Low (reuse existing data).  
+*Expected Gain*: Strengthens stability claim.
+
+### ASCII Diagram — Experiment Upgrade Plan
+
+```text
+P0 Fixes (no experiments)
+  P0.1: Add optimization details (writing)
+  P0.2: Reframe toy experiment (rewriting)
+  P0.3: Add literature differentiation (rewriting)
+  P0.4: Add limitations section (writing)
+
+P1 New Experiments
+  P1.1: Synthetic ground-truth experiment
+    [Synthetic abilities alpha_j] -> [Simulated biased evaluations]
+    -> [PiCO optimization] -> [Recovery of alpha_j ranking]
+    -> Validates:Circular dependency concern addressed
+
+  P1.2: Cold-start experiment
+    [Full D set] -> [Mask 20/40/60% comparisons]
+    -> [PiCO on masked data] -> [S vs human R*]
+    -> Validates:Motivation claim is testable
+
+  P1.3: Cross-dataset threshold validation
+    [Each dataset] -> [80/20 train/val split]
+    -> [PiCO at 0-80% thresholds]
+    -> [Validation S curve] -> [Optimal threshold confirmed]
+
+P2 Quality Improvements
+  P2.1: Ranking stability across 1000 seeds
+    [1000 runs] -> [Compute rankings] -> [Mean pairwise tau]
+    -> Stronger stability evidence
+```
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score**: **5/10**
+
+**Rationale**: This score reflects the following evidence-grounded assessment:
+
+- **Research Value (6/10)**: The problem of cost-effective, automated LLM evaluation is important and timely. The peer-review framework is a natural and well-motivated approach. However, the paper does not convincingly demonstrate that the method works in its claimed use case (fully unsupervised deployment), because validation requires ground-truth human rankings. The cold-start angle (motivation) is not experimentally tested. The research value is genuine but bounded.
+
+- **Novelty (4/10)**: The idea of using LLMs as peer evaluators is not new (PRE, PRD, ChatEval exist). The novelty resides specifically in the fully unsupervised optimization (without PRE's supervised qualification exam) and the specific consistency optimization formulation. However, the optimization is described as "straightforward," which undercuts the novelty claim. *External literature verification was unavailable; novelty score is a provisional estimate based on manuscript positioning and should be re-assessed with full literature review.*
+
+- **Validity/Soundness (5/10)**: The circular dependency in the consistency optimization (w affecting both sides of the correlation) is a fundamental concern that is not addressed. The toy experiment does not actually validate what it claims to validate. The optimization algorithm is underspecified, preventing reproducibility assessment. Empirical results are promising but lack statistical significance testing.
+
+- **Reproducibility (3/10)**: The optimization update rule is not provided, hyperparameters are not reported, and the training procedure (how many iterations, what convergence criterion) is missing. This is a significant weakness for a methods paper.
+
+**Post-Revision Target**: **[6, 7]/10**
+
+This target assumes that the authors:
+1. Address P0 items: specify the optimization, reframe the toy experiment, add limitations, and clarify novelty positioning.
+2. Address P1 items: add synthetic ground-truth validation for the circular dependency concern, add significance tests, and test the cold-start scenario.
+3. Address P2 items: report ranking variance across seeds and add quantitative bias reduction statistics.
+
+If these items are fully addressed, the paper would have clear novelty differentiation, a reproducible algorithm, validated causal claims, and appropriate scientific modesty. At that point, it would be a solid conference paper in the evaluation track (6-7 range). Without these fixes, the core methodological concerns and lack of reproducibility would keep it below the acceptance threshold for a top-tier venue.
+
+**Scoring Breakdown**:
+
+| Dimension | Current | Post-Revision Target | Notes |
+|-----------|---------|---------------------|-------|
+| Research Value | 6 | 7 | Cold-start experiment would increase impact |
+| Novelty | 4 | 6 | Clearer positioning + literature differentiation |
+| Validity/Soundness | 5 | 6 | Circular dependency analysis needed |
+| Reproducibility | 3 | 7 | Full algorithmic specification |
+| Presentation | 6 | 7 | Introduction and related work restructuring |
+| **Overall** | **5** | **[6, 7]** | |

@@ -1,0 +1,285 @@
+## Summary
+# Final Review Report
+
+## Summary
+
+This paper presents HD-Explain, an example-based prediction explanation method that leverages Kernelized Stein Discrepancy (KSD) to identify training samples that provide predictive support for a test point's classification. The core technical idea is to use the KSD-derived kernel function κθ, which encodes pairwise data correlation conditioned on the trained model, to rank training samples by their "predictive support" without requiring parameter-space computation. The authors propose two relaxations to apply KSD (which operates on joint distributions) to discriminative classifiers: setting Pθ(x)=PD(x) and treating discrete labels as continuous features. Experiments on four image classification datasets (CIFAR-10, SVHN, Brain Tumor MRI, Ovarian Cancer histopathology) with ResNet-18 show that HD-Explain achieves >80% hit rate under noise augmentation, substantially exceeding Influence Function, RPS, and TracIn baselines (≤10%), while maintaining competitive computational efficiency. The paper also introduces Hit Rate and Coverage as quantitative evaluation metrics for example-based explanations.
+
+The paper has notable strengths: a creative application of KSD to a new problem domain, well-designed quantitative evaluation metrics, and impressive empirical results on the proposed evaluation protocol. However, several significant concerns affect confidence in the work: (1) two strong relaxations needed to apply KSD to discriminative classifiers lack validation regarding their impact on explanation faithfulness; (2) the Hit Rate metric may partially favor methods with raw-feature similarity (like HD-Explain's RBF term) over model-conditioned signal; (3) runtime comparisons are not adequately standardized across methods; (4) the theoretical chain from MLE to KSD minimization contains skipped steps and implicit assumptions; and (5) novelty and comparison claims cannot be verified without external literature retrieval (deferred to manual verification in this run).
+
+## Strengths
+**S1. Creative application of KSD to a new problem domain.** The paper identifies that the KSD-derived kernel function κθ naturally defines a model-conditioned pairwise data correlation — a property that, to the authors' knowledge, has not been exploited for prediction explanation. Transferring a tool originally developed for goodness-of-fit testing and parameter inference to example-based explanation is a genuinely creative conceptual leap that opens a new connection between two previously separate research areas.
+
+**S2. Well-designed quantitative evaluation framework.** The paper identifies a genuine weakness in the example-based explanation literature: previous works rely primarily on qualitative visual inspection without standardized metrics. The Hit Rate and Coverage metrics provide a concrete, reproducible way to evaluate explanation quality by constructing test points with known ground-truth explanations via controlled data augmentation. The large-scale evaluation (>300,000 independent runs) gives statistical credibility to the main empirical claims.
+
+**S3. Impressive empirical performance on the proposed evaluation protocol.** HD-Explain achieves >80% hit rate under noise augmentation across all four datasets, compared to ≤10% for all three baselines (Influence Function, RPS, TracIn). This is a substantial margin that suggests the KSD-based approach captures a genuinely different and more effective signal for explanation retrieval under the tested conditions.
+
+**S4. Transparent discussion of limitations and relaxations.** Appendix D and J provide an unusually candid discussion of the method's theoretical limitations, acknowledging that the relaxations (Pθ(x)=PD(x), continuous-label approximation) are "hasty" and "not generally applicable to other contexts." This transparency improves scientific credibility.
+
+**S5. Computational efficiency advantage.** The O(m+k) cache scaling (data dimension + class count) versus O(|θ|) for parameter-space methods is a genuine advantage for deep networks where parameter count dominates data dimension. Table 1 provides a useful structured comparison of methods along multiple practical dimensions.
+
+## Weaknesses
+**W1. Unvalidated relaxations threaten theoretical grounding.** (Anchored: Page 5 - Section 3.1) Two strong approximations are required to apply KSD to discriminative classifiers: (a) setting Pθ(x) ≡ PD(x) to circumvent the fact that discriminative models do not model input distributions, and (b) treating discrete class labels as continuous features. The paper acknowledges these are "hasty" but provides no quantitative analysis of how they affect explanation faithfulness — e.g., whether they change the relative ordering of κθ values used for top-K retrieval. Without such analysis, the theoretical link between MLE training and KSD-based explanation remains heuristic rather than principled.
+
+**W2. Hit Rate metric may conflate raw-feature similarity with model-conditioned signal.** (Anchored: Page 6 - Metrics paragraph) The Hit Rate metric uses noise-augmented test points where pixel-level similarity between xt and the ground-truth xi is high. HD-Explain's κθ kernel includes a raw RBF trace term (term ① in Section 4.4) that directly measures pixel similarity. The paper does not ablate how much of HD-Explain's >80% hit rate comes from this raw term vs. the model-conditioned terms ②-④. The Horizontal Flip experiment (Figure 6) partially addresses this concern by destroying pixel similarity, where HD-Explain's advantage shrinks — but the paper does not decompose the contribution.
+
+**W3. Runtime comparison is not apples-to-apples.** (Anchored: Page 9 - Quantitative evaluation) Baselines (Influence Function, TracIn*) are artificially restricted to last-layer computation to make them runnable, while HD-Explain uses full-model gradients. RPS's reported low time excludes its prerequisite L2-regularized fine-tuning step. Preprocessing costs (gradient caching for HD-Explain) are not separated from per-query inference costs. This makes the runtime claims in Table 1 and Figure 5c difficult to interpret fairly.
+
+**W4. Missing theoretical derivation steps weaken motivation.** (Anchored: Page 4 - Section 3) The chain from MLE to KSD minimization through KL divergence skips the intermediate factorization D_KL(PD||Pθ) = E_x[D_KL(PD(y|x)||Pθ(y|x))] + D_KL(PD(x)||Pθ(x)), and the Pθ(x)=PD(x) assumption is invoked implicitly rather than stated as a required condition. This makes the theoretical narrative appear less rigorous than it could be.
+
+**W5. Qualitative claims are too strong for illustrative examples.** (Anchored: Page 7 - Section 4.1) Statements like "we are confident that HD-Explain provides a better explanation" based on 3-4 cherry-picked visual examples do not meet the standard of evidence for quantitative comparison. While the quantitative metrics (Section 4.2) provide proper support, the qualitative section's language could mislead readers.
+
+**W6. Conclusion over-claims.** (Anchored: Page 10 - Section 5) The conclusion introduces unsupported claims about cross-layer analysis capability and positions HD-Explain as a general transparency solution, while experiments are limited to image classification with one architecture (ResNet-18). The limitations identified in Appendix J are not reflected in the main-paper conclusion.
+
+**W7. Novelty and comparison claims are unverifiable in this run.** Due to Retrieval-Disabled Mode, all novelty and comparative positioning claims (e.g., "to the best of our knowledge, its innate property... has never been exploited") cannot be verified against external literature. Manual verification is required before accepting these claims.
+
+## Key Issues
+**Issue 1 (Major): Relaxation validation gap.** Two approximations (Pθ(x)=PD(x), continuous-label treatment) are essential for applying KSD to discriminative classifiers but are not validated. Without quantifying how these relaxations affect κθ value ordering, the theoretical foundation remains heuristic.
+
+- *Evidence:* Page 5 - Section 3.1, Appendix D
+- *Risk:* If relaxations change the relative ranking of training samples by κθ, the top-K explanations could be incorrect
+- *Fix requirement:* Add small-scale controlled experiment comparing approximate vs. exact κθ ordering
+
+**Issue 2 (Major): Hit Rate metric conflates raw RBF similarity with model-conditioned signal.** The κθ kernel includes a raw RBF trace term (term ①) that directly measures pixel similarity. Without ablating this term, it is unclear whether HD-Explain's high Hit Rate comes from model-conditioned terms (②-④) or simply from the RBF baseline.
+
+- *Evidence:* Page 4 Section 4.4 term decomposition, Page 6 Hit Rate definition, Page 9 Observation on Horizontal Flip
+- *Risk:* The claimed "model-dependent" explanation advantage may be partially attributable to a simple RBF similarity baseline
+- *Fix requirement:* Ablate term ① from κθ and report Hit Rate with and without it
+
+**Issue 3 (Major): Runtime comparison confounds preprocessing vs. inference.** Baselines are restricted to last-layer computation while HD-Explain uses full-model gradients; RPS excludes fine-tuning; HD-Explain's gradient caching cost is not separated.
+
+- *Evidence:* Page 2 Table 1, Page 9 runtime discussion
+- *Risk:* Misleading efficiency claims could affect reproducibility assessments
+- *Fix requirement:* Standardize comparison with clear preprocessing vs. per-query breakdown
+
+**Issue 4 (Major): Conclusion over-reaches beyond evidence.** Claims about cross-layer analysis and being an "important contribution towards improving transparency" are not supported by experiments limited to one architecture and image classification.
+
+- *Evidence:* Page 10 - Section 5
+- *Risk:* Sets unrealistic reviewer expectations
+- *Fix requirement:* Bound conclusion claims to what is demonstrated
+
+**Issue 5 (Moderate): Theoretical derivation skips critical intermediate steps.** The KL→KSD chain in Section 3 bypasses the factorization D_KL(PD||Pθ) = E_x[D_KL(PD(y|x)||Pθ(y|x))] + D_KL(PD(x)||Pθ(x)) and implicitly assumes Pθ(x)=PD(x) before this assumption is introduced.
+
+- *Evidence:* Page 4 - Section 3 equations
+- *Risk:* Reviewers familiar with information theory will identify the gap and question rigor
+- *Fix requirement:* Add explicit factorization steps and state assumptions clearly before the KL-KSD connection
+
+**Issue 6 (Moderate): Contribution statements are too generic.** The listed contributions ("novel method," "quantitative metrics," "thorough evaluation") do not differentiate this paper from other explanation works and provide no specificity about what is new.
+
+- *Evidence:* Page 2 - Contribution bullet list
+- *Risk:* Makes novelty assessment difficult for reviewers
+- *Fix requirement:* Rewrite contributions with specific claims anchored to results
+
+**Issue 7 (Minor): Qualitative claims over-interpret cherry-picked examples.** Language like "we are confident that HD-Explain provides a better explanation" overstates what 3-4 visual examples can demonstrate.
+
+- *Evidence:* Page 7 - Section 4.1
+- *Risk:* May be flagged by reviewers as insufficiently rigorous
+- *Fix requirement:* Use illustrative rather than conclusive language; let quantitative metrics carry the evidence
+
+## Actionable Suggestions
+### Must-Fix Items (Publication-Critical)
+
+**A1. Validate relaxations with a controlled experiment (Addresses Issue 1).** Add a new subsection or appendix comparing the approximate κθ used in HD-Explain against the exact discrete-treatment version [Yang et al., 2018] on a small-scale problem (e.g., binarized MNIST subset). Report: (a) Spearman rank correlation between the two κθ value orderings over all training-test pairs, (b) Overlap@K (K=1,3,5,10) for top-K explanations. If correlation is high (>0.9), state that relaxations preserve explanation ordering despite theoretical informality. If low, discuss when the approximation fails and consider using the exact treatment for those regimes.
+
+**A2. Ablate RBF trace term from Hit Rate analysis (Addresses Issue 2).** Recompute Hit Rate and Coverage using a modified κθ' that excludes term ① (the trace of ∇a∇bk(a,b)). Compare against the full κθ results in Figures 5-6. If κθ' without term ① achieves >60% hit rate, the model-conditioned terms are confirmed as the primary contributors. If performance drops significantly, add a discussion of the trade-off and recommend using HD-Explain* (on representations) instead of raw features to reduce raw-similarity dominance.
+
+**A3. Standardize runtime comparison (Addresses Issue 3).** Add a new table with columns: Method | Preprocessing Time (one-time) | Per-Query Time | Model Access Level (full/last-layer). Include HD-Explain's gradient caching time. For RPS, include the L2 fine-tuning time. Present HD-Explain*, TracIn*, and RPS all at the same model-access level (last layer) for a fair comparison. Clearly state that HD-Explain (full model) and baselines restricted to last layer are not directly comparable.
+
+**A4. Bound conclusion claims (Addresses Issue 4).** Replace "HD-Explain is flexible to apply on any layer of interest and can be used to analyze the evolution of a prediction across layers" with a statement about what is actually demonstrated. Remove "HD-Explain serves as an important contribution towards improving the transparency of machine learning models" unless accompanied by explicit bounds on scope. See annotation on Page 10 for a revised version.
+
+### Strongly Recommended Items
+
+**A5. Fix the MLE→KL→KSD derivation chain (Addresses Issue 5).** In Section 3 (Page 4), insert an explicit factorization step before the current equation:
+```
+D_KL(PD(x,y)||Pθ(x,y)) = E_{x~PD(x)}[D_KL(PD(y|x)||Pθ(y|x))] + D_KL(PD(x)||Pθ(x))
+```
+Then state: "Since fθ is a discriminative classifier that does not model Pθ(x), we adopt the approximation Pθ(x)=PD(x) (detailed in Section 3.1), making D_KL(PD(x)||Pθ(x)) = 0. Under this approximation, minimizing D_KL(PD||Pθ) reduces to maximizing E[log Pθ(y|x)], i.e., the MLE objective, which is equivalent to minimizing KSD during gradient-based optimization [Liu & Wang, 2016]." This makes the reasoning transparent and locates the assumption explicitly.
+
+**A6. Rewrite contribution statements (Addresses Issue 6).** Replace the generic bullet list on Page 2 with specific claims such as: (1) A KSD-based explanation method that achieves O(m+k) memory per training sample, (2) Hit Rate and Coverage metrics enabling quantitative evaluation of example-based explanations, (3) Empirical demonstration on four classification datasets showing >80% hit rate vs. ≤10% for existing methods.
+
+**A7. Tone down qualitative claims (Addresses Issue 7).** Throughout Section 4.1, replace "we are confident that HD-Explain provides a better explanation" with "HD-Explain's retrieved samples appear visually more similar to the test image on these selected examples." Let the quantitative results in Section 4.2 carry the comparative claims.
+
+### Nice-to-Have Items
+
+**A8. Report Hit@K in addition to top-1 Hit Rate.** Add a panel to Figures 5-6 showing Hit@1, Hit@3, Hit@5. This captures whether the correct sample appears in the top-K rather than only at rank 1, which is more aligned with practical explanation use (users reviewing multiple samples).
+
+**A9. Add calibration-sensitivity analysis.** Appendix J's observation about low-confidence predictions can be formalized: plot Hit Rate vs. model confidence bins (0.0-0.2, 0.2-0.4, ..., 0.8-1.0) for HD-Explain to show how explanation quality degrades for uncertain predictions. This provides actionable practitioner guidance.
+
+**A10. Verify "prediction consistency" assumption in Hit Rate metric.** Report what fraction of augmented test points (noise injection, horizontal flip) change the model's predicted class. If the fraction is non-negligible (>5%), recompute Hit Rate both with and without those points to ensure the metric is valid.
+
+## Storyline Options + Writing Outlines
+### Abstract Outline (Copy-Ready)
+
+**S1 (Problem+Stakes):** Example-based prediction explanations identify training samples that support a model's prediction, but current methods either incur high computational cost by operating in parameter space or produce coarse class-level rather than instance-level explanations.
+
+**S2 (Prior Gap):** Influence functions, Representer Point Selection, and TracIn all require parameter-bound computation and/or model retraining, limiting their scalability and explanation granularity.
+
+**S3 (Proposed Method):** This paper introduces HD-Explain, which leverages Kernelized Stein Discrepancy (KSD) to define a model-conditioned kernel function κθ that measures pairwise data correlation without parameter perturbation.
+
+**S4 (Key Result):** On four image classification datasets (CIFAR-10, SVHN, Brain Tumor MRI, Ovarian Cancer) with ResNet-18, HD-Explain achieves >80% Hit Rate under noise augmentation — substantially exceeding baselines (≤10%) — while maintaining O(m+k) memory per training sample.
+
+**S5 (Bounded Implication):** These results demonstrate that KSD-derived kernels provide a computationally efficient, instance-level explanation mechanism for neural classifiers, with the caveat that the approach relies on two approximations whose impact warrants further investigation.
+
+### Introduction Outline (6-Paragraph Plan)
+
+**P1 (Big Picture — 5 sentences).** 
+*Role:* Establish the importance of example-based explanations for model transparency.
+*Transition:* Transition from "why explanations matter" to "the specific problem of retrieval from large training sets."
+*Key claim:* Training data points are valuable for explaining model predictions.
+*Evidence anchor:* General ML transparency motivation, supported by [Cai et al., 2019; Anik & Bunt, 2021].
+
+**P2 (Existing Methods — 8 sentences).** 
+*Role:* Summarize the two dominant paradigms (parameter-space influence, representation-space similarity) and their shared limitations.
+*Transition:* End with "both paradigms share a fundamental limitation: they are bounded by model parameter count."
+*Key claim:* Current methods are parameter-bound, incurring heavy computational cost.
+*Evidence anchor:* Influence Function needs Hessian approximation; RPS requires L2 fine-tuning.
+
+**P3 (The Gap — 4 sentences).** 
+*Role:* Explicitly state the unresolved challenge — fine-grained instance-level explanations without parameter-bound computation.
+*Transition:* "Hence, an alternative influence chain that does not exploit model parameter perturbation is needed."
+*Key claim:* No existing method simultaneously achieves instance-level granularity, computational efficiency, and faithfulness to the original model.
+
+**P4 (Proposed Solution — 6 sentences).** 
+*Role:* Introduce HD-Explain and its KSD foundation.
+*Transition:* "This paper presents HD-Explain, which exploits Kernelized Stein Discrepancy..."
+*Key claim:* KSD's model-conditioned kernel uniquely defines pairwise data correlation without parameter perturbation.
+*Evidence anchor:* Section 3 derivations, Figure 1 empirical KSD-dataset relationship.
+
+**P5 (Contributions — 5 sentences).** 
+*Role:* List 3 specific, non-generic contributions.
+*Key claims:* (1) O(m+k) scalable KSD-based explanation method; (2) Hit Rate and Coverage quantitative metrics; (3) Empirical evaluation across 4 datasets showing >80% hit rate vs ≤10% baselines.
+
+**P6 (Findings Preview — 3 sentences).** 
+*Role:* Summarize main findings without hype.
+*Key claim:* HD-Explain offers fine-grained explanations with competitive efficiency on evaluated benchmarks.
+*Bounding:* Acknowledge the theoretical approximations and dataset scope.
+
+### Alternative Storyline Candidate
+
+**Current storyline:** General motivation → Literature survey (IF, RPS, TracIn) → Their shared limitation → HD-Explain as alternative → Contributions.
+
+**Recommended alternative:** 
+1. **Problem definition + concrete use case** (1 paragraph): Start with a specific medical diagnosis scenario where knowing which training samples support a prediction is critical.
+2. **Why existing methods fail for this scenario** (1 paragraph): Use the specific scenario to motivate why parameter-bound methods (IF, RPS, TracIn) are impractical at scale.
+3. **What is really needed** (1 paragraph): Instance-level explanations with O(data dimension) scaling.
+4. **Our idea** (1 paragraph): KSD-derived kernel bypasses parameter space entirely.
+5. **Contributions + evidence preview** (1 paragraph).
+6. **Scoped findings** (1 paragraph).
+
+This alternative improves the reader's ability to see why the problem matters before being exposed to technical method details.
+
+## Priority Revision Plan
+### Ranked Revision Priority Board
+
+| Priority | Issue | Effort | Impact | Section to Modify |
+|----------|-------|--------|--------|-------------------|
+| P0 | Validate relaxations (A1) | Medium | High (theoretical credibility) | New subsection in Method or Appendix |
+| P0 | Ablate RBF trace term from Hit Rate (A2) | Low | High (claim substantiation) | Section 4.4 + Figures 5-6 |
+| P0 | Standardize runtime comparison (A3) | Low | Medium (fairness) | Section 4.2 + Table 1 |
+| P1 | Bound conclusion claims (A4) | Low | Medium (defensibility) | Section 5 |
+| P1 | Fix MLE→KL→KSD derivation (A5) | Low | Medium (rigor) | Section 3 |
+| P1 | Rewrite contribution list (A6) | Low | Medium (reader clarity) | Page 2 bullet list |
+| P2 | Tone down qualitative claims (A7) | Low | Low (writing polish) | Section 4.1 |
+| P2 | Report Hit@K (A8) | Low | Low (useful addition) | Figures 5-6 |
+| P2 | Calibration-sensitivity analysis (A9) | Medium | Low (practitioner insight) | Appendix J or new subsection |
+| P2 | Verify prediction consistency assumption (A10) | Low | Low (metric validation) | Section 4.2 |
+
+### Staged Execution Plan
+
+**Stage 1 (immediate, <1 day):** A2 (RBF ablation), A3 (runtime standardization), A4 (conclusion bound), A5 (derivation fix), A6 (contributions rewrite), A7 (qualitative tone). These are all text-only changes or simple experimental re-runs that do not require new code infrastructure.
+
+**Stage 2 (this week, 2-3 days):** A1 (relaxation validation experiment). Requires implementing the exact discrete KSD treatment [Yang et al., 2018] on a small dataset. This is the most scientifically important addition.
+
+**Stage 3 (before submission, 1-2 days):** A8 (Hit@K), A9 (calibration analysis), A10 (prediction consistency verification). These are low-effort experiments with potential to strengthen the empirical claims.
+
+```text
+ASCII Diagram — Revision Strategy Roadmap
+
+[P0: Relaxation validation]  →  Small-scale exact KSD comparison  →  Theoretical credibility
+[P0: RBF ablation]          →  κθ without term ① re-run           →  Claim substantiation
+[P0: Runtime standardization] → Preprocessing/query breakdown      →  Fair comparison
+[P1: Conclusion bound]      →  Scope-limited rewrite               →  Reviewer defensibility
+[P1: Derivation fix]        →  Explicit KL factorization           →  Theoretical clarity
+[P1: Contribution rewrite]  →  Specific, evidence-anchored claims  →  Novelty communication
+```
+
+## Experiment Inventory & Research Experiment Plan
+### Completed Experiment Inventory
+
+| Exp ID | Objective/Hypothesis | Setup (Data/Protocol) | Metrics | Main Outcome | Claim Supported | Current Limitation |
+|--------|---------------------|----------------------|---------|-------------|-----------------|-------------------|
+| E1 | Qualitative comparison of explanations | CIFAR-10, ResNet-18; 3 scenarios (high-conf correct, low-conf correct, low-conf incorrect) | Visual similarity | HD-Explain produces visually more similar top-3 samples | C1 (method works) | Subjective; only 3 examples |
+| E2 | Qualitative comparison on SVHN | SVHN, ResNet-18; 3 scenarios | Visual similarity | HD-Explain better; RPS returns same samples for different test points | C1 | Same as E1 |
+| E3 | Hit Rate — Noise Injection | CIFAR-10, OCH, MRI, SVHN; 30 aug/test pt, >300k runs | Hit Rate (log-scale) | HD-Explain >80%, baselines ≤10% | C1, C3 | RBF term not ablated |
+| E4 | Hit Rate — Horizontal Flip | Same as E3 | Hit Rate (log-scale) | HD-Explain drops; HD-Explain* robust | C1, C3 | Highlights raw-feature dependence |
+| E5 | Coverage metric | Same as E3, E4 | Coverage = unique explanations / (n·k) | HD-Explain higher coverage (60-80%) vs baselines (10-50%) | C2 (metrics useful) | Coverage favors diverse explanations, which may not always be desired |
+| E6 | Runtime comparison | Same datasets; wall-clock time | Execution time (seconds) | RPS fastest; HD-Explain* 2nd; HD-Explain beats IF | C1 (efficiency) | Preprocessing not separated |
+| E7 | Kernel comparison | All datasets; RBF vs IMQ vs Linear | Hit Rate, Coverage, Time | IMQ best Hit Rate; Linear fastest | C1 (kernel flexibility) | No guidance on kernel selection |
+| E8 | Data debugging (Appendix G) | CIFAR-10; 100 flipped labels | Precision@K, Recall@K | HD-Explain* outperforms other last-layer methods | Side claim | Not main proposal; only last-layer variant works |
+
+### Research-Theme Gap Diagnosis
+
+1. **New Knowledge:** The core insight — that KSD's model-conditioned kernel can serve as an explanation mechanism — is genuinely novel. However, the theoretical gap (unvalidated relaxations) means the claim of "new knowledge about the KSD-data correlation connection" is not yet fully substantiated.
+
+2. **Reproducibility/Reusability:** The paper provides source code, clear algorithm pseudocode (Appendix L), and detailed dataset descriptions (Appendix F). Reproducibility is generally good. However, the runtime comparison lacks standardization, making efficiency claims difficult to reproduce independently.
+
+3. **Impact on Practice/Understanding:** The Hit Rate metric provides a new way to evaluate explanations quantitatively, which could influence evaluation practices in the interpretability community. The computational efficiency advantage (O(m+k) vs O(|θ|)) is practically relevant for large models.
+
+### Proposed Research Experiments (P0/P1/P2)
+
+```text
+ASCII Diagram — Experiment Upgrade Plan
+
+[P0] Relaxation Validation (Exp-N1)
+  → Compare approximate κθ vs exact [Yang et al., 2018] on binarized MNIST
+  → Metric: Spearman ρ, Overlap@K
+  → Expected: High correlation confirms theoretical shortcut is safe
+
+[P0] RBF Ablation (Exp-N2)
+  → Re-run Hit Rate with κθ' = terms ②+③+④ only
+  → Metric: Hit Rate, Coverage
+  → Expected: If >60%, model terms dominant. If <30%, method is RBF-based
+
+[P1] Calibration Sensitivity (Exp-N3)
+  → Bin test points by model confidence (0.0-0.2, ..., 0.8-1.0)
+  → Report HD-Explain Hit Rate per bin
+  → Expected: Performance degrades for low-confidence bins
+
+[P2] Hit@K Analysis (Exp-N4)
+  → Report Hit@1, Hit@3, Hit@5 for all methods
+  → Identify whether correct sample appears in top-K
+  → Expected: All methods improve, but HD-Explain maintains advantage
+```
+
+**Exp-N1: Relaxation Validation (P0).** *Target Claim:* C1 (method is theoretically grounded). *Design:* Train classifier on binarized MNIST (2 classes, small dimension). Compute κθ with: (a) HD-Explain's approximation, (b) exact discrete distribution treatment [Yang et al., 2018]. Measure rank correlation and Overlap@K. *Success Criterion:* Spearman ρ > 0.9 and Overlap@10 > 85%. *Cost:* ~1 day to implement exact treatment.
+
+**Exp-N2: RBF Ablation (P0).** *Target Claim:* C1 (explanations are model-conditioned). *Design:* Modify κθ to exclude term ①. Re-run Hit Rate and Coverage experiments (Figures 5-6). *Success Criterion:* κθ' achieves ≥60% of full κθ hit rate. *Cost:* ~1 hour (code change) + ~1 day compute.
+
+**Exp-N3: Calibration Sensitivity (P1).** *Target Claim:* C1 (robustness of method). *Design:* For each dataset, bin test predictions by confidence score. Compute HD-Explain Hit Rate per bin. *Success Criterion:* Hit Rate >60% even in lowest confidence bin. *Cost:* ~2 hours analysis.
+
+**Exp-N4: Hit@K Analysis (P2).** *Target Claim:* C2 (metric completeness). *Design:* Extend Hit Rate to Hit@1, @3, @5. *Success Criterion:* Report rates to show whether correct explanation appears in top-K. *Cost:* ~1 hour code + compute rerun.
+
+## Novelty Verification & Related-Work Matrix
+External literature search was not started in this run; novelty/comparison conclusions are deferred to manual verification.
+
+## References
+External literature search was not started in this run; no external references are listed.
+
+## Scores
+**Final Score: 6.5 / 10**
+
+**Scoring Rationale (10-point scale, prioritizing research value + novelty):**
+
+- **Research Value (7/10):** The paper introduces a creative connection between KSD and example-based explanation, which is a genuinely novel conceptual contribution. The quantitative evaluation framework (Hit Rate, Coverage) addresses a recognized gap in the literature. However, the unvalidated theoretical relaxations (Pθ(x)=PD(x), continuous-label approximation) reduce confidence in the method's principled foundation, capping the research value score.
+
+- **Novelty (7/10):** Applying KSD to prediction explanation appears to be novel. However, due to Retrieval-Disabled Mode, external literature verification was not possible in this run, so this assessment is preliminary and marked for manual verification. The paper's own contribution claims are stated too generically, making novelty assessment harder than necessary.
+
+- **Validity/Soundness (6/10):** The empirical results are strong under the proposed evaluation protocol, but the protocol itself has methodological concerns (Hit Rate may conflate RBF similarity with model-conditioned signal; runtime comparison is not apples-to-apples). The theoretical derivation skips critical intermediate steps. These issues are fixable but currently reduce soundness.
+
+- **Reproducibility (7/10):** Code is provided, algorithm pseudocode is clear, and dataset details are documented. The open questions (preprocessing time not separated, prediction consistency not verified) introduce minor reproducibility ambiguity.
+
+- **Writing/Presentation (6/10):** The paper is generally well-structured but has several issues: generic contribution statements, promotional language in abstract and conclusion, subjective qualitative claims, and a literature-survey-style introduction that does not build a clear narrative arc.
+
+**Post-Revision Target: [7.5, 8.0] / 10**
+
+If the authors address the P0 issues (relaxation validation, RBF ablation, runtime standardization) and P1 issues (conclusion bound, derivation fix, contribution rewrite), the paper would achieve a materially higher score. The core idea is strong enough to support publication at a competitive venue after these revisions. The upper bound is 8.0 because the paper's scope (image classification, single architecture) inherently limits its generality claims.

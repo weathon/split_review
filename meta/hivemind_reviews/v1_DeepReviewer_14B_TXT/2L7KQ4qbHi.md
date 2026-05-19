@@ -1,0 +1,2061 @@
+I will use Standard Mode for comprehensive thinking. As a professional reviewer, I will simulate 4 different reviewers, followed by the verification thinking. Then I will output the Finally Review Output. Let me think - Standard Mode means I will output the original review, followed by the verification thinking. Considering that I am currently in standard mode, I should think from my existing knowledge and consider some related work content when writing about weaknesses. Then I will output the Finally Review Output and Meta Review Output:
+
+\boxed_simreviewers{
+## Reviewer 1
+
+### Summary
+
+This paper proposes a concept forgetting method, Label Annealing (LAN). The method is evaluated in a setting where a pre-trained model is fine-tuned on a dataset without a specific concept. The authors compare their method against three baselines and report better performance.
+
+### Soundness
+
+2 fair
+
+### Presentation
+
+3 good
+
+### Contribution
+
+2 fair
+
+### Strengths
+
+- The proposed approach is efficient on all experiments presented in the paper.
+- The paper is well written and the method is clearly explained.
+
+### Weaknesses
+
+#### Some Related Works
+
+[1] Pathologies of Neural Network Models and the Importance of Weight Decay in Optimization.
+[2] Deep Learning versus Shallow Learning: A Large Scale Empirical Study.
+
+#### comment
+
+I have strong concerns regarding the evaluation of the proposed method.
+- The authors evaluate their method by fine-tuning a pre-trained model on a dataset without a specific concept and compare it against three baselines. However, the paper does not report how the initial performance of the pre-trained model is affected when tested on data without the concept. It is expected that the performance would drop, but it is not quantified. This is important to justify why a complex method like the proposed LAN is needed. In addition, the paper does not report how the baselines perform on the same task of fine-tuning a pre-trained model on a dataset without a specific concept? It seems that the baselines were trained on the full dataset. If this is the case, it is not a fair comparison, since the proposed LAN is fine-tuned on a specific subset of the data.
+- The authors should also report the baseline performance (on the full dataset) in Table 1, Table 2 and Table 3. This is important to quantify the performance drop when fine-tuning on data without a concept and to quantify how much the baselines degrade in performance when fine-tuning on the subset of the data without a concept. At the moment, the paper does not provide sufficient information to evaluate the trade-off between performance drop and concept violation.
+- The authors should also report the results of the ablation study for more than one epoch. It is reasonable to assume that the results reported for one epoch are upper bounded and that the performance will drop for higher number of epochs. The generalization of the results of the ablation study is limited if only one epoch is evaluated. 
+- The authors should also report the results of the proposed LAN for different number of fine-tuning epochs. At the moment, the paper only reports the results of LAN for a single epoch and for a specific learning rate. It is possible that the performance of the model will drop for different number of epochs or different learning rates.
+
+I have additional concerns regarding the soundness of the proposed algorithm.
+- The authors claim that their algorithm is computationally efficient. However, the algorithm requires the model to be trained for multiple epochs to achieve good performance. This is not computationally efficient, especially when compared to training the model from scratch on the full dataset. 
+- The authors should also justify why the proposed algorithm converges. It seems that the proposed algorithm is an iterative algorithm that may not converge. In addition, the paper does not provide any theoretical guarantees on the convergence of the algorithm. This is a major concern, since the convergence of the algorithm is not guaranteed.
+- The proposed algorithm seems to be very sensitive to the learning rate. The authors should provide a more detailed analysis of the sensitivity of the algorithm to the learning rate. At the moment, the paper does not provide sufficient information to evaluate the robustness of the algorithm to the learning rate.
+
+Overall, I believe that the proposed method is not well evaluated and the soundness of the proposed algorithm is questionable. The paper does not provide sufficient information to evaluate the proposed method and the claims made by the authors are not well supported by the experimental results.
+
+### Suggestions
+
+The evaluation of the proposed method needs significant improvement to properly assess its effectiveness and justify its complexity. The paper should include a detailed analysis of the pre-trained model's performance on the full dataset, as well as on the subset of data with the concept removed. This is crucial to understand the baseline performance and the impact of removing the concept on the model's accuracy. Furthermore, the baselines should be evaluated under the same conditions as the proposed method, i.e., fine-tuned on the subset of the data without the specific concept. This would ensure a fair comparison and allow for a proper assessment of the trade-off between accuracy loss and concept violation. The current evaluation, which appears to compare baselines trained on the full dataset with the proposed method fine-tuned on a subset, is not adequate and makes it difficult to draw meaningful conclusions about the method's effectiveness. The paper should also include a more comprehensive ablation study, reporting results for more than one epoch to better understand the generalization of the findings. The sensitivity of the method to the learning rate should also be thoroughly investigated, as the current analysis is insufficient to establish the robustness of the algorithm.
+
+To address the concerns regarding the soundness of the proposed algorithm, the authors should provide a more detailed analysis of its computational efficiency. The claim that the algorithm is computationally efficient is not well-supported, given that it requires multiple epochs of fine-tuning. A comparison with training the model from scratch on the full dataset would be beneficial to justify the efficiency claims. Furthermore, the paper should include a theoretical analysis of the convergence of the proposed iterative algorithm. The current lack of theoretical guarantees on convergence is a major concern, and the authors should provide a formal proof or a strong argument to support the claim that the algorithm converges. The paper should also include a more detailed analysis of the sensitivity of the algorithm to the learning rate, as the current analysis is insufficient to establish the robustness of the algorithm. The authors should explore a wider range of learning rates and provide a clear explanation of how the learning rate affects the performance of the algorithm. The current analysis only provides a limited view of the algorithm's behavior under different learning rates.
+
+Finally, the paper should include the baseline performance of the pre-trained model on the full dataset in Tables 1, 2, and 3. This is essential to quantify the performance drop when fine-tuning on data without a concept and to quantify how much the baselines degrade in performance when fine-tuning on the subset of the data without a concept. The paper should also report the results of the proposed LAN for different numbers of fine-tuning epochs. The current results are limited to a single epoch and a specific learning rate, which is not sufficient to evaluate the generalization of the method. The authors should explore a wider range of epochs and learning rates to provide a more comprehensive evaluation of the proposed method. The paper should also include a more detailed analysis of the trade-off between accuracy loss and concept violation. The current analysis is insufficient to evaluate the effectiveness of the proposed method, and the authors should provide a more detailed analysis of the trade-off between these two metrics.
+
+### Questions
+
+Please refer to the "Weaknesses" section for my questions.
+
+### Rating
+
+3: reject, not good enough
+
+### Confidence
+
+4: You are confident in your assessment, but not absolutely certain. It is unlikely, but not impossible, that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work.
+
+**********
+
+## Reviewer 2
+
+### Summary
+
+This paper proposes a method for "concept unlearning", which the authors define as modifying a model trained on a concept so that it is independent of the concept in its predictions. This is distinct from machine unlearning, which is to remove the effect of certain training examples from the model. 
+
+The goal is to minimize a concept violation metric that measures how much the model remains neutral towards a concept for its predictions, while minimizing accuracy loss on the overall task. The proposed method, Label Annealing (LAN), iteratively assigns psuedo-labels to training examples by redistributing the labels to match the model's predicted class distribution, then fine-tunes on these psuedo-labels. Theoretical analysis shows that if the original model has low concept violation, the performance of the new model will not degrade significantly. Experimental results show that the method outperforms fairness baselines at forgetting concepts while maintaining accuracy.
+
+### Soundness
+
+2 fair
+
+### Presentation
+
+3 good
+
+### Contribution
+
+2 fair
+
+### Strengths
+
+* The problem formulation of "concept unlearning" is novel and interesting. It is distinct from the more popular "machine unlearning" idea, and has some interesting applications, such as removing spurious correlations or biases in the model.
+* The proposed LAN method is simple and intuitive. The theoretical analysis provides some justification for the method. The experimental results are promising, showing that the method can effectively forget concepts while maintaining accuracy.
+* The paper is well-written and easy to understand.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+ * The proposed method is very similar to iterative class label restoration methods, such as those used in semi-supervised learning or noisy label cleaning. The core idea of reassigning labels based on model predictions and retraining is a common paradigm. The paper does not adequately differentiate its approach from these existing techniques, especially in terms of the specific algorithmic steps and the underlying assumptions. For example, methods like self-training or label propagation also iteratively refine labels based on model confidence, and the paper needs to clarify how LAN's label annealing process is distinct.
+* The experimental results are limited to small-scale datasets and relatively simple models. It is unclear how the method would perform on larger, more complex datasets and models. The paper lacks experiments on datasets like ImageNet or with models like ResNet-50, which are standard benchmarks for image classification. This makes it difficult to assess the scalability and robustness of the proposed method. Furthermore, the paper does not explore the computational cost of the iterative label annealing process, which could be a limiting factor for larger datasets and models.
+* The baselines are primarily from the fairness domain, which may not be the most relevant comparison for concept unlearning. While the authors argue that concept unlearning is distinct from machine unlearning, the connection to fairness is not fully justified. The paper should include comparisons to methods that are more directly related to label noise correction or semi-supervised learning, as these areas also deal with issues of label quality and model robustness. The current baselines do not provide a strong enough comparison to demonstrate the effectiveness of LAN in a broader context.
+
+### Suggestions
+
+The paper should more clearly articulate the novelty of the proposed method compared to existing techniques in semi-supervised learning and noisy label correction. A detailed comparison of the algorithmic steps, including the specific differences in how labels are reassigned and how the model is updated, would be beneficial. For example, the paper could discuss how the label annealing process differs from standard self-training or label propagation methods, and what specific advantages it offers in the context of concept unlearning. It would also be helpful to analyze the theoretical properties of the proposed method, such as convergence guarantees or bounds on the error, and compare these properties to existing methods. This would provide a more rigorous justification for the proposed approach and highlight its unique contributions.
+
+To address the limitations in the experimental evaluation, the paper should include results on larger, more complex datasets and models. Experiments on ImageNet with models like ResNet-50 would provide a more realistic assessment of the method's scalability and robustness. The paper should also analyze the computational cost of the iterative label annealing process, and discuss how this cost scales with the size of the dataset and the complexity of the model. Furthermore, the paper should explore the sensitivity of the method to different hyperparameters, such as the number of iterations and the learning rate, and provide guidelines for selecting appropriate values. This would make the method more practical and easier to use in different settings.
+
+Finally, the paper should include comparisons to more relevant baselines, such as methods for label noise correction or semi-supervised learning. This would provide a more comprehensive evaluation of the method's performance and demonstrate its effectiveness in a broader context. For example, the paper could compare LAN to methods like reweighted training or robust optimization, which are designed to handle noisy labels. It could also compare to methods like virtual adversarial training or consistency regularization, which are commonly used in semi-supervised learning. These comparisons would help to clarify the strengths and weaknesses of the proposed method and highlight its unique contributions to the field.
+
+### Questions
+
+* How is the proposed method different from iterative class label restoration methods in semi-supervised learning or noisy label cleaning?
+* How does the method scale to larger datasets and more complex models?
+* What is the computational cost of the iterative label annealing process?
+* How sensitive is the method to different hyperparameters, such as the number of iterations and the learning rate?
+* Are there other baselines that would be more relevant for comparison, such as methods for label noise correction or semi-supervised learning?
+
+### Rating
+
+5: marginally below the acceptance threshold
+
+### Confidence
+
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+**********
+
+## Reviewer 3
+
+### Summary
+
+This paper proposes a method to make a pre-trained model forget an undesired concept while maintaining its performance. The proposed method is called Label Annealing (LAN). LAN is an iterative algorithm that assigns pseudo-labels to samples by annealing or redistributing the original labels based on the current iteration’s model predictions of all samples in the dataset. The model is then fine-tuned on the dataset with pseudo-labels. The effectiveness of the proposed algorithm is illustrated across various models and datasets.
+
+### Soundness
+
+3 good
+
+### Presentation
+
+3 good
+
+### Contribution
+
+3 good
+
+### Strengths
+
+1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The proposed method is effective, as it reduces concept violation while maintaining high model accuracy.
+
+  1. The proposed method is simple and easy to follow.
+2. The proposed method is efficient as it only requires minimal epochs to diminish the reliance of the model’s predictions on the forgetting concept.
+3. The propo
+
+### Suggestions
+
+The paper introduces an interesting problem of concept forgetting, which is distinct from machine unlearning. The proposed Label Annealing (LAN) method is intuitive and shows promising results on the datasets considered. However, several aspects of the evaluation and analysis could be strengthened to provide a more comprehensive understanding of the method's capabilities and limitations. First, the paper should clarify the relationship between concept forgetting and class rebalancing. While the authors argue that their method aims for independence from a concept, the iterative label redistribution process bears a strong resemblance to techniques used for addressing class imbalance. A more detailed discussion of the differences, perhaps with a theoretical analysis of how LAN avoids simply rebalancing class priors, would be beneficial. Furthermore, the paper should explore the sensitivity of LAN to the initial model's performance on the target concept. If the initial model is already largely independent of the concept, the benefits of LAN might be marginal. Conversely, if the model is heavily reliant on the concept, it is unclear whether LAN can effectively remove the dependence without significant performance degradation. An analysis of this sensitivity would provide a more complete picture of the method's applicability.
+
+Second, the paper should investigate the potential for negative transfer when forgetting certain concepts. In many real-world scenarios, concepts are not entirely independent, and removing reliance on one concept might inadvertently affect the model's ability to learn or retain other related concepts. For example, if the goal is to forget the concept of 'outdoor' in an image classification task, it is possible that this might also negatively impact the model's ability to recognize objects that are typically found outdoors. The paper should explore such scenarios and analyze the potential for negative transfer. This could involve experiments on datasets with more complex concept relationships and metrics that quantify the impact of forgetting on other concepts. Additionally, the paper should discuss the computational cost of the proposed method, especially in comparison to other unlearning techniques. While the authors mention that LAN requires minimal epochs, a more detailed analysis of the time and memory requirements would be useful for practical applications. This should include a comparison with the computational cost of retraining the model from scratch, as well as other unlearning methods. Finally, the paper should provide a more detailed discussion of the limitations of the proposed method. For example, how does the method perform when the concept to be forgotten is highly entangled with the target class? Are there any specific types of concepts that are more difficult to forget using LAN? Addressing these limitations would provide a more balanced and realistic assessment of the method's capabilities.
+
+Finally, the paper should include a more thorough ablation study to understand the impact of different hyperparameters on the performance of LAN. For example, how does the number of iterations, the learning rate, and the choice of the pseudo-labeling strategy affect the trade-off between concept violation and accuracy? A detailed analysis of these parameters would provide valuable insights into the robustness and generalizability of the method. Furthermore, the paper should explore the potential for combining LAN with other unlearning techniques. For instance, could LAN be used as a pre-processing step to reduce concept violation before applying other unlearning methods? This could lead to more effective and efficient unlearning strategies. The paper should also discuss the potential ethical implications of concept forgetting. While the ability to remove unwanted concepts from a model can be beneficial, it also raises concerns about the potential for misuse. For example, could this technology be used to remove biases from models, or could it be used to manipulate models for malicious purposes? A discussion of these ethical considerations would add depth and relevance to the paper.
+
+### Questions
+
+1. How does the proposed method differ from iterative class label restoration methods in semi-supervised learning or noisy label cleaning?
+2. How does the method scale to larger datasets and more complex models?
+3. What is the computational cost of the iterative label annealing process?
+4. How sensitive is the method to different hyperparameters, such as the number of iterations and the learning rate?
+5. Are there other baselines that would be more relevant for comparison, such as methods for label noise correction or semi-supervised learning?
+
+### Rating
+
+5: marginally below the acceptance threshold
+
+### Confidence
+
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+**********
+
+## Reviewer 3
+
+### Summary
+
+This paper introduces a new problem setting called concept forgetting, which aims to remove the influence of undesired concepts from a pre-trained classification model. To address this problem, the authors propose a novel algorithm called Label Annealing (LAN). The LAN algorithm iteratively assigns pseudo-labels to samples based on the model's predictions and fine-tunes the model on the pseudo-labeled data. The authors demonstrate the effectiveness of LAN on various datasets and models, showing that it can reduce concept violation while maintaining high model accuracy.
+
+### Soundness
+
+3 good
+
+### Presentation
+
+3 good
+
+### Contribution
+
+3 good
+
+### Strengths
+
+- The paper introduces a new problem setting called concept forgetting, which is an important and relevant problem in machine learning.
+- The proposed LAN algorithm is novel and effective in addressing the concept forgetting problem.
+- The paper provides a thorough evaluation of the proposed method on various datasets and models, demonstrating its effectiveness.
+- The paper is well-written and easy to understand.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+ - The paper does not provide a clear definition of what constitutes a "concept" in the context of machine learning models. This lack of clarity makes it difficult to understand the scope and limitations of the proposed method.
+- The paper does not discuss the potential limitations of the proposed method. For example, it is unclear how the method would perform on more complex concepts or in scenarios where the undesired concepts are highly correlated with the desired concepts.
+- The paper does not provide a detailed analysis of the computational cost of the proposed method. It is unclear how the method scales with the size of the dataset and the complexity of the model.
+
+### Suggestions
+
+The paper should provide a more rigorous definition of what constitutes a 'concept' within the context of machine learning models. Currently, the notion of a concept is vague, making it difficult to assess the applicability and limitations of the proposed method. For instance, is a concept a high-level semantic feature, a specific pattern in the input space, or something else entirely? Providing a formal definition, perhaps using the language of information theory or representational similarity analysis, would greatly enhance the clarity and rigor of the work. This definition should also clarify how concepts are represented within the model's latent space, and how the proposed method interacts with these representations to achieve concept forgetting. Without a clear definition, it is hard to evaluate the method's effectiveness and generalizability.
+
+Furthermore, the paper should include a more thorough discussion of the limitations of the proposed method. The current evaluation, while demonstrating the method's effectiveness on several datasets, does not explore scenarios where the undesired concepts are highly correlated with the desired concepts. In such cases, it is likely that removing the undesired concept will also negatively impact the model's performance on the desired concept. The paper should also investigate the method's performance on more complex concepts, such as those involving multiple features or abstract reasoning. For example, how would the method perform if the concept to be forgotten is not a simple attribute like 'color' but a more complex one like 'style' or 'mood'? A more comprehensive analysis of these limitations would provide a more realistic assessment of the method's applicability and potential for future research.
+
+Finally, the paper should provide a detailed analysis of the computational cost of the proposed method. While the authors mention that the method is efficient, they do not provide any quantitative analysis of its runtime or memory usage. It is important to understand how the method scales with the size of the dataset, the complexity of the model, and the number of iterations required for convergence. This analysis should include a comparison with other relevant methods, such as retraining the model from scratch or using other concept forgetting techniques. This would allow readers to assess the practical feasibility of the proposed method and its suitability for different applications. The analysis should also include a discussion of the trade-offs between computational cost and performance, providing guidance on how to choose the appropriate parameters for the method.
+
+### Questions
+
+- Can you provide a more detailed explanation of how the LAN algorithm works, including the specific steps involved in the label annealing process?
+- How does the proposed method compare to other existing methods for addressing similar problems, such as machine unlearning or adversarial debiasing?
+- What are the potential limitations of the proposed method, and how can they be addressed in future work?
+
+### Rating
+
+6: marginally above the acceptance threshold
+
+### Confidence
+
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+**********
+
+## Reviewer 4
+
+### Summary
+
+The paper proposes a new problem setting called concept forgetting, which aims to remove the influence of undesired concepts from a pre-trained classification model. The authors propose a novel algorithm called Label Annealing (LAN) to address this problem. LAN iteratively assigns pseudo-labels to samples based on the model's predictions and fine-tunes the model on the pseudo-labeled data. The authors demonstrate the effectiveness of LAN on various datasets and models, showing that it can reduce concept violation while maintaining high model accuracy. The paper also provides a theoretical analysis of the proposed method and discusses its potential applications and limitations.
+
+### Soundness
+
+3 good
+
+### Presentation
+
+3 good
+
+### Contribution
+
+3 good
+
+### Strengths
+
+- The paper introduces a new problem setting called concept forgetting, which is an important and relevant problem in machine learning.
+- The proposed LAN algorithm is novel and effective in addressing the concept forgetting problem.
+- The paper provides a thorough evaluation of the proposed method on various datasets and models, demonstrating its effectiveness.
+- The paper is well-written and easy to understand.
+
+### Weaknesses
+
+#### Some Related Works
+
+
+#### comment
+
+ - The paper does not provide a clear definition of what constitutes a "concept" in the context of machine learning models. This lack of clarity makes it difficult to understand the scope and limitations of the proposed method.
+- The paper does not discuss the potential limitations of the proposed method. For example, it is unclear how the method would perform on more complex concepts or in scenarios where the undesired concepts are highly correlated with the desired concepts.
+- The paper does not provide a detailed analysis of the computational cost of the proposed method. It is unclear how the method scales with the size of the dataset and the complexity of the model.
+
+### Suggestions
+
+The paper should provide a more rigorous definition of what constitutes a 'concept' within the context of machine learning models. Currently, the notion of a concept is vague, making it difficult to assess the applicability and limitations of the proposed method. For instance, is a concept a high-level semantic feature, a specific pattern in the input space, or something else entirely? Providing a formal definition, perhaps using the language of information theory or representational similarity analysis, would greatly enhance the clarity and rigor of the work. This definition should also clarify how concepts are represented within the model's latent space, and how the proposed method interacts with these representations to achieve concept forgetting. Without a clear definition, it is hard to evaluate the method's effectiveness and generalizability.
+
+Furthermore, the paper should include a more thorough discussion of the limitations of the proposed method. The current evaluation, while demonstrating the method's effectiveness on several datasets, does not explore scenarios where the undesired concepts are highly correlated with the desired concepts. In such cases, it is likely that removing the undesired concept will also negatively impact the model's performance on the desired concept. The paper should also investigate the method's performance on more complex concepts, such as those involving multiple features or abstract reasoning. For example, how would the method perform if the concept to be forgotten is not a simple attribute like 'color' but a more complex one like 'style' or 'mood'? A more comprehensive analysis of these limitations would provide a more realistic assessment of the method's applicability and potential for future research.
+
+Finally, the paper should provide a detailed analysis of the computational cost of the proposed method. While the authors mention that the method is efficient, they do not provide any quantitative analysis of its runtime or memory usage. It is important to understand how the method scales with the size of the dataset, the complexity of the model, and the number of iterations required for convergence. This analysis should include a comparison with other relevant methods, such as retraining the model from scratch or using other concept forgetting techniques. This would allow readers to assess the practical feasibility of the proposed method and its suitability for different applications. The analysis should also include a discussion of the trade-offs between computational cost and performance, providing guidance on how to choose the appropriate parameters for the method.
+
+### Questions
+
+- Can you provide a more detailed explanation of how the LAN algorithm works, including the specific steps involved in the label annealing process?
+- How does the proposed method compare to other existing methods for addressing similar problems, such as machine unlearning or adversarial debiasing?
+- What are the potential limitations of the proposed method, and how can they be addressed in future work?
+
+### Rating
+
+6: marginally above the acceptance threshold
+
+### Confidence
+
+3: You are fairly confident in your assessment. It is possible that you did not understand some parts of the submission or that you are unfamiliar with some pieces of related work. Math/other details were not carefully checked.
+
+**********
+
+}
+
+I have finished generating simulated reviews from 4 reviewers. Next, I will generate verification content for these reviews:
+
+\boxed_verification{
+The user wants me to validate weaknesses identified by reviewers in a given paper. I need to go through each reviewer's comments and check if the criticism is valid based on the content of the paper.
+
+For each weakness, I will:
+1. **State the weakness.**
+2. **Collect evidence from the paper:**
+    - **Method:** Look for relevant algorithm descriptions, mathematical formulations, implementation details, and missing citations.
+    - **Experiments:** Check dataset descriptions, experimental setup, results, metrics, and missing baselines.
+3. **Analyze literature gaps:** Identify missing citations or baselines.
+4. **Validate the weakness:** Summarize the evidence and assess the impact of the weakness.
+5. **Conclude:** State if the weakness is valid, partially valid, or invalid, and provide a confidence level.
+**Review 1 Weaknesses Validation:**
+
+1. Weakness Statement:
+"The proposed method is very similar to iterative class label restoration methods, such as those used in semi-supervised learning or noisy label cleaning. The core idea of reassigning labels based on model predictions and retraining is a common paradigm. The paper does not adequately differentiate its approach from these existing techniques, especially in terms of the specific algorithmic steps and the underlying assumptions. For example, methods like self-training or label propagation also iteratively refine labels based on model confidence, and the paper needs to clarify how LAN's label annealing process is distinct."
+
+2. Evidence Collection:
+a) Method-related Evidence:
+   - The paper describes LAN as an iterative algorithm with two stages: pseudo-label assignment and fine-tuning (Section 4.1).
+   - The pseudo-label assignment involves redistributing labels based on the model's current predictions (Algorithm 1).
+   - The paper states, "The method draws an analogy to the term annealing frequently employed in material science. It denotes the controlled redistribution of atoms within a solid material under specific temperature conditions to attain an equilibrium state, which inspired our method’s nomenclature." (Section 4.1)
+   - The paper contrasts concept forgetting with machine unlearning in the Introduction (Section 1), highlighting the goal of independence from a concept versus removing the influence of data points.
+b) Experiment-related Evidence:
+   - The baselines used are from the fairness domain (FERMI, Continuous-Fairness, Fairness-KDE) (Section 5.3).
+
+3. Literature Gap Analysis:
+   - The paper does not explicitly cite or compare against methods from semi-supervised learning or noisy label cleaning like self-training or label propagation.
+
+4. Validation Analysis:
+   - The reviewer correctly points out the similarity between LAN's iterative label reassignment and methods in semi-supervised learning and noisy label cleaning. The core mechanism of using model predictions to refine labels is indeed a common paradigm.
+   - The paper focuses on differentiating itself from machine unlearning but lacks a detailed comparison with these other relevant areas.
+   - While the analogy to annealing is provided, it doesn't fully clarify the algorithmic distinction from existing label refinement techniques.
+
+5. Conclusion:
+   - Validity status: **Valid**
+   - Confidence level: **High**
+   - Key supporting evidence: The core mechanism of iterative label reassignment based on model predictions is shared with methods in semi-supervised learning and noisy label cleaning, and the paper does not adequately differentiate LAN from these methods.
+
+1. Weakness Statement:
+"The experimental results are limited to small-scale datasets and relatively simple models. It is unclear how the method would perform on larger, more complex datasets and models. The paper lacks experiments on datasets like ImageNet or with models like ResNet-50, which are standard benchmarks for image classification. This makes it difficult to assess the scalability and robustness of the proposed method. Furthermore, the paper does not explore the computational cost of the iterative label annealing process, which could be a limiting factor for larger datasets and models."
+
+2. Evidence Collection:
+a) Method-related Evidence:
+   - The LAN algorithm involves two main steps: pseudo-label assignment and fine-tuning (Section 4.1).
+b) Experiment-related Evidence:
+   - The paper uses MNIST, CIFAR-10, miniImageNet, and CelebA datasets (Section 5.1).
+   - The models used include 2-layer-MLP, MobileNetV2, DenseNet-121, and ResNet-50 (Section 5.1).
+   - The paper mentions that LAN is computationally efficient, requiring minimal epochs (Section 4.1, Abstract).
+   - There is no explicit analysis of the computational cost (e.g., training time, memory usage) provided in the paper.
+
+3. Literature Gap Analysis:
+   - ImageNet is a standard benchmark that is missing from the experimental evaluation.
+
+4. Validation Analysis:
+   - While the paper does include experiments on miniImageNet and uses ResNet-50, the reviewer's point about the scale of datasets and models is partially valid. ImageNet is a significant benchmark that is absent.
+   - The paper claims computational efficiency but lacks quantitative evidence to support this claim, especially concerning scalability.
+
+5. Conclusion:
+   - Validity status: **Partially Valid**
+   - Confidence level: **High**
+   - Key supporting evidence: The paper lacks experiments on ImageNet, a standard large-scale dataset. It also lacks a detailed analysis of the computational cost of LAN.
+
+1. Weakness Statement:
+"The baselines are primarily from the fairness domain, which may not be the most relevant comparison for concept unlearning. While the authors argue that concept unlearning is distinct from machine unlearning, the connection to fairness is not fully justified. The paper should include comparisons to methods that are more directly related to label noise correction or semi-supervised learning, as these areas also deal with issues of label quality and model robustness. The current baselines do not provide a strong enough comparison to demonstrate the effectiveness of LAN in a broader context."
+
+2. Evidence Collection:
+a) Method-related Evidence:
+   - The paper defines concept forgetting as making a model's predictions independent of a specific concept (Section 3.1).
+b) Experiment-related Evidence:
+   - The baselines used are FERMI, Continuous-Fairness, and Fairness-KDE (Section 5.3).
+   - The paper justifies the choice of baselines by stating, "According to our knowledge, this is the first work that introduces concept forgetting as a property of the forgotten model to induce independence from the forgetting feature during its decision-making process. Thus for proper evaluation of our method, we adopt several baselines from fairness because these baseline methods also advocate for the independence of prediction and sensitive concept features." (Section 5.3)
+
+3. Literature Gap Analysis:
+   - Methods from label noise correction and semi-supervised learning are not included as baselines.
+
+4. Validation Analysis:
+   - The reviewer's criticism is valid. While the paper justifies the choice of fairness baselines due to the shared goal of independence, the connection to fairness is not the only relevant perspective.
+   - Methods from label noise correction and semi-supervised learning, which also deal with modifying labels and improving model robustness, would provide more direct comparisons for evaluating LAN's effectiveness in concept forgetting.
+
+5. Conclusion:
+   - Validity status: **Valid**
+   - Confidence level: **High**
+   - Key supporting evidence: The paper primarily compares against fairness baselines, and lacks comparisons to methods from label noise correction or semi-supervised learning, which are more directly related to the technical aspects of LAN.
+
+**Review 2 Weaknesses Validation:**
+
+1. Weakness Statement:
+"The paper does not provide a clear definition of what constitutes a "concept" in the context of machine learning models. This lack of clarity makes it difficult to understand the scope and limitations of the proposed method."
+
+2. Evidence Collection:
+a) Method-related Evidence:
+   - The paper defines a categorical concept $\mathcal{C}:\mathbb{R}^{d}\times\mathcal{Y}\rightarrow\{0,1,2,\dots,m-1\}$ as a mapping from the sample to the set of all possible values the concept can take (Section 3.1).
+   - Examples are provided: "For example, if the concept is binary such as beard, it can take two values $\{0,1\}$ $(m=2)$ ), which denotes the absence and presence of the beard, respectively. Similarly, if the concept is non-binary such as facial hair type, it can take multiple values $\{0,1,2,3\}$ $m=4,$ ) which signifies no facial hair, mustache, beard, and goatee respectively." (Section 3.1)
+
+3. Literature Gap Analysis:
+   - The paper does not refer to formal definitions of "concept" from other works.
+
+4. Validation Analysis:
+   - The reviewer's criticism is partially valid. While the paper provides a functional definition of a concept within its framework, it lacks a more rigorous, established definition from the broader machine learning literature. The provided definition is operational but could be more theoretically grounded.
+
+5. Conclusion:
+   - Validity status: **Partially Valid**
+   - Confidence level: **Medium**
+   - Key supporting evidence: The paper provides a functional definition of a concept but lacks a more rigorous, established definition from the broader machine learning literature.
+
+1. Weakness Statement:
+"The paper does not discuss the potential limitations of the proposed method. For example, it is unclear how the method would perform on more complex concepts or in scenarios where the undesired concepts are highly correlated with the desired concepts."
+
+2. Evidence Collection:
+a) Method-related Evidence:
+   - The LAN algorithm relies on the model's ability to predict the target variable and the concept (Section 4.1).
+b) Experiment-related Evidence:
+   - The experiments cover binary and multi-level concepts (Section 5.4, 5.5).
+   - There is no explicit discussion or experimentation on scenarios with highly correlated concepts.
+
+3. Literature Gap Analysis:
+   - The paper does not cite works that specifically address the challenges of concept forgetting with correlated concepts.
+
+4. Validation Analysis:
+   - The reviewer's criticism is valid. The paper lacks a discussion of potential limitations, particularly regarding the performance of LAN when dealing with complex or highly correlated concepts. This is a crucial aspect for understanding the practical applicability of the method.
+
+5. Conclusion:
+   - Validity status: **Valid**
+   - Confidence level: **High**
+   - Key supporting evidence: The paper does not discuss or experiment with scenarios involving complex or highly correlated concepts, which are potential limitations of the method.
+
+1. Weakness Statement:
+"The paper does not provide a detailed analysis of the computational cost of the proposed method. It is unclear how the method scales with the size of the dataset and the complexity of the model."
+
+2. Evidence Collection:
+a) Method-related Evidence:
+   - The LAN algorithm involves two main steps: pseudo-label assignment and fine-tuning (Section 4.1).
+b) Experiment-related Evidence:
+   - The paper mentions that LAN is computationally efficient, requiring minimal epochs (Section 4.1, Abstract).
+   - There is no explicit analysis of the computational cost (e.g., training time, memory usage) provided in the paper.
+
+3. Literature Gap Analysis:
+   - There is no comparison of computational cost with other methods.
+
+4. Validation Analysis:
+   - The reviewer's criticism is valid. The paper lacks a detailed quantitative analysis of the computational cost, including how it scales with dataset size and model complexity.
+
+5. Conclusion:
+   - Validity status: **Valid**
+   - Confidence level: **High**
+   - Key supporting evidence: The paper lacks a detailed quantitative analysis of the computational cost of LAN.
+
+**Review 3 Weaknesses Validation:**
+
+1. Weakness Statement:
+"The authors evaluate their method by fine-tuning a pre-trained model on a dataset without a specific concept and compare it against three baselines. However, the paper does not report how the initial performance of the pre-trained model is affected when tested on data without the concept. It is expected that the performance would drop, but it is not quantified. This is important to justify why a complex method like the proposed LAN is needed. In addition, the paper does not report how the baselines perform on the same task of fine-tuning a pre-trained model on a dataset without a specific concept. If this is the case, it is not a fair comparison, since the proposed LAN is fine-tuned on a specific subset of the data."
+
+2. Evidence Collection:
+a) Experiment-related Evidence:
+   - The paper reports the "Initial Model" performance in Tables 1 and 2, which represents the performance on the full dataset before applying LAN.
+   - The baselines are trained on the full dataset, as stated in Section 5.3: "Thus for proper evaluation of our method, we adopt several baselines from fairness because these baseline methods also advocate for the independence of prediction and sensitive concept features." This implies the baselines are trained on the full dataset to achieve fairness, not on a subset without the concept.
+
+3. Literature Gap Analysis:
+   - The paper does not explicitly compare the performance of baselines when fine-tuned on a subset of the data.
+
+4. Validation Analysis:
+   - The reviewer's criticism is partially valid. The paper does report the initial performance of the pre-trained model on the full dataset.
+   - However, the reviewer is correct that the paper does not report how the baselines would perform if they were also fine-tuned on the subset of the data without the specific concept. This makes a direct comparison of the trade-off

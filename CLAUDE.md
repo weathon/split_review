@@ -25,6 +25,8 @@ This is research code, NOT a production system. Optimize for **iteration speed a
 - Don't add feature flags or backwards-compatibility shims when you can just change the code. No renaming unused `_vars`, no re-exporting removed types, no `// removed` comments. If something is unused, delete it.
 - Prefer editing existing files to creating new ones.
 - No half-finished implementations. Either do the thing or say you didn't.
+- Do NOT use helper function unless you really need to
+- Keep code simple, short, and stupid.
 
 ## Comments
 
