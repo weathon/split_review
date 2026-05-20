@@ -13,16 +13,17 @@ export NEUTRAL_MODEL="deepseek-v4-flash"
 export OUTPUT_CSV="test_mini.csv"
 export MERGE_LOG="test_mini.log" 
 export CONCURRENCY=50
-export MAX_PAPERS=50
-export CALIBRATION_SET="deepreview"
+export MAX_PAPERS=300
+# export CALIBRATION_SET="deepreview"
+export CALIBRATION_SET="2026"
 export REVIEWS_DIR="test_mini"
 
 ollama serve & 
 
 
-# python code/main.py --n_samples 2000 --benchmark ~/review_agent/iclr2026_new --seed $(cksum <<< '384758' | cut -f 1 -d ' ')
+python code/main.py --n_samples 2000 --benchmark ~/review_agent/iclr2026_new --seed $(cksum <<< '384758' | cut -f 1 -d ' ')
 # use some test as training
 # python code/main.py --n_samples 2000 --benchmark datasets/deepreview_13k_train/ --no_cal --include_cal_papers --seed $(cksum <<< '2343' | cut -f 1 -d ' ')
-python code/main.py --n_samples 500 --benchmark datasets/deepreview_13k_test_uniform --seed $(cksum <<< '2343' | cut -f 1 -d ' ')
+# python code/main.py --n_samples 500 --benchmark datasets/deepreview_13k_test_uniform --seed $(cksum <<< '2343' | cut -f 1 -d ' ')
 
 # --no_cal --include_cal_papers
