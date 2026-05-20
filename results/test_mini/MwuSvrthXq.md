@@ -1,112 +1,87 @@
-Now I have all the information I need. Let me compose the final review.
-
----
+Now I have a thorough understanding of the paper and the calibration. Let me write the final review.
 
 ## Summary
 
-This paper proposes WeCAN, an end-to-end RL framework for heterogeneous DAG scheduling. Two main technical contributions are: (1) a **weighted cross-attention (WeCA)** layer that places compatibility coefficients *outside* softmax normalization, enabling the encoder to handle varying numbers of pools/task types while capturing task-pool affinity; and (2) a **skip-action mechanism** designed for the single-pass (non-autoregressive) setting, which the authors argue closes the optimality gap inherent in list-scheduling-based methods. The model uses a single forward pass to produce action scores, then applies a generation map to produce feasible schedules. Experiments on TPC-H and Computation Graphs benchmarks show makespan improvements of up to 18.1% over heuristics and 7–9% over One-Shot, with inference times comparable to heuristics.
-
----
+This paper proposes WeCAN, an end-to-end RL framework for heterogeneous DAG scheduling with task-pool compatibility constraints. The core technical contributions are: (1) a **weighted cross-attention (WeCA)** mechanism that embeds compatibility coefficients outside the softmax, enabling variable-sized heterogeneous environments without fixed-dimensional encodings; (2) a **skip-action mechanism** in the single-pass setting that theoretically closes the optimality gap of list scheduling; and (3) a longest-directed-distance GNN (LDDGNN) for encoding task dependencies. Experiments on TPC-H and Computation Graphs benchmarks show up to 18.1% makespan improvement over the best heuristics and up to 9.5% over neural baselines, with inference times comparable to heuristics.
 
 ## Strengths
 
-1. **Novel and principled weighted cross-attention (WeCA) architecture.**  
-   Placing the compatibility coefficient $K_{acc}$ as a diagonal mask *outside* the softmax normalization (Eq. 4) is a clean design that avoids the information-loss problem of the inside-softmax variant (illustrated by the two-task example). The ablation in Table 3 confirms the outside version outperforms the inside version by ~3.5 percentage points (14.0% vs. 10.5% improvement on TPC-H-30). Because the number of pools is not hard-coded into the architecture, the same trained model can handle environments with varying pool counts and task types — a genuine practical advantage validated in the generalization experiments (Figure 2).
+1. **Weighted cross-attention is a well-motivated, novel architectural contribution.** The WeCA layer (Eq. 3, Section 3.1) places compatibility coefficients outside softmax as a diagonal weight matrix, allowing the network to distinguish tasks with identical attributes but different compatibility profiles across pools. The ablation study (Table 3) cleanly isolates this: replacing WeCA with an inside-softmax variant degrades improvement from 14.0% to 10.5%, and removing WeCA entirely collapses to near-baseline performance (0.5% improvement).
 
-2. **Single-pass inference with strong empirical results.**  
-   WeCAN generates a schedule with one forward pass plus a generation map. WeCAN-Greedy runs in 0.15–1.72s on TPC-H-30/50/100 — comparable to heuristics (0.18–3.35s) and orders of magnitude faster than PPO-BiHyb (20–179s). Despite this speed, WeCAN-S(256) achieves the best makespan across all TPC-H subsets and all Computation Graph types (Tables 1, 2). The improvement is consistent (12–18% over best heuristics, 7–9% over One-Shot) and the standard deviations across random seeds are small, indicating stable training.
+2. **Strong and consistent empirical results.** WeCAN-S(256) outperforms the best heuristic (Tetris) by 14.0–18.1% on TPC-H and 9.5–13.4% on Computation Graphs, and outperforms the best neural baseline (One-Shot-S(256)) by 4.7–9.5% across all settings. Gains are reported with standard deviations over random seeds and are consistent across problem sizes (30–100 query variants, 500-task graphs).
 
-3. **Theoretical analysis of the list-scheduling optimality gap.**  
-   The paper formalizes the reduced space $B_f$, the map $T$, and the surjectivity condition (Assumption 1, Theorem 2). This provides a principled language for analyzing why list scheduling can fail to produce optimal schedules (it cannot represent idle time) and what properties a generation map needs to close this gap. This framing is conceptually useful even if the practical skip-action implementation has limitations.
+3. **Generalization experiments demonstrate a concrete advantage of the architecture.** Figure 2 shows WeCAN maintains 14–20% improvement over best heuristics under environment fluctuations (pool count, pool type, task count, task type) without retraining, while One-Shot degrades to 0.9–10.2%. This directly validates the paper's claim that WeCA preserves adaptability across varying heterogeneous configurations — a non-trivial result.
 
-4. **Robust generalization under environmental shifts.**  
-   Figure 2 shows WeCAN-S(256) maintains 14–20% improvement over heuristics when the environment is perturbed (more pools, different pool types, more tasks, more task types), while One-Shot degrades to ≤10%. This directly validates that the weighted cross-attention design succeeds at its stated goal of environment-adaptive representation.
+4. **Comprehensive ablation study.** Table 3 systematically ablates both the WeCA placement (inside, decoder-only, decoder-inside, final-only) and the GNN component (GAT forward, GAT bidirectional), controlling for layer count and hidden dimensions. This gives high confidence that both WeCA and LDDGNN contribute meaningfully.
 
----
+5. **Single-pass speed is competitive with heuristics.** WeCAN-Greedy runs in 0.15s on TPC-H-30 vs. heuristics 0.18–0.30s, while the multi-round PPO-BiHyb takes 20.48s. This supports the claimed efficiency advantage of single-pass network inference.
 
 ## Weaknesses
 
 ### Fatal
-*None.*
+
+None.
 
 ### Major
 
-1. **The skip-action contribution is not ablated on the primary benchmarks.**  
-   The skip action is presented as a core contribution (contribution 3), and the theoretical claims (Theorem 1) about closing the optimality gap are a highlight of the paper. Yet the only ablation isolating skip vs. no-skip is performed on artificially modified "heavy task" datasets (Figure 3), not on the standard TPC-H or Computation Graphs benchmarks where the headline numbers are reported. On the main datasets, WeCAN is evaluated only as the full system. The reader cannot determine how much of the 12–18% improvement over heuristics comes from the skip action vs. the weighted cross-attention architecture. While the paper argues that the optimality gap matters most for heavy tasks, the empirical scope of the skip-action validation is narrower than its prominence in the contributions would suggest.
-
-2. **Comparison with One-Shot is not apples-to-apples for the heterogeneous setting.**  
-   One-Shot was designed without compatibility coefficients or pool-allocation handling. The paper evaluates it on datasets where "additional random memory constraints and task types (each with a group of compatibility coefficients)" were added — i.e., a problem variant One-Shot was not engineered for. The 7–9% improvement over One-Shot may partly reflect this architectural mismatch rather than superior scheduling policy. Adapting One-Shot to handle compatibility (e.g., by adding $K_{acc}$ to its decoder scores) would have been a fairer comparison. (That said, WeCAN also outperforms all heuristic baselines — HEFT, Tetris, CP — by substantial margins, so the overall claim of state-of-the-art performance does not rest solely on the One-Shot comparison.)
+1. **Missing comparison to the most closely related heterogeneous scheduling methods.** The paper cites Zhou et al. (2022), Zhadan et al. (2023), and Wang et al. (2025) as methods that handle compatibility coefficients in heterogeneous DAG scheduling (Section 1, lines 69–76), noting that they "represent compatibility coefficients by averaging them across pools, potentially losing fine-grained information." These are precisely the baselines that would most directly validate the advantage of weighted cross-attention over existing approaches, yet none are included in the experiments (Section 5.1 lists six heuristic/algorithmic baselines and two neural baselines — PPO-BiHyb from 2021 and One-Shot from 2023, the latter designed for homogeneous settings). The paper's central claim of "outperforming state-of-the-art methods" (Abstract) is therefore not fully supported by the evidence presented. This gap is structural: the evaluation protocol compares against methods that are either dated (PPO-BiHyb, 2021) or mismatched to the task (One-Shot does not handle compatibility), while the methods that specifically address the paper's problem setting are discussed but not evaluated. This weakness does not invalidate the results against the included baselines, but it substantially tempers the strength of the claims that can be drawn.
 
 ### Minor
 
-1. **The skip-score formula is hand-designed and lacking justification.**  
-   The formula $u_a(1 - k/(2n))^{u_b} + u_c$ is presented without any empirical or theoretical motivation beyond "prevents skip from being overly prioritized." The parameters $u_a, u_b, u_c$ are learned, but the functional form is arbitrary. No ablation is provided to justify why this specific decay schedule is better than simpler alternatives (e.g., linear decay, constant offset, or a learned MLP that outputs the skip score directly). Given that the skip mechanism is a highlighted contribution, the design choices around it are underexplored.
+2. **The skip-score formula and clustering claim lack main-text justification.** The skip score $u_{\pi_{\text{skip}}} = u_a(1 - k/2n)^{u_b} + u_c$ (Section 3.2, line 148) is presented without explanation of why this particular parametric form was chosen (e.g., monotonicity in $k$, boundedness, or other desirable properties). Furthermore, Section 4.2 claims that the skip-action design "clusters most poor solutions in the high-$u_a$, high-$u_c$ region" — this is stated without formal analysis or empirical support in the main text. Theorem 1 and Theorem 2 establish existence results, but the gap between "there exists a score that works" and "this specific learned formula achieves it" is not bridged in the main text. The heavy-task experiment (Figure 3) provides empirical evidence that skip helps, which partially addresses this, but the theoretical framing over-promises relative to what is demonstrated.
 
-2. **The theory-practice gap for Theorem 1 is not addressed.**  
-   Theorem 1(iv) states that there *exist* scores enabling an optimal solution via greedy selection. This is an existence claim that does not guarantee gradient descent will find such scores. The paper provides no convergence guarantees, no analysis of the loss landscape, and — most concretely — no empirical validation on small instances where the optimal makespan is computable (e.g., via MILP for ≤20 tasks). The skip-action analysis would be much stronger if it included such a sanity check.
-
-3. **Training details are underspecified.**  
-   The paper reports the number of test problems (10) but not the number of training instances, epochs, convergence behavior, or hyperparameter sensitivity. The baseline $b(X)$ is described as "average rewards" without clarifying whether this is a batch average or a learned baseline. These details are likely in the (stripped) appendices, but the main text leaves the reader guessing.
+3. **Only one heavy-task rate (1%) is tested in the skip-action ablation.** The heavy-task experiment (Figure 3) replaces 1% of tasks with heavy tasks. A sensitivity study varying this rate (e.g., 0.5%, 1%, 2%, 5%) would more convincingly validate the claim that skip's benefit grows with heavy-task proportion. The current single-point result is suggestive but thin.
 
 ### Trivial
-*None that survive filtering — see Removed Points.*
 
----
+None.
 
 ## Nice-to-Haves
 
-- **Validation on small optimality-known instances:** A comparison against MILP-optimal solutions for small DAGs (<20 tasks) would directly test whether the skip-action design actually closes the optimality gap in practice, and would quantify the gap that list scheduling leaves open.
-- **Ablation of the skip-score functional form:** Comparing the proposed decay formula against linear decay, constant skip score, or a learned MLP predictor would verify that the specific form matters.
-- **Analysis of poor-solution concentration:** The paper claims their design "clusters most poor solutions in the high-$u_a$, high-$u_c$ region" but provides no evidence. A simple 2D visualization or distribution analysis would substantiate this claim.
-- **Runtime breakdown:** Separating network inference time from generation-map time would clarify how the method achieves heuristic-comparable runtimes despite neural network overhead.
-
----
+- A comparison to Zhou et al. (2022), Zhadan et al. (2023), or Wang et al. (2025) would be the single most impactful addition. Even reporting their published results on similar datasets or adapting public code would substantially strengthen the evaluation.
+- A sensitivity analysis on the heavy-task proportion (varying the replacement rate) would strengthen the empirical support for the skip-action analysis.
+- Providing per-instance statistics (mean and std over test instances, rather than over seeds only) would give a clearer picture of variance across problems.
+- A brief justification of the skip-score functional form in the main text (e.g., why the $(1 - k/2n)^{u_b}$ structure) would improve readability.
 
 ## Removed Points
 
-These points were flagged for removal; treat them with caution.
+The following points from the harsh critic were removed per the filtering rules:
 
-- **Missing proofs in Appendix A.** *Reason:* The parser strips appendix sections from all papers; the proofs exist in the original submission. Per rule, remove criticisms about absent appendices.
-- **Theoretical claims are unverifiable / implausible.** *Reason:* This rests entirely on the missing-appendix point. The paper does contain proofs (in the original Appendix A); their current inaccessibility is a parser artifact, not an author omission.
-- **Standard deviations implausibly low (10 test problems).** *Reason:* The std is reported "among random seed" (training stability), not measurement noise. With 10 test problems × 256 samples each, stable averages are expected. This is reasonable, not an artifact.
-- **Running times too low for step-by-step processing.** *Reason:* The paper explains that the generation-map runtime dominates for all methods in heterogeneous environments, so inference time is bottlenecked by the same bookkeeping that heuristics require. The reported times are plausible.
-- **Figure 3 labeling confusion (WeCAN-S(256) appears twice).** *Reason:* The table in the extracted text likely reflects a parser-garbled figure label. The original PDF rendering is not accessible for verification. Per rule, formatting/parsing artifacts are not author errors.
-- **Architecture ablation confounded (Table 3).** *Reason:* The paper explicitly states "All network variants share the same layer count and hidden dimensions, with fewer WeCA layers offset by additional LDDGNN layers." This controls for total capacity — a reasonable design. The critic's objection is based on a misreading.
-- **Missing comparison with Zhou et al. / Zhadan et al. / Wang et al.** *Reason:* Per rule, do not impose requirements to include specific baselines beyond those the authors chose. The paper already compares against HEFT, Tetris, CP, SFT, MOPNR, PPO-BiHyb, and One-Shot — a reasonable suite.
-
----
+- **"The proof is relegated to an appendix that is not available in the main paper."** — Removed. The parser strips appendix content from all papers; the proof exists in the original submission. This is a parser artifact, not an author error.
+- **"Critical experimental details are deferred to an appendix that is not present"** (network architecture, hyperparameters, dataset generation details). — Removed. These are standard appendix contents, and the parser strips them from all papers.
+- **"Figure 1 caption says LDDNN (Long Short-Term Memory Network) but the text uses LDDGNN."** — Removed. The text "LDDNN (Long Short-Term Memory Network)" appears only in the OCR-extracted figure alt text, which is a parser artifact from the embedded image. The paper's actual text consistently uses LDDGNN and defines it correctly as "Longest Directed Distance based Graph Neural Network."
+- **Criticisms about missing related works, missing appendices, or missing references.** — Removed per the hard rules.
+- **Generic concerns about "evaluation lacking rigor" without specific anchors.** — Removed as they were category-driven noise rather than concrete, verifiable problems.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface any observation that the paper itself does not already articulate.
-
----
+None beyond the paper's own contributions. The two reviewers' perspectives largely converge — the core methodological contributions (WeCA, skip-action) are genuinely novel and well-evaluated in isolation, but the experimental comparison is incomplete for the strength of claims made. The best insight from the synthesis is that the missing-baselines gap is structural (the paper compares against methods not designed for its setting while omitting methods that are) rather than incidental, which usefully frames the most critical revision target.
 
 ## Suggestions
 
-1. **Add a skip-action ablation on the standard TPC-H/Computation Graphs benchmarks.** This is the single most impactful improvement: report WeCAN with and without skip actions on the same datasets where the headline numbers are claimed. If the improvement is small, that is fine — just be transparent about it and let the skip action's value rest on the heavy-task cases it was designed for.
-2. **Adapt One-Shot to handle compatibility coefficients** (e.g., by adding the $K_{acc}$ term to its decoder scores) for a fairer neural baseline comparison, or at least discuss the confound explicitly.
-3. **Provide a small-instance optimality check** comparing WeCAN and list-scheduling against MILP-optimal solutions for DAGs with ≤20 tasks. This would directly ground the theoretical claims.
-4. **Justify or ablate the skip-score functional form**, even if only with an appendix experiment showing that the specific decay matters.
-
----
+1. **Add the missing heterogeneous-scheduling baselines.** Even approximate comparisons using published results on similar datasets would significantly strengthen the paper's evaluation. If code is not available, clearly state this and reframe claims from "outperforming state-of-the-art methods" to "outperforming the baselines tested."
+2. **Provide main-text intuition for the skip-score formula.** A short paragraph explaining why the $(1 - k/2n)^{u_b}$ term prevents excessive skipping (it decays towards zero as $k$ approaches $2n$, making skip less attractive later in scheduling) would help readers evaluate the design.
+3. **Run a heavy-task proportion sweep** (0.5%, 1%, 2%, 5%) to demonstrate the trend predicted by the theoretical analysis.
+4. **Tone down the "SOTA" claim** or qualify it explicitly as "SOTA among the methods compared" unless the missing baselines are added.
 
 ## Score and Decision
 
-**Calibration anchors** (all from the human-review corpus):
+**Calibration anchors consulted:**
 
-| Path | Avg Score | Decision | Comparison to This Paper |
-|------|-----------|----------|------------------------|
-| `/home/wg25r/review_agent/human_reviews_2026/UbWy2QVmke.md` (GAA-PtrNet, one-shot DAG scheduling) | 4.50 | Reject | Similar domain, same datasets. Rejected for limited novelty. This paper has stronger architectural novelty and theoretical framing → our paper is stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/s5pWbwf2tk.md` (ReSched, FJSP with DRL) | 5.00 | Accept (Poster) | Comparable: both have solid empirical results and clean architecture. ReSched had concerns about REINFORCE training variance; our paper has concerns about skip-action ablation scope. |
-| `/home/wg25r/review_agent/human_reviews_2026/yVFOdLjd7V.md` (DEFT, dynamic cloud scheduling) | 5.00 | Accept (Poster) | Comparable: both accepted despite missing ablations. |
-| `/home/wg25r/review_agent/human_reviews_2026/7gA6ZYii0e.md` (RAISE, ensemble RL for scheduling) | 4.00 | Reject | Rejected for marginal gains vs. complexity. Our paper has clearer improvements over baselines → our paper is stronger. |
-| `/home/wg25r/review_agent/human_reviews_2026/OQQK8gMC5H.md` (DOPPLER, device placement) | 4.50 | Accept (Poster) | Comparable: accepted despite missing ablations and unclear motivation for some design choices. |
-| `/home/wg25r/review_agent/human_reviews_2026/XcCqRcHzJ3.md` (Instance-wise Adaptive Scheduling) | 5.00 | Accept (Poster) | Comparable: both have solid empirical work with some theoretical framing. |
-| `/home/wg25r/review_agent/human_reviews_2026/Zcn4n57lHg.md` (Smoothness Bounds, scheduling with predictions) | 6.00 | Accept (Poster) | Stronger theoretical contribution but different subfield. Not directly comparable. |
-| `/home/wg25r/review_agent/human_reviews_2026/QvN5FZ3tNW.md` (Reviewer Nomination, unrelated) | 1.50 | Withdrawn | Not comparable. |
+| Paper | Avg Score | Round | Comparison |
+|-------|-----------|-------|------------|
+| GAA-PtrNet (UbWy2QVmke) | 4.50 | R1 | Worse: similar missing-baselines issue but significantly less novelty (incremental GNN+P trNet) and weaker ablation |
+| DEFT (yVFOdLjd7V) | 5.00 | R1, R2 | Similar: accepted poster, weaker ablations, less novel (MoE application), but stronger on baseline comparisons |
+| RESCHED (s5pWbwf2tk) | 5.00 | R1, R2 | Similar: accepted poster, comparable ablation quality, but training data comparison concerns |
+| Multi-Obj FJSP (YAgOaYedLQ) | 5.50 | R2 | Similar: accepted poster, weaker novelty (DAN extension), missing ablation |
+| Found. Models Industrial Sched (qRjLjYrvMi) | 6.00 | R2 | Stronger in breadth of experiments but rejected due to missing DAG context — a more fundamental flaw |
+| Scheduling low-band papers | 2.0–3.0 | R1 | Clearly worse: basic methodology, limited results, no novel architecture |
 
-**Assessment:** This paper has genuine contributions — the weighted cross-attention design is novel and well-validated, the empirical results are strong across multiple datasets, and the theoretical framing of the optimality gap is principled. The main weaknesses are that the skip-action contribution is less thoroughly validated than its prominence warrants, and the comparison with One-Shot has a fairness confound. Neither weakness is fatal; both are addressable. The paper sits in the same band as ReSched (5.0), DEFT (5.0), and the Instance-wise Adaptive Scheduling paper (5.0), all of which were accepted as posters.
+**Round 1 bracket:** 4.5–7.0 (between GAA-PtrNet and high-quality/out-of-area papers).
 
-MY FINAL SCORE: <score>5.0</score>
+**Round 2 narrowing:** Compared to accepted posters at 5.0–5.5 (DEFT, RESCHED, Multi-Obj FJSP), this paper has stronger architectural novelty and better ablation studies but shares a common weakness pattern: incomplete baseline comparisons. The paper is better than GAA-PtrNet (4.50, Reject) which had less novelty and similar baseline gaps. It is slightly stronger than DEFT (5.00) and RESCHED (5.00) due to more novel contributions and cleaner ablation, but the missing-baselines issue prevents it from reaching the 6+ range.
+
+**Final position:** 5.5 — comparable to accepted poster papers but with a notable evaluation gap that the authors should address in revision.
+
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

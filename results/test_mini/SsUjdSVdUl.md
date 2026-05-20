@@ -1,87 +1,94 @@
-Here is the final consolidated review.
-
----
+Now I have all the data I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper proposes Critique-RL, a two-stage reinforcement learning approach for training critiquing language models (critics) that can both accurately judge response correctness (discriminability) and provide helpful feedback for refinement, without relying on a stronger supervisor or oracle verifier at test time. The key insight is that naive RL using only indirect reward signals (based on actor refinement correctness) improves helpfulness but fails to optimize discriminability, leading to overly conservative or aggressive critics. Stage I optimizes discriminability via a direct rule-based reward, and Stage II optimizes helpfulness via refinement rewards while regularizing toward the Stage I model to maintain discriminability. Experiments on Qwen2.5-3B and 7B across MATH, GSM8K, AQuA, and two OOD tasks show consistent gains over SFT, STaR, Retroformer, and CTRL baselines.
+This paper proposes Critique-RL, a two-stage reinforcement learning approach for training language models to critique other models' reasoning outputs without relying on a stronger supervisor. The core insight is that RL with only indirect reward signals (derived from the actor's refinement correctness) fails to optimize the critic's **discriminability** — the ability to judge whether a response is correct — leading to overly conservative or aggressive critics. Critique-RL first optimizes discriminability via a direct rule-based reward (Stage I), then optimizes helpfulness while preserving discriminability via a combined reward and KL regularization against the Stage I model (Stage II). Experiments across multiple model scales (3B, 7B) and tasks show consistent improvements over prior RL-based critique methods on both accuracy and discriminability, with additional gains from iterative training and evidence of out-of-domain generalization.
+
+---
 
 ## Strengths
 
-- **Well-diagnosed problem with compelling training dynamics analysis**: Section 4.1 (Figure 3) empirically demonstrates that RL with indirect rewards r_refine, r_correction, and r_Δ collapses discriminability — critics become either overly conservative or aggressive. This diagnosis directly motivates the two-stage design and is a useful finding for the community. The visualization of how discriminability degrades separately for correct and incorrect responses is particularly informative.
+1. **Identification and diagnosis of the discriminability bottleneck.** Section 4.1 and Figure 3 reveal a concrete, previously undiagnosed failure mode: indirect reward signals (r_refine, r_correction, r_Δ) optimize helpfulness at the cost of discriminability, producing critics that are either conservatively inert or aggressively harmful. This finding is well-supported by the training dynamics shown in Figure 3 and motivates the two-stage approach directly.
 
-- **Substantial and consistent gains across tasks and model sizes**: Critique-RL outperforms all baselines on MATH, GSM8K, and AQuA for both 3B and 7B models, often by wide margins (e.g., +9.02% Acc on MATH for 7B over CTRL, +5.31–13.76 Acc@Dis over CTRL on GSM8K). The gains are systematic across every setting, not cherry-picked.
+2. **Principled two-stage solution with clean ablation support.** The two-stage design (Algorithm 1) directly addresses the diagnosed bottleneck: Stage I optimizes discriminability via explicit correctness-judgment reward, and Stage II optimizes helpfulness via refinement reward while preserving discriminability via r_dis + KL regularization. The ablation study (Table 3) confirms that removing either stage, or removing the discrimination-preserving terms in Stage II, degrades performance — proving that the design choices are individually necessary.
 
-- **Generalization to out-of-domain tasks**: The method maintains improvements on SVAMP and TheoremQA (e.g., 89.7% Acc on SVAMP for 7B vs. CTRL's 85.1%), demonstrating that the trained critic transfers beyond its training distribution without loss of effectiveness.
+3. **Strong empirical results across multiple benchmarks and model scales.** Table 1 shows consistent gains over all baselines (SFT, STaR, Retroformer, CTRL) across MATH, GSM8K, and AQUA for both 3B and 7B models. For example, on Qwen2.5-7B MATH, Critique-RL achieves 58.40% Acc@Refine vs. the next best 53.86% (CTRL) and 85.20% Acc@Dis vs. 71.42% (CTRL). These gains are substantial.
 
-- **Ablations validate component necessity**: Removing Stage I or Stage II individually degrades both accuracy and discriminability (Table 3). The discrimination regularization in Stage II (r_dis + KL to Stage I) is shown to be critical — removing it causes a sharp drop in Acc@Dis from 82.8 to 77.7 on MATH. This supports the claim that both stages and the regularization are essential.
+4. **Evidence of out-of-domain generalization.** Table 4 shows that models trained on in-domain tasks generalize to unseen OOD tasks (SVAMP, TheoremQA) with consistent improvements, e.g., Qwen2.5-7B on SVAMP: 89.7% vs. CTRL 85.1%. This supports the method's potential for scalable oversight.
+
+5. **No reliance on stronger supervisors.** Unlike prior work (e.g., DeepCritic using 72B teachers, Critique-GRPO using GPT-4o), Critique-RL uses only the fixed actor model and rule-based correctness signals, making the approach more practical and scalable.
+
+---
 
 ## Weaknesses
 
 ### Major
 
-- **No variance or statistical reliability reported for any main result**: All results in Tables 1 and 4 are single-point accuracy numbers with no standard deviations, confidence intervals, or replication across random seeds. RL training, especially with relatively small models (3B, 7B) and RLOO, is known to be noisy. Without any measure of variance, the reader cannot assess whether the reported improvements (e.g., 2–5 percentage points over CTRL) are statistically significant or within the noise range of the training process. This is the most significant evidential gap in the paper and undermines confidence in the experimental contribution. Every main experiment should be run with at least 3 seeds with mean and std reported.
+1. **RL algorithm not controlled across baseline comparisons.** Retroformer uses PPO, CTRL uses GRPO, while Critique-RL uses RLOO. The headline results in Table 1 therefore conflate the RL algorithm choice with the proposed two-stage reward design. The ablation study in Table 3 does control the algorithm (everything is RLOO) and validates the two-stage advantage, so the core claim is not invalidated, but the strongest evidence would come from re-implementing baselines with RLOO or adding a "single-stage RLOO with r_refine" baseline to Table 1.
+
+2. **No statistical significance or variance reporting.** All results are reported from single runs (best-of-500-steps). RL training is inherently noisy, and the paper provides no standard deviations, confidence intervals, or multiple-seed results. This is especially concerning where margins are small (e.g., Qwen2.5-7B on AQUA: 65.75 vs. 64.96 for CTRL, a gap of only 0.79 points). Without variance estimates, it is difficult to assess whether the reported improvements are reliable.
 
 ### Minor
 
-- **Missing one-stage joint optimization baseline**: The paper's central claim is that a two-stage approach is necessary — that jointly optimizing r_dis + r_refine from scratch (without a dedicated discrimination-first stage) would fail. However, the ablation in Table 3 only tests removing Stage I entirely (falling back to baseline RL) or removing Stage II (only discriminability). It never tests a single-stage RL that jointly optimizes r_dis + r_refine with KL to SFT from the start. Such a comparison would directly validate whether the two-stage design is strictly necessary or whether a well-tuned joint objective suffices. The training dynamics (Figure 3) partially address this (showing that baseline RL fails to optimize discriminability), but a direct ablation would be stronger.
+3. **No direct evaluation of critique quality.** The critic is evaluated entirely through downstream accuracy of the fixed actor. While Acc@Dis measures judgment correctness and the oracle verifier experiment (Figure 5) isolates helpfulness, neither evaluates whether the *natural-language feedback text* is factually correct, non-redundant, or genuinely useful. There is a risk — acknowledged by the setup — that the critic learns to exploit the actor's specific failure modes rather than producing generally useful critiques.
 
-- **Stage II ablation is coarse**: The "Stage II w/o discrimination" condition removes both r_dis and the KL(Stage-I || Stage-II) regularization simultaneously. This does not isolate which mechanism — the discriminability reward signal or the KL anchor to Stage I — is more responsible for maintaining discriminability. A finer ablation (removing only r_dis, or only KL) would be more informative.
-
-- **Inference compute efficiency comparison is underspecified**: The paper claims that K× critique-refinement sampling is more efficient than 3K× parallel sampling. The figure caption mentions "@2k and @3k" indicating the comparison controls for total samples, which partially addresses this concern. However, it is not entirely clear whether "3K× parallel sampling responses" refers to 3K independent reasoning samples (no critique), or K samples each with a different type of processing. The visualization itself is hard to parse: the data appears to be read from a chart, and the legend descriptions are ambiguous. The claim is important for the practical value of the method but rests on a figure that would benefit from clearer presentation (e.g., accuracy vs. total tokens or FLOPs, not just number of samples).
-
-- **Preliminary analysis limited to one setting**: The motivating findings (Figure 3, Section 4.1) are demonstrated only on GSM8K with Qwen2.5-3B. While the main results confirm the method works for 7B and other tasks, the dynamics analysis itself is not replicated for larger models or other datasets.
+4. **Critic judgment extraction function f(x,y,c) not specified.** The paper defines r_dis using f(x,y,c) to extract the critic's judgment from generated text, and the example in Figure 2 shows a structured format, but the exact parsing logic is not stated in the main paper. This should be specified to ensure reproducibility.
 
 ### Trivial
 
-- The paper mentions "without stronger labeling" in the abstract, but the method still requires rule-based answer verifiers (ground-truth answers) for training rewards. This is a reasonable setup for math tasks and is acknowledged in the paper, but the framing slightly over-promises generality.
+5. None.
+
+---
 
 ## Nice-to-Haves
 
-- Evaluate on open-ended domains (e.g., summarization, as referenced in Appendix G) using learned reward models instead of rule-based verifiers — this would validate the method's scalability beyond answer-verifiable tasks.
-- Report the actor's baseline "obedience" or improvement rate when given oracle critiques, to separately assess whether the critic's feedback or the actor's refinement ability is the limiting factor.
+- A brief discussion of limitations (reliance on oracle verifier during training, assumption of a fixed actor, potential for critic overfitting to the actor's reasoning patterns).
+- Training dynamics (similar to Figure 3) for the full-scale 7B runs, showing that discriminability improves during Stage I and is maintained during Stage II at scale.
+- Sensitivity analysis on the scaling factors β, β₁, β₂ and the KL coefficient.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **"Comparison fairness (methodological gap)" framed as a fatal flaw** — The harsh critic raises this as the first critical issue. It is real and kept as Major. However, the harsh critic also acknowledges "This is not a fatal flaw — the ablation studies in Table 3 do control the algorithm," so the original framing is properly scaled down here.
+- **Strength Finder's generic strengths** — Claims like "addresses a timely problem" and "clear writing" are removed as they are generic and not specific to this paper's evidence.
+- **"Missing related works"** — Removed per instructions; I cannot independently verify what was left out.
+- **"Missing appendix content"** — Removed per instructions; the parser strips appendices from all papers.
+- **"Could the metric be measuring a proxy?"** speculation about confounders — Removed as speculative without concrete evidence in the paper.
 
-- **Criticism about "duplicate legend in Figure 1"**: The extracted text shows "w/o Critique-RL (3B)" listed twice in the table. This is a PDF parsing artifact (the original PDF likely has distinct entries like "w/o Critique-RL" and "w/o Critique-RL (3B)" with different curve styles). Not a paper flaw.
-
-- **Criticism about missing appendix content / unverifiable claims**: The parser strips appendix sections from all submissions. The references to Appendix C, E, F, G, J are present in the original paper and are standard practice. Not a valid weakness.
-
-- **Criticism about "oracle verifier assumption conflicting with 'no stronger labeling' claim"**: The paper is explicit ("without stronger labeling" refers to not needing a stronger HUMAN/LLM supervisor) and acknowledges the use of rule-based verifiers for math tasks — a standard and well-understood convention in the reasoning literature.
-
-- **Criticism about baselines using different RL algorithms (PPO/GRPO vs. RLOO)**: The baselines Retroformer and CTRL use their originally proposed RL algorithms. This is standard practice for reproducing prior work. Critique-RL uses RLOO because it does not require a value model. The comparison may not isolate the effect of the two-stage design from the RL algorithm choice, but this is a minor concern that does not undermine the main claim.
+---
 
 ## Novel Insights
 
-Beyond the paper's own contributions, one novel observation emerges from the reviews: the paper's diagnostic finding — that RL optimization of indirect refinement rewards systematically degrades discriminability — is a genuinely useful characterization of an optimization pathology. Prior work (Retroformer, CTRL) treated the critic as a black box optimized purely by outcome; this paper opens that black box and shows that discriminability and helpfulness can compete under naive RL, and that explicitly decoupling them is beneficial. However, the same pathology diagnosis also raises a question the paper does not fully answer: can a simpler joint reward (r_dis + r_refine) with careful weighting achieve similar results without two-stage training? Missing this ablation is the single largest empirical gap.
+None beyond the paper's own contributions. The key novel insight — that indirect RL reward signals fail to optimize critic discriminability, causing conservative or aggressive behavior — is the paper's own finding and is well-demonstrated.
+
+---
 
 ## Suggestions
 
-1. **Run all main experiments (Tables 1, 4) with at least 3 random seeds and report mean ± std.** This is the most impactful improvement the authors can make. If the results are as robust as they appear across settings, the variance is likely small, and this would substantially strengthen the paper.
-2. **Add a one-stage joint optimization baseline**: train from the SFT checkpoint with objective r_refine + β₁·r_dis and KL to SFT (no dedicated Stage I). This directly tests whether the two-stage design is strictly necessary.
-3. **Fine-grain the Stage II ablation**: separately test (a) removing only r_dis while keeping KL(Stage-I), and (b) removing only KL(Stage-I) while keeping r_dis.
-4. **Present the inference compute scaling analysis more clearly**: plot accuracy vs. total generation tokens (or FLOPs) rather than number of samples, and include explicit error bars or multiple runs.
+1. Add a controlled baseline: re-implement Retroformer/CTRL with RLOO, or add a "Stage II only with RLOO and r_refine" condition to the main results table, to show that the gains come from the two-stage reward design rather than the RL algorithm change.
+2. Report results with at least 3 random seeds and standard deviations (or use bootstrap confidence intervals), especially for conditions with small margins.
+3. Add a small-scale human evaluation or LLM-based evaluation of critique quality (e.g., factual correctness of feedback, usefulness for refinement) on a sampled subset.
+4. Specify the parsing logic for f(x,y,c) or provide the exact prompt format used to elicit structured judgments.
+5. Consider adding training dynamics plots (Acc@Dis over training steps) for the main-scale 7B runs, similar to the preliminary analysis in Figure 3.
+
+---
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration protocol:**
 
-- **Critique-Coder** (`/home/wg25r/review_agent/human_reviews_2026/tsuxIeLUsz.md`, avg 5.50, Accept): Similar topic (RL for critique), but our paper has a deeper methodological contribution (training dynamics diagnosis + two-stage design vs. simple data mixing). Our paper has weaker evidential reporting (no variance). Roughly comparable quality.
-- **RefCritic** (`/home/wg25r/review_agent/human_reviews_2026/qgMvotqkXd.md`, avg 4.00, Reject): Very similar topic, rejected mainly for novelty overlap with prior work. Our paper has stronger originality and cleaner motivation. Our paper is clearly stronger.
-- **DeepCritic** (`/home/wg25r/review_agent/human_reviews_2026/wyCnT4BUsT.md`, avg 4.67, Reject): Two-stage framework for critics with strong data curation. Our paper has a cleaner RL methodology but weaker experiments. Comparable overall.
-- **CORE** (`/home/wg25r/review_agent/human_reviews_2026/pRSRiXdpkm.md`, avg 5.00, Accept): Math reasoning + RL with concept supervision. Accepted despite one weak review. Our paper has comparable rigor and clearer abalations. Slightly worse on evidential completeness (no variance).
-- **RL's Razor** (`/home/wg25r/review_agent/human_reviews_2026/7HNRYT4V44.md`, avg 6.00, Accept): Strong theoretical contribution with clean experiments. Our paper is substantially weaker on both theory and experimental rigor.
-- **Critique to Verify** (`/home/wg25r/review_agent/human_reviews_2026/he7BMZwm8t.md`, avg 3.00, Withdrawn): Similar topic but notably weaker execution and analysis. Our paper is substantially stronger.
-- **In-Context RL** (`/home/wg25r/review_agent/human_reviews_2026/keCXNHOe4W.md`, avg 4.67, Accept): Novel prompting framework for in-context RL. Our paper has stronger empirical evidence but weaker novelty. Comparable quality.
+**Round 1 (Bracketing):** Three queries on "reinforcement learning for training critique models language model critiquing" with score bands <3.5, 3.5–7.5, >7.5.
+- Low band (avg 2–3): Papers on critique models with fundamental flaws or withdrawn. Paper under review is clearly above these.
+- Middle band (avg 4–5.5): Closest matches include Critique-Coder (5.5, Accept Poster), RefCritic (4.0, Reject), DeepCritic (4.67, Reject), Critique-GRPO (4.5, Reject). This paper is stronger than all of these due to deeper conceptual contribution (discriminability bottleneck), cleaner experimental design, and no reliance on stronger supervisors.
+- High band (avg 8.0): Papers on very different topics (transducing LMs, multimodal verifiers). Not directly comparable.
+- **Initial bracket:** [5.0, 7.0]
 
-Relative to these anchors, the paper is clearly above the Reject-tier papers (RefCritic at 4.00, DeepCritic at 4.67) due to better motivation and cleaner methodology, but below the strongest Accept papers (RL's Razor at 6.00) due to the missing variance reporting and incomplete ablation. It sits in the borderline Accept range alongside Critique-Coder (5.50) and CORE (5.00), with the missing variance preventing a higher score.
+**Round 2 (Narrowing):** Two queries within (4.5, 6.5) and (6.0, 8.0).
+- Critique-Coder (5.5, Accept Poster): Simpler approach (mixing critique data into RL). Paper under review is notably stronger in conceptual depth and experimental breadth. Score should be higher than 5.5.
+- J1 (6.5, Accept Poster): RL for LLM-as-a-Judge. Strong empirical results and comprehensive evaluation. The paper under review is comparable but has fewer "flashy" headline results and the weaknesses (no variance, algorithm confound) are more prominent. Score slightly below J1.
+- Text2Grad (4.8, Accept Poster): Depends on GPT-4o for feedback. Paper under review is stronger.
+- **Final score:** **6.0**, positioned between Critique-Coder (5.5) and J1 (6.5). The paper's deeper conceptual contribution and cleaner experiments justify a score above Critique-Coder, while the addressable weaknesses (variance reporting, baseline algorithm control) prevent it from reaching J1's level.
 
-**Score**: 5.0  
-**Decision**: Accept
-
-The paper makes a genuine contribution — the diagnosis of discriminability collapse under naive RL is a valuable finding, the two-stage design is well-motivated and empirically effective, and the results are consistent across tasks and model sizes. The main weakness (no variance reporting) is significant but addressable, and the consistency of the improvements across many settings mitigates concerns about noise. I recommend acceptance with the expectation that the authors add variance reporting and the one-stage ablation before the final version.
-
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,119 +1,93 @@
-Now I have sufficient information to write the consolidated review.
-
----
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces In-Context Watermarking (ICW), a paradigm for watermarking LLM-generated text solely through prompt engineering, without access to the model's logits, weights, or sampling process. The authors propose four strategies at different granularities (Unicode character insertion, initial-letter biasing, lexical/word-list biasing, and acrostic sentence-initial constraints), each paired with a tailored detection method. Experiments on GPT-o3-mini and GPT-4o-mini across both Direct Text Stamp and Indirect Prompt Injection (IPI) settings demonstrate near-perfect detection (0.995–1.000 AUC) for capable models, with reasonable robustness to paraphrasing for the sentence- and word-level methods.
-
----
+This paper introduces In-Context Watermarking (ICW), a paradigm for embedding watermarks into LLM-generated text purely through prompt engineering, without any access to model internals (weights, logits, or sampling). Four strategies (Unicode, Initials, Lexical, Acrostics) are proposed with tailored detection methods. The paper evaluates these in a Direct Text Stamp (DTS) setting and an Indirect Prompt Injection (IPI) setting motivated by detecting AI-generated peer reviews. Experiments on GPT-4o-mini and GPT-o3-mini show that with sufficiently capable models, ICW achieves strong detection accuracy, robustness, and text quality.
 
 ## Strengths
 
-1. **First systematic exploration of prompt-only watermarking.** The paper identifies and formalizes a genuinely underexplored space: embedding watermarks via in-context instruction rather than logit manipulation or post-hoc editing. The formulation in Section 3.1 and the four-strategy taxonomy (Table 1) provide a structured foundation for future work in this direction.
+1. **Prompt-only watermarking is a genuinely novel paradigm.** Existing watermarking methods require either in-process access (logits/sampling) or post-hoc text modification. ICW demonstrates that watermarks can be embedded solely through instruction following, which opens a new research direction. This is a clean conceptual contribution with clear practical motivation.
 
-2. **Strong empirical results on capable LLMs.** On GPT-o3-mini, all four ICW methods achieve ROC-AUC ≥ 0.995 in both DTS and IPI settings (Table 2). Acrostics ICW achieves 1.000 AUC in DTS and 0.997 in IPI; Lexical ICW achieves 0.995 and 0.997 respectively. This validates the central claim that current state-of-the-art LLMs can follow watermarking instructions reliably.
+2. **Strong empirical results on capable LLMs.** Table 2 shows that with GPT-o3-mini, all four ICW methods achieve ROC-AUC ≥ 0.995 in both DTS and IPI settings, with near-perfect detection rates (e.g., Acrostics ICW ROC-AUC 1.000, T@1%F 1.000). These results convincingly demonstrate feasibility.
 
-3. **Effective IPI case study for peer review integrity.** The Indirect Prompt Injection scenario (Section 3.2, Figure 2) is creative and practically motivated, targeting a real concern about LLM misuse in peer review. With GPT-o3-mini, results show that watermarking instructions embedded in long-context papers are followed (e.g., Initials ICW AUC=0.997, Lexical ICW AUC=0.997), demonstrating feasibility in a realistic use case.
+3. **First work to enable watermarking in the Indirect Prompt Injection scenario.** The IPI setting (Section 3.2) is a genuinely novel application where neither in-process (no model access) nor post-hoc (no reviewer incentive) methods can operate. The paper demonstrates detection performance in this setting (e.g., Acrostics ICW ROC-AUC 0.997, T@1%F 0.982), showing the practical relevance of the paradigm.
 
-4. **Competitive robustness under generic paraphrasing attacks.** Under LLM-based paraphrasing (Figure 3), Initials, Lexical, and Acrostics ICWs maintain AUCs of 0.887, 0.924, and 0.922 respectively — outperforming YCZ+23 (0.557) and PostMark (0.841). The acrostic approach is particularly well-suited to paraphrase resistance since sentence-initial letters are typically preserved even when content is reworded.
+4. **Superior robustness to paraphrasing vs. post-hoc baselines.** Under paraphrase attack (Figure 3), Initials ICW (AUC 0.887), Lexical ICW (AUC 0.924), and Acrostics ICW (AUC 0.922) all outperform YCZ+23 (0.557) and PostMark (0.841), a practically important result since paraphrasing is a common evasion strategy.
 
-5. **Preserved text quality relative to post-hoc baselines.** ICW methods achieve overall quality scores of 4.282–4.813 (Table 3, LLM-as-a-Judge on 1–5 scale), close to unwatermarked text (4.992) and substantially higher than PostMark (2.997) and YCZ+23 (3.865). The results suggest ICW methods can embed detectable signals with less quality degradation than existing black-box post-hoc alternatives.
-
-6. **Theoretical false-alarm control for Initials and Lexical ICWs.** The paper provides formal guarantees and proofs (Appendix B) for controlling the false positive rate of the detectors, adding statistical rigor.
-
----
+5. **Minimal impact on text quality.** LLM-as-a-Judge evaluation (Table 3) shows ICW responses scoring 4.28–4.81 (out of 5) overall, comparable to unwatermarked text (4.99) and substantially better than PostMark (3.00), demonstrating that the watermarking does not degrade response quality.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-1. **Robustness against a determined adversary is not demonstrated.** The paper's robustness evaluation uses benign transforms (random deletion/synonym replacement/generic paraphrasing) that do not model an adversary actively trying to break the watermark. A motivated reviewer who suspects watermarking could:
-   - Strip all zero-width characters (defeating Unicode ICW instantly).
-   - Instruct the LLM to "ignore prior prompts" or "rephrase while changing sentence-starting letters" before writing a review (defeating Acrostics and Initials ICWs).
-   - Replace words from a suspected green list with synonyms (defeating Lexical ICW).
-   
-   The paper acknowledges these vulnerabilities qualitatively (Sections 4.2.2, 6) but does not evaluate any adaptive adversary. The "ignore prior prompts" attack is mentioned as an Appendix D.1 experiment, but its results are absent from the main paper. Since the IPI threat model assumes a dishonest reviewer willing to cheat by using an LLM, assuming they will not also sanitize the input or use adversarial prompts is a significant gap.
-
-2. **IPI stealth premise is unvalidated and experiments simplify the setting.** The paper proposes embedding instructions via "white text" in PDFs (Section 3.2, line 94) but provides no experiments showing this survives real PDF-to-text conversion (pdftotext, copy-paste from viewers, OCR). The experiments simply concatenate the instruction directly with the paper text — a best-case simulation that bypasses the practical challenges of covert embedding. While the paper acknowledges this is "left for future work" (lines 106–107), the lack of validation undermines the claimed applicability to the peer-review scenario.
-
-3. **No confidence intervals or statistical significance reported.** Tables 2, 3, and Figure 3 report point estimates for AUC, T@1%F, and T@10%F without error bars or significance tests. With only 500 samples per class, these estimates may have substantial variance — particularly for T@1%F, which is measured on only ~5 positive samples. The community norm for watermarking papers at comparable venues is to report at least confidence intervals or multiple-seed runs.
-
-4. **Asymmetric baseline comparison.** The paper compares ICW (in-process via instruction) against PostMark and YCZ+23 (post-hoc methods that watermark already-generated text). These are fundamentally different capabilities: post-hoc methods can watermark any text including pre-existing content, while ICW requires controlling the generation instruction. The paper frames this as a direct comparison ("outperforming baselines," "comparable detection"), but the comparison is not apples-to-apples. A more appropriate framing would distinguish the two paradigms rather than presenting them as competitors on the same footing.
+1. **Only two models from a single provider are tested.** The paper evaluates on GPT-4o-mini and GPT-o3-mini — both OpenAI models with similar architectural lineage. The central claim that "as LLMs become more capable, ICWs will become correspondingly more powerful" (Section 1, line 45) rests on this single comparison (2 data points, same lineage). Without testing on non-OpenAI models with strong instruction-following (e.g., Claude 3.5 Sonnet, Gemini 2.0, Llama-3), the evidence is only suggestive. The paper would benefit from tempering this generalizability claim or adding at least one additional model from a different provider.
 
 ### Minor
 
-1. **Unicode ICW is fragile and its inclusion inflates the results.** The paper acknowledges Unicode ICW is "highly fragile to transformations like LLM paraphrasing" (line 138) and can be stripped by any text-normalization step. Yet its perfect 1.000 AUC scores appear prominently in the main results (Table 2) alongside the more robust methods. The reader would benefit from clearer separation between methods that are trivially removed and those that offer genuine robustness.
+2. **Acrostics ICW detection method is underspecified.** The detection procedure (Section 4.2.4, line 182) states: "we randomly resample N sequences of sentence initial letters (ℓ̃₁, ..., ℓ̃_N) from the suspect text" to estimate the null distribution parameters. The paper does not specify *how* resampling is performed (e.g., random permutation vs. bootstrap with replacement), which matters for the statistical validity of the z-test. While the watermark signal is so strong (AUC=1.000) that the core empirical finding is robust, the detection procedure as described is not reproducible. The specification should be clarified or corrected.
 
-2. **Acrostics ICW detection may have null distribution contamination.** The detector for Acrostics ICW estimates the null distribution of Levenshtein distances by resampling sentence-initial letter sequences *from the suspect text itself* (Section 4.2.4). If the text is watermarked, the resampled sequences also carry the watermark's signature, potentially biasing the estimated mean and standard deviation and inflating detection. This deserves theoretical analysis or experimental validation.
+3. **The IPI setting lacks a practical feasibility demonstration for covert embedding.** The paper proposes hiding watermarking instructions as invisible text (e.g., white text, zero-font-size) in PDF manuscripts, but provides no experiment showing that such instructions survive realistic document processing (PDF-to-text extraction, copy-paste, LLM document parsers). This is acknowledged as future work (Section 3.2, line 106), but the gap between the motivating use case and the experimental validation limits the practical claim.
 
-3. **LLM-as-a-Judge quality evaluation has known limitations.** Text quality is evaluated primarily via Gemini 2.0 Flash as a judge (Table 3). LLM judges can be insensitive to subtle unnaturalness from word-overuse patterns. While perplexity is also reported, the paper would benefit from a small human evaluation to validate that the high quality scores reflect genuinely fluent text rather than judge model bias.
+4. **No confidence intervals or error bars.** All reported detection metrics (AUC, T@1%F, T@10%F) and text quality scores are point estimates without uncertainty quantification (standard errors or confidence intervals). Given the 500-sample evaluation, bootstrapped confidence intervals would be straightforward and informative.
 
 ### Trivial
-
-None.
-
----
+- The paper does not report false positive rate calibration for Acrostics ICW on unwatermarked text. Theoretical guarantees are provided for Initials and Lexical ICWs (Appendix B) but not for Acrostics, leaving an empirical gap.
 
 ## Nice-to-Haves
-
-- A small human evaluation to validate the LLM-as-a-Judge quality scores.
-- Results for the "ignore prior prompts" attack in the main paper rather than deferred to appendix.
-- A diagram showing the IPI embedding pipeline with actual PDF white-text injection and extraction.
-
----
+- Testing on at least one non-OpenAI model (e.g., Claude 3.5 Sonnet or Gemini 2.0) would substantially strengthen the generalizability claim.
+- A simple sanity-check experiment for IPI: embed an instruction as invisible text in a PDF, extract via common PDF readers/pipelines, and verify the instruction is preserved.
+- Discussion of computational/context overhead (Lexical ICW's large green word list consumes prompt capacity).
+- The "ignore prior prompts" attack analysis is deferred to Appendix D.1; including the key finding in the main text would help the reader assess the IPI threat model.
 
 ## Removed Points
+These points were flagged by reviewers but are removed with justification:
 
-- **"The contribution is incremental and the paper overclaims novelty"** — This is a subjective evaluation that conflates "incremental" with "exploratory." The paper does not claim to have solved watermarking; it claims to have identified and systematically explored a new paradigm, which is a genuine contribution. The statement that "the main result — that stronger LLMs follow instructions better — is unsurprising" could apply to most empirical ML papers. Removed as it mischaracterizes the paper's framing.
+- **Harsh Critic's claim that Acrostics detection is "structurally flawed" and the null distribution is "contaminated"**: This claim assumes resampling preserves watermark structure rather than breaking it. The paper does not specify the resampling method, making the criticism speculative rather than verifiable. The near-perfect detection results (AUC=1.000) demonstrate the watermark is trivially detectable regardless of the exact test calibration. Downgraded to Minor (underspecification).
 
-- **"Baseline comparison is misleading"** — The paper explicitly identifies the baselines as "post-processing approaches" (line 194) and ICW as operating during generation. The comparison is clearly scoped as black-box watermarking methods; the reader can judge the asymmetry. Removed because the paper is transparent about what it compares and why.
+- **Harsh Critic's point about IPI robustness not shown in main text (relegated to Appendix)**: The paper shows DTS robustness in the main text (Figure 3) and IPI robustness in the appendix (Table 6). This is a presentation choice, not a weakness.
 
-- **"Text quality evaluation uses an LLM-as-a-Judge that may favor watermarked text"** — The claim that the judge "does not penalize watermarking artifacts" is factually contradicted by Table 3: ICW methods score 4.282–4.813 vs. unwatermarked's 4.992. The judge does detect a gap. This is a generic limitation of LLM-as-a-Judge, not a specific flaw in this paper.
+- **Strength Finder's claim about "Clear scaling with model capability"**: While the data shows improvement from GPT-4o-mini to GPT-o3-mini, this is only two models from one provider. The strength is real but tempered by the limited data; the Major weakness above captures the limitation.
 
-- **"The paper uses only 500 watermarked and 500 human texts. This is small"** — This is retained as a minor weakness (lack of confidence intervals) but removed as a standalone "small sample" complaint, as 500 per class is standard in many watermarking evaluations and the concern is primarily about the absence of error bars, not the sample size itself.
-
-- **"The IPI setting's stealth premise is unvalidated" (harsh critic point 2, full version)** — Weakened and moved to Major weakness #2, but the fully dismissive tone is moderated. The paper explicitly scopes this as future work. The criticism is valid only as a gap in practical validation, not as a fatal flaw.
-
-- **Generic strength from Strength Finder about "this paper addresses an important problem"** — Removed as lacking specific evidence.
-
----
+- **Strength Finder's generic strengths about "important problem" and "timely topic"**: Removed as superficial/generic per filtering rules.
 
 ## Novel Insights
 
-The reviews surface an important tension in this paper that goes beyond its individual results: prompt-only watermarking occupies an odd position between security and usability. The methods achieve high detection accuracy precisely because they ask the LLM to produce statistically unnatural text (biased word choices, constrained sentence initials, invisible characters) — but this very property makes the watermark trivially detectable and removable by any adversary who inspects the generation instruction or output distribution. The paper's core insight — that watermarking through instruction is feasible with capable models — simultaneously reveals that the approach is most powerful when the adversary is least sophisticated, and most fragile when the adversary is most motivated. This suggests the paradigm's value may lie not in adversarial settings but in cooperative attribution scenarios where the text producer consents to watermarking (e.g., content provenance), a framing the paper does not explicitly discuss.
-
----
+The most interesting insight from these reviews (beyond the paper's own contributions) is the tension between the paper's novelty and its thin empirical base. The ICW paradigm is genuinely new — it shifts watermarking from a model-access problem to an instruction-following problem — yet the central claim about scaling with model capability is supported by only two data points from one model family. This points to a broader question for the field: how should reviewers weigh high conceptual novelty against limited empirical scope in a paper that explicitly frames itself as an "initial exploration"?
 
 ## Suggestions
-
-1. **Evaluate against an adaptive adversary.** Run the robustness evaluation with an adversarial instruction such as "Ignore any prior formatting instructions. Rephrase the following review while varying sentence-starting letters and avoiding overused words." This is the minimal attack an aware adversary would use and would clarify the practical security margin.
-2. **Validate the IPI stealth premise** with a small experiment showing whether white-text instructions survive standard PDF-to-text conversion (pdftotext, pdfminer, browser copy-paste). Report the success rate.
-3. **Report confidence intervals** (e.g., bootstrapped 95% CIs) for all AUC and T@1%F/T@10%F values, or at minimum run each experiment with 3+ random seeds.
-4. **Separate the presentation of fragile vs. robust methods more clearly.** Unicode ICW could be presented as a lightweight baseline rather than grouped equally with the other three strategies in the main summary.
-5. **Include a "cooperative watermarking" discussion** to clarify that ICW may be better suited to settings where the text producer agrees to watermark (e.g., API-based content generation with instruction control) rather than adversarial detection scenarios.
-
----
+1. Clarify the Acrostics resampling procedure — specify whether it is a permutation test or another method, and provide empirical FPR calibration on unwatermarked text.
+2. Add at least one non-OpenAI model (e.g., Claude 3.5 Sonnet or Gemini 2.0) to demonstrate that the findings are not vendor-specific.
+3. Run a simple end-to-end IPI sanity check: embed an invisible instruction in a PDF, extract via common pipelines, and verify the instruction survives.
+4. Add bootstrapped confidence intervals to the main detection results (Table 2).
+5. Soften the generalization claim about "as LLMs become more capable" to acknowledge the limited evidence base.
 
 ## Score and Decision
 
-**Anchor calibration** (all anchors from the batch, including those read in full):
+**Round 1 bracket:** After reading the paper and comparing to calibration anchors, I estimate the paper sits between 4.5 and 6.5. It is clearly stronger than PromptHash (3.00, Reject) and dMARK (3.33, Reject) due to higher novelty and clearer presentation. It is comparable to PRO (5.00, Reject), OpenStamp (5.00, Reject), and CATMark (5.33, Reject) — these papers have similar methodological quality but less novelty. It is weaker than PMark (7.00, Accept Poster) and LLM Fingerprinting via Semantically Conditioned Watermarks (6.50, Accept Oral), which have more thorough evaluations and stronger theoretical foundations.
 
-| Anchor Paper | Path | Avg Score | Comparison |
-|---|---|---|---|
-| PMark: Robust Semantic-level Watermarking | EhDgP69DJG | 7.00 (Accept) | Stronger theoretical foundation and distortion-free guarantees; ICW explores a more novel paradigm but with weaker theoretical grounding and practical validation. |
-| Is Your Paper Being Reviewed by an LLM? | HyZwf1rt4s | 6.00 (Accept) | Large-scale benchmark paper with extensive evaluation; ICW has a more novel core idea but narrower evaluation scope. |
-| CATMark: Context-Aware Threshold Watermarking | Q2DrdrPcYm | 5.33 (Reject) | Incremental refinement of existing paradigm vs. ICW's new paradigm exploration; both have execution-quality issues but ICW is conceptually more original. |
-| BIRA: Watermark Evasion via Bias Inversion | dZY5t9ZrUB | 4.50 (Reject) | Incremental attack with known limitations; ICW is more methodologically novel but has comparable practical significance gaps. |
-| Windtalkers: Ciphered-Instruction Watermarking | US1UwMHHtS | 3.00 (Withdrawn) | Poorly framed with missing baselines; ICW is significantly better motivated and executed. |
+**Round 2 narrowing:** Focusing on the 4.5–6.5 bracket, I compared the paper against:
+- **PRO (5.00, Reject)**: ICW has higher novelty (new paradigm vs. incremental improvement on existing paradigm) but PRO has more thorough robustness evaluation across multiple models. ICW is slightly stronger overall.
+- **CATMark (5.33, Reject)**: CATMark has strong cross-task experiments but incremental novelty. ICW has higher novelty but thinner evaluation. Comparable quality.
+- **LLM Fingerprinting (6.50, Accept Oral)**: This paper evaluates across multiple models, multiple attack settings, and has a more thorough empirical foundation. ICW is clearly weaker than this anchor.
+- **PMark (7.00, Accept Poster)**: Strong theoretical framework (proxy functions, distortion-free guarantees) and thorough experiments. ICW has higher conceptual novelty but weaker theory and evaluation. ICW is clearly weaker.
 
-The paper explores a genuinely novel paradigm (prompt-only watermarking) with systematic taxonomy and strong feasibility results on capable LLMs. However, the core weakness — vulnerability to determined adversaries, acknowledged but not addressed — limits practical significance. The IPI application is creative but unvalidated. The paper is well-written and honest about limitations, which positions it as a solid exploratory work rather than a deployable solution.
+The paper's high novelty is its strongest asset, but the limited model coverage (2 models, 1 provider) and the underspecified Acrostics detection method prevent it from reaching the 6.5+ range of accepted watermarking papers. It sits above the 5.0–5.33 rejected papers due to its genuinely new paradigm.
 
-**Score: 5.0** — A well-executed exploration of a novel paradigm, with genuine contributions (taxonomy, detection methods, IPI framing), tempered by fundamental robustness limitations that the paper identifies but does not resolve. The contribution is real but the practical significance is constrained.
+**Final calibration against anchors:**
 
-MY FINAL SCORE: <score>5.0</score>
+| Anchor | Score | Round | Comparison |
+|--------|-------|-------|------------|
+| PromptHash | 3.00 | 1 | ICW is stronger — better presentation, more convincing experiments |
+| dMARK | 3.33 | 1 | ICW is stronger — clearer contribution, better evaluation |
+| PRO | 5.00 | 1, 2 | ICW is slightly stronger — higher novelty but thinner evaluation |
+| OpenStamp | 5.00 | 1 | ICW is slightly stronger — higher novelty |
+| Detecting Benchmark Contamination | 5.00 | 2 | ICW is similar — both have clear novelty and reasonable but limited evaluation |
+| CATMark | 5.33 | 2 | ICW is comparable — different tradeoffs in novelty vs. evaluation breadth |
+| LLM Fingerprinting | 6.50 | 1, 2 | ICW is weaker — less thorough evaluation, more limited model coverage |
+| PMark | 7.00 | 2 | ICW is weaker — PMark has stronger theory and more thorough evaluation |
+
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

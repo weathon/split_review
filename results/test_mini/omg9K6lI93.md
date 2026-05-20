@@ -1,18 +1,24 @@
-Now I have a thorough understanding of the paper and the calibration landscape. Let me synthesize the final review.
+Now I have thorough calibration. Let me synthesize the final review.
+
+**Round 1 bracket:** This paper is most similar to contamination detection papers in the 3.0–4.0 range. The weak anchors (<3.5) include "Fighting Fire with Fire" (3.33), "Detecting Variant Contamination" (3.00), and LogProber (3.00) — all share the same "fine-tuning on test data simulates contamination" paradigm. The middle anchors (3.5–7.5) include "Impact of Post-training" (4.67) and "Sensitivity of SLMs" (4.00), which have cleaner experimental designs. Initial bracket: 2.5–4.5.
+
+**Round 2 narrowing:** The most topically comparable paper, "Fighting Fire with Fire" (3.33), shares the same fundamental realism concern (SFT on test data ≠ pretraining contamination) but validates its proposed detection method. This paper does not validate TACD. The "Detecting Variant Contamination" paper (3.00) has a similar gap between problem framing (variant contamination) and experiment design (fine-tuning). This paper additionally suffers from a verifiable textual contradiction in Section 4.2, a flawed baseline (p=0 already contaminated with English test data), and no testing of existing detection methods — issues the anchor papers do not have.
+
+**Final score: 3.0/10 — Reject.**
+
+---
 
 ## Summary
 
-The paper investigates whether translating evaluation benchmarks into Arabic can conceal data contamination while still allowing models to benefit from memorized content. The authors fine-tune four open-weight LLMs on Arabic translations of test sets (MMLU, XQuAD, MLQA) at varying proportions, evaluate on original English benchmarks, and probe memorization via an extended TS-Guessing method with choice-reordering. They find that MMLU accuracy increases with contamination exposure while extractive QA shows non-monotonic patterns, and that translation masks surface-form contamination signals. A Translation-Aware Contamination Detection (TACD) framework is proposed as a blueprint.
+This paper studies whether translating evaluation benchmarks into Arabic can obscure signals of data contamination. The authors fine-tune four open-weight LLMs on Arabic-translated versions of MMLU, XQuAD, and MLQA test sets mixed with the original English test data, then evaluate on English benchmarks and probe memorization via a TS-Guessing extension with choice-reordering. They propose TACD, a blueprint for translation-aware contamination detection. The research question—whether translation masks contamination—is interesting and practically relevant, but the execution has multiple issues that prevent the paper from supporting its central claims.
 
 ## Strengths
 
-- **Novel and timely research question.** The paper asks whether cross-lingual translation can mask contamination — a genuine blind spot in the current English-centric contamination detection literature. This is a well-motivated and important issue for multilingual evaluation pipelines, and no prior work has studied it systematically.
+1. **Novel research angle with practical relevance.** Studying how translation across languages can obscure contamination signals is a direction the community needs to explore, especially as multilingual evaluation becomes standard. The paper is among the first to empirically investigate this specific problem.
 
-- **Clean methodological extension of TS-Guessing.** The choice-reordering strategy for multiple-choice items (randomly shuffling answer options before masking, then checking if the model recalls the pre-shuffle letter index) is a clever adaptation that provides a stronger contamination signal than standard TS-Guessing. The Index-recall rate (IDR) metric captures a form of positional memorization that pure content-masking would miss.
+2. **Choice-reordering extension to TS-Guessing for MCQ.** The extension of TS-Guessing (Section 3.3, Figure 1) with random choice shuffling and answer-masking provides a finer-grained probe for memorization of positional patterns in multiple-choice benchmarks. This is a genuine methodological contribution that goes beyond the original TS-Guessing.
 
-- **Non-monotonic findings in extractive QA.** The observation that XQuAD/MLQA performance often peaks at 10% contamination and then declines (e.g., Gemma-3-1B-it MLQA: 0.474→0.494→0.411→0.471) is a nuanced finding that goes beyond simple "more contamination = more performance" — it suggests small amounts of cross-lingual overlap can aid span extraction while heavier exposure overfits to dataset-specific quirks. This is genuinely interesting and worth further study.
-
-- **Cross-model experimental breadth.** The study covers four diverse instruction-tuned models (1B to 7B) and three benchmarks (MCQ and extractive QA), providing some evidence that the observed patterns are not model- or dataset-specific.
+3. **Multi-model, multi-dataset design.** The paper covers four models (LLaMA-3.2-1B, Mistral-7B, Gemma-3-1B, Qwen3-1.7B) and three datasets spanning closed-book MCQ (MMLU) and extractive QA (XQuAD, MLQA). The task-dependent effects observed (monotonic MMLU gains vs. non-monotonic XQuAD/MLQA trends in Table 2) are interesting empirical observations worth reporting.
 
 ## Weaknesses
 
@@ -21,70 +27,80 @@ None.
 
 ### Major
 
-1. **The experimental design models deliberate fine-tuning on test data, not realistic contamination, and this limits what can be concluded.** The paper fine-tunes models on Arabic *translations of the test sets themselves* and evaluates on the original English test sets. This is a "train-on-test" paradigm — explicit, deliberate exposure to evaluation data in another language. Performance gains from this setup are largely expected. The findings do not straightforwardly generalize to the realistic scenario where benchmark data appears incidentally in pre-training corpora and is then detected through surface-form matching. The paper would need a pre-training-level contamination experiment (e.g., injecting Arabic-translated test items into pre-training data, then checking if detection methods fail) to support claims about "real-world contamination dynamics." As structured, the experiment shows that translation obscures exact string matches during fine-tuning on test data — which is true but largely unsurprising.
+1. **Section 4.2 makes a claim directly contradicted by the paper's own Table 2 data.** The text states that "the models exhibit approximately equal performance on all evaluated benchmarks" and "scores remain broadly stable as p increases" (lines 205–220), citing Tables 2 and 3a together. Yet Table 2 shows MMLU accuracy increasing monotonically: Mistral 0.577→0.690 (20% relative gain), LLaMA 0.332→0.431 (30% gain). These are large, clear improvements, not stability. This is not a minor phrasing imprecision — it is a factual contradiction between the paper's interpretive narrative and its own presented data. The central "masking" argument rests on this misreading. (Verifiable: compare lines 205–220 with Table 2 data on lines 180–184.)
 
-2. **TS-Guessing results do not consistently support the memorization narrative, and the paper does not adequately address this discrepancy.** In Table 3, the TS-Guessing metrics (IDR, RL-F1, EM) are near-zero across most model/condition combinations, especially for XQuAD/MLQA. For MMLU, only LLaMA at 50% shows a notable IDR of 0.643; all other MMLU entries are ≤0.35 and most are below 0.05. If memorization were the primary driver of the observed performance gains, the probe (designed specifically to detect memorization) should register higher scores. The paper asserts that "translation conceals leakage" but the probe results equally support the alternative interpretation — that performance improvements reflect task adaptation, distribution learning, or general fine-tuning effects rather than verbatim recall. The paper lacks a positive control (e.g., demonstrating that TS-Guessing fires strongly for same-language contamination) and offers no mechanism-level explanation for why the probe fails to detect memorization that supposedly exists. This directly undermines the central claim.
+2. **Baseline (p=0) already includes fine-tuning on the English test set.** The training condition is defined as 𝒟_EN^d ∪ 𝒟_AR^d(p) (Section 3.1, line 134), meaning even the p=0 baseline has seen the English test set. The paper therefore never establishes a clean baseline. The comparisons between p=0 and p>0 are between "contaminated with English test data" and "contaminated with English test data plus some Arabic test data," not between clean and contaminated conditions. This undermines any claim about what translation does to contamination, since contamination is already present at the reference point.
 
-3. **Missing critical baseline: English paraphrasing or equivalent surface transformations.** To argue that *translation* specifically conceals contamination (as opposed to any surface perturbation), the paper must compare against equivalent transformations in English — e.g., paraphrasing, synonym replacement, or word-order shuffling that preserves semantics. Without this, there is no evidence that Arabic plays a special role; the observed effects could be a generic consequence of any meaning-preserving surface change. This is the single most important missing control.
+3. **No existing detection method is tested to demonstrate the claimed "blind spot."** The paper asserts that "translation into Arabic conceals traditional contamination signals" and that current methods would miss this. But it never applies Min-K% Prob, guided prompting, or any other existing detection method to its Arabic-translated data to verify this claim. A single experiment showing that, say, Min-K% Prob on Arabic items yields low scores despite measurable English performance gains would directly support the core narrative. Its absence is the most consequential empirical gap. (This is acknowledged indirectly as motivation for TACD but never executed.)
 
-4. **The paper claims existing detection methods fail on translated data but never tests them.** The abstract and conclusion state that translation "evade[s] standard detection tools" and "standard English-only checks fail to capture this" — yet the paper never applies any existing detection method (Min-K% Prob, guided prompts, etc.) to the translated training data to substantiate this claim. This is an empirical assertion the paper itself does not support.
+4. **TACD is presented as a contribution but is not validated.** Section 5 describes TACD as a "forward-looking blueprint rather than a complete implementation" (line 256). The paper therefore has two disconnected parts: an empirical study with methodological problems, and a proposed framework with zero experimental validation. The title and abstract frame TACD as a core output, but it contributes nothing that can be evaluated. (Confirmed: no TACD experiments exist in the paper.)
+
+5. **TS-Guessing results do not clearly support the "masking" interpretation.** Table 3a shows erratic IDR values that are hard to interpret as "near-flat" (line 205): LLaMA IDR goes 0.287→0.643→0.410 (a swing), Gemma goes 0.350→0.029→0.005 (a clear decrease). The ROUGE-L-F1 values are near-zero across all conditions. The paper's claim that these trends indicate "masking" is not justified by the data — the probe may simply be insensitive to the contamination modality used (Arabic→English), not "masked" by translation.
 
 ### Minor
 
-1. **The train-on-test paradigm conflates contamination with added data quantity.** The 0% condition uses only the English split; the 10% condition adds Arabic data. Improvements from 0% to 10% could simply reflect having more training data. A control condition with unrelated Arabic data (e.g., Arabic Wikipedia) would help isolate the contamination effect.
+1. **No statistical significance or variance reported for any result.** Tables 2 and 3 present single numbers per condition. Given the observed non-monotonic trends in XQuAD/MLQA, reporting variance across multiple fine-tuning runs would substantially strengthen the claims.
 
-2. **TACD is presented as a contribution but is entirely conceptual with no implementation or validation.** Section 5 explicitly states TACD is "a forward-looking blueprint rather than a complete implementation" — which is honest — but this means it cannot be evaluated as a contribution. Including it inflates the apparent submission without adding evidential weight.
+2. **Limited dataset scope.** Only three benchmarks are used, all knowledge/QA tasks. The paper would benefit from at least one reasoning or generation benchmark (e.g., GSM8K, HumanEval) to test whether translation-masked contamination generalizes beyond factual recall and extractive QA.
 
-3. **No confidence intervals, standard deviations, or repeated runs.** All results are point estimates from single runs. Given the small number of models and the observed fluctuations (especially in QA tasks), it is unclear which differences are significant.
+3. **Embedding analysis mentioned but not shown.** Section 4.3 mentions an "embedding figure" showing high cosine similarity between Arabic→English translations and English originals, but no quantitative results (cosine similarity values, variances, or figures) appear in the main text. This is a missing piece of evidence for the claim that translation preserves semantics while perturbing surface forms.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- An English-paraphrase control condition would directly test whether translation is uniquely effective at masking contamination.
-- A positive control demonstrating that TS-Guessing fires on same-language contamination (English→English) would validate the probe's sensitivity.
-- A control with added unrelated Arabic data would separate contamination effects from general training-data benefits.
+- Applying existing detection methods (Min-K% Prob, guided prompting) on the Arabic data would directly test the "blind spot" claim.
+- A truly clean baseline (no English test set exposure) would isolate the effect of Arabic contamination without confounding.
+- Validating TS-Guessing on *Arabic* items (not English) would clarify whether the probe works for the intended modality and whether the English probe is the one that fails.
+- Confidence intervals or standard deviations across multiple runs would improve interpretability.
 
 ## Removed Points
 
-- **"Embedding figure is referenced but not shown"** — The figure was stripped by the PDF parser; it exists in the original submission. Not a valid criticism.
-- **"Related work is too long / is a general survey"** — This is a presentation preference, not a substantive weakness. The related work is comprehensive and relevant.
-- **"Section-by-section style nitpicks"** (e.g., specific line-level formatting issues) — These are largely parser artifacts or minor presentation concerns that don't affect the paper's scientific contribution.
-- **Strength Finder's generic strengths** (e.g., "the paper addresses an important problem") — These overlap with the more specific strengths listed above and add no additional information.
+The following points from the harsh critic review have been removed with justifications:
+
+- **"Mismatch between stated problem (pretraining contamination) and experimental design (fine-tuning)"** — Removed as an overreach. The literature review does discuss pretraining detection methods, but the paper's stated goal (Abstract, Section 1) is to study contamination dynamics *in general*, not specifically pretraining. The paper frames the fine-tuning setup honestly. The mismatch claim is a scope critique, not a factual error. (That said, the baseline flaw in point #2 of Major Weaknesses above is real and related but distinct.)
+
+- **"The 'masking' claim is not supported because evaluation shows clear gains"** — Partially removed and reframed. The critic's version conflated two things: (a) the valid point that the *paper's own text* claims flat trends (which I verified and kept as Major Weakness #1), and (b) the separate point that "masking means no performance difference." The paper's actual claim is that TS-Guessing (a detection probe) doesn't pick up contamination, not that evaluation scores are flat. However, the paper's Section 4.2 does explicitly claim flat evaluation scores (which is wrong), so this is already covered in Major Weakness #1.
+
+- **"TS-Guessing is inapplicable to Arabic modality"** — Removed. The probe is applied to English items, which tests whether the model memorized the Arabic content in a way that surfaces in English recall. This is a valid design choice, even if the results turn out to be noisy.
+
+- **Pure formatting/style nitpicks** — Removed per instructions.
+
+- **Strength Finder's claim that "demonstration that translation masks conventional contamination signals while preserving performance gains"** — Partially demoted. The TS-Guessing results are too noisy to support a clean "masking" narrative. LLaMA's IDR at 50% being 0.643 and Gemma's dropping from 0.350 to 0.005 are not "near-flat trends." This strength is not fully supported by the evidence.
 
 ## Novel Insights
 
-The most valuable observation from the reviews is the tension between the paper's evaluation results (which show performance gains from contamination) and the TS-Guessing probe results (which largely fail to detect memorization). This tension points to a potentially deeper issue: fine-tuning on translated data may improve benchmark performance through mechanisms other than verbatim recall — such as learning the task format, distribution, or reasoning patterns from additional examples. If this is the case, the paper's framing as "contamination masking" may be misleading, and the real phenomenon is something more interesting (and less alarming): cross-lingual transfer learning during fine-tuning. The non-monotonic patterns in extractive QA further support this reinterpretation. A paper that directly investigated *when* translation-induced gains reflect memorization vs. genuine task adaptation would be a stronger contribution.
+The reviews surface two observations worth noting beyond the paper's own contributions. First, the *pattern* of results across tasks (monotonic MMLU gains vs. non-monotonic XQuAD/MLQA trends with a "peak at 10%" pattern) may itself be a finding worth deeper investigation: it suggests contamination effects are qualitatively different for closed-book MCQ versus extractive QA, potentially because MCQ reward answer-recognition while extractive QA requires span localization that overfitting disrupts. Second, the erratic TS-Guessing results across models (LLaMA swings, Gemma collapses, Mistral flat at zero) hint that surface-form memorization probes like TS-Guessing may have model-specific calibration issues that are poorly understood, which is a methodological finding for the contamination detection community regardless of this paper's specific claims.
 
 ## Suggestions
 
-1. Run a positive control: fine-tune on English→English test data (no translation) and verify that TS-Guessing IDR fires strongly, establishing the probe's sensitivity.
-2. Add an English-paraphrase baseline (e.g., round-trip translation through a third language, or an LLM-based paraphrase) to compare against the Arabic condition.
-3. Test at least one existing detection method (Min-K% Prob, guided prompts) on the Arabic-translated training data to substantiate the claim that "standard detection tools fail."
-4. Include a control condition where the added Arabic data is unrelated to the benchmark (e.g., Arabic Wikipedia sentences) to separate contamination effects from general data quantity effects.
-5. Report results with variance estimates (e.g., 3 random seeds per condition).
-6. Consider framing the contribution more modestly: rather than claiming to study "real-world contamination," position the work as "investigating whether fine-tuning on translated test data can evade surface-form detection methods" — this is what the experiment actually supports.
+1. **Correct the Section 4.2 contradiction** by removing the claim that evaluation results (Table 2) show "approximately equal performance" and reframing the masking argument around TS-Guessing only — but then honestly acknowledge that the TS-Guessing data are noisy and do not cleanly support the narrative.
+
+2. **Add a single experiment applying an existing detection method** (e.g., Min-K% Prob) on the Arabic-translated items. This would directly demonstrate whether current methods fail on translated data, which is the core premise of the paper.
+
+3. **Retrain with a cleaner baseline** — either (a) remove the English test set from the p=0 condition and train only on unrelated data, or (b) include a no-fine-tuning control.
+
+4. **Report variance** across at least 3 independent fine-tuning runs with different random seeds to assess stability of results.
 
 ## Score and Decision
 
-**Calibration anchors:**
+**Calibration Anchors (all rounds):**
 
-| Anchor path | Avg Score | Comparison |
-|---|---|---|
-| `GFDSGlEks2.md` (Post-training Contamination) | 4.67 | More realistic pre-training contamination setup; cleaner experiments and error bars; rejected. Current paper has a more novel question but weaker experimental design. |
-| `x4vwdjckZ6.md` (SLM Contamination Sensitivity) | 4.00 | Tests 23 models across diverse transformations; thorough but less novel question; rejected. Current paper matches in thoroughness but has fewer models and more experimental gaps. |
-| `jCkmwIN9kz.md` (Fighting Fire with Fire) | 3.33 | Proposes loss-trajectory-based detection with >95% accuracy but uses similar fine-tuning-on-test-set paradigm; rejected. Current paper has a more novel question but weaker evidence for its central claim. |
-| `YlpaaYxx4t.md` (CoDeC) | 5.33 | Clean, well-executed contamination detection method with strong results across many models; accepted as poster. Current paper has more novelty in the question but far weaker execution. |
-| `WERLf030OU.md` (LogProber) | 3.00 | Limited experiments, few baselines; rejected. Current paper has broader experiments and a more novel question. |
-| `29ETLxTQAN.md` (CapBencher) | 5.50 | Strong theoretical foundation with theorems and broad experiments, though rejected due to practical concerns. Current paper lacks comparable theoretical depth. |
-| `KryACG4LGT.md` (Learning without Memorizing) | 2.00 | Poorly structured with unclear contributions; rejected. Current paper is substantially better organized and more focused. |
+| Path | Score | Round | Comparison |
+|------|-------|-------|-----------|
+| /home/wg25r/review_agent/human_reviews_2026/jCkmwIN9kz.md | 3.33 | R1 | "Fighting Fire with Fire" — same "SFT on test data" paradigm, validates its method → slightly stronger |
+| /home/wg25r/review_agent/human_reviews_2026/Ubi631nNbI.md | 3.00 | R1 | "Variant Contamination" — similar gap between problem framing and experiment → comparable |
+| /home/wg25r/review_agent/human_reviews_2026/WERLf030OU.md | 3.00 | R1 | LogProber — proposes detection method with limited experiments → comparable |
+| /home/wg25r/review_agent/human_reviews_2026/GFDSGlEks2.md | 4.67 | R1 | "Impact of Post-training" — cleaner design, pretraining contamination → stronger |
+| /home/wg25r/review_agent/human_reviews_2026/x4vwdjckZ6.md | 4.00 | R1/R2 | "Sensitivity of SLMs" — broader systematic study → stronger |
+| /home/wg25r/review_agent/human_reviews_2026/A5cvMnKUpJ.md | 4.00 | R2 | "Rote Learners" — validated detection framework → stronger |
+| /home/wg25r/review_agent/human_reviews_2026/zHjNmKiJCS.md | 2.00 | R1 | Translation errors in multilingual eval — weak anchor, less relevant |
+| /home/wg25r/review_agent/human_reviews_2026/fkyebMiRHv.md | 2.67 | R2 | SLMs for low-resource MT — weak anchor, less relevant |
 
-The paper identifies a genuine and timely gap in contamination research and presents some interesting empirical patterns (non-monotonic QA effects, MMLU gains). However, the experimental design has fundamental limitations — it models deliberate fine-tuning on test data rather than realistic pre-training contamination, the TS-Guessing results contradict the memorization narrative, key baselines are missing, and central claims about "evading standard detection tools" are asserted without empirical testing. The question is interesting enough to motivate follow-up work, but the current evidence does not support the paper's broader conclusions about real-world contamination dynamics.
+**Round 1 bracket:** 2.5–4.5  
+**Round 2 narrowing:** The paper sits at the lower end of this band. Compared to the 3.0–3.33 anchors ("Fighting Fire with Fire," "Variant Contamination," LogProber), this paper has a verifiable textual contradiction in Section 4.2, a methodologically flawed baseline, and an unvalidated proposed framework — issues the comparable papers do not have. However, it has a more novel research question (translation masking) and broader model coverage. Score: 3.0.
 
-**Score: 3.5**
-
-**Decision: Reject**
-
-MY FINAL SCORE: <score>3.5</score>
+MY FINAL SCORE: <score>3.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

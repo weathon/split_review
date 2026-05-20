@@ -1,81 +1,93 @@
-Now I have everything I need. Let me synthesize the final review.
+Now I have all the information I need to write the final consolidated review. Let me produce it.
 
 ## Summary
-This paper introduces TNT, a two-stage training framework for deep memory modules (e.g., Titans) that decouples training efficiency from inference performance. Stage 1 uses a hierarchical memory architecture — a global memory operating on large chunks for efficiency plus parallel local memories with periodic state resets that enable context parallelism. Stage 2 is a lightweight fine-tuning that adapts the local memories to smaller chunk sizes for better inference. On 150M-parameter models, TNT achieves up to 17.37× speedup in time-to-quality and improves perplexity over the strongest Titans baseline (23.09 vs. 25.07) while also improving commonsense reasoning accuracy.
+
+This paper introduces TNT, a two-stage training framework for deep memory modules (e.g., Titans, TTT) — recurrent architectures with non-linear test-time memorization. The key idea is to break the sequential dependency that prevents parallel training of these models by (1) using a hierarchical memory (global + local) where local memories periodically reset to a learned initial state, enabling context parallelism, and (2) a two-stage schedule: efficiency-focused pre-training with large chunks, then a brief fine-tuning with smaller chunks. Evaluated on 150M-parameter Titans models, TNT achieves up to 17.37× training speedup while improving perplexity (23.13 vs. 25.07) and commonsense reasoning accuracy (41.0% vs. 39.0%) over the best Titans baseline.
 
 ## Strengths
-- **Novel periodic reset mechanism enabling context parallelism for non-linear RNNs**: The key technical innovation — resetting local memory states to a learned initial state at shard boundaries (Eq. 6) — breaks sequential dependencies that previously prevented parallelization of non-linear recurrences. This is a genuinely clever solution to a real bottleneck. The ablation (Table 3) confirms the hierarchical design is critical: removing global memory degrades PPL from 21.04 to 25.60.
 
-- **Well-designed ablation study cleanly isolating each contribution**: Table 3 separately ablates the local memory count, global memory, Q-K projection, and Stage 2 fine-tuning, demonstrating that each component contributes positively. This makes the paper's claims about individual design choices well-supported.
+1. **Periodic reset mechanism enables context parallelism for non-linear deep memories.** The local memory reset to a learned initial state \(W_{\text{init}}\) at segment boundaries (Eq. 6) breaks sequential dependencies across chunks, allowing independent shards to be processed in parallel. Figure 4 shows TNT achieves near-constant runtime (~400–550ms) as sequence length grows from 2K to 32K, while Titans' runtime increases from ~400ms to ~4000ms. This directly addresses a long-standing challenge in parallelizing non-linear recurrences that prior work (Zhang et al., 2025; Guo et al., 2025) either mixed with attention or limited to linear memories.
 
-- **Practical speedup results with transparent reporting**: Table 1 reports training time to reach a fixed target loss for all Titans chunk sizes and all TNT configurations, not just the best one. Even at equal chunk sizes (Cₗ=C=8), TNT is 7.68× faster than baseline Titans, showing the speedup is not solely from larger chunks but from the parallelism enabled by the architecture.
+2. **Q-K Projection empirically resolves the compression–retrieval domain mismatch.** The ablation in Table 3 shows a clear penalty when Q-K projection is removed: perplexity increases from 21.04 to 22.01 and commonsense accuracy drops from 40.6% to 36.4%. This confirms that projecting queries onto the subspace of previously observed keys mitigates the input-space mismatch between memory training (keys) and inference (queries).
 
-- **Q-K Projection is a principled fix for the compression-retrieval mismatch**: The observation that memory is compressed using keys but retrieved using queries (hence a domain mismatch) is insightful, and the running-sum projection matrix (Eq. 7) is an elegant, constant-memory solution. Table 3 confirms its removal hurts PPL (22.01 → 21.04) and accuracy significantly (36.4% → 40.6%).
+3. **Two-stage training demonstrably decouples pre-training speed from inference resolution.** Stage 1 with large chunks achieves the speedup (up to 17.37× in Table 1), and Stage 2 fine-tuning with smaller chunks improves perplexity from 23.13 to 23.09 at only 5% additional compute (Section 5.3, Table 4). This directly resolves the chunksize mismatch identified in Challenge 3 (Figure 2).
+
+4. **Clean ablation study validates each design component.** Table 3 systematically removes global memory, Q-K projection, and Stage 2 fine-tuning, with each removal degrading performance (global memory removal: 25.60 PPL—worse than the Titans baseline; Q-K removal: 22.01 PPL). This provides causal evidence for each proposed mechanism.
+
+5. **Model quality improves beyond the best Titans baseline while also being faster.** In Table 2, TNT Stage 1 achieves average perplexity 23.13 vs. Titans' best 25.07 (chunk size 8) and higher commonsense reasoning accuracy (41.0% vs. 39.0%). The speedup is not at the expense of quality.
 
 ## Weaknesses
 
 ### Major
-- **Abstract contains a factual inaccuracy about the evaluation scope**: The abstract states "Evaluated on Titans and TTT models," but TNT was only instantiated and evaluated on Titans. TTT appears solely as a baseline in Table 2 (PPL 27.62). There are no experiments showing TNT applied to the TTT architecture. This misrepresentation must be corrected.
 
-- **Generality claim is unsupported by the experimental evidence**: The paper asserts TNT is "model-agnostic" and "a general training paradigm applicable to any deep memory module" (line 43), but all experiments use only one architecture (Titans) at one scale (150M). Without at least one additional deep memory architecture (e.g., TTT, Atlas) or a larger scale (e.g., 1B+), the claim of generality is unsubstantiated. The contribution is better described as an architecture + training method validated on Titans, which is still valuable.
+1. **The claimed "training paradigm" is inseparably tied to architectural changes, and the framing is overclaimed.** The paper repeatedly states TNT is "a general training paradigm applicable to any deep memory module rather than a specific architecture" (Section 1). Yet the contribution list includes "a novel hierarchical memory architecture" (Section 4.1), and the ablation in Table 3 confirms that the architectural components are essential: removing the global memory causes perplexity to jump to 25.60, *worse* than the original Titans baseline (23.53). The speedup and quality gains reported in Tables 1–2 compare TNT's global+local architecture against Titans' single-memory architecture, so the comparison conflates architecture and training method. A within-architecture comparison (TNT's hierarchical architecture trained without the two-stage schedule) is missing and would be needed to isolate what the training paradigm itself contributes. *This does not invalidate the paper's contributions, but it means the contribution is more accurately described as an architecture+training co-design rather than a general training paradigm.*
 
-- **Parameter counts are not clearly controlled across configurations**: All models are labeled "150M params" (Table 2), but TNT with 4 local memory modules (N=4) almost certainly has more fast-weight parameters than a baseline Titans model with a single memory. The paper does not explain how the parameter budget is maintained — whether other dimensions (embedding size, number of layers) were reduced to compensate. If TNT uses more parameters, the accuracy comparison is unfair and must be clarified.
+2. **No evaluation on tasks that require long-range dependencies, despite long-context efficiency being the central motivation.** The paper opens with "The demand for modeling long sequences" and consistently motivates TNT through the need to "apply these models to truly long sequences" (Section 1). However, the quality evaluation (Table 2) uses only standard perplexity datasets (C4, FineWeb, PG19) and short-context reasoning benchmarks. PG19 contains long documents, but perplexity is not reported as a function of position or sequence length, so it is impossible to tell whether the model actually uses long-range information. The hierarchical design deliberately resets local memory every 2048/4096 tokens, discarding fine-grained cross-segment information. Without demonstrating that quality holds on tasks requiring long-context reasoning (e.g., multi-hop QA over long documents, in-context retrieval at >16K), the practical significance of the runtime gains for long sequences remains unverified.
+
+3. **The claim of generality is unsubstantiated.** The paper states TNT is "a general training paradigm applicable to any deep memory module" (Section 1) and the abstract says "Evaluated on Titans and TTT models." However, TNT is only ever applied to Titans. TTT appears only as a baseline trained with its original method (Table 2, PPL 27.62), not as a TNT-instantiated model. Other deep memory modules (Atlas, etc.) are mentioned but never tested. The hierarchical memory design (global vs. local, periodic resets) may not transfer straightforwardly to architectures with different recurrence structures. The generality claim is a major selling point of the paper and needs at least one additional instantiation to be credible, or the claim should be scaled back.
 
 ### Minor
-- **Stage 2 improvement is modest and statistical significance is not discussed**: Perplexity improves from 23.13 (Stage 1) to 23.09 (Stage 2) — a 0.04 gain. While the accuracy improvement (40.6% → 40.9%) is more meaningful, the paper does not discuss whether these gains are statistically significant or compute confidence intervals.
 
-- **Headline "17× speedup" vs. most- vs. reasonably-configured baselines**: The 17.37× speedup is reported against Titans with C=8, the slowest baseline. The paper transparently provides all configurations in Table 1, but the headline number is maximal. A more meaningful comparison: at Cₗ=C=64, TNT is ~3.7× faster than Titans, not 17×. The framing is not deceptive but is worth noting.
+1. **Stage 2 fine-tuning shows very marginal improvement.** The best Stage 1 perplexity is 23.13 and Stage 2 improves it to 23.09 — a 0.04 PPL reduction at 5% additional compute. The paper frames this as important, but the gain is negligible. The authors should either show a more substantial benefit (e.g., on the \(C'_L=1\) configuration for autoregressive decoding) or temper the claim about Stage 2's importance.
 
-- **Sensitivity to the reset period S_L is not explored**: The paper uses S_L=2048 or 4096 but does not ablate this hyperparameter, which directly governs the parallelism-throughput-accuracy tradeoff. The paper would benefit from showing how varying S_L affects both speed and quality.
+2. **No sensitivity analysis for the local window size \(S_L\).** The paper uses \(S_L=2048\) or \(4096\) throughout. This hyperparameter controls how often local memory resets (and thus the degree of parallelism vs. context preservation). An ablation varying \(S_L\) would help readers understand the trade-off.
+
+3. **Theoretical justification for Q-K Projection is thin.** The paper motivates it as projecting queries onto the subspace of past keys, but does not analyze why a linear projection should suffice when keys may lie on a non-linear manifold (the paper notes keys are often L2-normalized). The ablation confirms it works empirically, so this is not a fatal flaw, but the framing as a "principled solution" (Section 4.1.2) overstates what is essentially a heuristic validated only by ablation.
 
 ### Trivial
-- None that survive filtering.
+
+None.
 
 ## Nice-to-Haves
-- FLOPs utilization numbers (MFU) would strengthen Challenge 1's motivation beyond qualitative claims.
-- Convergence curves showing loss vs. wall-clock time would visually reinforce the time-to-quality advantage.
-- Computational cost analysis of the Q-K projection's d×d running-sum matrix (could be expensive at scale).
+
+- **Confidence intervals or multiple seeds.** Standard practice in large-scale LM training is single-run evaluation, so this is not a flaw, but reporting variance would strengthen the claims, especially for the small commonsense accuracy differences (e.g., 41.0% vs. 39.7%).
+- **Position-wise perplexity on PG19** to demonstrate that long-range dependency capture is preserved despite the local memory reset mechanism.
 
 ## Removed Points
-Points from the reviews that were removed or weakened after cross-checking against the paper:
 
-- **"Contribution conflates architecture and training paradigm"** — The paper is transparent about the architectural changes it introduces; many training methods in deep learning involve architectural modifications (dropout, batch norm, etc.). The critic's distinction is semantic and the paper does not hide what it does. However, the related point about overclaimed generality is preserved above.
-- **"FlashAttention comparison is not apples-to-apples"** — The paper itself acknowledges it lacks custom kernels and explicitly states this as a limitation (line 241). The comparison is presented transparently as wall-clock time.
-- **"TNT does not match SOTA Gated Transformer"** — The paper explicitly acknowledges this (line 245: "While TNT does not fully match the perplexity of the state-of-the-art Gated Transformer...").
-- **"Challenge 2 not empirically demonstrated"** — Table 3 directly validates this via the Q-K projection ablation.
-- **Various formatting/presentation nitpicks, missing appendix content, typo claims** — These are parser artifacts, not author errors.
-- **"Missing related works"** — Cannot confirm without external sources.
+These points were raised by reviewers but excluded or downgraded from the main weaknesses after verification against the paper:
+
+1. *"The speedup comparison varies (17× vs Titans C=8, 3.2× vs C=128)."* — Removed because the paper explicitly cites the comparison as "up to 17.37×" against the "most accurate baseline configuration" (Titans C=8), which is standard reporting practice. The paper does not claim uniform 17× against all configurations.
+
+2. *"Missing confidence intervals."* — Moved to Nice-to-Haves. Single-run large-scale LM training is standard in this community; the absence is not a flaw but would strengthen the paper if included.
+
+3. *"Q-K Projection may not work for normalized keys."* — Demoted to Minor. The paper acknowledges that keys are often normalized and notes the simplification this enables (Section 4.1.2: "denominator... can simplify"). The ablation confirms it works. The reviewer's concern is speculative.
+
+4. *"Parameter budget not controlled between global and local memories."* — Removed. The paper states all models are 150M parameters (Section 5.1). Without evidence that parameter allocation is unfair, this is speculation.
+
+5. *"Strength: framework is model-agnostic."* — Removed from strengths because it conflicts with verified Weakness #3 (generality unsubstantiated). The paper's claim of model-agnosticism is not backed by experiments beyond Titans.
+
+6. *"Missing comparison to concurrent work (Zhang et al., 2025; Guo et al., 2025)."* — Removed. The paper discusses these works in Section 1 ("Recent work attempts to mitigate this issue...") and positions TNT relative to them conceptually. Quantitative comparison would strengthen the paper but is not standard for concurrent work.
 
 ## Novel Insights
-The most interesting insight to emerge from the reviews is that the periodic reset mechanism (Eq. 6) can be viewed as a form of truncated BPTT applied at the architecture level rather than the optimization level. Where standard chunkwise training approximates gradients within a chunk, TNT's reset mechanism actually *enforces* independence between shards by re-initializing the state, making parallelism exact rather than approximate. This distinction — exact reset vs. gradient approximation — is a subtle but important conceptual difference from prior chunkwise methods, and it explains why TNT can achieve near-linear scaling while maintaining (and even improving) quality.
+
+None beyond the paper's own contributions. The reviewer reviews surface a genuine tension in how to classify TNT (architecture vs. training paradigm) and identify a clear gap between the paper's long-context motivation and its evaluation suite, but these are gaps in the paper's framing and evaluation rather than novel observations about the method.
 
 ## Suggestions
-1. **Correct the abstract**: Replace "Evaluated on Titans and TTT models" with "Evaluated on Titans" or "Evaluated against Titans and TTT baselines." This is the single most actionable and necessary fix.
 
-2. **Tone down the generality claim**: Reframe TNT as an effective method validated on Titans rather than a universal paradigm. If the authors want to claim generality, add at least one experiment on another deep memory architecture (TTT or Atlas) at the same 150M scale — this does not require massive compute.
+1. **Add a within-architecture ablation.** Train the TNT hierarchical architecture using standard chunkwise training (no periodic resets, no two-stage schedule) and compare wall-clock time to quality. This would isolate the training paradigm's contribution from the architecture's.
 
-3. **Clarify parameter accounting**: Explain how the 150M parameter budget is split between global memory, N local memories, and the rest of the network across all configurations. If TNT uses more total parameters, report this transparently and discuss fairness.
+2. **Add long-context quality evaluation.** Evaluate on at least one benchmark that requires fine-grained long-range dependencies (e.g., BABILong, RULER, or language modeling perplexity as a function of context position on PG19). Without this, the paper's central motivation is unvalidated.
 
-4. **Add S_L ablation**: Even a simple table showing PPL vs. speedup for S_L ∈ {1024, 2048, 4096, 8192} would address reviewer concerns about this critical hyperparameter.
+3. **Demonstrate generality on at least one other architecture** (e.g., TTT or a simple deep memory RNN), or moderate the claim from "any deep memory module" to "applicable to architectures like Titans."
 
-5. **Report statistical significance or confidence intervals** for the Stage 2 improvement, or reframe the claim to focus on the more substantial reasoning accuracy gain.
+4. **Provide a sensitivity analysis of the local window size \(S_L\)** to show how the parallelism/quality trade-off behaves.
+
+5. **Report Stage 2 results with per-step curves** rather than just the endpoint, to clarify whether the small improvement (0.04 PPL) is meaningful or near saturation.
 
 ## Score and Decision
 
-**Calibration Anchors** (all retrieved in batch):
+| Anchor | Path | Avg Score | Round | Comparison |
+|--------|------|-----------|-------|------------|
+| MoM: Mixture-of-Memories | 3PdOq8Rgue.md | 5.50 | 1 (middle) | More comprehensive evaluation at larger scales (380M, 1.3B); TNT has more novel method but less evaluation breadth |
+| Smooth Reading | GoaWSQWtOE.md | 5.00 | 1 (middle) | Comparable evaluation thoroughness and clarity; TNT's training efficiency contribution is more fundamental |
+| Memory Caching | R3EJ2IjgOI.md | 4.67 | 1 (middle) | Simpler method with computational complexity questions; TNT has cleaner method and stronger results |
+| Hierarchical Memories Pretraining | XOu5z16cbY.md | 4.80 | 2 | Larger-scale experiments (trillion tokens) but more incremental method; TNT is more novel but smaller scale |
+| Tuning Burn-in Phase RNN | jwkdKpioHJ.md | 5.33 | 2 | Theoretical+empirical on a related problem; TNT has more practical impact but lacks theoretical analysis |
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| ParaRNN (mX8b64iUaa.md) | 6.50 (Oral) | Much stronger: custom CUDA kernels, 7B-scale experiments, 2 architectures tested. TNT is narrower. |
-| MesaNet (xa3OnTb6c3.md) | 6.50 (Poster) | Stronger: experiments up to 1B scale, thorough comparisons. TNT has more modest scope. |
-| Smooth Reading (GoaWSQWtOE.md) | 5.00 (Poster) | Comparable quality: clear practical contribution, solid evaluation, but narrower scope. |
-| Hierarchical Memories (XOu5z16cbY.md) | 4.80 (Poster) | Comparable: well-executed but limited novelty concerns. TNT has stronger innovation but narrower validation. |
-| Memora (YgvIjdzR4C.md) | 4.50 (Withdrawn) | Slightly weaker: novelty concerns and missing efficiency benchmarks. TNT has clearer innovations. |
-| Asymmetric Training (so5IbHTetE.md) | 3.33 (Reject) | Weaker: overclaimed paradigm framing without sufficient evidence. Similar framing issue to TNT but without compensating strong results. |
-| ADVMEM (vanVyHsl30.md) | 3.00 (Reject) | Weaker: limited novelty, narrow evaluation. TNT has stronger technical contributions. |
-| Size Doesn't Matter (wAb8vtEZfM.md) | 1.20 (Withdrawn) | Much weaker: incoherent presentation, no clear contribution. |
+Round-1 bracket: between 3.5 and 7.5 → narrowed by round-2 to ~4.5–5.5.
 
-Relative to these anchors, TNT's core technical contributions (periodic reset, hierarchical memory, Q-K projection) are genuinely novel and well-validated by the ablation study. However, the paper's claims significantly outpace its evidence (unsupported generality, misstated evaluation scope, uncontrolled parameter counts), which prevents it from reaching the level of the stronger accepted papers (~6.0+). It sits below ParaRNN and MesaNet (which have broader validation at scale) but above the rejected papers (which lack equivalent technical novelty). It is most comparable to the mid-5-range accepted papers.
+The paper's core idea is novel and the speedup results are impressive. However, three significant gaps (architecture/training conflation, missing long-context quality evaluation, unsubstantiated generality claim) prevent it from reaching the 5.5+ tier. It is comparable to Smooth Reading (5.00, accepted) in overall quality — a methodologically sound paper with clear contributions but evaluation gaps that should be addressed. The paper is above the rejected Memory Caching paper (4.67) because its method is more novel and the evidence of its central claim (training speedup) is stronger.
 
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+**MY FINAL SCORE: <score>5.0</score>**
+**MY FINAL DECISION: <decision>Accept</decision>**

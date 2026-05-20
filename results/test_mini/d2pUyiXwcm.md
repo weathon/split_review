@@ -1,18 +1,18 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have enough calibration data. Let me write the consolidated review.
 
 ## Summary
 
-This paper introduces SCaSML (Simulation-Calibrated Scientific Machine Learning), a framework that improves pre-trained surrogate PDE solvers at inference time via defect correction. The key idea is to derive a "Structural-preserving Law of Defect" — an error PDE that retains the semi-linear structure of the original problem — and solve it using Multilevel Picard (MLP) Monte Carlo simulation to obtain a correction. The paper proves a product-form error bound (Theorem 2.5) and demonstrates 20–80% error reduction on high-dimensional PDEs (up to 160D) for PINN and GP surrogates.
+The paper proposes SCaSML (Simulation-Calibrated Scientific Machine Learning), a framework that corrects pre-trained surrogate PDE solvers (PINNs, GPs) at inference time. The key idea is to derive a "Structural-preserving Law of Defect"—a new semi-linear PDE that exactly describes the error of the surrogate—and solve it using Multilevel Picard (MLP) Monte Carlo simulation. The paper provides theoretical convergence guarantees (Theorem 2.5, Corollary 2.6) showing the final error is the product of surrogate and simulation errors, yielding a faster combined rate. Experiments on four PDE families up to 160 dimensions show consistent error reduction.
 
 ## Strengths
 
-- **Novel algorithmic framework with practical merit**: SCaSML is the first framework that systematically combines a pre-trained surrogate PDE solver with MLP-based Monte Carlo simulation to correct the surrogate's error at inference time without retraining. The interpretation of the surrogate as a control variate for the simulation is clean and well-motivated. This addresses a real need: improving the reliability of learned PDE solvers without the cost of retraining a better global model.
+1. **Clean, principled derivation of the defect PDE**: Fact 2.3 shows that subtracting the surrogate's residual from the original semi-linear PDE yields a new semi-linear PDE for the defect ũ = u − û. This structural preservation is critical because it allows the defect to be solved with established stochastic solvers (MLP). The contrast with classical finite-element defect correction (which requires mesh hierarchies and asymptotic error expansions unavailable for neural networks) is clearly articulated in Section 2.2.
 
-- **Consistent and substantial empirical error reduction**: Across four challenging PDE families — Linear Convection-Diffusion, Viscous Burgers, Hamilton-Jacobi-Bellman (LQG), and Diffusion-Reaction — SCaSML reduces relative L² error by 20–80% compared to the base surrogate (Table 1). The results hold for both PINN and GP surrogates, and violin plots (Figure 3a) show systematic tightening of the error distribution. Statistical significance (p ≪ 0.001) is reported. These experiments extend to 160 dimensions, which is non-trivial.
+2. **Theoretically motivated product-form error bound**: Theorem 2.5 and Corollary 2.6 provide a formal argument that SCaSML's global L² error is bounded by the product of the MLP simulation error and the surrogate error, yielding an improved scaling rate O(m^{−γ−1/2}) when the surrogate achieves O(m^{−γ}) and m inference samples are used. This goes beyond the "just combine two methods" heuristic and gives a concrete prediction about how accuracy improves with total budget.
 
-- **Inference-time scaling is demonstrated**: Figure 3b shows that SCaSML's accuracy improves monotonically with additional Monte Carlo samples, and Figure 4 provides empirical evidence of the claimed improved convergence rate (steeper log-log slope than the surrogate alone). The "elastic compute" paradigm — trading inference budget for accuracy on demand — is a practically useful feature.
+3. **Consistent empirical improvement across challenging high-dimensional benchmarks**: Table 1 reports results on four PDE families (linear convection-diffusion, viscous Burgers, HJB/LQG, diffusion-reaction) in dimensions up to 160, with two surrogate types (PINN and GP). SCaSML reduces relative L² error across the board—e.g., 47–57% for LCD, up to ~66% for VB-PINN, and 43–58% for VB-GP. The method improves both PINN and GP surrogates, demonstrating versatility.
 
-- **Theoretical error bound with practical implications**: Theorem 2.5's product-form bound, if correct, implies that the cost of correction decreases as the surrogate improves (Corollary E.9). This provides principled guidance for budget allocation between training and inference. The theoretical ambition is a strength even if the main-text sketch is compressed.
+4. **Elastic compute paradigm**: Remark 2.2 and Figure 3b establish that SCaSML allows trading inference-time compute for accuracy without retraining. This is a practical advantage over methods requiring full retraining to improve accuracy, and it parallels the "inference-time scaling" concept from LLMs.
 
 ## Weaknesses
 
@@ -20,55 +20,85 @@ This paper introduces SCaSML (Simulation-Calibrated Scientific Machine Learning)
 None.
 
 ### Major
-- **The main-text proof sketch of Theorem 2.5 is too vague to verify the claimed product form.** The theorem states that the SCaSML L² error is bounded by *E(M,N)·(C_F e(ũ))*, where *E(M,N)* is the MLP solver's error "independent of the surrogate." The proof sketch in Section 2.4 argues that the MLP solver's complexity depends on the Lipschitz constant of the modified nonlinearity *F̃* and the magnitude of the source terms. For the defect PDE, the solution magnitude is *O(e(ũ))* and the residual *ε* is *O(e(ũ))*. Standard MLP error bounds scale with the solution magnitude, which would make the absolute error of the MLP solver on the defect PDE itself *O(e(ũ))·(solver factor)* — yielding a total SCaSML error that is *O(e(ũ)²·(solver factor))*, not the claimed product with an *independent* *E(M,N)*. The proof is deferred to the appendix, but the main text does not provide enough reasoning to resolve this tension. This makes the theoretical contribution difficult to assess from the paper as presented.
+
+1. **Assumption 2.4 requires stronger regularity than stated**: The assumption bounds the PDE residual sup|ε| ≤ C_{F,1} e(û) and the W^{1,∞} error. However, the residual ε = ∂û/∂t + ℒû + F(û, σ^T∇û) involves the second-order differential operator ℒ (which contains the Laplacian). Bounding sup|ε| by a measure of the solution error e(û) requires controlling second derivatives of the error, but the assumption only guarantees W^{1,∞} control of ũ (part 2). This gap between the needed regularity (W^{2,∞} or equivalent control of ℒ acting on the error) and the assumed regularity is not addressed. While the assumption is not "implausible" (it would be satisfied if the error is smooth enough, e.g., for surrogates with well-behaved second derivatives), the paper would benefit from either strengthening part 2 of the assumption or providing a justification for why the residual can be bounded with only W^{1,∞} control. Without clarification, the theoretical acceleration claim in Corollary 2.6 rests on an incompletely specified condition.
 
 ### Minor
-- **Novelty is overstated in places.** The "Structural-preserving Law of Defect" (Fact 2.3) is a direct algebraic rearrangement: subtract the surrogate's PDE residual from the original PDE. While it is useful to note that semi-linearity is preserved, claiming this is "the first derivation that preserves the semi-linear structure" (Section 1) inflates a straightforward algebraic observation. The genuine novelty lies in the algorithmic pipeline (use MLP to solve the error PDE), not in the derivation itself. Similarly, the claim of being "the first inference-time scaling algorithm that enhances the learned surrogate solution during inference" sweeps past residual correction and iterative refinement methods that exist in SciML (Section 4).
 
-- **The secondary claim about outperforming pure simulation is weakly supported.** The paper states that the naive MLP baseline is included "for reference, to show that the hybrid approach succeeds where pure simulation often fails." But this MLP baseline uses only 2 levels with M=10 base samples, and in several experiments the clipping thresholds differ dramatically between MLP and SCaSML (e.g., 10 vs. 0.1 for HJB, 10 vs. 0.01 for DR). While the paper justifies these choices (the defect has smaller magnitude), the comparison is not on equal footing and does not convincingly support the "pure simulation" narrative. The paper's main empirical claim (SCaSML improves over the surrogate) is solid; this secondary claim is not.
+2. **Overstated novelty**: The paper uses phrases like "the first physics-informed inference-time scaling framework" and "the first derivation that preserves the semi-linear structure." Defect correction for PDEs is a classical technique (Bank & Weiser, 1985; Stetter, 1978), which the paper does cite. The specific contribution—applying defect correction to learned surrogates with MLP simulation—is solid and useful but incremental. The "first" framing is unnecessary and risks misleading readers. The paper would be stronger by stating its contribution as "a new combination" or "a principled extension" rather than claiming priority.
 
-- **Computational cost of surrogate derivative evaluation is not accounted for.** Computing the residual *ε* at each simulated path point requires evaluating the PDE operator on the surrogate *û*, which involves derivatives that are expensive if *û* is a neural network (backpropagation at every simulation time step). The runtime comparisons in Table 1 include this cost implicitly, but there is no breakdown or discussion of how this cost scales with the surrogate architecture or dimension. A practitioner evaluating the method needs this information.
+3. **Discrepancy between headline error reduction claims and main-table numbers**: The abstract and conclusion state "reduces errors by 20–80%" and "up to 80%." However, in the main table (Table 1), the largest observed relative L² reduction is approximately 66% (VB-PINN 20d). The 80% figure is not supported by data in the main text. If this number comes from an appendix experiment, it should be referenced explicitly in the main text; otherwise, the headline should match what is reported in the main table.
+
+4. **Scaling plots do not fully account for total compute**: Figure 4 plots L² error vs. number of training collocation points (m) on log-log axes, comparing the GP surrogate alone against SCaSML. However, SCaSML uses both m training points AND additional inference-time simulation samples. The x-axis therefore does not reflect total compute for SCaSML. The steeper slope partly reflects the extra budget, not just superior efficiency. The paper notes that a fixed-budget comparison exists in Appendix G.7, but the main figure as presented is somewhat misleading without this context.
 
 ### Trivial
-- The warm-up scaling argument in Section 2.1 uses the same symbol *m* for both training points and inference-time Monte Carlo paths in a heuristic way. While this is standard for intuitive exposition, it could mislead readers unfamiliar with the two independent budgets.
 
-- The LLM inference-time scaling analogy (Introduction) is strained: it reduces to "spend more compute at inference to improve outputs," which describes many post-processing methods. This framing adds little to the technical contribution.
+5. Table 1 header has formatting artifacts ("SCA²SM¹"; the superscripts appear to be parser corruption of inline notation).
 
 ## Nice-to-Haves
-- An ablation varying surrogate quality systematically (e.g., shallower networks, fewer training steps) to test whether SCaSML's improvement degrades gracefully as predicted by the theory.
-- A cost breakdown isolating the surrogate derivative evaluation cost from the Monte Carlo path simulation cost.
-- A small 2D slice error map (mentioned in Appendix G.6) would help build intuition and should be in the main paper.
-- An iterative SCaSML experiment (correct, re-compute residual, correct again) to test whether single-step correction is sufficient or whether multi-step yields further gains.
+
+- A sensitivity study showing how SCaSML's correction cost scales with surrogate quality (e.g., training surrogates with varying accuracy and measuring the MLP cost needed to reach a target error).
+- Guidance for practitioners on how to split budget between surrogate training and inference-time simulation.
+- Discussion of the modified nonlinearity F̃'s Lipschitz constant: when the surrogate û is rough, F̃ may have large Lipschitz constants, potentially increasing MLP cost.
 
 ## Removed Points
-- **Criticism that the Structural-preserving Law of Defect is "not a derived PDE" but a "trivial algebraic identity."** The derivation is indeed algebraic, but the paper never claims it is anything else; the contribution is in recognizing that the preserved semi-linear structure enables MLP solvers. This is a valid algorithmic insight. The reviewer's language ("vastly overstates," "this is obvious") is overly dismissive of a useful observation.
-- **Claim that the naive MLP baseline "invalidates the paper's strongest comparative claim."** The paper explicitly states that the primary comparison is SR vs. SCaSML, and the MLP is "for reference." The strongest comparative claim (SCaSML improves over the surrogate) is well-supported by the evidence.
-- **Claim about missing related work references.** The reviewer mentions "local refinement methods, uncertainty quantification-guided iterative solves, and residual correction methods" without specific citations. This is unverifiable.
-- **Formatting and typo-related nitpicks.** These are parser artifacts.
-- **Criticism about the scaling argument conflating training and inference budgets.** The heuristic uses the same *m* for both, which is a standard simplification for an intuitive scaling argument. The rigorous treatment is in the appendix.
+
+These points are flagged to be removed; treat them with caution:
+
+- **"Assumption 2.4 is implausible"** (harsh critic): The critic claimed the residual-error relationship "does not hold in general" and is unverifiable. **Removed because** this is factually inaccurate for Lipschitz F and continuous linear operator ℒ—the residual IS bounded by the solution error under standard continuity arguments (|ε| ≤ ||A||·||ũ|| + L_F·||ũ||). The assumption is mathematically standard, even if the needed regularity level could be clarified.
+- **"Fixed-budget comparison missing / relegated to appendix"**: **Removed per hard rules** — the appendix is stripped by the parser; the paper explicitly states these comparisons exist in Appendix G.7.
+- **"Naive MLP is a strawman baseline"** (harsh critic): **Removed** — the MLP configuration (2 levels, M=10) is a standard default. The catastrophic failure on LQG (errors >500%) demonstrates a genuine benefit of SCaSML's hybrid approach, not a weak baseline choice.
+- **"Proof sketch too vague"**: **Removed per hard rules** — rigorous proofs are deferred to Appendices F and E, which are stripped by the parser.
+- **"LLM inference-time scaling comparison is inaccurate"**: **Removed** — the paper explicitly frames this as an analogy/inspiration, not a technical equivalence.
 
 ## Novel Insights
-The reviews do not surface any genuinely novel observation beyond what the paper itself contributes. The core insight — using defect correction to turn a surrogate's error into a new semi-linear PDE that can be solved by MLP at inference time — is the paper's own contribution and is well-summarized in the paper.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Strengthen the theoretical presentation**: Provide a concrete worked example or a clearer schematic in the main text showing how the product form *E(M,N)·(C_F e(ũ))* emerges without double-counting the solution magnitude. Even a sketch showing how the MLP error *E(M,N)* is defined (relative error vs. absolute error) would resolve the current ambiguity.
-2. **Re-frame the MLP baseline honestly**: Either present matched-budget results (from Appendix G.7) in the main paper, or remove the "pure simulation often fails" claim and simply state the MLP results are shown for completeness with the caveat that settings differ.
-3. **Tone down novelty language**: Replace "first derivation that preserves semi-linear structure" with something like "we observe that the error PDE inherits the semi-linear structure of the original problem, which is key for applying MLP solvers." The contribution stands on its own without the "first" framing.
-4. **Add a cost breakdown**: Include a brief analysis (even as a supplementary table) of how much time is spent on surrogate derivative evaluation vs. path simulation in the MLP correction step.
 
-## Score and Decision
+1. **Clarify Assumption 2.4**: Either strengthen part 2 to W^{2,∞} or explain why W^{1,∞} suffices to bound the residual (which involves second derivatives via ℒ). A short remark connecting the PDE operator's continuity to the needed regularity would resolve the concern.
 
-**Calibration anchors** (all from the human review corpus):
+2. **Correct the error reduction range**: Adjust the abstract and conclusion to match the maximum reduction reported in the main table (~66%), or if the 80% figure is from an appendix experiment, cite it explicitly in the main text.
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| **Multilevel Control Functional** (Ahdsg2nkNH) | 8.00 | Much cleaner theory + experiments. Our paper has a more complex story with vaguer main-text theory. Our paper is weaker. |
-| **Frozen-PINN** (3VdSuh3sie) | 7.00 | Strong empirical work with clearer novelty. Our paper has comparable experiments but less accessible theory and somewhat overclaimed novelty. Our paper is weaker. |
-| **Physics-informed learning under mixing** (IvLVPbeoRx) | 6.00 | Solid theory paper with one toy experiment. Our paper has richer experiments but less rigorous main-text theory. Comparable overall. |
-| **PDE-PFN** (z7ilspv4uH) | 5.50 | Rejected paper with strong empirical scope but conceptual framing issues. Our paper has a clearer problem framing and theoretical ambition. Slightly stronger. |
-| **Adaptive Correction for Conservation Laws** (2rLgh5ewD6) | 2.67 | Very weak paper with minimal contribution. Our paper is substantially stronger. |
+3. **Tone down "first" claims**: Replace "the first physics-informed inference-time scaling framework" with more precise language (e.g., "a novel framework that integrates defect correction with Monte Carlo simulation for inference-time refinement").
 
-The paper makes a genuine contribution — the SCaSML algorithm is well-motivated and the empirical results are solid. However, the main-text theoretical argument is too compressed to verify a nonstandard product-form bound, and the novelty claims need scaling back. The experiments are the strongest part, but the secondary claim about outperforming pure simulation is not properly supported. Relative to the anchors, this paper sits between the mid-range (5–6) papers: it has stronger experiments than the purely theoretical papers but has less theoretical clarity than the clean theory+experiment papers.
+4. **Make total-compute scaling clearer**: In Figure 4, add a second x-axis or annotation showing the total compute budget for SCaSML, or note explicitly that the x-axis reflects only training points and inference samples are additional.
 
-MY FINAL SCORE: 5.5
-MY FINAL DECISION: Reject
+---
+
+Now, for the calibration report and score.
+
+**Round 1 bracketing**: I queried three bands:
+- Weak (avg < 3.5): yielded scores 1.33–3.33 — papers with withdrawn/reject decisions, fundamental flaws.
+- Middle (3.5 < avg < 7.5): yielded scores 4.50–4.67 — hybrid ML-numerics papers.
+- Strong (avg > 7.5): yielded scores 8.00 — clean, impactful papers (e.g., Multilevel Control Functional).
+
+Initial bracket: this paper is clearly above the weak band (1.33–3.33) and below the strong band (7.5–8.0). Conservative bracket: [4.5, 7.0].
+
+**Round 2 narrowing**: I queried inside (4.5, 5.5) and (5.5, 6.5) for topically similar work:
+- Low-mid band (4.5–5.5) anchors: OrthoSolver (4.67), DGNet (5.00), PDE-PFN (5.50), Probabilistic DiffusionNet (5.00). These papers have moderate contributions but notable methodological gaps or narrow evaluations.
+- Mid band (5.5–6.5) anchors: Physics-informed learning under mixing (6.00), Fast Convergence of NGD for PINNs (6.00). These have solid theory and clear contributions but with some acknowledged limitations.
+
+Comparing: this paper has a cleaner mathematical derivation than the 4.67–5.00 papers, more extensive experiments (up to 160d vs. typically 1d–10d), and a formal theoretical result. However, it has stronger overclaiming issues and a less polished presentation of the total-compute comparison than the 6.0 papers. I place it between these bands, closer to 5.5.
+
+**Anchors examined**:
+
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| fdjGPp1KPR | 1.33 | 1 | Much weaker — withdrawn paper with fundamental issues |
+| RGmDtMs9w7 | 3.33 | 1 | Weaker — limited empirical validation |
+| TyxMbTd2V5 | 4.50 | 1 | Comparable methodology but narrower scope |
+| mJiPqOzc3O | 4.67 | 1 | Weaker evaluation and less formal theory |
+| 9OOmlDrEfn | 4.67 | 2 | Narrower scope (linear reduction only) |
+| EJ8HnNTEAv | 5.00 | 2 | Similar weakness in assumptions but less theory |
+| qO1cJBh5BX | 5.00 | 2 | Weaker — less empirical breadth |
+| z7ilspv4uH | 5.50 | 2 | Comparable — PDE-PFN has similar ambition/limitations |
+| IvLVPbeoRx | 6.00 | 2 | Stronger theory, cleaner presentation |
+| KWWfLgkySm | 6.00 | 2 | More rigorous theory, less overclaiming |
+| Ahdsg2nkNH | 8.00 | 1 | Clearly stronger — tighter theory and evaluation |
+
+**Final score**: 5.5. The paper has a genuine contribution (clean derivation + consistent empirical gains) but is held back by overstated novelty claims, an incomplete theoretical assumption, and a modest mismatch between headline and reported error reductions.
+
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

@@ -1,86 +1,101 @@
-Now I have all the information I need. Let me write the final review.
+Now I have comprehensive calibration data. Let me produce the final review.
 
 ## Summary
 
-This paper presents a framework for fine-tuning pre-trained flow-matching generative models to enforce PDE constraints and jointly infer latent physical parameters. The method uses weak-form PDE residuals as a reward signal, adjoint matching as the fine-tuning engine, and a novel joint evolution of state and parameters via a surrogate base flow for the latent variables. Experiments span four PDE systems (Darcy, linear elasticity, Helmholtz, Stokes) and a natural-image demonstration, showing reduced PDE residuals and plausible parameter recovery.
+This paper proposes a framework for post-training fine-tuning of flow-matching generative models to enforce parameter-dependent PDE constraints and jointly infer latent parameters. The core idea is to augment the generative process with a learnable latent parameter predictor φ, construct a surrogate base flow for the parameters, and use adjoint matching (a stochastic optimal control formulation) to steer the joint (state, parameter) distribution toward lower PDE residuals. The method is evaluated on four PDE systems (Darcy, elasticity, Helmholtz, Stokes) and a natural-image recoloring task.
 
 ## Strengths
 
-- **Novel methodological synthesis.** The combination of adjoint matching (Domingo-Enrich et al., 2025) with weak-form PDE residuals and joint state-parameter evolution is original. Framing physics-constrained fine-tuning as a stochastic optimal control problem with a learnable latent-parameter flow is a genuine contribution that goes beyond straightforward extensions of prior work. Evidence: Sections 3.1–3.3 define the weak residual, the joint evolution with surrogate base flow, and the adjoint-matching objective.
+1. **Joint evolution of state and latent parameters is a principled and novel mechanism for inverse problems.** The paper constructs a surrogate base flow for parameters via one-step estimates from a pre-trained inverse predictor, enabling joint sampling of solution-parameter pairs without paired training data (Section 3.2, Fig. 1). The effectiveness is concretely demonstrated in the Helmholtz experiment (Table 2): the joint AM model achieves the lowest weak residual (4.3×10⁰) and lowest MMD_x (0.06) among all methods—simultaneously best on both metrics. In Stokes (Fig. 5), the joint model reaches substantially lower MMD_α (0.07–0.13) compared to ablations (0.22–0.28), while residuals are comparable.
 
-- **Joint parameter inference without paired data.** The surrogate base flow (derived from the inverse predictor φ) enables joint generation of physically consistent solution-parameter pairs without requiring paired training data. This is a clean solution to a practical bottleneck in scientific inference. Evidence: Section 3.2 defines the mechanism; the Stokes experiment (Figure 5) shows the joint model reaches MMD_α ≈ 0.07–0.13, substantially lower than ablations at 0.22–0.28, demonstrating that the joint flow is necessary for accurate parameter recovery.
+2. **Computationally efficient fine-tuning.** On the noisy Darcy task, fine-tuning requires only 20 gradient steps and completes in under 15 minutes on a single NVIDIA L40S (Section 4.1). After fine-tuning, sampling proceeds at base-model cost with no inference-time adjustments. This is a practical advantage over training-time constraint methods and inference-time projection methods that introduce per-sample overhead.
 
-- **Scaled memoryless noise schedule.** The introduction of σ²(t) = (1−κ)2η_t as a family of theoretically valid schedules (Lemma 1 in Appendix D.4) is a genuine minor contribution that provides a practical stabilization knob for adjoint matching, which previously specified a unique schedule. This is grounded and the motivation (preventing blow-ups near t→0) is clearly stated.
-
-- **Good experimental breadth.** The method is tested on four PDE systems with different misspecification types (noise, BC misspecification, model mismatch, system misspecification), plus a natural-image transfer experiment. Results consistently show residual reduction. The Helmholtz results (Table 2) are particularly strong: the joint model achieves the lowest PDE residuals and lowest MMD_x simultaneously.
-
-- **Lightweight fine-tuning.** Fine-tuning requires only 20 gradient steps for Darcy and completes in under 15 minutes on a single GPU, after which sampling runs at base-model cost. This practical efficiency is well-documented (Section 4.1).
+3. **Comprehensive experimental scope with ablations.** The paper evaluates on four diverse PDE families (elliptic diffusion, elasticity, wave propagation, incompressible flow) spanning different types of model misspecification (observational noise, boundary condition mismatch, system misspecification). The Darcy ablation study (Fig. 3) provides practical guidance on how λ_x, λ_α, and λ_f trade off residual reduction against distributional fidelity.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **The central claim about preserving the "underlying learned distribution" is not directly measured.** The paper's experiment section (line 150) states that MMD_x and MMD_α are computed against the reference set D_ref — a synthetic, clean dataset of PDE-consistent solutions. However, the base model was trained on noisy observational data. Measuring MMD against clean synthetic targets tells us how close fine-tuned samples are to an idealized PDE-consistent manifold, but it does **not** directly measure distortion of the distribution the base model actually learned. The claim "without distorting the underlying learned distribution" (Abstract, line 20) would require comparing fine-tuned samples against the base model's own samples or the noisy training data. The Figure 3b caption adds further ambiguity: it calls this "fidelity to the base distribution (MMD_x)" while the experimental protocol says MMD is against the reference set. This measurement gap needs to be addressed — either by computing MMD against base model samples, or by clarifying that "underlying learned distribution" refers to the clean PDE-consistent distribution rather than the noisy training distribution.
+1. **Selective baseline inclusion undermines comparison fairness.** The ECI baseline (Cheng et al., 2024) is included only in the elasticity experiment (Table 1), where it performs very poorly (R_weak ≈ 1.01×10³), and is absent from Helmholtz, Stokes, and Darcy. Since ECI is an inference-time projection method that could reasonably be applied to any of these PDE tasks (especially where misspecification is present), its selective appearance only where it makes the proposed method look best erodes confidence in the comparison. Similarly, PBFM (Baldan et al., 2025) is a training-time method that is retrofitted to the fine-tuning setting by "augmenting with our pre-trained φ to enable residual evaluation" (Section 4, paragraph on comparisons), but the paper does not describe the adaptation in sufficient detail to assess whether the comparison is fair to PBFM's intended usage.
+
+2. **The role of the inverse predictor φ during joint fine-tuning is underspecified.** The experimental setup (Section 4) states that φ is pre-trained on base samples, then fine-tuning occurs. The ablation description says "Base AM+φ variant where φ continues to train" (Section 4, paragraph on comparisons), which implies that in the proposed method φ may be frozen. If φ is frozen, the surrogate base flow for α is fixed and may misalign with the evolving fine-tuned distribution; if φ is updated, the surrogate changes during training in ways not analyzed. The paper should explicitly state whether φ is frozen or updated and discuss the implications of either choice.
 
 ### Minor
 
-2. **Latent parameter α is not explicitly defined for the Helmholtz and Stokes experiments.** For Helmholtz (Section 4.4), the paper states the PDE includes a damping term tan δ and a wavenumber κ(x)², but never states which quantity α represents. For Stokes (Section 4.5), α could be the viscosity ν(x) or the forcing f — the paper doesn't say. While an expert reader can infer that α is the PDE parameter entering the differential operator (e.g., κ(x)² for Helmholtz, ν(x) for Stokes), the paper should state this explicitly to make the MMD_α values interpretable.
+3. **MMD values are reported without uncertainty estimates.** Residual metrics (R_weak, R_strong) are reported with standard deviations (from 256 samples), but MMD_x and MMD_α—used to support central claims about distributional fidelity—are given as point estimates without any measure of uncertainty (Tables 1, 2; Fig. 5). In the Stokes experiment, the claim that the joint model achieves "substantially lower parameter-distribution discrepancies" (MMD_α 0.07–0.13 vs. 0.22–0.28) would be stronger with confidence intervals or multiple independent runs, especially given the modest sample size.
 
-3. **Missing error bars or uncertainty estimates in several quantitative results.** The Darcy ablations (Figure 3) report point estimates from 256 samples with shared seeds, but no error bars. MMD is known to have high variance, and without confidence intervals it is difficult to assess whether observed differences are statistically meaningful. The elasticity results (Table 1) do include ±1 standard deviation for residuals but not for MMD values. Reporting variance across multiple independent sampling runs would strengthen the evaluation.
+4. **The running state cost f(α) is introduced without analysis of its effect on theoretical guarantees.** Section 3.3 adds a running state cost f(α) = λ_f ‖v_{t,α}^ft − v_{t,α}^reg‖² that penalizes deviations of the fine-tuned α-drift from the base estimate. The paper presents this as an engineering choice (line 136: "Empirically we find that this can be effectively encoded"), but the adjoint matching framework's consistency with the tilted target distribution (Domingo-Enrich et al., 2025) is established for f = 0. The paper does not discuss how adding f(α) affects the target distribution or whether the theoretical guarantees still apply.
 
-4. **Sparse inclusion of inference-time projection baselines.** The paper discusses inference-time projection methods (Utkarsh et al., 2025; Cheng et al., 2024 / ECI) in the related work, and FM+ECI appears as a baseline in the elasticity experiment (Table 1). However, these methods are not included in the Helmholtz, Stokes, or Darcy experiments. While the parameter-dependent soft-constraint setting differs from the hard-constraint setting these methods target, including them where feasible would strengthen the comparative evaluation.
+5. **Hyperparameter sensitivity analysis is limited.** The method introduces four hyperparameters (λ_x, λ_α, λ_f, κ) plus the noise schedule scaling. The ablation study (Fig. 3) covers only the Darcy task and only λ_x=λ_α and λ_f. Sensitivity to κ and to the number of test functions N_test is not explored. For practical adoption, guidance on setting these parameters beyond the Darcy case would be helpful.
+
+6. **The natural images experiment is a weak demonstration of the core claim.** The "physics" in Section 4.6 is a parametric color transformation, not a PDE, and the evaluation is purely qualitative (three images per condition with PickScore optimization). This section does not strengthen the paper's central thesis about physics-constrained generation and feels like scope extension that dilutes the focus.
 
 ### Trivial
 
-5. **Figure 3b caption is inconsistent with the experimental protocol.** The caption (line 168) says it reports "MMD_x between the fine-tuned samples and the base dataset," while the experiment section (line 150) states MMD is computed against the reference set D_ref. These should be reconciled.
-
-6. **The number of fine-tuning gradient steps is only reported for Darcy (20 steps).** Reporting this for all experiments would aid reproducibility and practical adoption.
+None.
 
 ## Nice-to-Haves
 
-- Analyze the effect of distribution shift on the pre-trained inverse predictor φ. As fine-tuning progresses, the state distribution changes; does the surrogate base flow (which depends on φ) become less accurate, and does this affect performance?
-- Compute an additional distributional metric (e.g., FID or MMD) between fine-tuned samples and base model samples to directly quantify distributional shift.
-- Include error bars / confidence intervals on all MMD values.
-- Wall-clock time comparison with baselines beyond the Darcy experiment.
+- The paper could add a baseline that fine-tunes only the state x with adjoint matching, infers α via frozen φ, and then computes residuals—this would isolate the benefit of the learned joint flow over α.
+- A brief discussion of limitations (e.g., reliance on pre-trained φ quality, differentiability of PDE residuals, grid resolution dependence) would improve completeness.
 
 ## Removed Points
 
-- **"PBFM is a pre-training method, using it as a post-training baseline is unfair."** The paper adapts PBFM by augmenting it with the pre-trained φ to enable residual evaluation in the same setting. This is a reasonable adaptation, not an unfair comparison. The critic's characterization overstates the problem.
-- **"Natural image experiment does not validate the physics-constraint claim."** The paper explicitly frames this as "cross-domain utility" (Section 4.6) and a demonstration of the parametric framework beyond PDEs. It does not claim this experiment validates the physics-constraint claim.
-- **"Missing error bars in Darcy"** — kept as minor point #3 above (with the uncertainty caveat properly stated).
-- **"Missing related works"** — removed per instructions, as I cannot verify this.
-- **"Missing appendix content / missing proofs"** — removed per instructions, as the parser strips appendices.
-- Formatting/style nitpicks removed per instructions.
+*These points are flagged to be removed from consideration but are noted for transparency:*
+
+- **Scaled memoryless noise schedule justification (Critical Issue #4 from Harsh Critic):** The critic argues the paper does not show the consistency proof carries through for the scaled variant. The paper states "see Lemma 1 in Appendix D.4" — the appendix was stripped by the parser and exists in the original submission. Per hard rules, criticisms about missing appendix proofs are removed.
+- **Missing conditional expectation details / integration scheme / number of ODE steps:** The paper states implementation details are in Appendix D.2, D.3, D.5 — stripped by parser. Removed per hard rules about missing appendix content.
+- **Missing related works:** Removed per hard rules (the reviewer lacks external sources to confirm existence).
+- **Pure formatting/style criticisms, typo complaints:** Removed per hard rules (parser artifacts, not author errors).
+- **Generic speculation about bias in surrogate base flow:** The critic raises a valid concern conceptually, but the specific claim that "one-step estimates from the base flow are imperfect" without demonstrating that this actually harms results is a generic area sweep rather than a concrete identified problem.
 
 ## Novel Insights
 
-The harsh critic's observation about the MMD measurement gap is the single most insightful point across all reviews. It exposes a real disconnect between the paper's narrative claim ("preserving the learned distribution") and its experimental protocol (measuring against clean synthetic targets). This is not fatal — the paper's other evidence (qualitative similarity, SSIM diversity, residual trade-offs) still supports the claim that fine-tuning does not pathologically distort the distribution — but it reveals that the paper would benefit from either an additional metric or a more precise articulation of what "learned distribution" means in context. The strength finder correctly identifies the joint evolution mechanism and the scaled noise schedule as the paper's strongest technical innovations, both of which are well-supported. The harsh critic's complaint about baselines is weaker than it appears — the paper actually does a reasonable job adapting PBFM and including ECI in one experiment — while the α-definition issue is a genuine clarity gap that is easily fixable.
+None beyond the paper's own contributions. The key observation—that joint parameter-state evolution enables fine-tuning without paired data—is the paper's own contribution, not a novel insight from the reviews.
 
 ## Suggestions
 
-1. **Clarify the distributional fidelity measurement.** Either (a) compute MMD between fine-tuned samples and base model samples (or the noisy training data) to directly measure distributional shift, or (b) explicitly state that the "underlying learned distribution" refers to the clean PDE-consistent manifold and adjust the narrative accordingly. This is the most impactful fix.
-2. **Explicitly define α for each experiment.** For Helmholtz: α = κ(ξ)² (squared wavenumber). For Stokes: α = ν(ξ) (viscosity field). Include this information when introducing each PDE system.
-3. **Reconcile the Figure 3 caption** with the experimental protocol (line 150 vs. line 162).
-4. **Add error bars** to the Darcy ablation plots and report MMD uncertainty across multiple independent runs.
-5. **Include FM+ECI or other inference-time projection methods** as baselines in at least one more experiment where applicable (e.g., Helmholtz).
+1. Provide MMD values with confidence intervals (e.g., bootstrap with 95% CI) or multiple independent runs for at least the Stokes and Helmholtz results.
+2. Clarify whether φ is frozen or updated during joint fine-tuning and discuss the implications of this design choice.
+3. Either include ECI on all applicable tasks or provide a principled explanation (backed by citations) for why it cannot be applied to Helmholtz/Stokes/Darcy.
+4. Add a brief discussion (1–2 paragraphs) on the limitations of the approach: reliance on φ quality, differentiability assumptions, and grid resolution dependence.
+5. Remove or substantially strengthen the natural images experiment — either connect it more concretely to the PDE story or drop it to avoid diluting the core contribution.
 
 ## Score and Decision
 
-### Anchor papers for calibration
+**Calibration Procedure:**
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| tAf1KI3d4X.md (PBFM) — Physics vs Distributions | 5.5 | Similar topic (physics-constrained FM), accepted Poster. The current paper has more novel methodology (adjoint matching + joint evolution) but slightly weaker experimental presentation. Comparable quality. |
-| hW7P3x9W8A.md (PIDDM) — Physics-Informed Distillation | 4.0 | Related topic (PDE-constrained generation), rejected. The current paper has stronger theoretical grounding and more novel contributions. |
-| FbssShlI4N.md (FALCON) — Few-step Likelihoods | 7.0 | Strong method paper, accepted Oral. More rigorous theory and experiments. Current paper is weaker. |
-| nnRB90w2kv.md (Flow Marching) — Generative PDE Foundation | 2.5 | Related topic, rejected. The current paper has clearer experiments, better baselines, and sounder evaluation. |
-| y3oHMcoItR.md (RealPDEBench) — Benchmark paper | 7.5 | Different contribution type (benchmark). Not directly comparable. |
-| TJWhvS5JXg.md (TabPalooza) — Benchmark | 1.2 | Very weak paper. Current paper is substantially stronger. |
+**Round 1 (Bracketing):** Three queries on "flow matching generative model physics PDE constraints fine-tuning" yielded:
+- Weak band (<3.5): Anchors at 2.50 (Flow Marching), 2.50 (FourierFlow), 3.33 (Chance-constrained FM) — papers with serious flaws or very narrow scope.
+- Middle band (3.5–7.5): PBFM at 5.50 (Accept Poster), Physics-Manifold FM at 4.00 (Reject), Fine-tuning FM via MLE at 4.00 (Withdrawn/Reject), Physics-Informed Distillation at 4.00 (Withdrawn/Reject).
+- Strong band (>7.5): Anchors at 8.00 (La-Proteina, protein generation; VIST3A, text-to-3D) — these are less topically relevant but represent obviously higher-quality work.
 
-The paper presents a novel and well-grounded methodology with good experimental breadth. The main concern is a measurement gap between the narrative claim about distributional fidelity and the actual metric used — this is addressable but substantive. On balance, the work is comparable to accepted papers in this space and provides a genuine technical contribution.
+Bracket: The paper sits clearly above the weak band. It is stronger than PMFM (4.00, Reject) and comparable to PBFM (5.50, Accept Poster) — the closest topical match.
 
-MY FINAL SCORE: 5.0
-MY FINAL DECISION: Accept
+**Round 2 (Narrowing):** Pulled anchors within (4.5, 6.5) and (5.5, 7.5):
+- PBFM (5.50, Accept Poster): Same area (physics-constrained FM), similar approach scope. The current paper has a more novel contribution (joint parameter evolution) but weaker experimental rigor (selective baselines, missing MMD error bars). Slightly weaker overall.
+- SGFM (5.50, Accept Poster): Strong theory, moderate experiments. Comparable quality.
+- GFM (5.33, Accept Poster): Strong theory but limited real-world evaluation. Comparable.
+- OAT-FM (5.00, Reject): Rejected despite theoretical contributions due to marginal gains and theory concerns. The current paper has clearer practical improvements and is stronger.
+- Flower (6.00, Accept Poster): Clean execution, strong results. Better than the current paper.
+
+**Final score: 5.0** — The paper makes a genuine contribution (joint parameter-state evolution via adjoint matching is novel and well-motivated), the experiments are broad, and the computational efficiency is appealing. However, the selective baseline reporting and underspecified design choices are significant enough to prevent a higher score. The paper is stronger than rejected anchors at ~4.0 (PMFM, OAT-FM) but slightly weaker than the cleanest accepted anchors at 5.5–6.0 (PBFM, Flower) due to evaluation gaps.
+
+**Anchor Summary:**
+
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| tAf1KI3d4X.md (PBFM) | 5.50 | R1/R2 | Closest topic; slightly more polished execution |
+| lRGAMx3f6N.md (PMFM) | 4.00 | R1 | Weaker clarity and novelty; current paper is stronger |
+| rx4UKPSi3K.md (CCFM) | 3.33 | R1 | Narrower scope, weaker evaluation; current paper is stronger |
+| p56ZAQUCUr.md (SGFM) | 5.50 | R2 | Comparable quality; different approach to guidance |
+| VN2kyKTNMH.md (OAT-FM) | 5.00 | R2 | Rejected; current paper has clearer improvements |
+| vxq1OnaAMq.md (GFM) | 5.33 | R2 | Comparable quality; accepted |
+| QGd34p02mI.md (Flower) | 6.00 | R2 | Cleaner execution; current paper is weaker |
+
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

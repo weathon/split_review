@@ -1,90 +1,103 @@
-I now have a thorough understanding of the paper and can provide a calibrated evaluation. Let me produce the final consolidated review.
+Now I have enough calibration information. Let me write the consolidated review.
 
 ## Summary
 
-This paper develops a theoretical framework for understanding how attention-based transformers learn semantic associations during early training. The key technical contribution is a gradient leading-term expansion that yields closed-form expressions for the output, value, and query-key weight matrices as compositions of three interpretable basis functions—bigram mapping, interchangeability mapping, and context mapping—derived from corpus statistics. The theory is validated experimentally on a 3-layer attention-only transformer (TinyStories) and, via an indirect covariance-based methodology, on Pythia-1.4B.
+This paper derives closed-form expressions for attention-based transformer weights trained on natural language under next-token prediction, using a gradient leading-term approximation that is accurate during early training. The weights are characterized as compositions of three interpretable basis functions — bigram mapping (B̄), interchangeability mapping (Σ_B̄), and context mapping (Φ̄) — which capture statistical and semantic associations between tokens. The theory is validated on a 3-layer transformer trained on TinyStories (cosine similarity >0.99) and, via a covariance-based adaptation, on Pythia-1.4B trained on OpenWebText.
 
 ## Strengths
 
-- **Novel theoretical technique yielding closed-form weight expressions.** Theorem 4.1 provides explicit leading-term formulas for all weight types (output ≈ sη𝐁̄, value ≈ (s choose 2)η²Φ̄ᵀ𝐁̄ᵀ, query-key ≈ (s choose 4)η⁴𝐐̄). This is a principled alternative to ad-hoc mechanistic interpretability and moves beyond prior work that relied on synthetic language or stripped-down architectures. The formalism captures natural language data, causal masking, relative positional encoding, and residual streams—substantially more realistic than many comparable theoretical analyses.
+1. **First closed-form characterization of transformer weights trained on natural language data.** Theorem 4.1 gives explicit expressions for the output, value, query-key, and positional matrices (Eqs. 5–8) in terms of corpus statistics (B̄, Φ̄, Q̄, Δ) with explicit Frobenius norm error bounds. Table 1 reports minimum cosine similarities >0.998 between theoretical and learned weights across all layers in the matching architecture. This goes substantially beyond prior theoretical work that relies on synthetic languages or simplified architectures.
 
-- **Interpretable decomposition into three basis functions with linguistic grounding.** The decomposition into bigram (𝐁̄), interchangeability (Σ̄𝐁 = 𝐁̄ᵀ𝐁̄), and context (Φ̄) mappings provides a clear, testable narrative for how token-level associations form. Figure 5's concrete examples (e.g., "red" → "truck"/"balloon"/"dress" under 𝐁̄; "fish" → "pond"/"lake"/"water" under Φ̄) validate that these basis functions capture both grammatical and semantic relationships aligned with linguistic intuition.
+2. **Interpretation of learned features as compositions of three linguistically meaningful basis functions.** Section 4.2 defines (1) bigram mapping (Eq. 9), (2) interchangeability mapping (Eq. 10), and (3) context mapping (Eq. 11). Figure 5 shows that the most-correlated tokens under each basis function capture genuine semantic relations (e.g., "red"↔"balloon", "fish"↔"pond"). The end-to-end decomposition in Eq. (12) provides a mechanistic account of how the residual stream, attention, and output matrix cooperate: the output matrix provides a bigram baseline while the attention mechanism refines predictions via contextually predictive tokens (Section 4.2.3).
 
-- **Strong quantitative agreement on the matching architecture.** In the 3-layer attention-only transformer (TinyStories), the minimum cosine similarity between theoretical and learned weights across all checkpoints exceeds 0.998 (Table 1), and remains above 0.9 even after 30 epochs (Figure 4). This demonstrates that the theory captures the actual learned weights well for the architecture it is designed to analyze.
+3. **Validation on a realistic large-scale LLM (Pythia-1.4B).** Section 5.2 presents a methodology to bridge the architectural gap (multi-head attention, MLP) by comparing covariance structures of token embeddings with theoretical leading-term matrices. Figure 6 shows high cosine similarity (>0.9) at early training steps across most layers for both attention and embedding mappings, with an MLP ablation and per-head analysis (Figure 7) providing finer-grained insight. The attempt to validate the theory on a billion-parameter model goes well beyond the toy settings common in this literature.
 
-- **Pythia experiments attempt to bridge theory and practice.** Despite their methodological limitations, the experiments on Pythia-1.4B (which includes MLP and multi-head attention) show non-trivial agreement between the theoretical features and the model's representations at early training steps (Figure 6). The per-head analysis (Figure 7) revealing differential specialization rates across layers adds a useful fine-grained view.
+4. **Rigorous handling of realistic architectural components.** The model (Definition 3.1) includes causal masking, relative positional encodings, residual streams, and multi-layer attention — all present in practical transformers. The error bounds in Theorem 4.1 are uniform across layers and do not require sequential or frozen-weight training, contrasting with assumptions in prior work (Bietti et al., 2023; Huang et al., 2025).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Cosine similarity does not validate the Frobenius norm bounds that constitute the core theorem.** Theorem 4.1 states bounds of the form ‖W_O − sη𝐁̄‖_F ≤ 3s²η² (and analogous bounds for other weights). The paper's experimental validation (Section 5.1, Table 1, Figure 4) reports cosine similarity instead of ‖·‖_F differences. Cosine similarity measures directional alignment, not whether the learned weights lie within the proven norm bounds. Two matrices can have high cosine similarity while violating the Frobenius bound (e.g., both scaled identically but with large absolute difference). The paper includes no numerical check of whether the actual Frobenius distances satisfy the theorem's thresholds, leaving the central mathematical claim empirically unsupported. This is the most significant gap in the paper.
+1. **The empirical validation does not directly test what the theorem guarantees.** Theorem 4.1 provides **Frobenius norm bounds** (e.g., ‖W_O − sηB̄‖_F ≤ 3s²η²), but the paper validates using **cosine similarity** between the learned weights and their leading terms. These are different metrics: cosine similarity can be high even when the Frobenius norm difference is large (if the learned weight is a scaled version of the leading term plus a large orthogonal component). The paper states "To verify Theorem 4.1, we measure the cosine similarity" (Section 5.1), but the proof bounds Frobenius error, not cosine similarity. The reported cosine similarities >0.99 are encouraging circumstantial evidence, but they do not constitute a direct test of the proven bounds. Reporting relative Frobenius error ‖W_learned − sηB̄‖_F / ‖W_learned‖_F for the matching-architecture TinyStories experiment would directly connect the empirical validation to the theoretical claim.
 
-2. **The Pythia validation methodology is indirect and lacks key controls.** The protocol involves several unvalidated transformations: (a) tokens are passed individually rather than in sequence, discarding contextual information that the theory is partly about; (b) attention mappings are constructed by averaging head products and converting via learned embeddings to token space—a procedure not shown to be equivalent to the theoretical 𝐐̄; (c) comparisons are made between covariance matrices rather than the weight matrices themselves, with no theoretical justification for why embedding covariances should match weight-matrix covariances under the theory. The paper does not compare against simple baselines (e.g., bigram co-occurrence matrices, random matrices of matching dimensions), so the reported "strong agreement" could reflect any low-order corpus statistics shared between the model and the leading-term features, not the specific compositional structure claimed by the theory.
-
-3. **Architecture gap between the theoretical model and the practical claims.** The theory analyzes an attention-only, single-head transformer without MLP or layer normalization (Definition 3.1). The paper acknowledges this gap in Section 5.2 ("Unlike our theoretical setting, Pythia includes additional components such as MLP and multi-head attention") but the abstract and introduction claim "the first explicit characterization of weights in attention-based transformers trained on real-world text corpora" and "minimize the gap between theory and practice." The Pythia experiments do not directly bridge this gap—they use an indirect covariance comparison not derived from the theory. The paper would benefit from studying intermediate models (attention-only with multi-head, or attention+MLP in small controlled settings) to trace how each architectural addition changes the picture.
+2. **The theoretical regime (s ≤ ~5–6 gradient steps) and the experimental regime (100 epochs, likely >10⁵ steps) are dramatically mismatched.** For the TinyStories experiment (T=200, L=3, η=0.005), the bound requires s ≤ η⁻¹ min(5/(8√T), 1/(12L)) ≈ 5.6 gradient steps. The paper trains for 100 epochs with batch SGD. While the paper acknowledges that "features remain informative well beyond" the theoretical regime, it does not provide any analysis — theoretical or experimental — of why the approximation persists orders of magnitude past its proven validity bound. This gap means the central claim of empirical verification is supported for a regime far smaller than what is actually tested. A focused study of the first ~5–10 steps (where the theorem applies) to measure Frobenius error directly would be the minimum remedy.
 
 ### Minor
 
-1. **Missing experimental details for the 3-layer experiments.** The paper does not specify the number of gradient steps per epoch or the exact method for computing cosine similarity (per-matrix flattened, average row-wise, etc.). The leading-term matrices are constructed from the same corpus used for training, which is appropriate for testing whether the theory predicts the learned weights, but the paper does not clarify whether any held-out portion was used for the corpus statistics.
+3. **The Pythia-1.4B validation is necessarily indirect.** As the paper acknowledges, multi-head attention and MLP modules make it "impossible to directly read off average token correlations from the weights." The workaround — comparing covariance matrices of token embeddings with those of the theoretical leading-term matrices — is reasonable but provides weaker evidence than a direct weight comparison. Covariance structure is a high-level summary; different matrices can produce similar covariances. The paper would benefit from additional finer-grained checks (e.g., per-head attention pattern comparisons where possible).
 
-2. **The bounds in Theorem 4.1 involve unspecified constants.** The bound ‖W^(l) − (s choose 4)η⁴𝐐̄‖_F ≤ 13s⁵η⁵T, for instance, has the O(·) constant baked into the coefficient "13" but the reader cannot assess whether this bound is meaningful for the experimental setup without knowing the numeric values of the implied constants in relation to the actual parameter norms.
+4. **No variance or uncertainty reporting.** The TinyStories experiment (Table 1, Figure 4) appears to come from a single run without error bars. The Pythia heatmaps (Figure 6) similarly lack quantification of variance. The strong claims would be more robust with multiple random seeds and standard deviations reported.
 
-3. **No discussion of limitations.** The conclusion (Section 6) states no limitations, caveats, or directions for addressing the architecture gap, which is a missed opportunity to guide future work and contextualize the theory's scope.
+5. **The training setup has a subtle mismatch with the theory.** The theory assumes full-batch gradient descent (Eq. 4), but the TinyStories experiment uses mini-batch SGD with batch size 2048 (Section 5.1). While this is a reasonable practical choice, the theoretical bounds do not directly cover mini-batch noise.
 
 ### Trivial
-None (formatting/typographical issues are parser artifacts).
+
+6. The paper uses "epochs" as the unit of training time in experiments (Section 5.1) but the theory is stated in terms of gradient steps (s). The corresponding number of gradient steps per epoch is not stated, making it difficult to directly compare the experimental duration (~100 epochs) against the theoretical regime (s ≤ ~5.6 steps).
 
 ## Nice-to-Haves
 
-- Reporting ‖W_O − sη𝐁̄‖_F and comparing to the proven bounds would directly validate Theorem 4.1.
-- Training small models that incrementally add architectural complexity (attention-only → multi-head → +MLP → +layer norm) to isolate how each component affects the theoretical predictions.
-- Including baseline comparisons (random matrices, bigram co-occurrence matrices) in the Pythia covariance analysis.
-- Clarifying whether the leading-term corpus statistics are computed on a held-out set or the training set.
+- **Direct Frobenius norm comparison** for the TinyStories setting, as this would directly test Theorem 4.1 rather than using cosine similarity as a proxy.
+- **Null model baseline** showing what cosine similarity looks like for random embeddings or initial weights, to demonstrate that the high observed similarity is non-trivial.
+- **A study focused on the first ~10 gradient steps** where the theoretical bound provably holds, to establish whether the approximation is tight within its proven regime before examining longer training.
+- Additional ablations on how the approximation quality depends on vocabulary size and sequence length.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged as removed; treat them with caution.
 
-1. **"DM function is never formally defined"** — The paper states: "DM(v) maps the i-th element of v to the (-i+1)-th subdiagonal." This is a definition, albeit concise. REMOVED as factually incorrect.
+1. **"Theoretical analysis presented with insufficient precision"** — Removed because the paper explicitly references Appendix A for formal definitions and Appendix D for proofs. The parser removes appendix content from all papers; the formal definitions exist in the original submission. The main text provides Eq. (9), (10), (11) with clear descriptions and the three-step construction of Q̄ with a pointer to Appendix A.
 
-2. **"T5 comparison is wrong / discrepancy not discussed"** — The DM construction is precisely how T5 relative biases work (learned position-offset dependent biases added to attention logits). The reviewer misunderstood the architecture. REMOVED as factually incorrect.
+2. **"Missing related works" / "Insufficient differentiation from prior work"** — Removed per hard rules (cannot verify existence of related works without external sources). The paper does clearly distinguish its contribution in the Introduction (lines 33–35) and Related Works (Section 2), explicitly noting how it differs from Bietti et al., Nichani et al., Huang et al., Tian et al., and others.
 
-3. **"The theoretical model does not approximate the architecture of practical LLMs, invalidating the central claim"** — This overstates the issue. The paper acknowledges the gap, and the central claim is about the attention-based transformer defined in the paper, with the Pythia experiments being a generalization test. The architecture gap is a real limitation (see Major #3) but does not "invalidate" the core contribution. RELABELED from fatal to a calibrated major weakness.
+3. **"First explicit characterization claim overstated"** — Removed. While the Pythia validation is indirect, the claim refers to providing closed-form weight expressions for a transformer trained on real-world text, which is indeed a first relative to prior work that uses synthetic languages or simplified architectures. The paper's Introduction transparently describes what is and is not achieved.
 
-4. **"Abstract overstates novelty"** — The abstract claim of "first explicit characterization of weights in attention-based transformers trained on real-world text corpora" is defensible: prior theoretical works used synthetic language or unrealistic architectures; this paper uses natural-language corpora with a more realistic architecture than comparable analyses. WEAKENED.
+4. **"Reproducibility / undisclosed hyperparameters"** — Removed per hard rules. The paper provides the key hyperparameters (learning rate 0.005, batch size 2048, sequence length 200, vocabulary 3000) and references the appendix for further experimental details.
 
-5. **"Could be circular if leading-term matrices were computed from the same data"** — For the 3-layer experiments, computing leading terms from the same training corpus is the correct methodology: the theory predicts that weights learn corpus statistics. This is not circular. REMOVED.
+5. **Typo/formatting/style nitpicks** — Removed per hard rules (parser artifacts, not author errors).
 
 ## Novel Insights
 
-The most interesting dynamic not fully articulated by the paper's own framing is the tension between the theory's elegant simplicity and the messiness of the empirical validation. The gradient leading-term approach yields strikingly clean closed forms—weights as simple polynomial compositions of three interpretable matrices—which is a genuine theoretical achievement. Yet the validation strategy (cosine similarity for Frobenius bounds; indirect covariance comparisons on Pythia) introduces enough methodological distance that one cannot tell whether the empirical "agreement" comes from the specific compositional structure the theory predicts or from generic low-order corpus statistics that any reasonable model would learn. This suggests the paper's strongest contribution may be conceptual: providing a vocabulary (bigram, interchangeability, context mappings) for reasoning about what transformers learn, even if the quantitative predictions require more direct testing. Conversely, the suspiciously high cosine similarities (>0.998 on TinyStories) raise the question of whether the leading-term approximation is so dominant that it would be hard for the learned weights NOT to align with it—meaning the theory may be correct but the test is insufficiently discriminating.
+Looking across the two reviewers, neither identifies a genuinely novel observation that the paper itself does not already articulate. The harsh critic's most penetrating point — that the Frobenius-norm theorem is tested with cosine similarity, not Frobenius error — is an important methodological critique of the paper's empirical strategy, but it is a weakness in the paper's execution, not a novel insight about the science. Similarly, the Strength Finder's observations about the three basis functions and the Pythia validation reflect the paper's own framing. No genuinely novel insight emerges beyond the paper's contributions.
 
 ## Suggestions
 
-1. Report the Frobenius norm differences ‖W_O − sη𝐁̄‖_F alongside the cosine similarities, and compare them against the theorem's bounds. This is the most direct and impactful fix.
-2. Train intermediate models (attention-only with multi-head; attention+MLP but shallow) to systematically trace how architectural additions affect the theory's predictions, rather than jumping from the 3-layer attention-only model directly to Pythia-1.4B.
-3. Add baseline comparisons to the Pythia covariance analysis (random matrices, simple bigram matrices) to demonstrate that the reported agreement is specific to the theory's compositional structure.
-4. Include a limitations paragraph in the conclusion explicitly discussing the architecture gap and the indirect validation methodology.
+1. Report **relative Frobenius error** (‖W_learned − sηB̄‖_F / ‖W_learned‖_F) alongside cosine similarity for the TinyStories experiment. This directly tests the bound in Theorem 4.1 and eliminates the metric mismatch.
+
+2. Run a **short-time experiment** focused on the first 5–10 gradient steps (where the theorem provably holds) to establish that the approximation is tight within its proven regime. Show both Frobenius error and cosine similarity over these steps.
+
+3. Report results from **multiple random seeds** (e.g., 3 seeds) with standard deviations in Table 1 and Figure 4.
+
+4. Clarify how many gradient steps each epoch corresponds to in the TinyStories experiment, and state the total number of gradient steps reached at each checkpoint.
+
+5. For the Pythia experiment, consider adding a **per-head attention pattern comparison** where feasible (e.g., comparing top-k attended tokens between the theoretical Q̄ projection and actual attention heads), going beyond covariance-level comparisons.
 
 ## Score and Decision
 
-**Calibration anchors** (retrieved via `calibration_search`):
+**Round 1 (Bracketing):** Queries targeting three bands returned anchors at avg 3.00 (weak, reject-range papers on transformer training dynamics), avg 4.0–6.5 (mid-range), and avg 8.00 (strong-accept papers on unrelated topics). The paper clearly exceeds the 3.0 band (different class of work — these are reject-range papers with simpler scope or flawed execution) and falls well short of the 8.0 band (oral-level work on different topics). Initial bracket: **4.5–6.5**.
 
-| Anchor | Avg Score | Comparison |
-|--------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/EAfMzT8ZLy.md` (How Transformers Get Rich) | 4.50 | Similar type (training dynamics, simplified model). The current paper has stronger empirical validation (TinyStories + Pythia vs mainly synthetic), but both share theory-practice gap concerns. |
-| `/home/wg25r/review_agent/human_reviews_2026/1pTzWVvwEd.md` (Incremental Learning in Transformers) | 4.50 | Similar scope (simplified transformer dynamics). Current paper has broader validation but less precise quantitative theory-experiment matching. |
-| `/home/wg25r/review_agent/human_reviews_2026/CfFj68C9Cn.md` (Learning to Recall) | 6.50 | Cleaner execution: theory matches experiments directly. Current paper has more ambitious scope (natural language vs synthetic task) but weaker validation of core claims. |
-| `/home/wg25r/review_agent/human_reviews_2026/utSqpxQHXq.md` (Two Failure Modes) | 6.00 | Strong theory with well-matched experiments and practical implications. Current paper's theory is similarly principled but validation is less direct. |
-| `/home/wg25r/review_agent/human_reviews_2026/ukiRIdgoIF.md` (Transformers Trained via GD Can Provably Learn) | 4.50 | Accepted paper with comparable theory-practice gap. Current paper has more interpretable conceptual contribution but similar validation concerns. |
-| `/home/wg25r/review_agent/human_reviews_2026/iQG6CObQ7E.md` (On the Scaling Theory) | 4.00 | Rejected theory paper. Current paper has stronger experimental component but similar gap between theoretical claims and empirical support. |
-| `/home/wg25r/review_agent/human_reviews_2026/I3spHvRHqo.md` (Non-vacuous Test Error Guarantee) | 4.00 | Rejected. Current paper has a more novel theoretical technique and more extensive experiments. |
+**Round 2 (Narrowing):** Queries targeting (4.5, 7.5) and (5.0, 7.5) returned anchors at 5.0 (Reject — simplified setting, theory-experiment misalignment), 5.2 (Accept Poster — elegant but limited scope), 5.5 (Accept Poster — interesting theory, imperfect causal evidence), 6.0 (Accept Poster — solid theoretical analysis), and 6.5 (Accept Poster — clear theory, good validation). The paper under review is stronger than the 5.0 anchor (which had a more limited contribution and worse theory-experiment alignment) and comparable to the 5.2 and 5.5 anchors in terms of ambition–evidence balance. However, it has a more significant validation gap (Frobenius vs. cosine, 5 steps vs. 100 epochs) than the 6.0 and 6.5 anchors, which had cleaner empirical support for their theoretical claims. The paper's theoretical contribution (realistic architecture, natural language, closed-form expressions) is genuinely novel, but the empirical verification has structural gaps.
 
-The paper sits between the ~4.5 rejected papers (similar genre, comparable limitations but better validation) and the ~6.0+ accepted papers (cleaner theory-experiment correspondence). The core theoretical contribution—gradient leading-term analysis yielding closed-form weight expressions—is genuinely novel and the basis function decomposition is conceptually valuable. However, the empirical validation has two significant gaps: (1) the theory states Frobenius norm bounds but experiments report cosine similarity, leaving the central claim untested, and (2) the Pythia methodology is indirect and lacks controls. These gaps prevent the paper from reaching the acceptance bar in its current form but are addressable with additional experiments and analysis.
+**Selected anchors (all rounds):**
 
-MY FINAL SCORE: 5.0
-MY FINAL DECISION: Reject
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| l8eWnNH7qN (Ill-Conditioning) | 3.00 | R1 | Much weaker — different focus, simpler analysis |
+| S0IIgb33fO (Fan-in Asymmetry) | 2.67 | R1 | Much weaker — gradient analysis for redundancy, not weight characterization |
+| 27fc8hXB5N (Grokking Dynamics) | 3.33 | R1 | Much weaker — different phenomenon, limited theory |
+| CfFj68C9Cn (Learning to Recall) | 6.50 | R1/R2 | Stronger in empirical rigor; simpler setting (single-layer, synthetic task) |
+| 1pTzWVvwEd (Incremental Learning) | 4.50 | R2 | Weaker — very simplified architecture, limited empirical support |
+| 7CAvzaRUkH (Interpreting Multi-Layer) | 4.50 | R2 | Comparable — probing methodology but less novel theory |
+| sY14iAFGIH (How Transformers Learn ICL) | 4.00 | R2 | Weaker — on-convergence analysis only, restricted setting |
+| utSqpxQHXq (Two failure modes) | 6.00 | R2 | Stronger — cleaner empirical validation of theory |
+| z8xjWmyQSZ (Strong Correlations) | 5.20 | R2 | Comparable — interesting theory, limited experimental scope |
+| 2g8vgmyXgQ (Provable ICL Nonlinear) | 5.00 | R2 | Weaker — theory-experiment alignment concerns, simpler setting |
+| J4GYMiE3JT (Structural Inference) | 6.50 | R2 | Stronger — cleaner interpretability methodology |
+| TLSUIyBIfs (Quantitative Bounds) | 7.00 | R2 | Stronger — rigorous theory with clean experiments |
+| c5TFhCJ6fs (Attention Sinks) | 5.50 | R2 | Comparable — interesting theory, imperfect causal evidence |
+
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

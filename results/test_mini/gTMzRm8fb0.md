@@ -1,90 +1,83 @@
-Now I have everything I need. Let me compose the final consolidated review.
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
-
-This paper proposes GoalRank, a generator-only ranking framework that replaces the two-stage Generator–Evaluator (G-E) paradigm with a single large generator trained via "group-relative optimization." The authors theoretically prove that a sufficiently large single generator can achieve strictly smaller approximation error to the optimal ranking policy than any finite G-E mixture, and that this error decreases with model scale (Theorem 1). They introduce a training objective that uses a (biased) reward model to construct a group-relative reference policy, and train the generator to match it via cross-entropy. Offline experiments on three datasets and an online A/B test on a platform with >500M DAUs show improvements over several baselines.
+GoalRank proposes a generator-only large ranking model to replace the prevailing (Multi-)Generator–Evaluator paradigm. The paper contributes (i) a theoretical result showing that a sufficiently large single generator can approximate the optimal ranking policy more tightly than any finite mixture-of-generators-with-evaluator system, (ii) a group-relative optimization principle that uses a biased reward model to construct a reference policy, and (iii) GoalRank, a practical instantiation of this framework. Offline experiments on three datasets (including an industrial one) and large-scale online A/B tests show substantial gains over strong baselines.
 
 ## Strengths
-
-- **Large-scale online A/B validation.** GoalRank was deployed in production on a platform serving over half a billion daily active users, and a two-week A/B test (Table 4) shows consistent improvements over the production MG-E baseline across all five business metrics (e.g., +1.212% effective views, +0.802% comments). A hybrid setting (GoalRank + MG-E) also yields gains and was deployed to full traffic. This is genuine evidence of practical value.
-
-- **Robustness to reward model bias.** The controlled noise experiment (Table 3) shows that GoalRank's performance degrades only modestly even under substantial injected bias (λ=0.5), and still outperforms the best baselines. This suggests the group-relative normalization provides meaningful robustness to reward inaccuracy.
-
-- **Reasonable group-size flexibility.** The ablation on group size |B| (Table 2) shows consistent performance across a wide range (8–20), with graceful degradation only at extreme values (50–100). The method does not require brittle hyperparameter tuning.
-
-- **Clear motivation and problem framing.** The observation that multi-generator approaches plateau (Figure 1d) is well-supported, and the ambition to replace a complex multi-stage pipeline with a single scalable model is a legitimate research direction.
+- **Novel training paradigm with principled derivation.** The group-relative optimization objective (Eq. 4–5) is derived from an evidence upper bound on the KL divergence to the optimal policy, providing a theoretically grounded surrogate that leverages a reward model while remaining robust to its bias. This is a genuine methodological contribution that bridges the existence result in Theorem 1 with practical training.
+- **Very strong and consistent offline empirical results.** Table 1 shows GoalRank outperforming all baseline categories (G-only, G-E, MG-E) by large margins — e.g., +25.39% H@6 and +29.63% M@6 on the Industry dataset, with statistical significance. The gains hold across three datasets covering both public benchmarks and an industrial platform.
+- **Scaling law verification.** Figure 3 empirically confirms Theorem 1's scaling prediction: GoalRank metrics improve steadily from 1M to 0.1B parameters, while baselines exhibit much weaker or saturating scaling. This directly supports the core thesis that a one-stage large generator can benefit from increased capacity.
+- **Clean large-scale online A/B validation.** Table 4 reports statistically significant improvements over the production MG-E system on all five business metrics (e.g., +1.212% Effective Views, +0.197% Watch Time) across tens of millions of users. Unlike many industrial papers where online results are mixed, GoalRank shows consistent positive gains across the board.
+- **Ablations on group size and reward model bias (Tables 2–3).** The ablation of group size reveals a clear U-shaped pattern explained by the theory (small groups lack sample size, large groups shrink reward gaps), and the bias ablation shows the method remains competitive even with λ=0.5 (50% noise), demonstrating practical robustness.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
+1. **Confounded comparison: GoalRank uses the reward model during training while baselines do not.** The paper states "all baselines share exactly the same evaluator (reward model) as GoalRank" (Section 4.1.2). This is true for *inference-time* usage of the evaluator by G-E methods, but GoalRank uses the reward model to construct its training targets (the reference policy π^{ref}) while the baselines train on pointwise or pairwise objectives against the proxy ground truth. This means GoalRank receives an additional, richer supervision signal that baselines do not, making it unclear whether the observed gains stem from the generator-only *paradigm* or simply from the extra training signal. A proper control would compare GoalRank against a generator trained with the same reward model (e.g., via distillation from the reward model's top-ranked lists, or RL fine-tuning) but without the group-relative mechanism. Without such an ablation, the headline claim that a generator-only paradigm outperforms G-E systems is not fully disentangled from the fact that the generator was trained with a more informative objective.
 
-- **Asymmetric comparison inflates reported gains.** GoalRank uses the reward model during **training** as a teacher to construct the reference policy π_ref (Eq. 4–5), while the G-E baselines (PIER, NAR4Rec) only use the **same** reward model as an **inference-time** evaluator to select among pre-generated lists, and the G-only baselines (DNN, DLCM, etc.) do not use the reward model at all. The paper states "all baselines share exactly the same evaluator (reward model) as GoalRank" (Section 4.1.2), but this only addresses the inference evaluator, not the training signal. This creates a fundamental asymmetry: GoalRank benefits from reward-model distillation during training, while the baselines do not. Without controlling for this training signal, the massive offline gaps (e.g., +25.39% H@6 on Industry) cannot be attributed to the generator-only architecture — they may simply reflect the power of distillation. A fair comparison would either (a) train G-E baselines' generators with the same reward-model distillation objective, or (b) use the reward model only as an evaluator for all methods.
-
-- **Claimed "evidence upper bound" derivation is not present in the main text and the training objective is presented as a heuristic.** The abstract, introduction, and conclusion all claim that the paper "derives an evidence upper bound of the one-stage optimization objective," and this is listed as a core contribution. However, Section 3.2 does not state or derive any such bound. It transitions directly from the oracle policy (Eq. 1–2) to a heuristic reference policy (Eq. 4) whose specific form (subtract-mean, divide-by-std normalization) is introduced without derivation or analysis of why this particular normalization is optimal. The paper references Appendix A for "detailed derivations," but a claimed contribution of this significance should at least be stated in the main text. As presented, the "group-relative optimization principle" is a heuristic distillation from a reward model dressed in theoretical language.
+2. **Theoretical contribution is less novel than claimed.** Theorem 1 shows that a single generator with width ≥ kα+n achieves strictly smaller KL error than a k-mixture of (α,β)-bounded generators, and the error vanishes as n→∞. This is functionally a capacity argument: a larger model can embed the mixture and then use excess capacity to further reduce approximation error. The comparison is not parameter-matched — the single generator uses strictly more width (kα+n vs. kα, plus the evaluator is absent, so the total parameter comparison is ambiguous). Moreover, the asymptotic result (error→0 as n→∞) follows from universal approximation properties of neural networks. The paper frames this as proving generator-only *superiority*, but the result is better understood as confirming that capacity helps (which is expected) and does not prove the generator-only paradigm is more *efficient* than a properly tuned G-E system. The theoretical positioning should be substantially moderated.
 
 ### Minor
+3. **Soft-mixture assumption in the theory weakens practical relevance.** Definition 2 uses soft mixture weights (ω∈Δ^{k-1}) for the evaluator's output, which makes the MG-E policy class more expressive than the hard-selection evaluators used in practice. The paper acknowledges this (line 111: "strictly contains the policy class realized by hard selection") and correctly notes it only strengthens Theorem 1. However, this means the theoretical comparison is against a *stronger* MG-E class than what real G-E systems implement, so the practical implication is less direct than the presentation suggests.
 
-- **Theorem 1 is a capacity comparison, not a paradigm argument.** The theorem shows that a single generator with width ≥ kα + n (i.e., strictly larger total parameters than the combined G-E generators) can achieve strictly smaller approximation error. This is a valid existence result, but the framing ("for any finite G-E model, there always exists a generator-only model that achieves strictly smaller approximation error") obscures that the generator-only model needs to be **larger** than the entire ensemble combined. The same construction would apply if one simply enlarged the G-E generators. The theorem does not identify any structural advantage of the generator-only paradigm — it is a parametric capacity inequality. Moreover, the result relies on soft mixture weights (ω ∈ Δ^{k-1}), while practice uses hard (one-hot) selection, making the comparison even less grounded in actual G-E usage.
+4. **Offline evaluation uses a proxy ground truth that may not align with user utility.** The offline task treats users' last six chronological interactions as the ground truth recommendation list. GoalRank's reward model is trained on real user feedback (e.g., watch time), making its training target more aligned with actual utility, while baselines train on the proxy ground truth. This creates a secondary confound beyond point 1: the offline metrics (H@6, NDCG, etc.) measure agreement with the proxy, not true user utility. The online results partially mitigate this concern, but the offline comparison remains biased in GoalRank's favor.
 
-- **Large gap between offline and online gains.** Offline improvements are massive (e.g., +25.39% H@6, +29.63% M@6 on Industry), while online gains are tiny (0.1–1.2% relative). While some gap is expected, the orders-of-magnitude discrepancy is unusually large and suggests the offline protocol may not be representative. The paper does not discuss or explain this gap.
+5. **No guidance on setting σ\* or analyzing group-size/reward-gap interaction.** The condition in Equation 3 requires the reward spread within a group to exceed a threshold σ\* for the order-invariance property to hold. The paper does not discuss how σ\* is determined in practice or how the group size |ℬ| interacts with this condition beyond the empirical observation that large groups hurt performance (Table 2).
 
-- **Scaling experiment partially confounds model size with data volume.** A footnote in Section 4.1.3 states that "for very small models, training on the full dataset leads to unstable convergence. To ensure fair comparison, we proportionally sample the dataset for all models (including GoalRank) at the same parameter scale." This means smaller models are trained on less data, so the observed scaling trend could be partially driven by data volume rather than model capacity. (The cross-method comparison at each scale is fair since all methods see the same data at that scale, but the within-GoalRank scaling trend is confounded.)
+6. **Bias ablation uses Gaussian noise, which is a weak proxy for realistic reward model bias.** Real reward model bias is systematic (e.g., position bias, popularity bias) rather than independent random noise. While the ablation shows robustness to the specific noise model tested, it does not address realistic bias patterns.
 
-- **The group-relative reference policy (Eq. 4) lacks theoretical grounding.** The choice to normalize by group mean and standard deviation (rather than, say, using raw scores with a temperature or softmax over raw rewards) is not justified. The condition in Eq. 3 (reward gap exceeding a threshold σ*) is stated but σ* is never specified or analyzed, and no proof connects this condition to the specific form of Eq. 4. The reference policy's relationship to the oracle π* is asserted but not established.
-
-- **The auxiliary policies M blur the "generator-only" claim.** The group construction (Section 3.3) explicitly relies on an auxiliary set of ranking policies M (heuristic methods and lightweight neural models) to generate diverse lists. This means GoalRank's training depends on external list-generation methods, partially undermining the "pure generator-only" framing. If M includes DNN-based policies, GoalRank is effectively a distillation ensemble rather than a single standalone generator.
+7. **Parameter-matched scaling comparison is missing.** In Figure 3, MG-E is scaled by adding generators while GoalRank is scaled by increasing width/depth. The total parameter counts of the compared systems may grow differently. A parameter-matched scaling comparison would strengthen the fairness argument.
 
 ### Trivial
-
-- The ablation on reward-model bias (Table 3) injects Gaussian noise, which does not model systematic biases (e.g., popularity bias, position bias) that real reward models typically exhibit. A more realistic bias model would strengthen the claim.
+None.
 
 ## Nice-to-Haves
-
-- A comparison where G-E baselines' generators are also trained with reward-model distillation to isolate the effect of the generator-only architecture.
-- An offline evaluation protocol that better matches online serving, or an analysis of why offline gains are two orders of magnitude larger than online gains.
-- An ablation that removes the reward model entirely and trains GoalRank using only direct user feedback (e.g., policy gradient), to test whether the group-relative optimization itself is necessary or whether any reward-model signal suffices.
-- A parameter-matched comparison where a G-E system with the same total capacity is compared against the single generator.
+- Train a generator baseline using the same reward model (e.g., via direct RL or by imitating the reward model's top-scoring list) to isolate the benefit of the group-relative mechanism itself.
+- Provide correlation analysis between reward model predictions and actual user feedback to validate the bias robustness claim on realistic bias patterns.
+- Analyze how the quality and diversity of auxiliary policies ℳ affect GoalRank's training — this is a practical concern for deployment.
 
 ## Removed Points
+The following points from the reviews are removed with justification:
 
-These points are flagged to be removed, treat them with caution:
-
-- **Criticism that the offline evaluation is "not a ranking task"** — The offline protocol (treating last k interactions as ground truth, N→L generation) is the standard evaluation setup in the ranking/re-ranking literature (DLCM, PRM, PIER, NAR4Rec all use identical or similar protocols). The criticism is factually incorrect about the nature of the task.
-
-- **Strength Finder's claim that "Theorem 1 provides a rigorous foundation for replacing multi-stage pipelines with a one-stage ranker"** — This conflicts with the verified weakness that Theorem 1 is a capacity comparison requiring the generator to be larger than the combined ensemble, not a structural paradigm argument. The theorem does not isolate any property of the generator-only architecture.
-
-- **Strength Finder's claim about "empirical validation of scaling laws"** — Partially conflicts with the verified weakness that model size and data volume are confounded in the scaling experiment.
-
-- **Strength Finder's claim that "large and consistent performance gains" support the paradigm claim** — Conflicts with the verified major weakness about asymmetric comparison.
-
-- **Criticism that "baseline details are missing (referenced to Appendix D.2)"** — Per the rules, weaknesses about missing appendix content are removed as the parser strips appendices.
-
-- **Criticism about "no variance or confidence intervals" despite "five independent runs"** — The paper reports results as averages over five runs but does not show intervals. While this would strengthen presentation, the critic selectively mentions this while the same lack of intervals is common practice for many baselines as well.
+- **"Hybrid setting outperforms pure GoalRank on some metrics"** (Harsh Critic, Section 4.2): **Factually wrong.** Table 4 shows GoalRank (pure) beats GoalRank+MG-E (hybrid) on *all* five metrics. The paper's text (lines 332–333) correctly states "a full deployment of GoalRank yields the largest improvements." Removed entirely as incorrect.
+- **"Figure 1(d) does not compare to scaling a single generator"**: The figure's purpose is to motivate the saturation problem with MG-E, not to prove generator-only superiority. This is adequately scoped.
+- **"Missing appendix details, proofs, reproducibility concerns with cited entities"**: Per review guidelines, removing appendix content is a parser artifact, not an author error, and cited entities are assumed to exist.
+- **Various formatting/style nitpicks and typos**: These are parser artifacts, not author errors.
+- **Strength Finder strengths about "important problem"**: Removed as generic; kept only concrete, paper-specific strengths.
 
 ## Novel Insights
-
-The most interesting observation across the reviews is the tension between the paper's ambitious theoretical framing and its heuristic core. The paper attempts to ground the transition from G-E to generator-only in approximation theory (Theorem 1), but the theorem reduces to a capacity argument. The "principled derivation" of the training objective is in fact a heuristic recipe (reward model → group-relative normalization → cross-entropy loss). This mismatch between claimed rigor and actual content is the paper's central weakness. At the same time, the paper does surface a genuinely useful engineering insight: normalizing reward scores within a group by their mean and standard deviation before constructing a soft target for distillation appears to work well across group sizes and bias levels. The online A/B results are also valuable evidence that this kind of approach can work at scale, even if the offline comparisons are inconclusive about why.
+The principal insight emerging from cross-referencing the critiques is that the paper's contribution is somewhat misaligned with its self-presentation. The paper frames itself as proving the superiority of the generator-only *paradigm* over the G-E *paradigm*. In reality, its strongest contribution is a specific *training method* (group-relative optimization) that effectively distills knowledge from a reward model into a single generator. The paradigm-level claim is not fully supported by the current experiments because the comparison conflates training signal with architectural paradigm. However, the training method itself is well-motivated, empirically effective (including online), and the theoretical framing of group-relative reference construction as a tractable surrogate for optimal-policy KL minimization is a genuinely useful insight for practitioners building large ranking models.
 
 ## Suggestions
-
-1. **Fix the unfair comparison.** Train at least one G-E baseline (e.g., PIER or NAR4Rec) using the same reward-model distillation as GoalRank, or alternatively, remove the reward model from GoalRank's training and compare all methods on an equal footing.
-2. **Either state the evidence upper bound or drop the claim.** If the derivation is in Appendix A, at least write down the bound in the main text and explain how it connects to the group-relative construction. If it cannot be stated concisely, the claim should be removed from the contributions.
-3. **Discuss the offline-online gap.** Provide an analysis of why offline gains are 25–47% while online gains are 0.1–1.2%, and what this implies about the evaluation protocol.
-4. **Repair the scaling experiment.** Control for data volume when varying model size, or at minimum add a separate experiment where data is fixed and only model size varies.
-5. **Re-center the narrative.** The paper would be stronger if presented as a practical approach for training large ranking models via reward-model distillation with group-relative normalization, rather than as a theoretical challenge to the G-E paradigm.
+1. **Add a controlled ablation**: Train a single generator of the same architecture as GoalRank using the reward model's scores directly — e.g., by using the reward model to rank sampled lists and then minimizing cross-entropy against the top-1 list (a form of behavioral cloning). If this baseline performs comparably to GoalRank, the group-relative mechanism itself adds little; if GoalRank significantly outperforms it, the group-relative design is validated.
+2. **Moderate the paradigm claim**: Reframe the paper as "a training framework for effective generator-only ranking" rather than "proof that generator-only beats G-E." The paradigm-level comparison requires controlling for the training signal.
+3. **Parameter-match the scaling comparison**: When comparing GoalRank vs. MG-E at different scales, ensure the total parameter budgets are approximately equal.
 
 ## Score and Decision
 
-**Calibration anchors (from retrieval):**
-- **/home/wg25r/review_agent/human_reviews_2026/JlwYkFm91F.md** (avg 5.50, Accept Poster — Denoising Neural Reranker): Cleaner experimental design with well-controlled comparisons and both offline and online validation, but smaller ambition. GoalRank is more ambitious but has more serious experimental flaws.
-- **/home/wg25r/review_agent/human_reviews_2026/PR6oISgk90.md** (avg 6.00, Reject — Reinforced Preference Optimization): Solid incremental contribution with cleaner experiments but rejected for limited novelty. GoalRank has more ambitious claims but significantly weaker experimental evidence.
-- **/home/wg25r/review_agent/human_reviews_2026/EjfzChLkHO.md** (avg 4.00, Reject — Understanding GR with SIDs): Shares similar methodological concerns about experimental controls. GoalRank has stronger real-world validation (online A/B) but similar issues with controlled comparisons.
-- **/home/wg25r/review_agent/human_reviews_2026/P6y3gZDsFa.md** (avg 3.50, Reject — SynerGen): Comparable level of experimental concern. GoalRank has stronger theoretical framing and online results but SynerGen had somewhat cleaner offline comparisons.
-- **/home/wg25r/review_agent/human_reviews_2026/dI5GvUg7ps.md** (avg 2.50, Reject — RewardRank): More fundamental issues with novelty and evaluation validity. GoalRank is stronger by comparison.
-- **/home/wg25r/review_agent/human_reviews_2026/FwVL5ckUdF.md** (avg 3.33, Reject — Two Tower Theory): Theoretical paper with limited experimental validation. GoalRank has more comprehensive experiments but shares similar theory-practice gap concerns.
-- **/home/wg25r/review_agent/human_reviews_2026/NjOn3GklMk.md** (avg 4.50, Reject — DFL LTR-SAA): Cleaner experimental design but narrower scope. GoalRank has broader impact claims but weaker experimental controls.
+### Calibration Anchors
 
-GoalRank presents a bold and well-motivated challenge to the G-E paradigm, with genuine online deployment evidence and an interesting heuristic training approach. However, the experimental comparison is fundamentally asymmetric (GoalRank gets reward-model distillation during training; baselines do not), making the central claim unsupported. The claimed theoretical contributions are either capacity comparisons (Theorem 1) or heuristic recipes presented as derivations (the "evidence upper bound"). The massive offline gains are inconsistent with the small online gains, and this gap goes unexplained. These issues are substantial enough that a major revision is needed to substantiate the core claims.
+**Round 1 (Bracketing):**
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| Policy Degeneracy in DRL for Rec (KVQJpmCYDn) | 3.00 | R1 | Much weaker — no online test, limited contribution |
+| RewardRank (dI5GvUg7ps) | 2.50 | R1 | Much weaker — no online A/B test, limited novelty |
+| LLMs as Foundational Recommenders (ldvNSeHvpK) | 3.00 | R1 | Weaker — benchmark paper, no new method or online validation |
+| Diffusion Beats ARM (iGuz8mgsye) | 3.00 | R1 | Weaker — limited datasets, no online experiments |
+| Understanding Generative Rec (EjfzChLkHO) | 4.00 | R1 | Weaker — scaling analysis only, no new method or online test |
+| ATRD (XJImx3cLmf) | 4.00 | R1 | Comparable framework depth but narrower baselines, theoretical depth |
+| Denoising Neural Reranker (JlwYkFm91F) | 5.50 | R1/R2 | Similar paper type (theory + offline + online) but GoalRank has stronger & cleaner online results and a theoretical theorem |
+| Reinforced Preference Opt for Rec (PR6oISgk90) | 6.00 | R1/R2 | Comparable — both have strong empirical work; RPO lacks online experiments while GoalRank has them; GoalRank's confound is the main counterbalance |
+| Gaia2 / Generative Verifier / RL World Models | 8.00 | R1 | Different topic; not directly comparable |
 
-MY FINAL SCORE: <score>4.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+**Round 1 Bracket:** [5.0, 7.0] — The paper is clearly above 3-4 range papers (which lack online validation or have major methodological issues) and below the 8.0 range (which are about different topics).
+
+**Round 2 (Narrowing):** The denoising reranker (5.5, accepted) and RPO (6.0, rejected) are the most directly comparable anchors. The paper under review is slightly stronger than the denoising reranker (cleaner online results across all metrics, theoretical theorem, larger-scale experiments) and comparable to RPO (both have strong empirical work, but GoalRank adds online A/B tests while RPO doesn't). The confound concern prevents a higher score.
+
+**Final Score: 6.0** — A solid paper with genuine contributions (group-relative optimization framework, strong empirical validation including online A/B tests) but with a significant confound in the headline comparison that requires addressing. The paper's core technical contribution — the training method — is sound and practically useful; the issue is that the paradigm-level claim is not fully supported by the current evidence.
+
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

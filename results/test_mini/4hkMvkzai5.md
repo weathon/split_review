@@ -1,89 +1,83 @@
-Now I have thoroughly verified the paper content against the reviewer claims. Let me write the final consolidated review.
-
 ## Summary
 
-This paper proposes DeCodec, a neural audio codec that learns to decouple audio representations into orthogonal subspaces for speech and background sound, and further decomposes speech into semantic and paralinguistic components. The core technical innovations are a subspace orthogonal projection (SOP) module that factorizes the encoder embedding into two orthogonal subspaces, and a representation swap training (RST) procedure that pushes each subspace to specialize to speech or background sound. Semantic guidance (SG) via HuBERT features is additionally applied to the speech quantizer. The model is evaluated on reconstruction, speech enhancement, one-shot voice conversion, and (in appendices) downstream ASR and TTS.
+DeCodec rethinks the neural audio codec as a universal disentangled representation learner. It introduces a Subspace Orthogonal Projection (SOP) module and Representation Swap Training (RST) procedure to decouple speech and background sound in the feature domain, while Semantic Guidance (SG) further decomposes speech into semantic and paralinguistic components. The core idea — moving from cascaded pipelines to a single unified representation that enables task-driven feature selection — is well motivated and the architectural design is novel.
 
 ## Strengths
 
-- **Novel architectural approach to codec-based disentanglement**: The combination of subspace orthogonal projection (SOP) with representation swap training (RST) is a genuinely new idea for neural codecs. The ablation study (Table 4) provides solid empirical evidence that the two components together achieve non-trivial decoupling: Ablation-3 (SOP+RST) attains SDR-B=0.49 dB and SDR-S=7.90 dB, whereas either component alone yields SDR-B < -10 dB and SDR-S ≤ 3.03 dB. This clean ablation design convincingly shows that both components are necessary.
+- **First demonstration of speech–background sound decoupling in a codec representation domain.** The ablation (Table 4) shows that neither SOP alone nor RST alone yields effective decoupling (SDR-B < –10 dB for both), but their combination in Ablation-3 achieves SDR-B = 0.49 dB and SDR-S = 7.90 dB. This clean ablation isolates the contribution of each proposed module and verifies that the joint design, not individual components, produces the decoupling. This is a genuinely novel result among neural codecs.
 
-- **Single model serving multiple tasks without cascaded pipelines**: DeCodec can perform audio reconstruction, speech enhancement (by replacing the BGS representation with a blank), and one-shot voice conversion (by swapping paralinguistic RVQ layers) from a single trained codec. The SE results (Table 2) are competitive with dedicated SE models — DeCodec achieves the highest DNSMOS OVL (3.39) and BAK (4.13) without reverb, outperforming SE-specific models like SELM and StoRM. This demonstrates a genuine advantage of the decoupled representation approach.
+- **Strong speech enhancement performance via representation recombination.** Table 2 shows DeCodec achieves the highest DNSMOS OVL among all SE models (3.39 without reverb, 3.13 on real recordings), including discriminative, diffusion, and transformer-based baselines. The BAK score of 4.13 (without reverb) demonstrates effective background suppression, and the causal variant (DeCodec-c) remains competitive with non-causal SE models. This provides concrete evidence that the decoupled representation can be practically exploited for a useful task.
 
-- **Comprehensive ablation study isolating component contributions**: The ablation (Table 4) carefully separates the contributions of SOP, RST, and SG, and reports multiple metrics (SDR-O for overall reconstruction, SDR-B/S for decoupling quality, and WER* for semantic preservation). This allows readers to understand the specific role of each component and the trade-offs involved.
+- **Ablation study cleanly isolates each component's contribution.** Table 4 systematically ablates SOP, RST, and SG, showing that (a) SOP+RST together raise SDR-B from below –10 dB to +0.49 dB and SDR-S to 7.90 dB, while (b) adding SG trades modest SDR for large WER* reduction (41.9 → 25.8). This disentangles the roles of the three modules and makes the design choices interpretable.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The claimed theoretical guarantee in Section 3.6 is not a valid proof.** The paper states "Here, we theoretically prove that the proposed L_RST can further force Zs ... to be speech representations only" (line 144), but the argument using the mean value theorem does not establish this. The conclusion that "Zs1 must be independent of n1" does not follow from the equations shown: the partial derivative ∂Dec/∂Zn evaluated at an intermediate point ξ can depend on Zs1 in arbitrarily complex ways, and the equality of two reconstruction differences does not force Zs1 to be independent of n1. The derivation is at best a heuristic intuition, not a proof. This matters because the paper repeatedly invokes this "theoretical guarantee" to motivate the approach (abstract, line 45, line 144). The empirical results (Ablation-3) remain valid evidence of decoupling, but the theoretical claim should be dropped or honestly characterized as intuition.
+- **Uncontrolled bitrate in the reconstruction comparison (Table 1).** DeCodec operates at 8 kbps total (4.0 + 4.0), whereas all baseline codecs use 2.0–6.0 kbps. Higher bitrate trivially improves reconstruction fidelity, so the reported SDR advantage (e.g., 7.61 vs. EnCodec's 6.86 at 6 kbps) cannot be interpreted as evidence of superior codec design. The paper's abstract claim that DeCodec "maintains advanced signal reconstruction" is not well supported because the comparison is not controlled for the primary factor driving reconstruction quality. This is not fatal to the core disentanglement contribution, but it undermines the reconstruction-related claims and the strength of the overall narrative. The authors should either match total bitrate (e.g., fewer RVQ layers in DeCodec to reach 6 kbps) or frame the reconstruction results purely as documentation with explicit caveats.
 
-2. **Baseline comparisons for reconstruction (Table 1) are not controlled for training data.** DeCodec is trained from scratch on 700h of speech mixed with ESC-50/DNS-Noise at random SNRs, while the baselines (EnCodec, HiFi-Codec, DAC, SpeechTokenizer) are evaluated using their official pretrained checkpoints trained on different data distributions and bitrates. No baseline is retrained or fine-tuned on the same mixture data. Consequently, the SDR, Mel distance, and WER comparisons in Table 1 primarily reflect differences in training data and bitrate allocation (DeCodec uses 8.0 kbps total vs. 4.5–6.0 kbps for baselines) rather than measuring whether DeCodec maintains reconstruction quality while decoupling. The core novelty of the paper is decoupling, not reconstruction, so this weakness is not fatal, but the reconstruction claims should be tempered.
-
-3. **One-shot voice conversion results do not support strong claims of effectiveness.** The WER on noisy speech is 50.46% (Table 3). While this is better than the cascaded StoRM-SpeechTokenizer baseline (52.73%), a WER of ~50% means roughly every other word is incorrect, indicating very limited intelligibility. The paper acknowledges "relatively high WER" and attributes it to voicing mismatches (line 243), but provides no per-utterance breakdown or analysis to support this explanation. Given that the SE results (which rely only on speech-BGS decoupling) are strong, the weak VC performance suggests that the semantic-paralinguistic decomposition within speech (via SG) may be less effective than claimed. The paper's claim of "effective one-shot voice conversion" is not supported by the evidence.
+- **Background sound extraction quality is poor in the full model (Table 4).** The full DeCodec (with SG) achieves SDR-B of –0.36 dB (non-causal) and –1.11 dB (causal). Negative SDR indicates the extracted background sound is more distorted than silence. While the primary application of the decoupling is speech-focused (SE, VC), the paper's framing of "explicit decoupling of speech and background sound" implies two-way functionality. The BGS branch cannot reconstruct background sound with useful fidelity in the full model, which limits the claimed universality. The Ablation-3 (SOP+RST without SG) does achieve positive SDR-B (0.49 dB), suggesting SG is the cause of the degradation, but this trade-off is not discussed in the paper.
 
 ### Minor
 
-1. **Semantic guidance (SG) degrades speech-BGS decoupling, and the implications are under-explored.** Table 4 shows that adding SG to SOP+RST reduces SDR-B from 0.49 to -1.11 (causal) and SDR-S from 7.90 to 5.70 (causal). The paper notes this as "a slight decrease in SDR" (line 258), but the degradation is substantial — SDR-B goes from positive (actual BGS reconstruction) to negative (essentially no BGS reconstruction). Since the SE and VC experiments use the full model (including SG), readers cannot determine whether these results would be stronger without SG. Ablating SG in the SE/VC settings would clarify whether SG's value for semantic decomposition outweighs its cost to speech-BGS decoupling.
+- **No statistical significance or confidence intervals reported.** Given the small differences in some comparisons (e.g., WER 50.46 vs. 52.73 in the VC task; SDR of 6.79 vs. 6.86 between DeCodec-c and EnCodec on clean speech), it is unclear whether the reported advantages are reliable or within measurement noise. This is particularly important for the DNSMOS scores and WER results in the VC experiment.
 
-2. **The SOP orthogonality derivation (Section 3.4) is mathematically vague.** The paper states that when the covariance matrix YY^T "satisfies the angular matrix" (undefined term) and feature channels are "sufficiently diverse" and "mutually independent" (line 112), then P_S P_N^T = 0 follows. No definition of "angular matrix" is provided, and the condition is not operationalized. The claim that SOP "ensures the subspaces ... to be disentangled" is therefore justified only by the empirical L_perp loss, not by the mathematical derivation presented.
+- **The theoretical derivation for RST (Section 3.6) is heuristic rather than rigorous.** The proof uses the mean value theorem to argue that Zs₁ must be independent of n₁ (Equation 15-16), but the conclusion is inductive — it relies on approximations from training objectives (13)-(14) and the assumption that the decoder Jacobian captures the relevant behavior. The argument is reasonable as motivation but overstated as a formal guarantee. Similarly, the SOP derivation (Section 3.4) that minimizing L⊥ yields true orthogonal projectors requires the assumption that the covariance matrix of Y is "angular" (i.e., feature channels are mutually independent), which is neither verified nor discussed as an approximation.
 
-3. **The supervision asymmetry is not controlled for.** DeCodec uses clean-speech HuBERT-L9 features as semantic targets during training (Section 3.5), giving it access to oracle clean speech information that baselines do not have. This is acknowledged for the SG loss, but its impact on WER comparisons (both in reconstruction and downstream ASR) is not discussed or controlled for. An experiment training a baseline codec with identical HuBERT supervision would isolate whether the decoupling mechanism itself or simply the extra supervision drives the semantic improvements.
+- **No BGS-only reconstruction ablation.** The ablation study (Table 4) evaluates SDR-B and SDR-S jointly but does not include an ablation that specifically tests whether the BGS branch alone can reconstruct background sound from a mixture (e.g., evaluating only the BRVQ + decoder path). This would directly validate the two-way decoupling claim.
 
-4. **SDR-B and SDR-S metrics are not well-defined.** The ablation study (Table 4) reports SDR-B and SDR-S for "decoupled background sound" and "decoupled speech," but the paper does not specify how ground truth signals for these decoupled components are obtained from the mixed signal. SDR requires a reference signal — are the references simply the original s and n from the mixture? If so, SDR-B of 0.49 dB means the reconstructed BGS has roughly equal signal and distortion power, which is better than negative values but still relatively weak decoupling. The paper should define these metrics explicitly.
+- **No subjective listening evaluation.** Despite the paper mentioning a demo page, no MUSHRA or similar listening test is reported. DNSMOS is a useful non-intrusive proxy, but for a codec claiming high reconstruction and SE quality, a subjective evaluation would substantially strengthen the evidence.
 
 ### Trivial
 
-- The term "angular matrix" in Section 3.4 is used without definition.
-- Table format (Table 1) has an extra column separator that makes it slightly hard to parse.
-- Minor: the paper says "first time" for achieving decoupled representations in a codec (line 45) — this is a strong claim that would benefit from more careful qualification given related work like DualCodec and UniCodec.
+- In Table 4, "DeCodec-c" and "DeCodec" appear in the ablation table but the ordering of rows could be clearer (Ablations 1-3 first, then the full models).
+- Minor: Table 1 caption uses "kpbs" instead of "kbps."
 
 ## Nice-to-Haves
 
-- Reporting SE/VC results for the Ablation-3 variant (SOP+RST without SG) to isolate whether SG's degradation of decoupling hurts downstream task performance.
-- Mutual information estimates or classifier-based probing between Zs and Zn as a more direct measure of disentanglement, complementing SDR-B/S.
-- Per-SNR breakdown of VC WER to validate the voicing-mismatch explanation.
-- Retraining one baseline codec (e.g., a simplified RVQGAN) on the same mixture data with the same bitrate to enable fairer reconstruction comparison.
-
-## Removed Points
-
-- **Criticism about missing downstream results in appendices (original #6):** Per policy, appendix content exists in the original submission and was removed by the parser. The ASR result (WER*) is already presented in Table 4 in the main paper.
-- **Criticism that "the trade-off [of SG] is not discussed":** The paper explicitly states "resulting in a slight decrease in SDR but a significant reduction in WER*" (line 258). The trade-off is acknowledged, though the discussion could be deeper.
-- **Criticism that WER comparisons in Table 1 are unfair due to supervision asymmetry:** The WER column in Table 1 is for **clean** speech reconstruction, where all models receive clean input. No supervision asymmetry exists for clean speech evaluation.
-- **Criticism about missing code release or reproducibility details:** These are standard deferred-to-acceptance items, not review-deciding weaknesses.
-- **Several generic format/style nitpicks.**
-- **Strength Finder's generic strengths** (e.g., "addresses an important problem") — removed as they lack specific content.
+- A controlled bitrate comparison (e.g., DeCodec with 4+0 = 4 kbps total vs. SpeechTokenizer at 4 kbps) would cleanly separate the speech-decoupling benefit from the bitrate advantage.
+- A comparison of DeCodec's SE mode against using its own BGS replacement strategy combined with SpeechTokenizer (the closest ablative baseline) would clarify the advantage of the unified design.
+- An analysis of the semantic guidance trade-off: the paper notes that SG reduces SDR but improves WER*, but does not quantify whether the BGS quality degradation is a necessary cost or an artifact of the current optimization.
 
 ## Novel Insights
 
-The most interesting finding from the reviews is the tension between the two levels of disentanglement the paper attempts. The SOP+RST mechanism achieves non-trivial speech-BGS decoupling (SDR-B=0.49, SDR-S=7.90), but adding semantic guidance (SG) to also decompose speech into semantic and paralinguistic components actually degrades the speech-BGS decoupling (SDR-B drops to -1.11, SDR-S drops to 5.70). This suggests that the current collaborative optimization strategy does not fully resolve the competition between the two disentanglement objectives — the model trades off cross-source decoupling for within-speech decomposition. Whether this trade-off is fundamental or addressable through better optimization (e.g., dynamic loss weighting, two-stage training) is an open question that the paper does not investigate. The finding that full DeCodec still outperforms the cascaded denoising+codec baseline in VC (WER 50.46 vs. 52.73) hints that even the degraded decoupling may still be useful, but this seems like the most productive direction for future work.
+A genuinely novel observation emerges from the calibration exercise: the gap between DeCodec and the closest accepted anchor (FlexiCodec, 5.67) is predominantly *not* about the architecture or the core idea but about *evaluation control*. FlexiCodec retrains its baselines at the same bitrate and frame rate; DeCodec compares against off-the-shelf baselines at heterogeneous bitrates. This underscores a broader pattern in speech codec papers at this venue: the community evaluates novelty generously when the idea is strong, but penalizes uncontrolled comparisons even when the idea itself is sound. DeCodec's architecture is arguably as novel as FlexiCodec's, but the uncontrolled reconstruction comparison weakens the paper's case more than any architectural limitation.
 
 ## Suggestions
 
-1. **Remove or recharacterize the theoretical "proof" in Section 3.6** as a heuristic intuition or informal justification. The empirical ablation (Ablation-3) already provides strong evidence for SOP+RST effectiveness.
-2. **Include SE and VC results for the Ablation-3 variant** (SOP+RST without SG) to show whether SG's semantic decomposition benefit outweighs its decoupling cost in downstream tasks.
-3. **Retrain at least one baseline codec on the same data mixture** for reconstruction comparison, or clearly state the data/bitrate mismatch as a limitation.
-4. **Define SDR-B/S metrics explicitly** — specify the reference signals used.
-5. **Provide per-utterance VC analysis** (by SNR, voicing status) to support the explanation for high WER.
+1. **Add a controlled bitrate variant**: Retrain or configure DeCodec at 4–6 kbps total (e.g., by reducing SRVQ or BRVQ layers) and report its reconstruction against baselines at the same bitrates. Even if the performance drops, this would bound the efficiency cost of the decoupling and allow a fair comparison.
+2. **Report confidence intervals or error bars for key metrics** (WER, SDR, DNSMOS), especially where differences are small.
+3. **Add a brief limitations discussion to the main text** acknowledging the BGS quality limitations and the bitrate overhead.
+4. **Include a direct BGS reconstruction evaluation** (e.g., SI-SNR on isolated BGS) to make the two-way decoupling claim more concrete.
+
+## Removed Points
+
+These points were raised by reviewers but removed per filtering rules (with brief justification):
+
+- *ASR/TTS results are in the appendix* — REMOVED per hard rule: the parser strips appendix content from all papers; the results exist in the original submission.
+- *Over-reliance on appendix for key claims* — REMOVED per hard rule: same as above.
+- *"Limitations are deferred to Appendix H"* — REMOVED per hard rule: same as above.
+- *"SE BAK advantage may come from replacing BGS with blank — overly aggressive suppression"* — REMOVED as speculative; the paper explicitly describes this mechanism and the DNSMOS results measure overall perceptual quality, not just suppression.
+- *"Missing comparison with related works"* — REMOVED per hard rule: cannot assert missing related works without external verification.
+- *"The paper would benefit from more discussion on XY"* (generic suggestions from Strengthening section) — REMOVED as discussion of hypothetical improvements not tied to paper flaws.
+- *Strength Finder claims about "biologically motivated design" and "systematic evaluation"* — KEPT as genuine strengths with specific evidence in the paper. Generic strengths about "addressing an important problem" were dropped.
 
 ## Score and Decision
 
-Calibration anchors (from one-shot batch retrieval):
+**Score calibration summary:**
 
-| Path | Avg Score | Comparison to this paper |
-|------|-----------|------------------------|
-| `/home/.../kYkfCs4ZAH.md` (FlexiCodec) | 5.67 | Stronger: more rigorous experiments, better-controlled baselines, cleaner contributions, accepted as poster |
-| `/home/.../GVOLiaENgU.md` (Bayes-QLAE) | 6.00 | Stronger: sound theoretical derivation combined with empirical validation, accepted |
-| `/home/.../MDHVDfUrDz.md` (CodecSep) | 4.00 | Comparable: both propose novel codec-based approaches with multi-task evaluations, both have evaluation gaps; this paper has stronger ablation but weaker reconstruction baselines |
-| `/home/.../TgRMixfAPK.md` (HP-Codec) | 3.33 | Weaker: HP-Codec's central claim is less well-supported by ablations, missing key baselines; this paper has more convincing ablation evidence |
-| `/home/.../FA2R2KwyTH.md` (Speech Codecs Beyond Compression) | 3.00 | Comparable weakness level: both have evaluation issues that undermine central claims; this paper has more architectural novelty |
-| `/home/.../6P3JxS3Pfl.md` (DisCoVR) | 4.00 | Comparable: both have theoretical derivations with gaps, but reasonable empirical contributions |
-| `/home/.../b36drMoKir.md` (Gradient Flow) | 0.50 | Much weaker: fundamentally incorrect proof; this paper's empirical results are valid even if the theoretical argument is not |
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| `kYkfCs4ZAH.md` (FlexiCodec) | 5.67 | R1, R2 | Stronger paper — controls bitrate in baselines, more thorough experiments. DeCodec is below this. |
+| `lCaU7NlZ1I.md` (Self-Guidance) | 5.00 | R2 | Similar novelty level with minor evaluation gaps. DeCodec has more ambitious architecture but less controlled evaluation. Comparable. |
+| `MDHVDfUrDz.md` (CodecSep) | 4.00 | R1, R2 | Weaker — mixed reviews, presentation concerns. DeCodec is above this. |
+| `mrTTkF3LEM.md` (XY-Tokenizer) | 4.00 | R1 | Had concerns about limited novelty. DeCodec has clearer architectural novelty. Above this. |
+| `RILri9w9IW.md` (FuseCodec) | 3.50 | R2 | Methodological fragmentation. DeCodec is clearly stronger. |
+| `TgRMixfAPK.md` (H-P Disentangled) | 3.33 | R1 | Similar theme (disentangled codec) but weaker architecture. DeCodec above this. |
+| `FA2R2KwyTH.md` (Speech Codecs Beyond) | 3.00 | R1 | Had critical experimental flaw (language mismatch). DeCodec is stronger. |
+| `JeIDPXc9XG.md` (AudioCodecBench) | 2.40 | R1 | Benchmark paper, different category but weaker overall. |
 
-This paper introduces a genuinely novel approach to disentangled codec representations with a clean ablation design, and achieves competitive SE performance without dedicated SE model architecture. However, the paper overclaims in several areas: the theoretical "proof" is invalid, the reconstruction baselines are uncontrolled, the VC results are weak, and the trade-off between the two disentanglement objectives is underexplored. The paper is stronger than rejected codec papers (CodecSep, HP-Codec) but notably weaker than accepted codec papers (FlexiCodec) in experimental rigor. A borderline submission.
+Round 1 bracket: 4.0–5.5. Round 2 narrowing placed DeCodec between the 4.0-level papers (CodecSep, XY-Tokenizer) and FlexiCodec (5.67). The paper's genuine novelty in speech-BGS decoupling is a clear strength, but the uncontrolled bitrate comparison and weak BGS extraction quality in the full model prevent it from reaching the 5.5+ tier occupied by FlexiCodec. Comparing directly to Self-Guidance (5.00), DeCodec has more architectural ambition but also more significant evaluation gaps. The paper is comparable to Self-Guidance in overall quality — a novel idea with notable evaluation shortcomings — placing it just below 5.0.
 
-MY FINAL SCORE: 4.5
-MY FINAL DECISION: Reject
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

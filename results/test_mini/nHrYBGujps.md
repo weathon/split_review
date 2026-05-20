@@ -1,88 +1,90 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have sufficient calibration data. Let me write the consolidated review.
 
 ## Summary
 
-BIRD-INTERACT re-imagines text-to-SQL evaluation by shifting from single-turn, static benchmarks to a dynamic interactive environment. The paper contributes: (1) a function-driven user simulator that prevents ground-truth leakage (2.7% failure rate on unanswerable questions vs. 67.4% for baselines), (2) two evaluation settings (protocol-guided *c*-Interact and autonomous *a*-Interact) with budget-constrained awareness, and (3) 900 interactive tasks covering the full CRUD spectrum, each with ambiguity injection and state-dependent follow-up sub-tasks. The strongest model (GPT-5) achieves only 8.67% success in *c*-Interact and 17.00% in *a*-Interact, demonstrating a large gap between SQL generation and strategic interaction abilities.
+BIRD-INTERACT is a benchmark that evaluates LLMs on multi-turn, dynamic text-to-SQL interaction. It converts single-turn tasks from LIVESQLBENCH into interactive scenarios requiring ambiguity resolution, knowledge retrieval, error recovery, and state-dependent follow-ups — all mediated by a function-driven user simulator that prevents ground-truth leakage. The benchmark includes 600/300 tasks spanning the full CRUD spectrum, two evaluation settings (protocol-guided *c*-Interact and agentic *a*-Interact), and budget-constrained interaction limits. Experiments with 7 frontier LLMs show that even the strongest model (GPT-5) achieves only 8.67% end-to-end success in *c*-Interact and 17.00% in *a*-Interact, confirming the task remains largely unsolved.
 
 ## Strengths
 
-- **Novel function-driven user simulator that demonstrably solves the ground-truth leakage problem.** The two-stage approach (action classification → response generation) is a principled solution to a well-known weakness of LLM-as-user approaches. The USERSIM-GUARD evaluation (2,100 expert-labeled questions) is rigorous: the function-driven approach cuts UNA failure rates from 67.4% to 2.7% (Figure 6).
+1. **Function-driven user simulator with strong empirical validation.** The two-stage design (Section 3.3) maps system requests to three constrained actions (AMB/LOC/UNA) before generating responses. On USERSIM-GUARD (2,100 labeled questions), this reduces UNA failure rates from 67.4% (baseline) to 2.7% (Figure 6). Human alignment improves substantially: GPT-4o with function calling achieves Pearson r=0.84 (p=0.02) vs. 0.61 without (p=0.14) (Table 3). This directly supports the claim that the simulator enables fair, realistic end-to-end evaluation.
 
-- **First interactive text-to-SQL benchmark covering the full CRUD spectrum.** While prior work (COSQL, SParC, MINT) restricts to SELECT-only queries, BIRD-INTERACT includes 190 DM tasks (INSERT, UPDATE, DELETE, DDL) in the full set (Table 1). This is essential for production-grade database assistants and meaningfully broadens evaluation scope.
+2. **Two complementary evaluation settings reveal distinct model-specific deficiencies.** The *c*-Interact (protocol-guided) and *a*-Interact (agentic) settings (Section 4) expose divergent model behaviors. GPT-5 achieves 14.50% SR in *c*-Interact but 29.17% in *a*-Interact — the largest gap among all tested models (Table 2). This demonstrates that the benchmark isolates communication capability from SQL generation skill, which static-transcript benchmarks (e.g., CoSQL) cannot support.
 
-- **The benchmark is genuinely challenging and reveals concrete insights about LLM interaction strategies.** Even the best models score ≤25.52% normalized reward (Table 2). The memory grafting experiment (Figure 5) cleanly isolates communication strategy as the bottleneck for GPT-5, and the action-distribution analysis shows models systematically prefer costly trial-and-error over strategic exploration.
+3. **Memory grafting experiment isolates communication as the bottleneck.** By supplying GPT-5 with interaction histories from O3-mini, its success rate jumps from 13.8% to 20.5% (Figure 5), while providing the same histories to the original better model yields no gain. This cleanly demonstrates that the benchmark's difficulty stems from interactive dialogue strategy, not SQL generation ability.
 
-- **Dual evaluation settings with budget constraints are well-designed.** *c*-Interact and *a*-Interact capture distinct real-world deployment scenarios (conversational assistant vs. autonomous agent). The budget mechanism with user-patience parameterization enables stress-testing. The finding that models exhibit different relative strengths across the two modes (GPT-5: worst in *c*-Interact, best in *a*-Interact) is a genuine empirical discovery.
-
-- **Human alignment validation on the simulator.** The Pearson correlation of 0.84 (p=0.02) between the function-driven GPT-4o simulator and human users (Table 3), versus 0.61 (p=0.14) for the baseline, provides credible evidence that the simulator captures realistic interaction patterns.
+4. **Challenging task suite over the full CRUD spectrum with state-dependent follow-ups.** The benchmark covers 410 BI and 190 DM tasks (Table 1), with each task containing ambiguous priority sub-tasks and follow-ups that depend on intermediate database state. The strongest model reaches only 17% end-to-end success in *a*-Interact, confirming the difficulty gap relative to single-turn or static multi-turn benchmarks.
 
 ## Weaknesses
 
-### Fatal
+### Major
 None.
 
-### Major
-None. The paper's core contributions are valid and supported by evidence.
-
 ### Minor
+1. **Single-run evaluation limits precision of model comparisons.** All success rates are based on a single run per model (temperature=0, line 177), acknowledged due to cost. While the broad ordering is reliable, differences between close models (e.g., O3-Mini vs. Gemini-2.5-Pro in *a*-Interact follow-ups: 8.50% vs. 10.33%) and debugging increments as small as 0.24 percentage points are within noise. The standard error of a binomial proportion at ~17% on 600 tasks is ~1.5pp. The paper does not discuss variance or provide confidence intervals. Bootstrapped estimates over the task set would strengthen the quantitative claims without requiring additional API calls. This is a common limitation in LLM evaluation but should be acknowledged more transparently.
 
-- **The Interaction Test-Time Scaling (ITS) "law" is overclaimed.** The paper defines the ITS Law as reaching or surpassing idealized single-turn performance given enough turns, but no model actually achieves this in either setting (Figure 4). In *a*-Interact, several models show flat or decreasing performance with more patience, directly contradicting the claimed scaling. The observation that Claude-3.7-Sonnet improves with more turns in *c*-Interact is interesting and worth reporting, but calling it a "law" and framing it as a general phenomenon is not supported by the data. This should be downgraded to "ITS observation" or "ITS trend" with appropriate caveats.
+2. **No quantitative model-level comparison against existing interactive benchmarks (CoSQL, SParC).** The paper convincingly argues that existing benchmarks use static transcripts and SELECT-only scopes (Section 1), and Appendix E provides a dataset-level comparison. However, running the same models on CoSQL or SParC would concretely demonstrate that BIRD-INTERACT captures a *different* or *harder* evaluation. Without this, the reader must rely on argumentation alone to assess how incremental the contribution is relative to adding a user simulator to existing tasks. The human alignment study (Table 3) validates simulator realism but not comparative task difficulty.
 
-- **The claim that ambiguous queries are "unsolvable without clarification" is asserted but not experimentally verified.** The paper states this as a quality-control property (Section 3.2), but no ablation experiment demonstrates that models fail at chance on the ambiguous queries when prohibited from interaction. Such an experiment would directly support the benchmark's central premise. (The paper does show low absolute success rates, but without an interaction-free baseline, one cannot attribute the difficulty specifically to the need for interaction.)
+3. **Cost multiplier justification for *a*-Interact action space is incomplete.** The 9 actions are enumerated (Section 4.2), and cost multipliers are shown in Figure 3. Models overuse *submit* and *ask* (60.87% of actions), attributed to "pre-training bias" toward trial-and-error. However, if low-cost actions like *Retrieve Knowledge* are available, the paper does not ablate whether the cost structure itself incentivizes non-exploratory behavior. Without an experiment equalizing all action costs, the "pre-training bias" conclusion, while plausible, is not uniquely supported.
 
-- **The human-correlation study for the user simulator is limited in scale and reporting.** The study uses only 100 tasks (of 900) and lacks detailed protocol description in the main text (budget constraints, allowed responses, annotation guidelines). While the 0.84 correlation is encouraging, this is a modest basis for the claim of "high-fidelity" simulation. The paper does not report confidence intervals or discuss cases where simulator and human judgments diverge.
-
-- **The memory grafting experiment has a confound.** GPT-5's improvement when given interaction histories from Qwen-3-Coder and O3-mini could reflect not just better interaction strategy but simply having a longer or different context. The "without grafting" baseline is GPT-5's own (worst) performance, so improvement from any external history is expected. An ablation where GPT-5 receives its own successful interaction histories (when available) would better isolate the communication-deficiency hypothesis.
-
-- **Single-run evaluations limit reliability.** The paper acknowledges this (Section 5), but with narrow margins between some models (e.g., 16.33% vs. 15.83% follow-up SR in *c*-Interact between Gemini-2.5-Pro and O3-Mini), variance is a concern for model rankings.
+4. **ITS analysis is limited by model coverage.** Figure 4 shows only 4 of the 7 models; Qwen-3 exhibits flat or non-monotonic trends. The "ITS Law" is defined as a property a model *can* satisfy (Section 5.2), but the evidence for it as a general phenomenon is limited. The paper appropriately focuses on Claude-3.7-Sonnet as the clearest example, but the framing could be tempered.
 
 ### Trivial
-
-- The main text lacks concrete worked examples demonstrating state-dependency in follow-up sub-tasks (e.g., how INSERT modifies the database state and how the follow-up depends on it). A short illustrative example would strengthen the exposition.
-- No confidence intervals are reported for the human-correlation coefficients in Table 3.
+- The budget formula $B = B_{\text{base}} + 2m_{\text{amb}} + 2\lambda_{\text{pat}}$ uses a factor of 2 without explicit justification in the main text.
+- The "Idealized Performance" line in Figure 4 would benefit from a clearer caption specifying whether it is human expert performance or the best model's single-turn score.
+- The debugging reward penalty (reward=0.7) is only shown in Figure 3 but not stated in the text of Section 4.1.
 
 ## Nice-to-Haves
-
-- Include an explicit ablation where models are forced to solve ambiguous queries without any interaction (patience=0 and no clarification allowed) to verify the "unsolvable without clarification" claim.
-- Report action costs used in *a*-Interact more prominently in the main text (currently deferred to Appendix J).
-- Add multiple runs (e.g., 3) for a subset of models and budget settings to assess the stability of rankings.
+- **Per-category breakdown by ambiguity type** (superficial, knowledge, environmental) would deepen behavioral analysis and guide future method development.
+- **Action distribution table** (all 9 actions per model) in the main text would strengthen the *a*-Interact behavior analysis, which currently reports aggregate percentages for only two actions.
+- **Free-mode experiments** (mentioned in Future Work, Section 8) would complement the stress-mode results and clarify whether budget constraints drive observed behaviors.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. **"Reward weights (70/30) justified only in appendix"** — Removed per rule about missing appendix content; the parser strips appendices from all papers.
-2. **"Action costs not reported in main text"** — Removed per rule about missing appendix content; the paper points to Appendix J for details.
-3. **"Budget constraint justification is heuristic"** — Removed because it is a normal design choice for benchmarks; most benchmark design parameters are heuristic and this is not a weakness.
-4. **"Claim of restoring missing realism overstates"** — Removed as a subjective opinion; the paper's claims about realism are appropriately scoped.
-5. **"State-dependency claim weak without concrete examples"** — Removed as a formatting/stylistic preference; the paper's description is adequate for the main text (Appendix H.5 presumably contains the taxonomy).
+- **"600 tasks selected from 900" confusion**: The paper clearly states FULL has 600 tasks and LITE has 300 tasks (Table 1, line 117). This reflects a misreading of the paper.
+- **ITS Law overclaim**: The paper defines the law as a property a model *can* satisfy and only claims Claude-3.7-Sonnet "exhibits clear scaling behavior" (Section 5.2). The criticism that the paper claims this as a universal property is not supported by the text.
+- **Missing debugging reward details**: The reward penalty (0.7) is shown in Figure 3 and referenced in the text ("details can be found in Figure 3," Section 4.1). The paper addresses this.
+- **LITE results not in main text**: Per the instructions, do not penalize for content moved to appendix (parser strips appendices from all papers).
+- **Reproducibility nits about hyperparameters**: Temperature=0 and top_p=1 are stated; reasoning model defaults are acknowledged. This is standard practice.
+- **Missing related works**: Cannot be verified without external sources.
+- **Formatting/style concerns**: Parser artifacts, not author errors.
 
 ## Novel Insights
 
-The reviews surface a tension that the paper does not fully resolve: the user simulator is simultaneously the paper's strongest technical contribution (demonstrably preventing ground-truth leakage) and the source of its most persistent validity concern (whether simulated interactions reflect real user behavior). This tension is inherent to the task — avoiding human-in-the-loop evaluation while maintaining ecological validity — and BIRD-INTERACT makes an unusually systematic attempt to address both sides, but the evidential gap between the two remains the salient issue for future work building on this benchmark.
+None beyond the paper's own contributions. The harsh critic and strength finder both surface the same key findings: the function-driven user simulator is well-validated, the memory grafting experiment is a clean isolation of the interaction bottleneck, and the gap between c-Interact and a-Interact performance reveals model-specific communication deficiencies. No reviewer identified an unrecognized limitation or a surprising implication that the authors themselves had not considered.
 
 ## Suggestions
 
-1. Downgrade the "ITS Law" to a more measured claim (e.g., "ITS observation" or "ITS trend") and explicitly note that no model reaches the idealized single-turn baseline in the tested range.
-2. Run an interaction-free ablation on a subset of ambiguous tasks to verify the "unsolvable without clarification" premise. Even 50 tasks would significantly strengthen the paper's central claim.
-3. Expand the human-correlation study to at least 200 tasks and report confidence intervals and qualitative divergence examples.
-4. Add a short illustrative example of state-dependent follow-up sub-tasks in the main text (can be a footnote or callout box).
+1. Report bootstrapped 95% confidence intervals for the main success rates by resampling the task set. This addresses the single-run concern without additional API expenditure.
+2. Run the same agent/prompt setup on CoSQL (or report comparable published numbers) to quantify how much harder BIRD-INTERACT is than the closest existing benchmark.
+3. Add an ablation in *a*-Interact where all actions have equal cost, to separate pre-training bias from cost-driven behavior in the action distribution analysis.
+4. Include a table of all 9 action frequencies per model in Section 5.2 to support the trial-and-error bias conclusion.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration summary** (all anchors retrieved across rounds):
 
-| Path | Avg Score | Comparison |
-|------|-----------|------------|
-| `/home/wg25r/review_agent/human_reviews_2026/BdlIQGetYv.md` (Octopus) | 2.50 | Auto-generated text-to-SQL benchmark without human validation. BIRD-INTERACT is significantly stronger — it has real human annotation, validated simulator, and genuine methodological novelty. |
-| `/home/wg25r/review_agent/human_reviews_2026/hxEHr5gJBY.md` (TQA-Bench) | 4.00 | Multi-table QA benchmark. BIRD-INTERACT has comparable scale but more methodological innovation (interactive framework, user simulator design). |
-| `/home/wg25r/review_agent/human_reviews_2026/hLweUPBz7k.md` (EHR-ChatQA) | 4.00 | Interactive database QA benchmark in the EHR domain — closest genre match. BIRD-INTERACT is larger (900 vs. small task count), covers CRUD vs. SELECT-only, has more rigorous simulator validation (2,100-question USERSIM-GUARD). |
-| `/home/wg25r/review_agent/human_reviews_2026/gXkIkSN2Ha.md` (BIRD-Ent) | 3.60 | Enterprise extension of BIRD. BIRD-INTERACT introduces a fundamentally new evaluation paradigm (interaction) rather than scaling an existing one. |
-| `/home/wg25r/review_agent/human_reviews_2026/UAUimofy3W.md` (Non-Collab User Sim) | 4.67 | User simulator for tool agents — comparable focus on simulation quality. BIRD-INTERACT has broader benchmark scope and more rigorous simulator evaluation. |
-| `/home/wg25r/review_agent/human_reviews_2026/EtzJy9yI5J.md` (DAComp) | 5.33 | Broad data agent lifecycle benchmark with strong reviewer support (one 8). BIRD-INTERACT is comparable in quality, slightly narrower in scope but with a more novel interaction paradigm. |
-| `/home/wg25r/review_agent/human_reviews_2026/PL51SpN6ZJ.md` (SimBench) | 6.00 | High-quality behavioral simulation benchmark with 20 diverse datasets. BIRD-INTERACT has less comprehensive validation but comparable methodological rigor within its domain. |
+| Anchor | Path | Avg Score | Round | Comparison |
+|--------|------|-----------|-------|------------|
+| Octopus | BdlIQGetYv.md | 2.50 | R1 (weak) | Much weaker — auto-generated, quality issues, withdrawn |
+| ConDABench | jOxfpsnDFo.md | 2.50 | R1 (weak) | Much weaker — smaller scale, interactive DA, withdrawn |
+| SQLAgent | voLoLHms2K.md | 3.33 | R1 (weak) | Weaker — method paper with shallow baselines, withdrawn |
+| BIRD-Ent | gXkIkSN2Ha.md | 3.60 | R1 (weak) | Weaker — synthetic enterprise, concerns about quality, withdrawn |
+| EHR-ChatQA | hLweUPBz7k.md | 4.00 | R1 (mid) | Weaker — smaller scale (64 AdaptQA instances), accepted poster |
+| KnowMT-Bench | 66v0c2oOHK.md | 4.80 | R2 (narrow) | Weaker — template-based, smaller, rejected |
+| ATAD | 9HacBDFOjt.md | 5.00 | R2 (narrow) | Weaker — single task family, accepted poster |
+| DAComp | EtzJy9yI5J.md | 5.33 | R2 (narrow) | Comparable — broader scope but less user simulator validation, poster |
+| VitaBench | rtcX9qOBaz.md | 5.50 | R2 (narrow) | Comparable — similar tier, more scenarios but less validation, poster |
+| AMemGym | sfrVLzsmlf.md | 6.00 | R2 (narrow) | Slightly stronger — interactive memory benchmark, poster |
+| LLMs Get Lost… | VKGTGGcwl6.md | 8.00 | R1 (strong) | Stronger — novel finding about multi-turn degradation, Oral |
+| Gaia2 | 9gw03JpKK4.md | 8.00 | R1 (strong) | Stronger — broader agent benchmark with dynamic environments, Oral |
 
-**Score rationale:** BIRD-INTERACT clearly outperforms the cluster of text-to-SQL benchmarks in the corpus (Octopus 2.50, TQA-Bench 4.00, BIRD-Ent 3.60). It is stronger than the closest comparable interactive database benchmark (EHR-ChatQA 4.00) due to its larger scale, CRUD coverage, and more rigorous simulator evaluation. It is comparable to DAComp (5.33) — both make genuine benchmark contributions with well-designed evaluations and actionable empirical findings. It is slightly weaker than SimBench (6.00) in terms of validation breadth. Minor weaknesses (overclaimed ITS "law," missing interaction-free ablation, modest human study scale) prevent it from reaching the 6+ tier, but the core contributions are solid and empirically grounded.
+**Round-1 bracket**: The paper sits clearly above the weak band (2–3.6) and below the strong band (7.5+), placing it in the [4.5, 7.0] range.
 
-MY FINAL SCORE: <score>5.5</score>
+**Round-2 narrowing**: Comparing against VitaBench (5.50, poster) and DAComp (5.33, poster) — both accepted benchmarks with similar rigor — BIRD-INTERACT has larger task scale (600 vs 100/210), more thorough user simulator validation (USERSIM-GUARD + human alignment study), and cleaner empirical insights (memory grafting, ITS analysis). Its main weaknesses (single-run evaluation, missing model-level comparison to existing benchmarks) are addressable and do not undermine the core contribution. This places it at the high end of the comparable-anchor cluster, slightly above VitaBench and AMemGym.
+
+**Final score: 6.0**
+
+The paper represents a solid, well-constructed benchmark contribution with a validated user simulator, informative empirical findings, and clear practical value. The weaknesses are real but manageable — no fatal flaw threatens the core claims. The paper is clearly above the acceptance threshold.
+
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

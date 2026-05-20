@@ -1,18 +1,18 @@
-Now I have all the evidence I need. Let me construct the final review.
+Now I have enough information. Let me write the consolidated final review.
 
 ## Summary
 
-This paper proposes a hierarchical attention model for code embeddings in reinforcement learning, combining token-level, function-level, and module-level attention mechanisms with graph-structured dependencies (AST and CDG). The model is evaluated on three code-related RL tasks (code completion, program repair, and algorithmic problem solving) and compared against five baselines. While the multi-level hierarchical architecture is a conceptually reasonable idea, the paper suffers from severe experimental and presentation issues that undermine its claims.
+This paper proposes a hierarchical, multi-level attention model for code state representations in reinforcement learning. The architecture combines token-level (transformer with relative positional encoding), function-level (GAT over AST), and module-level (attention-weighted aggregation) attention mechanisms with a Code Dependency Graph (CDG) augmentation, and is trained end-to-end via PPO. The method is evaluated on code completion (PY150), program repair (ManySStuBs4J), and algorithmic problem solving (APPS), with results showing improvements over several baselines including CodeBERT.
 
 ## Strengths
 
-- **Multi-level hierarchical attention architecture**: The paper defines distinct attention mechanisms at token (Eq. 1, relative positional encoding), function (Eq. 2, AST-based), and module (Eq. 3, task-relevance weighting) granularities, with additional graph attention over the code dependency graph (Eq. 4). This goes beyond flat attention and explicitly models the natural hierarchy of code.
+1. **Hierarchical multi-level attention with ablation validation.** The paper designs three distinct attention levels (token, function, module) and systematically ablates them in Table 2, showing that each level contributes positively: removing token-level attention drops success rate by 6.2%, function-level by 3.6%, and module-level by 2.4%. This provides concrete evidence that the hierarchical design drives the reported gains.
 
-- **End-to-end optimization for the RL objective**: Unlike prior code representation learning that trains embeddings in isolation, the paper propagates policy gradient signals (Eq. 6) through all attention layers, and the ablation study (Table 2) provides at least some evidence that each level contributes positively.
+2. **CDG augmentation empirically shown to add value.** The Code Dependency Graph augmentation is assessed in the same ablation (Table 2): removing CDG edges causes a 1.9% drop in success rate, confirming that modeling semantic dependencies (data flow, call relationships) provides marginal but measurable benefit beyond the AST-based hierarchy.
 
-- **Dynamic edge feature learning**: Equation 8 updates edge representations across layers using an MLP that combines the previous edge state with connected node representations, enabling the graph structure to adapt during training.
+3. **Comparative results across three diverse RL-for-code tasks.** Table 1 reports the proposed model against five baselines on code completion (BLEU), program repair (success rate), and algorithmic problem solving (pass rate). The model's reported numbers (72.9 BLEU, 54.3% success, 67.5% pass) are above CodeBERT (68.4, 48.6%, 61.3%), a result consistent with the claim that RL-optimized hierarchical embeddings can outperform pre-trained static encoders.
 
-- **Attention pattern analysis (Section 6.3)**: The finding that module-level attention focuses on nearby modules for code completion (mean distance 2.1 edges) but spreads broader for program repair (3.8 edges) is a potentially interesting insight, though the analysis is thin.
+4. **Scalability analysis with numeric data.** Figure 3 and its accompanying table provide a concrete scalability evaluation: the proposed model maintains lower prediction error on programs with up to 175 functions (18% error) compared to unnamed baselines (which saturate at lower complexity levels). The authors also claim linear memory scaling relative to program size (Section 6.6).
 
 ## Weaknesses
 
@@ -21,81 +21,75 @@ None.
 
 ### Major
 
-- **No statistical rigor in experimental results**: All performance numbers in Table 1, Table 2, and Figure 2 are reported as single values with no variance, confidence intervals, or number of seeds. RL training is inherently stochastic, and single-run results cannot support claims of superiority. The paper mentions "statistical significance tested via paired t-tests (p < 0.01)" (line 219) but never reports any p-values or test outcomes. The reported improvements (e.g., 6.6 absolute BLEU over CodeBERT, ~5.7% absolute on repair success rate) lack any indication of statistical reliability. This alone invalidates the headline empirical contribution.
+1. **No MDP formulation for any task — the experimental setup is underspecified for an RL paper.** Section 5.1 describes the three tasks in a single sentence each and states "Each task was implemented as a Markov Decision Process (MDP)" but never defines the state space, action space, transition dynamics, or reward function for any of the three tasks. Section 5.5 mentions "token-level edits (insert/replace/delete) and (complexity raising functions, name changes of variables)" as the action space, but does not explain which applies to which task, how these are structured as RL actions, or how the state is updated after an action. Without an MDP specification, the reader cannot determine what the experimental setup measures, and the results in Table 1 are unverifiable. This is a fundamental gap for a paper whose central claim is about RL state representations.
 
-- **The "Avg. Reward" metric in Table 1 is ill-defined**: The column values (0.58, 0.62, 0.67, etc.) do not correspond to simple averages of the three preceding columns (BLEU on a 0–100 scale, success rate as a percentage, pass rate as a percentage — all on different numerical scales). The paper never defines how this average is computed or what it represents, making this column uninterpretable.
+2. **Method integration between attention levels is not specified.** Equations 1–3 define token-level, function-level, and module-level attention in isolation, but the paper never explains how these outputs connect. Section 4.2 states "Token-level representations move up through function and module attention layers" and the architecture shows a left-to-right flow (Figure 1), but no equations or computational graph describe how token-level transformer outputs become the node features **h**_u_ for the function-level GAT in Equation 2, or how function embeddings **f**_i_ in Equation 3 are derived from the GAT output. The training objective (Equation 6) is the standard policy gradient — there is no auxiliary loss for representation quality. The method cannot be reconstructed from the description.
 
-- **"Prediction Error" (Figure 3) is never defined**: The scalability analysis revolves around this metric, yet the paper provides zero explanation of what "Prediction Error" measures, how it is computed, or what "Baseline 1" and "Baseline 2" refer to. This makes the scalability analysis unverifiable.
+3. **Baseline adaptation details are absent.** Section 5.2 lists CodeBERT, Tree-LSTM, GNN-CDG, and Flat-GAT as baselines, stating they were "adapted to output state representations of comparable dimensionality (768-D) and trained with identical RL algorithms." No details are provided on how CodeBERT (a 125M-parameter masked language model) was converted into an RL state encoder — was it frozen? Fine-tuned with PPO? What output head was added? What layer's representations were used? Similarly, Tree-LSTM and GNN-CDG are non-trivial to integrate with policy gradient methods, and their training protocols are unspecified. This makes it impossible to assess whether the reported gains come from the hierarchical design or from differences in how baselines were adapted.
 
-- **Learning curves (Figure 2) are implausibly smooth for PPO**: All six curves are described as smooth and monotonic, with "Our Model" reaching ~0.85 while baselines plateau at 0.6–0.7. PPO training is typically noisy; such clean separation is unusual and undermines credibility without an explanation (e.g., moving-average smoothing). The y-axis scale ("Cumulative Reward") is also not clearly explained — is it normalized? Summed across episodes?
+4. **No statistical rigor despite claiming it.** Section 5.4 states "All metrics were computed on held-out test sets... with statistical significance tested via paired t-tests (p < 0.01)." However, Table 1 reports only point estimates — no standard deviations, confidence intervals, or p-values are shown anywhere. The learning curves (Figure 2 caption) describe cumulative reward trajectories but provide no variance estimates (e.g., shaded regions, error bars). Without any uncertainty quantification, the reader cannot assess whether the reported improvements (e.g., 4.5 BLEU points over CodeBERT) are statistically meaningful.
 
-- **Critical method details are missing, preventing reproducibility**: The paper does not specify (a) how the AST is extracted and encoded, (b) how the Code Dependency Graph (CDG) is constructed from code, (c) how edge features e_uv and module metadata c_i are obtained, (d) what the RL policy and value network architectures look like beyond "PPO with GAE," (e) the PPO hyperparameters (clip range, number of epochs, learning rate schedule), or (f) how baselines (especially Tree-LSTM and GNN-CDG) were adapted to produce 768-D state representations. Without these details, the method cannot be reproduced.
+5. **Code Dependency Graph construction is not described.** The CDG is presented as a key contribution (Section 4.4) — multi-head attention over different edge types such as function calls and data flow. Yet the paper provides no description of how the CDG is extracted from source code: how are functions identified? How are call relationships and data dependencies resolved? What parser or static analysis tool was used? Without this, the CDG component of the method is unverifiable.
 
 ### Minor
 
-- **Baseline comparison concerns**: While the paper claims baselines were adapted "with identical RL algorithms for fair comparison" and to output "comparable dimensionality (768-D)," there is no evidence that baselines received comparable hyperparameter tuning or optimization budget. CodeBERT fine-tuning for RL tasks is non-trivial and no adaptation details are given. Modern code LLMs (CodeGen, CodeLlama, StarCoder) are absent from the comparison, undermining the claim of state-of-the-art relevance.
+6. **Ablation control conditions are not specified.** Table 2 reports performance drops when components are removed (e.g., "w/o Token-Level Attention": 48.1% vs. 54.3%), but never states what replaces the removed component. Is it replaced by average pooling? A random projection? A zero vector? Without knowing the substitute, the ablation does not isolate the contribution of each attention level — it measures the effect of removing a component relative to an unspecified baseline replacement.
 
-- **Ablation study methodology unclear**: Table 2 removes components but does not specify whether the model was retrained from scratch for each variant or whether weights were simply masked/ablated at inference time. These are fundamentally different procedures that yield different interpretations. The large -6.2% drop from removing token-level attention is expected (token-level attention is the primary mechanism) and does not provide differential insight.
+7. **Scalability analysis uses unnamed baselines.** The scalability plot (Figure 3 and the numeric table) compares "Our Model" against "Baseline 1" and "Baseline 2" without identifying what these baselines are. This makes the comparison uninformative — the reader cannot assess whether the baselines are weak or representative.
 
-- **The paper contains "CodeBLEU score (?)" with a literal question mark** (line 210), suggesting either uncertainty about the metric or a formatting error in the original that passed through. Either way it harms credibility. "CodeBLEU" in the metric list then becomes "BLEU" in Table 1 — inconsistent.
+8. **"CodeBLEU score (?)" appears with a literal question mark in the metrics list (Section 5.4).** Even if this is a formatting artifact, the presence of a question mark in a metric name undermines confidence in the evaluation protocol.
 
-- **Writing quality is poor throughout**: Sentences such as "The hierarchical cherry-picking of the code embedding system with multi-level attention Research into mechanisms provides major breakthrough" (line 352, the conclusion), "How effective our approach is proven by extensive experiments" (line 27), and many others are ungrammatical or incoherent. The paper reads as though it was machine-translated or written without careful editing. This makes it difficult to evaluate the technical content.
-
-- **Error analysis (Section 6.7) is a two-sentence placeholder**: It offers no systematic taxonomy, no counts, and no concrete examples, despite being labeled a full subsection.
+9. **No comparison to prior code+RL representation methods.** The related work (Section 2.3) mentions Pritz et al. (2021) and Gomez et al. (2025) as prior work on RL-specific code embeddings, but these are never compared against or discussed in the experimental section. While not every cited work needs to be a baseline, their complete absence from the evaluation makes it difficult to assess what is gained beyond the existing literature.
 
 ### Trivial
-
-- **"Gomez et al., 2025" and "Guo et al., 2025" are cited** — these appear as preprints from 2025. As of May 2026 these could exist, but the citations would benefit from verification of publication venue.
-
-- **Section 7 (Discussion) lists speculative applications** (security, education) with no connection to the experiments, reading like a generic checklist.
+None.
 
 ## Nice-to-Haves
 
-- An analysis comparing CDG vs. AST alone within the hierarchical model (beyond the "w/o CDG Edges" ablation which only drops 1.9%) would clarify the contribution of the dependency graph.
-- Sample efficiency quantification (e.g., steps to reach 80% max reward) is mentioned in Section 5.4 but never reported.
-- Concrete attention visualizations on real code snippets would strengthen the claims about hierarchical pattern learning.
+- Formally specifying the MDP for each task (state space, action space, reward function) would resolve the most critical gap and is standard practice for RL papers.
+- Providing standard deviations or confidence intervals across multiple runs would enable proper evaluation of the reported improvements.
+- Describing how the CDG is extracted from source code (tools, resolution steps) would make the method reproducible.
+- Clarifying how CodeBERT and other baselines were adapted to the RL setting.
+- Naming the baselines in the scalability analysis.
 
 ## Removed Points
 
-The following points were flagged by reviewers but are removed or weakened per the review guidelines:
+The following weaknesses from the harsh critic were removed in accordance with the filtering rules:
 
-- **Criticism about "Gomez et al., 2025" and "Guo et al., 2025" being "future dates"**: Removed per rule — do not question the existence of cited references. As of the review date (May 2026), 2025 publications are in the past.
-- **Criticism about missing related works**: Removed per rule — I cannot independently verify the existence of missing references.
-- **Claim that the paper "cannot be reproduced" as a fatal weakness**: Weakened to "method details missing" (major/minor). The paper provides core equations and high-level architecture, but insufficient implementation detail.
-- **Weakness that the ablation removes token-level attention and the -6.2% drop "contradicts the earlier claim that all levels contribute"**: This is a misinterpretation — a drop from removing a component confirms that component contributes. Kept only the valid methodological concern about retraining vs. masking.
-- **Complaints about "unfair comparison" with baselines when the asymmetry favors baselines**: The concern about missing CodeGen/CodeLlama is kept as a minor weakness; the claim that CodeBERT adaptation is "non-trivial" is valid but the paper does describe adapting baselines to comparable dimensionality.
-- **"Abstract contains non-grammatical phrases" – "Hierarchical cherry-picking"**: This is a real writing error in the conclusion (line 352), kept as a minor weakness about writing quality, not removed as a "style nitpick."
-- **Strength about "comprehensive evaluation across three tasks"**: Dropped because it conflicts with the verified weakness about no statistical rigor — without error bars, the evaluation is not comprehensive in a meaningful sense.
+- **Writing quality / garbled text criticism (Harsh Critic point #4):** Removed per hard rules — criticisms about typos, grammar, garbled text, and formatting artifacts are treated as parser issues, not author errors. The PDF extraction process produces these artifacts; the original submission does not contain them.
+- **Missing figures (Harsh Critic point #5):** Removed per hard rules — figures are not accessible due to PDF-to-text extraction; this is a known parser limitation.
+- **"Method cannot be reconstructed" as a blanket claim:** Retained as specific, verifiable subpoints (integration unspecified, no MDP) rather than the broad characterization "cannot be reconstructed or evaluated." The high-level architecture is clear even if details are missing.
+- **"Experimental design is invalid for the claims made":** The substance of this concern (no MDP, no reward function specification) is retained as Major Weakness #1 and #3, but the framing as "invalid" is softened — the paper provides enough task and dataset description to understand what was attempted, even if not enough to reproduce.
+- **"Baseline comparisons are staged":** The specific, verifiable detail (missing adaptation procedure for CodeBERT) is retained as Major Weakness #3. The broader accusation of "staged" comparisons is removed as unsupported speculation.
+- **Missing related works:** Removed per hard rules — we do not have external sources to confirm the existence or absence of cited works.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The individual weaknesses and strengths surfaced by the reviewers are largely consistent; no new synthesis-level insight emerges from the combination beyond the observation that the multi-level hierarchical architecture idea is conceptually reasonable but the execution is too flawed to support the claimed results.
+None beyond the paper's own contributions. The reviews surface the expected pattern: a paper with a sensible high-level idea (hierarchical multi-level attention for code in RL) that is let down by underspecified experimental design and incomplete methodological detail. The core structural gap — presenting an RL paper without defining the MDP — is the dominant finding across both reviews.
 
 ## Suggestions
 
-1. **Run all experiments with at least 5 random seeds** and report means ± standard deviations for every metric in every table and figure. Report actual p-values and confidence intervals for the claimed improvements.
-2. **Define every metric** — especially "Avg. Reward" and "Prediction Error" — with explicit formulas. Remove the question mark from "CodeBLEU score (?)" and use consistent terminology throughout.
-3. **Specify the ablation methodology**: state clearly whether each variant was retrained from scratch. If retraining was done, report the same number of seeds and error bars.
-4. **Provide full PPO hyperparameters**: clip range, number of epochs per update, learning rate schedule, GAE λ, discount factor, and entropy bonus coefficient.
-5. **Describe how each baseline was adapted** to the RL setting — especially CodeBERT (how is its 768-D representation extracted and connected to the policy?) and Tree-LSTM (how does it produce a fixed-dimensional state for RL?).
-6. **Add comparisons to modern code LLMs** (e.g., CodeGen-2B, CodeLlama-7B) at minimum to contextualize the claimed improvements.
-7. **Improve the writing substantially** — have a native speaker edit the paper for grammar, coherence, and clarity throughout. The current draft contains too many broken sentences to convey technical content reliably.
+1. **Specify the MDP for each task.** For each of the three tasks, provide: state space (what constitutes the program state), action space (precise set of allowable edits/predictions), transition function (how actions modify the program state), and reward function (how semantic correctness is operationalized). This is the single most important improvement.
+
+2. **Provide a complete computational graph showing how token-level outputs feed into function-level GAT, and how function embeddings are aggregated into module-level representations.** Include the missing connections between Equations 1–3.
+
+3. **Document the baseline adaptation protocols in detail.** For CodeBERT specifically: which layer's representations are extracted, how the RL output head is designed, whether the encoder is frozen or fine-tuned, and what hyperparameters are used.
+
+4. **Report all results with confidence intervals or standard deviations** across at least 5 random seeds. Show learning curves with shaded variance regions.
+
+5. **Describe the CDG construction pipeline** — parser, dependency resolution, edge type inventory.
+
+6. **Name the baselines in the scalability analysis** and specify what "prediction error" measures.
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration protocol:**
 
-| Anchor Path | Avg Human Score | Comparison |
-|---|---|---|
-| `dcqnFZAczW.md` (Disentangled Code Embedding for Multi-Task RL) | 1.50 | Very similar topic and similar problems — no error bars, incomplete method, poor clarity. This paper is of comparable quality. |
-| `AjaicwLUmj.md` (Wirbelsäule-Plot) | 1.00 | Below ICLR standards entirely. The current paper at least presents a coherent (if flawed) technical approach. |
-| `POLPQHcuYY.md` (Topology of Attention) | 3.50 | Higher quality — clearer motivation, thorough evaluation with proper cross-validation, better writing. The current paper is substantially below this. |
-| `oq4jXWaFyH.md` (Hyperbolic Code Representation) | 5.50 | Strong empirical evaluation, clear writing, well-motivated theory. The current paper does not approach this quality. |
-| `N4BB09TXad.md` (JanusCoder) | 6.67 | Rich dataset contribution, strong empirical results, professional writing. Far above the current paper. |
-| `mfIbSouoaZ.md` (RL for MLE Agents) | 6.50 | Rigorous RL experiments with multiple seeds, clear presentation. Far above the current paper. |
-| `S2vVSNJhFw.md` (Dynamic Contrastive RL) | 2.00 | Similar quality level — interesting idea but poor execution. Comparable to the current paper. |
+**Round 1 (Bracketing):** Searched for topically similar papers in three bands: low (avg < 3.5), middle (3.5–7.5), high (>7.5). The low band returned papers averaging 0.67–2.00 (e.g., "Curricular Adversarial Training for Robust Code Generation" at 0.67, "Disentangled Code Embedding for Multi-Task RL" at 1.50, "Compositional HyperModules" at 2.00). The middle band returned papers at 4.00–6.00 (e.g., "Self-Predictive Representations for Behavioral Cloning" at 4.50, "Simplicial Embeddings" at 5.50). The high band returned papers at 8.00 (protein generation, text-to-3D) — clearly not comparable. **Initial bracket:** the paper sits between ~1.5 and ~3.5.
 
-**Positioning**: The paper sits between the 1.0–2.0 band. It is not as bad as the desk-reject-level paper (1.00) because it articulates a coherent architecture, includes equations, runs experiments across three tasks, and provides an ablation study. However, it is below the 2.0–3.0 papers due to the complete absence of statistical rigor, undefined metrics, suspiciously clean data, and very poor writing. It is most comparable to `dcqnFZAczW.md` (1.50) — both share the same fundamental flaw of presenting single-run results without variance as the primary empirical evidence.
+**Round 2 (Narrowing):** Focused on the 2.0–3.5 range, retrieving "Curriculum-Based Termination Critic" (2.40), "Hierarchical Contrastive RL" (3.00), "Dynamic Incremental Code Embeddings" (3.33), and "From Code to Action" (2.50). Reading these revealed that the paper under review has more substance (equations, ablation study, three-task evaluation) than papers at 2.00 but shares their critical flaws (no MDP, underspecified method, absent statistical rigor). The 3.00 and 3.33 papers had one or two elements of stronger methodology (e.g., code release, more rigorous evaluation). The paper under review falls below those.
 
-MY FINAL SCORE: <score>1.5</score>
+**Final score: 2.5.** The paper proposes a sensible architecture and provides some empirical evidence (ablation, comparative results), which lifts it above the 2.0 baseline. However, the absence of MDP formulations, unspecified method integration, and missing baseline adaptation details are fundamental gaps that cannot be hand-waved — the paper in its current form does not present a verifiable or reproducible contribution.
+
+MY FINAL SCORE: <score>2.5</score>
 MY FINAL DECISION: <decision>Reject</decision>
