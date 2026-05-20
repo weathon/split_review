@@ -1,0 +1,353 @@
+
+
+{0}------------------------------------------------
+
+# --- DP-SGD WITHOUT CLIPPING: THE LIPSCHITZ NEURAL NETWORK WAY
+
+Louis Béthune<sup>\*</sup>
+
+Thomas Masséna<sup>\*</sup>
+
+Thibaut Boissin<sup>\*</sup>
+
+Aurélien Bellet<sup>§</sup>
+
+Franck Mamalet<sup>‡</sup>
+
+Yannick Prudent<sup>‡</sup>
+
+Corentin Friedrich<sup>‡</sup>
+
+Mathieu Serrurier<sup>†</sup>
+
+David Vigouroux<sup>‡</sup>
+
+## ABSTRACT
+
+State-of-the-art approaches for training Differentially Private (DP) Deep Neural Networks (DNN) face difficulties to estimate tight bounds on the sensitivity of the network's layers, and instead rely on a process of per-sample gradient clipping. This clipping process not only biases the direction of gradients but also proves costly both in memory consumption and in computation. To provide sensitivity bounds and bypass the drawbacks of the clipping process, we propose to rely on Lipschitz constrained networks. Our theoretical analysis reveals an unexplored link between the Lipschitz constant with respect to their input and the one with respect to their parameters. By bounding the Lipschitz constant of each layer with respect to its parameters, we prove that we can train these networks with privacy guarantees. Our analysis not only allows the computation of the aforementioned sensitivities at scale, but also provides guidance on how to maximize the gradient-to-noise ratio for fixed privacy guarantees. The code has been released as a Python package available at <https://github.com/Algue-Rythme/lip-dp>
+
+## 1 INTRODUCTION
+
+The field of differential privacy seeks to enable deep learning on sensitive data, while ensuring that models do not inadvertently memorize or reveal specific details about individual samples in their weights. This involves incorporating privacy-preserving mechanisms into the design of deep learning architectures and training algorithms, whose most popular example is Differentially Private Stochastic Gradient Descent (DP-SGD) (Abadi et al., 2016). One main drawback of classical DP-SGD methods is that they require costly per-sample backward processing and gradient clipping. In this paper, we offer a new method that unlocks fast differentially private training through the use of Lipschitz constrained neural networks.
+
+**Differential privacy.** Informally, differential privacy (DP) is a *definition* that bounds how much the change of a single sample in a dataset affects the range of a stochastic function (here, the training algorithm). This definition is largely accepted as a strong guarantee against privacy leakages under various scenariis, including data aggregation or post-processing (Dwork et al., 2006).
+
+In this paper we focus on supervised learning tasks: we assume that the dataset  $\mathcal{D}$  is a finite collection of input/label pairs  $\mathcal{D} = \{(x_1, y_1), \dots, (x_N, y_N)\}$ . The definition of DP relies on the notion of neighboring datasets, i.e. datasets that vary by at most one example. We highlight below the central tools related to the field, inspired from Dwork et al. (2014).
+
+**Definition 1** ( $(\epsilon, \delta)$ -Approximate Differential Privacy). *Two datasets  $\mathcal{D}$  and  $\mathcal{D}'$  are said to be neighboring for the “add/remove-one” relation if they differ by exactly one sample:  $|\mathcal{D}' \ominus \mathcal{D}| = 1$  where  $\ominus$  denotes the symmetric difference between sets. Let  $\epsilon$  and  $\delta$  be two non-negative scalars. An*
+
+---
+
+<sup>\*</sup>Equal contribution.
+
+<sup>†</sup>IRIT, Université Paul Sabatier, Toulouse.
+
+<sup>‡</sup>IRT Saint Exupéry, Toulouse.
+
+<sup>§</sup>Inria, Université de Montpellier.
+
+{1}------------------------------------------------
+
+```
+
+model = DP_Sequential([ # step 1: use DP_Sequential to build a model
+    # step 2: add Lipschitz layers of known sensitivity
+    DP_BoundedInput(input_shape=(28, 28, 1), upper_bound=20.),
+    DP_SpectralConv2D(filters=16, kernel_size=3, use_bias=False),
+    DP_GroupSort(2),
+    DP_Flatten(),
+    DP_SpectralDense(1)],
+    dp_parameters=dp_parameters,
+    dataset_metadata=dataset_metadata,
+) # step 4: compile the model, and choose any first order optimizer
+model.compile(loss=DP_TauBCE(tau=20.), optimizer=Adam(1e-3))
+model.fit( # step 5: train the model and measure the DP guarantees
+    train_dataset, validation_data=val_dataset,
+    epochs=num_epochs, callbacks=[DP_Accountant()]
+)
+
+```
+
+Figure 1: An example of usage of our framework `lip-dp`, illustrating how to create a small Lipschitz VGG and how to train it under  $(\epsilon, \delta)$ -DP guarantees while reporting  $(\epsilon, \delta)$  values.
+
+algorithm  $\mathcal{A}$  is  $(\epsilon, \delta)$ -DP if for any two neighboring datasets  $\mathcal{D}$  and  $\mathcal{D}'$ , and for any  $S \subseteq \text{range}(\mathcal{A})$ :
+
+$$\mathbb{P}[\mathcal{A}(\mathcal{D}) \in S] \leq e^\epsilon \times \mathbb{P}[\mathcal{A}(\mathcal{D}') \in S] + \delta. \quad (1)$$
+
+A popular rule of thumb suggests using  $\epsilon \leq 10$  and  $\delta < \frac{1}{N}$  with  $N$  the number of records (Ponomareva et al., 2023) for mild guarantees. In practice, most classic algorithmic procedures (called *queries* in this context) do not readily fulfill the definition for useful values of  $(\epsilon, \delta)$ : in particular, randomization is mandatory. A general recipe to make a query differentially private is to compute its *sensitivity*  $\Delta$ , and to perturb its output by adding a Gaussian noise of predefined variance  $\zeta^2 = \Delta^2 \sigma^2$ , where the  $(\epsilon, \delta)$  guarantees depend on  $\sigma$ , yielding what is called a *Gaussian mechanism* (Dwork et al., 2006).
+
+**Definition 2** ( $l_2$ -sensitivity). Let  $\mathcal{M}$  be a query mapping from the space of the datasets to  $\mathbb{R}^p$ . Let  $\mathcal{N}$  be the set of all possible pairs of neighboring datasets  $\mathcal{D}, \mathcal{D}'$ . The  $l_2$  sensitivity of  $\mathcal{M}$  is defined by:
+
+$$\Delta(\mathcal{M}) = \sup_{\mathcal{D}, \mathcal{D}' \in \mathcal{N}} \|\mathcal{M}(\mathcal{D}) - \mathcal{M}(\mathcal{D}')\|_2. \quad (2)$$
+
+This randomization comes at the expense of “utility”, i.e the usefulness of the output for downstream tasks (Alvim et al., 2012). The goal is then to strike a balance between privacy and utility, ensuring that the released information remains useful and informative for the intended purpose while minimizing the risk of privacy breaches. The privacy/utility trade-off yields a Pareto front, materialized by plotting  $\epsilon$  against a measurement of utility, such as validation accuracy for a classification task.
+
+**Differentially Private SGD.** The SGD algorithm consists of a sequence of queries that (i) take the dataset in input, sample a minibatch from it, and return the gradient of the loss evaluated on the minibatch, before (ii) performing a descent step following the gradient direction. In “add-remove” neighboring relations, if the gradients are bounded by  $K > 0$ , the sensitivity of the gradients averaged on a minibatch of size  $b$  is  $\Delta = K/b$ . DP-SGD (Abadi et al., 2016) makes each of these queries private by resorting to the Gaussian mechanism. Crucially, the algorithm requires a bound on gradient norms  $\|\nabla_{\theta} \mathcal{L}(\hat{y}, y)\|_2 \leq C$ . This upper bound on gradient norms is generally unknown in advance, which leads practitioners to clip it to  $C > 0$ , in order to bound the sensitivity manually. Unfortunately, this creates a number of issues: **1.** Hyper-parameter search on the broad-range clipping value  $C$  is required to train models with good privacy/utility trade-offs (Papernot & Steinke, 2022), **2.** The computation of per-sample gradients is expensive: DP-SGD is usually slower and consumes more memory than vanilla SGD, in particular for the large batch sizes often used in private training (Lee & Kifer, 2021), **3.** Clipping the per-sample gradients biases their average (Chen et al., 2020). This is problematic as the average direction is mainly driven by misclassified examples.
+
+**An unexplored approach: Lipschitz constrained networks.** To avoid these issues, we propose to train neural networks for which the parameter-wise gradients are provably and analytically bounded during the whole training procedure, in order to get rid of the clipping process. This allows for efficient training of models without the need for tedious hyper-parameter optimization. The main reason why this approach has not been experimented much in the past is that upper bounding the
+
+{2}------------------------------------------------
+
+gradient of neural networks is often intractable. However, by leveraging the literature on Lipschitz constrained networks introduced by Anil et al. (2019), we show that these networks have computable bounds for their gradient’s norm. This yields tight bounds on the sensitivity of SGD steps, making their transformation into Gaussian mechanisms inexpensive - hence the name **Clipless DP-SGD**. Thus, our approach is qualitatively different from methods that replace clipping with re-normalization (Bu et al., 2022b; Yang et al., 2022), or from those that aim to reduce its time and memory footprint (Li et al., 2021; Bu et al., 2022a; He et al., 2022; Bu et al., 2023). A comparison is made in Appendix A.5.
+
+The Lipschitz constant of a function and the norm of its gradient are two sides of the same coin. The function  $f : \mathbb{R}^m \rightarrow \mathbb{R}^n$  is said  $\ell$ -Lipschitz for  $l_2$  norm if for every  $x, y \in \mathbb{R}^m$  we have  $\|f(x) - f(y)\|_2 \leq \ell \|x - y\|_2$ . Per Rademacher’s theorem Simon et al. (1983), its gradient is bounded:  $\|\nabla_x f\| \leq \ell$ . Reciprocally, continuous functions with gradient bounded by  $\ell$  are  $\ell$ -Lipschitz.
+
+A feedforward neural network of depth  $D$ , with input space  $\mathcal{X} \subset \mathbb{R}^n$ , output space  $\mathcal{Y} \subset \mathbb{R}^K$  (e.g logits), and parameter space  $\Theta \subset \mathbb{R}^p$ , is a parameterized function  $f : \Theta \times \mathcal{X} \rightarrow \mathcal{Y}$  defined by the sequential composition of layers  $f_1 \dots f_D$ :
+
+$$f(\theta, x) := (f_D(\theta_D) \circ \dots \circ f_2(\theta_2) \circ f_1(\theta_1))(x). \quad (3)$$
+
+The parameters of the layers are denoted by  $\theta = (\theta_d)_{1 \leq d \leq D} \in \Theta$ . For affine layers, it corresponds to bias and weight matrix  $\theta_d = (W_d, b_d)$ . For activation functions, there are no parameters:  $\theta_d = \emptyset$ . Feedforward networks include notably Fully Connected networks, CNN, Resnets, or MLP mixers.
+
+**Definition 3** (Lipschitz feed-forward neural network). *Lipschitz networks are feedforward networks, with the additional constraint that each layer  $x_d \mapsto f_d(\theta_d, x_d) := y_d$  is  $\ell_d$ -Lipschitz for all  $\theta_d$ . Consequently, the function  $x \mapsto f(\theta, x)$  is  $\ell$ -Lipschitz with  $\ell = \ell_1 \times \dots \times \ell_D$  for all  $\theta \in \Theta$ .*
+
+The literature has predominantly focused on investigating the control of Lipschitzness with respect to the inputs (i.e bounding  $\nabla_x f$ ), primarily motivated by concerns of robustness (Szegedy et al., 2014; Li et al., 2019a; Fazlyab et al., 2019), or improved generalization (Bartlett et al., 2017; Béthune et al., 2022). However, in this work, we will demonstrate that it is also possible to control Lipschitzness with respect to parameters (i.e bounding  $\nabla_\theta f$ ), which is essential for ensuring privacy. Our first contribution will point out the tight link that exists between those two quantities. The closest work to ours is Shavit & Gjurra (2019), where a Lipschitz network is used as a general function approximator of bounded sensitivity  $\|\nabla_x f(\theta, x)\|_2$ , but to this day the sensitivity of the gradient query  $x \mapsto \nabla_\theta f(\theta, x)$  itself remains largely unexplored. The idea of using automatic differentiation to compute sensitivity bounds has also been discussed in Ziller et al. (2021) and Usynin et al. (2021).
+
+**Contributions.** While the properties of Lipschitz constrained networks regarding their inputs are well explored, the properties with respect to their parameters remain non-trivial. This work provides a first step to fill this gap: our analysis shows that under appropriate architectural constraints, a  $l$ -Lipschitz network has a tractable, finite Lipschitz constant with respect to its parameters, which allows for easy estimation of the sensitivity of the gradient computation queries. Our contributions are the following:
+
+1. We extend the field of applications of Lipschitz constrained neural networks. We extend the framework to **compute the Lipschitzness with respect to the parameters**. This general framework allows to track *layer-wise* sensitivities that depends on the loss and the model’s structure. This is exposed in Section 2. We show that SGD training of deep neural networks can be achieved **without per-sample gradient clipping** using Lipschitz constrained layers.
+2. We establish connections between Gradient Norm Preserving (GNP) networks and improved privacy/utility trade-offs (Section 3.1). To the best of our knowledge, **we are the first ones to produce neural networks benefiting from both Lipschitz-based robustness certificates and privacy guarantees**.
+3. Finally, a **Python package** companions the project, with pre-computed Lipschitz constants for each loss and each layer type. This is exposed in Section 3.2. It covers widely used architectures, including VGG, ResNets or MLP Mixers. Our package enables the use of larger networks and larger batch sizes, as illustrated by our experiments in Section 4.
+
+## 2 CLIPLESS DP-SGD WITH $\ell$ -LIPSCHITZ NETWORKS
+
+Our framework relies on the computation of the maximum gradient norm of a network w.r.t its parameters to obtain a *per-layer* sensitivity  $\Delta_d$ . It is based on the recursive formulation of the chain rule involved in backpropagation and requires some natural assumptions that we highlight below.
+
+{3}------------------------------------------------
+
+![Diagram illustrating the backpropagation for bounds algorithm. A central 'DP Layer' block labeled f_d(theta_d, x) receives 'Forward input bounds' (X_{d-1}) and 'Backpropagate gradient bounds' (G_d). It outputs 'Sensitivity' (Delta_d) and 'Backpropagate gradient bounds' (G_{d-1}). The sensitivity is calculated as the product of the maximum norm of the Jacobian of f_d with respect to x and the sensitivity from the next layer. The gradient bounds are calculated as the product of the maximum norm of the Jacobian of f_d with respect to theta_d and the gradient bounds from the next layer.](2763901b7a1fd1b5d704cdc450d12ed0_img.jpg)
+
+Diagram illustrating the backpropagation for bounds algorithm. A central 'DP Layer' block labeled f\_d(theta\_d, x) receives 'Forward input bounds' (X\_{d-1}) and 'Backpropagate gradient bounds' (G\_d). It outputs 'Sensitivity' (Delta\_d) and 'Backpropagate gradient bounds' (G\_{d-1}). The sensitivity is calculated as the product of the maximum norm of the Jacobian of f\_d with respect to x and the sensitivity from the next layer. The gradient bounds are calculated as the product of the maximum norm of the Jacobian of f\_d with respect to theta\_d and the gradient bounds from the next layer.
+
+Figure 2: **Backpropagation for bounds** (Algorithm 1) computes the per-layer sensitivity  $\Delta_d$ .
+
+**Requirement 1** (Lipschitz loss.). *The loss function  $\hat{y} \mapsto \mathcal{L}(\hat{y}, y)$  must be  $L$ -Lipschitz with respect to the logits  $\hat{y}$  for all ground truths  $y \in \mathcal{Y}$ . This is notably the case of Categorical Softmax-Crossentropy.*
+
+The Lipschitz constants of common supervised losses has been computed and reported in the appendix.
+
+**Requirement 2** (Bounded input). *There exists  $X_0 > 0$  such that for all  $x \in \mathcal{X}$  we have  $\|x\| \leq X_0$ .*
+
+There exist numerous approaches for the parametrization of Lipschitz networks, such as differentiable re-parametrization (aka “trivialization”) like Miyato et al. (2018); Anil et al. (2019), optimization over matrix manifolds (Absil et al., 2008), direct parametrization (Meunier et al., 2022; Wang & Manchester, 2023), or projections (Arjovsky et al., 2017). We can distinguish two strategies:
+
+1. With a differentiable reparametrization  $\Pi : \mathbb{R}^p \rightarrow \Theta$  where  $\tilde{\theta} = \Pi(\theta)$ : the weights  $\tilde{\theta}$  are used during the forward pass, but the gradients are back-propagated to  $\theta$  through  $\Pi$ . This turns the training into an unconstrained optimization problem on the landscape of  $\mathcal{L} \circ f \circ \Pi$ .
+2. With a suitable projection operator  $\Pi : \mathbb{R}^p \rightarrow \Theta$ : this is the celebrated Projected Gradient Descent (PGD) algorithm (Bubeck et al., 2015) applied on the landscape of  $\mathcal{L} \circ f$ .
+
+Option 1 requires the analysis of the Lipschitz constant of  $\Pi$ . If  $\Theta$  is convex, then  $\Pi$  is 1-Lipschitz w.r.t the projection norm, otherwise the Lipschitz constant is generally unknown. For simplicity, option 2 will be the focus of our work.
+
+**Requirement 3** (Lipschitz projection). *The Lipschitz constraints must be enforced with a projection operator  $\Pi : \mathbb{R}^p \rightarrow \Theta$ . This corresponds to Tensorflow constraints and Pytorch hooks. Projection is a post-processing (Dwork et al., 2006) of private data: it induces no privacy leakage.*
+
+To compute the per-layer sensitivities, our framework mimics the backpropagation algorithm, where *Vector-Jacobian* products (VJP) are replaced by *Scalar-Scalar* products of element-wise bounds. For an arbitrary layer  $x_d \mapsto f_d(\theta_d, x_d) := y_d$  the operation is sketched below, as a simple consequence of Cauchy-Schwartz inequality:
+
+$$\underbrace{\nabla_{x_d} \mathcal{L} := (\nabla_{y_d} \mathcal{L}) \frac{\partial f_d}{\partial x_d}}_{\text{Vector-Jacobian product: backpropagate gradients}} \implies \underbrace{\|\nabla_{x_d} \mathcal{L}\|_2 \leq \|\nabla_{y_d} \mathcal{L}\|_2 \times \left\| \frac{\partial f_d}{\partial x_d} \right\|_2}_{\text{Scalar-Scalar product: backpropagate bounds}}. \quad (4)$$
+
+The notation  $\|\cdot\|_2$  must be understood as the spectral norm for Jacobian matrices, and the Euclidean norm for gradient vectors. The scalar-scalar product is inexpensive. For Lipschitz layers, the spectral norm of the Jacobian  $\left\| \frac{\partial f}{\partial x} \right\|$  is kept constant during training with projection operator  $\Pi$ . The bound of the gradient with respect to the parameters takes a simple form:
+
+$$\|\nabla_{\theta_d} \mathcal{L}\|_2 \leq \|\nabla_{y_d} \mathcal{L}\|_2 \times \left\| \frac{\partial f_d}{\partial \theta_d} \right\|_2. \quad (5)$$
+
+This term can be analytically bounded, as exposed in the following section.
+
+### 2.1 BACKPROPAGATION FOR BOUNDS
+
+The pseudo-code of **Clipless DP-SGD** is sketched in Algorithm 2. The algorithm avoids per-sample clipping by computing a *per-layer* bound on the element-wise gradient norm. The computation of this
+
+{4}------------------------------------------------
+
+*per-layer* bound is described by Algorithm 1 (graphically explained in Figure 2). Crucially, it requires to compute the spectral norm of the Jacobian of each layer with respect to input and parameters.
+
+**Input bound propagation (line 2).** We compute  $X_d = \max_{\|x\| \leq X_{d-1}} \|f_d(x)\|_2$ . For activation functions it depends on their range. For linear layers, it depends on the spectral norm of the operator itself. This quantity can be computed through the SVD or Power Iteration (Trefethen & Bau, 2022; Miyato et al., 2018), and constrained during training using projection operator II. In particular, it covers the case of convolutions, for which tight bounds are known (Singla & Feizi, 2021a). For affine layers, it additionally depends on the magnitude of the bias  $\|b_d\|$ .
+
+**Remark 1** (Tighter bounds in literature). *Exact estimation of the Lipschitz bound is notoriously an NP-hard problem, as proven by (Virmaux & Scaman, 2018). Algorithm 2 can be seen as an extension of their AutoLip algorithm to the case of parameters, while their work focused on Lipschitzness with respect to the input. Although libraries such as Decomon (Airbus, 2023) or auto-LiRPA (Xu et al., 2020) provide tighter bounds for  $X_d$  via linear relaxations (Singh et al., 2019; Zhang et al., 2018), our approach is capable of delivering practically tighter bounds than worst-case scenarios thanks to the projection operator II, while also being significantly less computationally expensive. Moreover, hybridizing our method with scalable certification methods can be a path for future extensions.*
+
+**Computing maximum gradient norm (line 6).** We now present how to bound the Jacobian  $\frac{\partial f_d(\theta_d, x)}{\partial \theta_d}$ . In neural networks, the parameterized layers  $f(\theta, x)$  (fully connected, convolutions) are bilinear operators. Hence, we typically obtain bounds of the form:
+
+$$\left\| \frac{\partial f_d(\theta_d, x)}{\partial \theta_d} \right\|_2 \leq K(f_d, \theta_d) \|x\|_2 \leq K(f_d, \theta_d) X_{d-1}, \quad (6)$$
+
+where  $K(f_d, \theta_d)$  is a constant that depends on the nature of the operator.  $X_{d-1}$  is obtained in line 2 with input bound propagation. Values of  $K(f_d, \theta_d)$  for popular layers are reported in the appendix.
+
+**Backpropagate cotangent vector bounds (line 7).** Finally, we bound the Jacobian  $\frac{\partial f_d(\theta_d, x)}{\partial x}$ . For activation functions, this value can be hard-coded, while for affine layers it is the spectral norm of the linear operator. Like before, this value is enforced by the projection operator II.
+
+#### --- Algorithm 1 Backpropagation for Bounds( $f, X$ ) ---
+
+**Input:** Feed-forward architecture  $f(\theta, \cdot) = f_D(\theta_D, \cdot) \circ \dots \circ f_1(\theta_1, \cdot)$
+
+**Input:** Weights  $\theta = (\theta_1, \theta_2, \dots, \theta_D)$ , input bound  $X_0$
+
+- 1: **for** all layers  $1 \leq d \leq D$  **do**
+ - 2:    $X_d \leftarrow \max_{\|x\| \leq X_{d-1}} \|f_d(\theta_d, x)\|_2$ . ▷ Input bounds propagation
+ - 3: **end for**
+ - 4:  $G \leftarrow L/b$ . ▷ Lipschitz constant of the (averaged) loss for batchsize b
+ - 5: **for** all layers  $D \geq d \geq 1$  **do**
+ - 6:    $\Delta_d \leftarrow G \max_{\|x\| \leq X_{d-1}} \left\| \frac{\partial f_d(\theta_d, x)}{\partial \theta_d} \right\|_2$ . ▷ Compute sensitivity from gradient norm
+ - 7:    $G \leftarrow G \max_{\|x\| \leq X_{d-1}} \left\| \frac{\partial f_d(\theta_d, x)}{\partial x} \right\|_2 = G l_d$ . ▷ Backpropagate cotangent vector bounds
+ - 8: **end for**
+ - 9: **return** sensitivities  $\Delta_1, \Delta_2, \dots, \Delta_D$
+- 
+
+**Privacy accounting for Clipless DP-SGD.** We keep track of  $(\epsilon, \delta)$ -DP values with a *privacy accountant* (Abadi et al., 2016), by composing different mechanisms. For a dataset with  $N$  records and a batch size  $b$ , it relies on two parameters: the sampling ratio  $p = \frac{b}{N}$  and the “noise multiplier”  $\sigma$  defined as the ratio between effective noise strength  $\zeta$  and sensitivity  $\Delta$ . We propose two strategies to keep track of  $(\epsilon, \delta)$  values as the training progresses, based on either the “per-layer” sensitivities  $\Delta_d$  (composition of Gaussian mechanisms), or by aggregating them into a “global” sensitivity  $\Delta = \sqrt{\sum_d \Delta_d^2}$  (single isotropic Gaussian mechanism). We rely on the `autodp`<sup>1</sup> library as it uses the Rényi Differential Privacy (RDP) adaptive composition theorem (Mironov, 2017), that ensures tighter bounds than naive DP composition. Following standard practices of the community (Ponomareva
+
+<sup>1</sup><https://github.com/yuxiangw/autodp> distributed under Apache License 2.0.
+
+{5}------------------------------------------------
+
+#### --- **Algorithm 2** Clipless DP-SGD with per-layer sensitivity accounting ---
+
+**Input:** Feed-forward architecture  $f(\theta, \cdot) = f_D(\theta_D, \cdot) \circ \dots \circ f_1(\theta_1, \cdot)$
+
+**Input:** Initial weights  $\theta = (\theta_1, \theta_2, \dots, \theta_D)$ , learning rate  $\eta$ , noise multiplier  $\sigma$ .
+
+- 1: **repeat**
+ - 2:    $\Delta_1, \Delta_2, \dots, \Delta_D \leftarrow \text{Backpropagation for Bounds}(f, X)$ .
+ - 3:   Sample a batch  $\mathcal{B} = \{(x_1, y_1), (x_2, y_2), \dots, (x_b, y_b)\}$ .
+ - 4:   Compute the averaged gradient for each layer  $d$ :  $g_d := \frac{1}{b} \sum_{i=1}^b \nabla_{\theta_d} \mathcal{L}(f(\theta, x_i), y_i)$ .
+ - 5:   Sample per-layer noise:  $\zeta_d \sim \mathcal{N}(0, \sigma \Delta_d)$ .
+ - 6:   Perform perturbed gradient step:  $\theta_d \leftarrow \theta_d - \eta(g_d + \zeta_d)$ .
+ - 7:   Enforce Lipschitz constraint with projection:  $\theta_d \leftarrow \Pi(\theta_d)$ .
+ - 8:   Compute new  $(\epsilon, \delta)$ -DP guarantees with privacy accountant.
+ - 9: **until** privacy budget  $(\epsilon, \delta)$  has been reached.
+- 
+
+et al., 2023), we used *sampling without replacement* at each epoch (by shuffling examples), but we reported  $\epsilon$  assuming *Poisson sampling* to benefit from privacy amplification (Balle et al., 2018).
+
+## 3 SIGNAL-TO-NOISE RATIO ANALYSIS
+
+We discuss how the tightness of the bound provided by Algorithm 1 can be controlled.
+
+### 3.1 THEORETICAL ANALYSIS OF CLIPLESS DP-SGD
+
+In some cases we can manually derive the bounds across diverse configurations.
+
+**Theorem (informal) 1. Gradient Norm of Lipschitz Networks.** Assume that every layer  $f_d$  is  $K$ -Lipschitz, i.e  $l_1 = \dots = l_D = K$ . Assume that every bias is bounded by  $B$ . We further assume that each activation is centered at zero (i.e  $f_d(0) = 0$ , like ReLU, GroupSort...). Then the global upper bound of Algorithm 2 can be computed analytically, as follows:
+
+**1. If  $K < 1$  we have:**  $\|\nabla_{\theta} \mathcal{L}(f(\theta, x), y)\|_2 = \mathcal{O}(L(K^D(X_0 + B) + 1))$ .
+
+Due to the  $K^D \ll 1$  term this corresponds to a vanishing gradient phenomenon (Pascanu et al., 2013). The output of the network is essentially independent of its input, and training is nearly impossible.
+
+**2. If  $K > 1$  we have:**  $\|\nabla_{\theta} \mathcal{L}(f(\theta, x), y)\|_2 = \mathcal{O}(LK^D(X_0 + B + 1))$ .
+
+Due to the  $K^D \gg 1$  term this corresponds to an exploding gradient phenomenon (Bengio et al., 1994). The upper bound becomes vacuous for deep networks: the added noise  $\zeta$  will be too high.
+
+**3. If  $K = 1$  we have:**  $\|\nabla_{\theta} \mathcal{L}(f(\theta, x), y)\|_2 = \mathcal{O}\left(L\left(\sqrt{D} + X_0\sqrt{D} + \sqrt{B}X_0D + BD^{3/2}\right)\right)$ , which for linear layers without biases further simplify to  $\mathcal{O}(L\sqrt{D}(1 + X_0))$ .
+
+The formal statement can be found in appendix. We see that most favorable bounds are achieved by 1-Lipschitz neural networks with 1-Lipschitz layers. In classification tasks, they are as expressive as conventional networks (Béthune et al., 2022). Hence, this choice of architecture is not at the expense of utility. Moreover an accuracy/robustness trade-off exists, determined by the choice of loss function (Béthune et al., 2022). However, setting  $K = 1$  merely ensures that  $\|\nabla_x f\| \leq 1$ , and in the worst-case scenario we could have  $\|\nabla_x f\| \ll 1$  almost everywhere. This results in a situation where the bound of case 3 in Theorem 1 is not tight, leading to an underfitting regime as in the case  $K < 1$ . With Gradient Norm Preserving (GNP) networks, we expect to mitigate this issue.
+
+**Controlling  $K$  with Gradient Norm Preserving (GNP) networks.** GNP (Li et al., 2019a) networks are 1-Lipschitz neural networks with the additional constraint that the Jacobian of layers consists of orthogonal matrices. They fulfill the Eikonal equation  $\left\| \frac{\partial f_d(\theta_d, x_d)}{\partial x_d} \right\|_2 = 1$  for any intermediate activation  $f_d(\theta_d, x_d)$ . As a consequence, the gradient of the loss with respect to the parameters
+
+{6}------------------------------------------------
+
+is bounded by
+
+$$\|\nabla_{\theta_d} \mathcal{L}\| \leq \left\| \nabla_{y_d} \mathcal{L} \right\| \times \left\| \prod_{d' < i \leq D} \frac{\partial f_{i'}(\theta_{i'}, x_{i'})}{\partial x_{i'}} \right\| \times \left\| \frac{\partial f_d(\theta_d, x_d)}{\partial \theta_d} \right\| = \left\| \nabla_{y_d} \mathcal{L} \right\| \times \left\| \frac{\partial f_d(\theta_d, x_d)}{\partial \theta_d} \right\|, \quad (7)$$
+
+which for weight matrices  $W_d$  further simplifies to  $\|\nabla_{y_d} \mathcal{L}\| \leq \|\nabla_{y_d} \mathcal{L}\| \times \|f_{d-1}(\theta_{d-1}, x_{d-1})\|$ . We see that this upper bound crucially depends on two terms that can be analyzed separately. On the one hand,  $\|f_{d-1}(\theta_{d-1}, x_{d-1})\|$  depends on the scale of the input. On the other,  $\|\nabla_{y_d} \mathcal{L}\|$  depends on the loss, the predictions and the training stage. We show below how to intervene on these two quantities.
+
+**Controlling  $X_0$  with input pre-processing.** The weight gradient norm  $\|\nabla_{y_d} \mathcal{L}\|$  indirectly depends on the norm of the inputs. Multiple strategies are available to keep this norm under control: projection onto the ball (“norm clipping”), or projection onto the sphere (“normalization”). In the domain of natural images, this result sheds light on the importance of color space: RGB, HSV, etc. Empirically, a narrower distribution of input norms would make up for tighter gradient norm bounds.
+
+**Controlling  $L$  with the hybrid approach: loss gradient clipping** As training progresses, the magnitude of  $\|\nabla_f \mathcal{L}\|$  tends to diminish when approaching local minima, falling below the upper bound and diminishing the signal to noise ratio. Fortunately, for Lipschitz constrained networks, the norm of the elementwise-gradient remains lower bounded throughout (Béthune et al., 2022). Since the noise amplitude only depends on the architecture and the loss, and remains fixed during training, the loss with the best signal-to-noise ratio would be a loss whose gradient norm w.r.t the logits remains constant during training. For the binary classification case, with labels  $y \in \{-1, +1\}$ , this yields the loss  $\mathcal{L}_{KR}(\hat{y}, y) = -y\hat{y}$ , that arises in Kantorovich-Rubinstein duality (Villani, 2008):
+
+$$\mathcal{W}_1(P, Q) := \frac{1}{\ell} \inf_{f \in \ell\text{-Lip}(\mathcal{D}, \mathbb{R})} \mathbb{E}_{(x, y) \sim \mathcal{D}} [\mathcal{L}_{KR}(f(x), y)], \quad (8)$$
+
+where  $\mathcal{W}_1(P, Q)$  is the Wasserstein-1 distance between the two classes  $P$  and  $Q$ .
+
+Another way to ensure high signal-to-noise ratio is to diminish the noise and clip the gradients of the loss w.r.t the logits. We emphasize that *this is different from the clipping of the “parameter gradient”*  $\nabla_{\theta_d} \mathcal{L}$  done in DP-SGD. Here, *any intermediate gradient*  $\nabla_{f_d} \mathcal{L}$  can be clipped during backpropagation. This can be achieved with a special “clipping layer” that behaves like the identity function at the forward pass, and clips the gradient during the backward pass. In DP-SGD the clipping is applied on the element-wise gradient  $\nabla_{W_d} \mathcal{L}$  of size  $b \times h^2$  for matrix weight  $W_d \in \mathbb{R}^{b \times h}$  and batch size  $b$ , and clipping it can cause memory issues or slowdowns (Lee & Kifer, 2021). In our case,  $\nabla_{y_d} \mathcal{L}$  is of size  $b \times h$ : this is far smaller, especially for the last layer. Moreover, this clipping is compatible with the adaptive clipping introduced by (Andrew et al., 2021): the quantiles of  $\|\nabla_{y_d} \mathcal{L}\|$  can be privately estimated for a small privacy budget. This allows to effectively reduce the noise while ensuring that most of the gradients remain unbiased. Furthermore, this bias of this clipping can be characterized.
+
+**Proposition (informal) 1** (Bias of loss gradient clipping in binary classification tasks). *Let  $\mathcal{L}_{BCE}$  be the binary cross-entropy loss, with sigmoid activation. Assume that the loss gradient (w.r.t the logits)  $\nabla_{\hat{y}} \mathbb{E}_{\mathcal{D}}[\mathcal{L}_{BCE}(\hat{y}, y)]$  is clipped to norm at most  $C > 0$ . Then there exists  $C' > 0$  such that for all  $C \leq C'$  a gradient descent step with the clipped gradient is identical in direction to the gradient descent step obtained from the loss  $\mathcal{L}_{KR}(\hat{y}, y) = -y\hat{y}$ .*
+
+As observed in Serrurier et al. (2021) and Béthune et al. (2022) this descent direction yields classifiers with high certifiable robustness, but lower clean accuracy. Therefore, in practice, we set the adaptive clipping threshold at not less than the 90%-th quantile to mitigate the bias and avoid utility drop.
+
+### 3.2 LIP-DP LIBRARY
+
+To foster and spread accessibility, we provide an open source TensorFlow library for Clipless DP-SGD training<sup>2</sup>, named `lip-dp`, with Keras API. The code is available at <https://github.com/Algue-Rythme/lip-dp>. Its usage is illustrated in Figure 1. We rely on the `deel-lip3` library Serrurier et al. (2021) to enforce Lipschitz constraints in practice, with Reshaped Kernel
+
+<sup>2</sup><https://anonymous.4open.science/r/lipdp-5EA1> distributed under MIT License.
+
+<sup>3</sup><https://github.com/deel-ai/deel-lip> distributed under MIT License.
+
+{7}------------------------------------------------
+
+| Dataset | Size | Dim. | $\delta$ | Validation AUROC $\uparrow$ |  |
+|-|-|-|-|-|-|
+|  |  |  |  | DP-SGD | Clipless DP-SGD |
+| ALOI | 39,627 | 27 | $10^{-5}$ | <b>56.5</b> | 56.2 |
+| campaign | 32,950 | 62 | $10^{-5}$ | <b>90.0</b> | 82.2 |
+| celeba | 162,079 | 39 | $10^{-6}$ | <b>96.6</b> | 96.5 |
+| census | 239,428 | 500 | $10^{-6}$ | <b>93.3</b> | 92.5 |
+| donors | 495,460 | 10 | $10^{-6}$ | <b>100.0</b> | <b>100.0</b> |
+| magic | 15,216 | 10 | $10^{-5}$ | <b>90.7</b> | 89.7 |
+| shuttle | 39,277 | 9 | $10^{-5}$ | 98.3 | <b>99.4</b> |
+| skin | 196,045 | 3 | $10^{-6}$ | <b>100.0</b> | 99.8 |
+| yeast | 1,187 | 8 | $10^{-4}$ | 66.8 | <b>75.1</b> |
+
+(a) **Best AUROC values (in %)** for models trained under  $(\epsilon, \delta)$ -DP privacy with  $\epsilon = 1$ , on binary classification tasks of tabular data from Adbench datasets Han et al. (2022). We use a random stratified split into train (80%) / validation (20%).
+
+![Figure 3b: Pareto front on MNIST. A line plot showing Validation Accuracy (y-axis, 0.10 to 1.00) versus epsilon at delta = 1e-5 (x-axis, 0.0 to 3.0). The plot shows a Pareto front for Clipless DP-SGD (blue line) and various other methods (Abadi et al. (2016), Bu et al. (2019), Chen & Lee (2020), Feldman & Zrnic (2020), Papernot et al. (2021)). Green dots represent individual epochs. The Pareto front starts at approximately (0.1, 0.6) and rises to (2.5, 0.95).](a71911ad87414271aeb190e0eebcb989_img.jpg)
+
+Figure 3b: Pareto front on MNIST. A line plot showing Validation Accuracy (y-axis, 0.10 to 1.00) versus epsilon at delta = 1e-5 (x-axis, 0.0 to 3.0). The plot shows a Pareto front for Clipless DP-SGD (blue line) and various other methods (Abadi et al. (2016), Bu et al. (2019), Chen & Lee (2020), Feldman & Zrnic (2020), Papernot et al. (2021)). Green dots represent individual epochs. The Pareto front starts at approximately (0.1, 0.6) and rises to (2.5, 0.95).
+
+(b) **Pareto front on MNIST.** Each green dot corresponds to a (val. acc,  $\epsilon$ ) pair from an epoch.
+
+Figure 3: **Comparison of the utility of DP-SGD and Clipless DP-SGD** on tabular and image data.
+
+Orthogonalization (RKO) for fast and near-orthogonal convolutions (Li et al., 2019b). The Lipschitz constraint is enforced by using activations with known Lipschitz constant  $l_d$  (most activations fulfill this condition), and by applying a projection  $\Pi : \mathbb{R}^p \rightarrow \Theta$  on the weights of affine layers. These constraints correspond to spectrally normalized matrices Yoshida & Miyato (2017); Bartlett et al. (2017), since for affine layers we have  $\ell_d = \|W_d\|_2 := \max_{\|x\| \leq 1} \|W_d x\|_2$  and therefore  $\Theta = \{\|W_d\|_2 \leq \ell_d\}$ . We rely on Power Iteration for fast computation of the spectral norm. The leading eigenvector is cached from a step to another to speed-up computations. The seminal work of Anil et al. (2019) proved that universal approximation in the set of  $\ell$ -Lipschitz functions was achievable by this family of architectures. In practice, GNP networks are parametrized with GroupSort activation Anil et al. (2019); Tanielian & Biau (2021), Householder activation Mhammedi et al. (2017), and orthogonal weight matrices Li et al. (2019a,b).
+
+**Remark 2** (GNP networks limitations). *Strict orthogonality is challenging to enforce, especially for convolutions for which it is still an active research area (see Trockman & Kolter (2021); Singla & Feizi (2021b); Achour et al. (2022); Singla & Feizi (2022); Xu et al. (2022) and references therein). Our line of work traces an additional motivation for the development of GNP and the bounds will strengthen as the field progresses. Concurrent approaches based on regularization (Gulrajani et al., 2017; Cisse et al., 2017; Gouk et al., 2021) fail to produce formal guarantees.*
+
+## 4 EXPERIMENTAL RESULTS
+
+We validate our implementation with a speed benchmark against competing approaches, and we present the privacy/utility Pareto fronts that can be obtained with GNP networks.
+
+### 4.1 EVALUATION OF PRIVACY, ACCURACY AND ROBUSTNESS
+
+For the comparisons, we leverage the DP-SGD implementation from Opacus. We perform a search over a broad range of hyper-parameter values: the configuration is given in Appendix D. We ignore the privacy loss that may be induced by this hyper-parameter search, which is a limitation per recent studies like Papernot & Steinke (2022) or Ding & Wu (2022).
+
+**Accuracy and Privacy.** We validate the performance of our approach on tabular data from Adbench suite (Han et al., 2022) using a MLP, and report the result in Table 3a. For MNIST (Fig. 3b) we use a Lipschitz LeNet-like architecture.
+
+**Robustness and Privacy.** One of the most prominent advantage of Lipschitz networks is their ability to provide robustness certificates against adversarial attacks, and was the primary motivation for their development (Szegedy et al., 2014; Li et al., 2019a; Fazlyab et al., 2019). For a  $\ell$ -Lipschitz classifier  $f$ , with predictions  $\bar{k} := \arg \max_k f_k(x)$  the decision is invariant under perturbation of norms smaller than  $\frac{1}{\ell\sqrt{2}}(f_{\bar{k}}(x) - \arg \max_{i \neq \bar{k}} f_i(x))$ . Therefore, for each perturbation radius  $r$  we
+
+{8}------------------------------------------------
+
+![Figure 4: A line graph showing Validation accuracy (y-axis, 0.05 to 0.55) versus Privacy budget ε at δ = 1e-5 (x-axis, 2.0 to 14.0). The graph compares two algorithms: [Lipschitz] Clipless DP-SGD (solid lines) and [Unconstrained] DP-SGD (dashed lines). The legend indicates Robustness radius: clean, r = 1/255, r = 2/255, r = 4/255, r = 8/255, and r = 16/255. The [Unconstrained] DP-SGD algorithm shows a sharp increase in accuracy at low privacy budgets, while the [Lipschitz] Clipless DP-SGD algorithm shows a more gradual increase. The [Unconstrained] DP-SGD algorithm's accuracy plateaus around 0.45, while the [Lipschitz] Clipless DP-SGD algorithm's accuracy continues to increase, reaching approximately 0.50 at ε = 14.0.](352c5fab6f936356e9570761a02ab71e_img.jpg)
+
+Figure 4: A line graph showing Validation accuracy (y-axis, 0.05 to 0.55) versus Privacy budget ε at δ = 1e-5 (x-axis, 2.0 to 14.0). The graph compares two algorithms: [Lipschitz] Clipless DP-SGD (solid lines) and [Unconstrained] DP-SGD (dashed lines). The legend indicates Robustness radius: clean, r = 1/255, r = 2/255, r = 4/255, r = 8/255, and r = 16/255. The [Unconstrained] DP-SGD algorithm shows a sharp increase in accuracy at low privacy budgets, while the [Lipschitz] Clipless DP-SGD algorithm shows a more gradual increase. The [Unconstrained] DP-SGD algorithm's accuracy plateaus around 0.45, while the [Lipschitz] Clipless DP-SGD algorithm's accuracy continues to increase, reaching approximately 0.50 at ε = 14.0.
+
+Figure 4: **Privacy/accuracy/robustness trade-off on Cifar-10:** We report the pareto front of robustness certificates at different radii  $r$  for Lipschitz constrained networks, while unconstrained networks cannot produce robustness certificates. Models are trained in an "out of the box setting": no pre-training, no data augmentation and no handcrafted features. To ensure a fair comparison between algorithms, we perform 30 repetitions with a Bayesian optimizer to select the best hyper-parameters.
+
+can measure the accuracy of the perturbed network, and we report these results in Fig. 4. The computation of the certificates is straightforward, while methods applicable to conventional networks (like randomized smoothing (Cohen et al., 2019) or interval propagation, see remark 1), are expensive. This suggests that robust decisions and privacy are not necessarily antipodal objectives, contrary to what was observed in Song et al. (2019). The work of Wu et al. (2023) also study the link between certified robustness and privacy, albeit through the lens of adversarial training (Zhang et al., 2019).
+
+### 4.2 SPEED AND MEMORY CONSUMPTION
+
+We benchmarked the median runtime per batch of vanilla DP-SGD against the one of Clipless DP-SGD, on a CNN architecture and its Lipschitz equivalent respectively. The experiment was run on a GPU with 48GB video memory. We compare against the implementation of `tf_privacy`, `opacus` and `optax`. In order to allow a fair comparison, when evaluating `Opacus`, we reported the runtime with respect to the logical batch size, while capping the physical batch size to avoid Out Of Memory error (OOM).
+
+An advantage of the projection  $\Pi$  over per-sample gradient clipping is that its cost is independent of the batch size. Fig 5 validates that our method scales much better than vanilla DP-SGD, and is compatible with large batch sizes. It offers several advantages: firstly, a larger batch size contributes to a decrease of the sensitivity  $\Delta \propto 1/b$ , which diminishes the ratio between noise and gradient norm. Secondly, as the batch size  $b$  increases, the variance decreases at the parametric rate  $\mathcal{O}(\sqrt{b})$  (as demonstrated in appendix E.1), aligning with expectations. This observation does not apply to DP-SGD: clipping biases the direction of the average gradient, as noticed by Chen et al. (2020).
+
+![Figure 5: A line graph showing Median Runtime per batch (s) (y-axis, 0.0 to 4.0) versus Batch Size (x-axis, 0 to 50K). The graph compares four optimizers: [opacus] DP-SGD (blue solid line), [lip-dp] Clipless DP-SGD (orange solid line), [optax] DP-SGD (green solid line), and [tf_privacy] DP-SGD (red dashed line). The legend also indicates Number of parameters: 130K (solid lines), 510K (dashed lines), and 2,800K (dotted lines). The [tf_privacy] DP-SGD optimizer shows a sharp increase in runtime as batch size increases, reaching a median runtime of approximately 3.5 seconds at a batch size of 20K. The [opacus] DP-SGD optimizer also shows a sharp increase, reaching approximately 3.0 seconds at a batch size of 20K. The [lip-dp] Clipless DP-SGD and [optax] DP-SGD optimizers show a much more gradual increase in runtime, reaching approximately 1.5 seconds at a batch size of 50K. The [tf_privacy] DP-SGD optimizer's runtime increases so sharply that it exceeds the 48GB memory limit at a batch size of approximately 20K.](0f3e3ea50bcceb86f6c524ab2b6f3e7a_img.jpg)
+
+Figure 5: A line graph showing Median Runtime per batch (s) (y-axis, 0.0 to 4.0) versus Batch Size (x-axis, 0 to 50K). The graph compares four optimizers: [opacus] DP-SGD (blue solid line), [lip-dp] Clipless DP-SGD (orange solid line), [optax] DP-SGD (green solid line), and [tf\_privacy] DP-SGD (red dashed line). The legend also indicates Number of parameters: 130K (solid lines), 510K (dashed lines), and 2,800K (dotted lines). The [tf\_privacy] DP-SGD optimizer shows a sharp increase in runtime as batch size increases, reaching a median runtime of approximately 3.5 seconds at a batch size of 20K. The [opacus] DP-SGD optimizer also shows a sharp increase, reaching approximately 3.0 seconds at a batch size of 20K. The [lip-dp] Clipless DP-SGD and [optax] DP-SGD optimizers show a much more gradual increase in runtime, reaching approximately 1.5 seconds at a batch size of 50K. The [tf\_privacy] DP-SGD optimizer's runtime increases so sharply that it exceeds the 48GB memory limit at a batch size of approximately 20K.
+
+Figure 5: **Our approach outperforms concurrent frameworks in terms of runtime and memory:** we trained CNNs (ranging from 130K to 2M parameters) on CIFAR-10, and report the median batch processing time (including noise, and constraints application  $\Pi$  or gradient clipping).
+
+## 5 LIMITATIONS, FUTURE WORK AND BROADER IMPACT
+
+Our framework offers a novel approach to address differentially private training, but also introduces new challenges. Clipless DP-SGD replaces a bias of optimizer with a bias in function space (as
+
+{9}------------------------------------------------
+
+---
+
+discussed in Appendix A.4). We primarily rely on GNP networks, where high performing architectures are quite different from the usual CNN architectures. This serves as **(1) a motivation to further develop Gradient Norm Preserving architectures**. As emphasized in Remark 2, we anticipate that progress in these areas will greatly enhance the effectiveness of our approach. Additionally, to meet requirement 3, we rely on projections, necessitating additional efforts to incorporate “trivializations” Trockman & Kolter (2021); Singla & Feizi (2021b). Finally, as mentioned in Remark 1, our propagation bound method can be refined. Comparison of Clipless DP-SGD with recent methods based on back-propagation, in particular Bu et al. (2023), is discussed in appendix A.5. Furthermore, the development of networks with known Lipschitz constant with respect to parameters is a question of independent interest, making **lip-dp (2) a useful tool for the study of the optimization dynamics** in Lipschitz constrained neural networks.
+
+## CONTRIBUTIONS
+
+The design and the theoretical analysis has been conducted by Louis Béthune and Thomas Masséna. The lip-dp package has been created by Louis Béthune, Thomas Masséna, and Thibaut Boissin. The experiments have been run by Louis Béthune, Thomas Masséna, Thibaut Boissin, Yannick Prudent, and Corentin Friedrich. Proofreading, writing, and feedback are a joint contribution of all authors.
+
+## ACKNOWLEDGMENTS
+
+Louis thanks Fabian Pedregosa for its detailed feedback. The authors thank Agustin Picard for its proofreading.
+
+This work has benefited from the AI Interdisciplinary Institute ANITI, which is funded by the French “Investing for the Future – PIA3” program under the Grant agreement ANR-19-P3IA-0004. The authors gratefully acknowledge the support of the DEEL project.<sup>4</sup>
+
+This work was supported by grant ANR-20-CE23-0015 (Project PRIDE) and the ANR 22-PECY-0002 IPOP (Interdisciplinary Project on Privacy) project of the Cybersecurity PEPR.
+
+---
+
+<sup>4</sup><https://www.deel.ai/>
+
+ Rest of paper (reference and Appendix) is removed.

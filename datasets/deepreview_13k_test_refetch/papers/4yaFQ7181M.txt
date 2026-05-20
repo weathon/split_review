@@ -1,0 +1,289 @@
+
+
+{0}------------------------------------------------
+
+# SPACE AND TIME CONTINUOUS PHYSICS SIMULATION FROM PARTIAL OBSERVATIONS
+
+**Steven Janny**
+
+LIRIS, INSA Lyon, France  
+steven.janny@insa-lyon.fr
+
+**Madiha Nadri**
+
+LAGEPP, Univ. Lyon 1, France  
+madiha.nadri-wolf@univ-lyon1.fr
+
+**Julie Digne**
+
+LIRIS, CNRS, France  
+julie.digne@cnrs.fr
+
+**Christian Wolf**
+
+Naver Labs Europe, France  
+christian.wolf@naverlabs.com
+
+## ABSTRACT
+
+Modern techniques for physical simulations rely on numerical schemes and mesh-refinement methods to address trade-offs between precision and complexity, but these handcrafted solutions are tedious and require high computational power. Data-driven methods based on large-scale machine learning promise high adaptivity by integrating long-range dependencies more directly and efficiently. In this work, we focus on fluid dynamics and address the shortcomings of a large part of the literature, which are based on fixed support for computations and predictions in the form of regular or irregular grids. We propose a novel setup to perform predictions in a continuous spatial and temporal domain while being trained on sparse observations. We formulate the task as a double observation problem and propose a solution with two interlinked dynamical systems defined on, respectively, the sparse positions and the continuous domain, which allows to forecast and interpolate a solution from the initial condition. Our practical implementation involves recurrent GNNs and a spatio-temporal attention observer capable of interpolating the solution at arbitrary locations. Our model not only generalizes to new initial conditions (as standard auto-regressive models do) but also performs evaluation at arbitrary space and time locations. We evaluate on three standard datasets in fluid dynamics and compare to strong baselines, which are outperformed both in classical settings and in the extended new task requiring continuous predictions.
+
+## 1 INTRODUCTION
+
+The Lavoisier conservation principle states that changes in physical quantities in closed regions must be attributed to either input, output, or source terms. By applying this rule at an infinitesimal scale, we retrieve partial differential equations (PDEs) governing the evolution of a large majority of physics scenarios. Consequently, the development of efficient solvers is crucial in various domains involving physical phenomena. While conventional methods (e.g. finite difference or finite volume methods) showed early success in many situations, numerical schemes suffer from high computational complexity, in particular for growing requirements on fidelity and precision. Therefore, there is a need for faster and more versatile simulation tools that are reliable and efficient, and data-driven methods offer a promising opportunity.
+
+Large-scale machine learning offers a natural solution to this problem. In this paper, we address data-driven solvers for physics, but with additional requirements on the behavior of the simulator:
+
+**R1. Data-driven** – the underlying physics equation is assumed to be completely unknown. This includes the PDE, but also the boundary conditions. The dynamics must be discovered from a finite dataset of trajectories, i.e. a collection of observed behaviors from the physical system,
+
+**R2. Generalization** – the method must be capable of handling new initial conditions that do not explicitly belong to the training set, without re-training or fine-tuning,
+
+{1}------------------------------------------------
+
+**R3. Time and space continuous** – the domain of the predicted solution must be continuous in space and time<sup>1</sup> so that it can be queried at any arbitrary location within the domain of definition.
+
+These requirements are common in the field but rarely addressed altogether. R1 allows for handling complex phenomena where the exact equation might be unknown, and R2 supports the growing need for faster simulators, which consequently must handle new ICs. Space and time continuity (R3) are also useful properties for standard simulations since the solution can be made as fine as needed in certain complex areas.
+
+This task requires learning from sparsely distributed observations only, and without any prior knowledge on the PDE form. In these settings, a standard approach consists of approximating the behavior of a discrete solver, enabling forecasting in an auto-regressive fashion Pfaff et al. (2020); Janny et al. (2023); Sanchez-Gonzalez et al. (2020), losing therefore spatial and temporal continuity. Indeed, auto-regressive models assume strong regularities in the data, such as a static spatial lattice and uniform time steps. For these reasons, generalization to new spatial locations or intermediate time steps is not straightforward. These methods satisfy R1 and R2, but not R3. In another trend, Physics-Informed Neural Networks (PINNs) learn a solution on a continuous domain. They leverage the PDE operator to optimize the weights of a neural network representing the solution, and cannot generalize to new ICs, thus violating R1 and R2.
+
+In this paper, we address R1, R2 and R3 altogether in a new setup involving two joint dynamical systems. R1 and R2 are satisfied using an auto-regressive discrete-time dynamics learned from the sparse observations and producing a trajectory in latent space. Then, R3 is achieved with a state observer derived from a second dynamical system in continuous time. This state observer relies on transformer-based cross-attention to enable evaluation at arbitrary spatio-temporal locations. In a nutshell: **(a)** We propose a new setup to address continuous space and time simulations of physical systems from sparse observation, leveraging insights from control theory. **(b)** We provide strong theoretical results indicating that our setup is well-suited to address this task compared to existing baselines, which are confirmed experimentally on challenging benchmarks. **(c)** We provide experimental evidence that our state observer is more powerful than handcrafted interpolations for the targeted task. **(d)** With experiments on three challenging standard datasets (*Navier* Yin et al. (2022); Stokes (2009), *Shallow Water* Yin et al. (2022); Galewsky et al. (2004), *Eagle* Janny et al. (2023), and against state-of-the-art methods (MeshGraphNet (MGN) Pfaff et al. (2020), DINO Yin et al. (2022), MAgNet (Boussif et al., 2022)), we show that our results generalize to a wider class of problems, with excellent performances.
+
+## 2 RELATED WORKS
+
+**Autoregressive models** – have been extensively used to replicate the behavior of iterative solvers in discrete time, especially in cases where the PDE is unknown or generalization to new initial conditions is needed. These models come in various internal architectures, including convolution-based models for systems observed on a dense uniform grid (Stachenfeld et al., 2021; Guen & Thome, 2020; Bézenac et al., 2019) and graph neural networks (Battaglia et al., 2016) that can adapt to arbitrary spatial discretizations (Sanchez-Gonzalez et al., 2020; Janny et al., 2022a; Li et al., 2018). Such models have demonstrated a remarkable capacity to produce highly accurate predictions and generalize over long prediction horizons, making them particularly suitable for addressing complex problems such as fluid simulation (Pfaff et al., 2020; Han et al., 2021; Janny et al., 2023). However, auto-regressive models are inherently limited to a fixed and constant spatio-temporal discretization grid, hindering their capability to evaluate the solution anywhere and at any time. Neural ordinary differential equations (Neural ODE Chen et al. (2018); Dupont et al. (2019)) offer a countermeasure to the fixed timestep constraint by learning continuous ODEs on discrete data using an explicit solver, such as Euler or Runge-Kutta methods. In theory, this enables the solution to be evaluated at any temporal location but in practice still relies on the discretization of the time variable. Moreover, extending this approach to PDEs is not straightforward. Contrarily to these approaches, we leverage the auto-regressive capacity and accuracy while allowing arbitrary evaluation of the solution at any point in both time and space.
+
+<sup>1</sup>In what follows, while being a misnomer, *space and time continuity* of the solution designate the continuity of the spatial and temporal domain of definition of the solution, and not the continuity of the solution itself.
+
+{2}------------------------------------------------
+
+**Continuous solutions for PDEs** – date back to the early days of deep learning (Dissanayake & Phan-Thien, 1994; Lagaris et al., 1998; Psichogios & Ungar, 1992) and have recently experienced a resurgence of interest Raissi et al. (2019; 2017). Physics-informed neural networks represent the solution directly as a neural network and train the model to minimize a residual loss derived from the PDE. They are mesh-free, which alleviates the need for complex adaptive mesh refinement techniques (mandatory in finite volume methods), and have been successfully applied to a broad range of physical problems (Lu et al., 2021; Misryis et al., 2020; Zoboli et al., 2022; Kissas et al., 2020; Yang et al., 2019; Cai et al., 2021), with a growing community proposing architecture designs specifically tailored for PDEs (Sitzmann et al., 2020; Fathony et al., 2021) as well as new training methods (Zeng et al., 2023; Finzi et al., 2023; de Avila Belbute-Peres & Kolter, 2023). Yet, these models are also known to be difficult to train efficiently (Krishnapriyan et al., 2021; Wang et al., 2022). Recently, neural operators have attempted to learn a mapping between function space, leveraging kernels in Fourier space (Li et al., 2020b) (FNO) or graphs (Li et al., 2020a) (GNO) to learn the correspondence from the initial condition to the solution at a fixed horizon. While some operator learning frameworks can theoretically generalize to unseen initial conditions and arbitrary locations, we must consider the practical limitations of existing baselines. For instance, FNO requires a static cartesian grid and cannot be directly evaluated outside the training grid. Similarly, GNO can handle arbitrary meshes in theory, but still has limitations in evaluating points outside the training grid and Li et al. (2021) variant can only be queried at fixed time increments. DeepONet (Lu et al., 2019) can handle free sampling in time and space but is also constrained to a static observation grid.
+
+**Continuous and generalizable solvers** – represent a significant challenge. Few models satisfy all these conditions. MP-PDE (Brandstetter et al., 2022) can handle free-form grids but cannot generalize to different resolutions between train and test, and performs auto-regressive temporal forecasting. Closer to our work, MAGNet (Boussif et al., 2022) proposes to interpolate the observation graph in latent space to new query points before forecasting the solution using graph neural networks. However, they assume prior knowledge of the evaluation mesh and the new query points, use nearest neighbor interpolation instead of trained attention and struggle to generalize to finer grids during test time. In Hua et al. (2022), the auto-regressive MeshGraphNet (Pfaff et al., 2020) is combined with *Orthogonal Spline Collocation* to allow for arbitrary spatial queries. Finally, DINO (Yin et al., 2022) proposes a mesh-free, space-time continuous model to address PDE solving. The model uses context adaptation techniques to dynamically adapt the output of an implicit neural representation forward in time. DINO assumes the existence of a latent ODE modeling the temporal evolution of the context vector and learns it as a Neural ODE. In contrast, our method differs from DINO as our model is based on physics forecasting in an auto-regressive manner. We achieve space and time continuity through a learned dynamical attention transformer capable of handling arbitrary locations and points in time. Our design choices allow for generalization on new spatial and temporal locations, ie. not limited to discrete time steps, and new initial conditions while being trainable from sparse observations<sup>2</sup>.
+
+## 3 CONTINUOUS SOLUTIONS FROM SPARSE OBSERVATIONS
+
+Consider a dynamical system following a Partial Differential Equation (PDE) defined for all  $(\mathbf{x}, t) \in \Omega \times [0, T]$ , with  $T$  a positive constant:
+
+$$\begin{aligned} \dot{s}(\mathbf{x}, t) &= f(s, \mathbf{x}, t) & \forall (\mathbf{x}, t) \in \Omega \times [0, T], \\ s(\mathbf{x}, 0) &= s_0(\mathbf{x}) & \forall \mathbf{x} \in \Omega, \quad s(\mathbf{x}, t) = \bar{s}(\mathbf{x}, t) & \forall (\mathbf{x}, t) \in \partial\Omega \times [0, T] \end{aligned} \quad (1)$$
+
+where the state lies in an invariant set  $s \in \mathcal{S}$ ,  $f : \mathcal{S} \mapsto \mathcal{S}$  is an unknown operator,  $s_0 : \Omega \mapsto \mathbb{R}^n$  is the initial condition (IC) and  $\bar{s} : \partial\Omega \times [0, T] \mapsto \mathbb{R}^n$  the boundary condition. In what follows, we consider trajectories with shared boundary conditions, hence we omit  $\bar{s}$  from the notation for readability. In practice, the operator  $f$  is unknown, and we assume access to a set  $\mathcal{D}$  of  $K$  discrete trajectories from different ICs,  $s_0^k$ , sampled at sparse and scattered locations in time and space. Formally, we introduce two finite sets  $\mathcal{X} \subset \Omega$  of fixed positions and fixed regularly sampled times  $\mathcal{T}$  at sampling rate  $\Delta t$ . Let  $S(s_0, \mathbf{x}, t)$  be the solution of this PDE from IC  $s_0$ , the dataset  $\mathcal{D}$  is given as:  $\mathcal{D} := \left\{ S(s_0^k, \mathcal{X}, \mathcal{T}) \mid k \in [1, K] \right\}$ . Our task is formulated as:
+
+*Given  $\mathcal{D}$ , a new initial condition  $s_0 \in \mathcal{S}$ , and a query  $(\mathbf{x}, t) \in \Omega \times [0, T]$ , find the solution of equation 1 at the queried location and from the given IC, that is  $S(s_0, \mathbf{x}, t)$ .*
+
+<sup>2</sup>Code will be made public. Project page: <https://continuous-pde.github.io/>
+
+{3}------------------------------------------------
+
+![Figure 1: Model overview diagram. The diagram illustrates a two-system architecture for physics simulations. System 1 (Discrete solution) is a latent dynamical model that takes a sparse physical observation s_d[0] = s(X, 0) and a control input C to produce a sequence of latent anchor states z_d[0], z_d[1], z_d[2], z_d[3], z_d[n] at discrete time steps t_0, t_1, t_2, t_3, t_n. System 2 (Continuous solution) is a state estimator that uses these anchor states to predict the dense physical state s(x, t) at arbitrary locations (x, t) in the physical space. The output of System 1 is used as an output predictor to generate a sequence of sparse observations s_d[0], s_d[1], s_d[2], s_d[3], s_d[n] at the same time steps. The diagram shows the flow of information from physical space to latent space and back to physical space, with System 1 handling the discrete part and System 2 handling the continuous part.](2fa4a1bf91d0f34e87c689fbc1211fe3_img.jpg)
+
+Figure 1: Model overview diagram. The diagram illustrates a two-system architecture for physics simulations. System 1 (Discrete solution) is a latent dynamical model that takes a sparse physical observation s\_d[0] = s(X, 0) and a control input C to produce a sequence of latent anchor states z\_d[0], z\_d[1], z\_d[2], z\_d[3], z\_d[n] at discrete time steps t\_0, t\_1, t\_2, t\_3, t\_n. System 2 (Continuous solution) is a state estimator that uses these anchor states to predict the dense physical state s(x, t) at arbitrary locations (x, t) in the physical space. The output of System 1 is used as an output predictor to generate a sequence of sparse observations s\_d[0], s\_d[1], s\_d[2], s\_d[3], s\_d[n] at the same time steps. The diagram shows the flow of information from physical space to latent space and back to physical space, with System 1 handling the discrete part and System 2 handling the continuous part.
+
+Figure 1: **Model overview** – We achieve space and time continuous simulations of physics systems by formulating the task as a double observation problem. **System 1** is a discrete dynamical model used to compute a sequence of latent anchor states  $z_d$  auto-regressively, and **System 2** is used to design a state estimator  $\psi_q$  retrieving the dense physical state at arbitrary locations  $(\mathbf{x}, t)$ .
+
+Note that this task involves generalization to new ICs, as well as estimation to unseen spatial locations within  $\Omega$  and unseen time instants within  $[0, T]$ . We do not explicitly require extrapolation to instants  $t > T$ , although it comes as a side benefit of our approach up to some extent.
+
+### 3.1 THE DOUBLE OBSERVATION PROBLEM
+
+The task implies extracting regularities from weakly informative physical variables that are sparsely measured in space and time, since  $\mathcal{X}$  and  $\mathcal{T}$  contain very few elements. Consequently, the possibility to forecast their trajectories from off-the-shelf auto-regressive methods is very unlikely (as confirmed experimentally). To tackle this challenge, we propose an approach accounting for the fact that the phenomenon is not directly observable from the sparse trajectories, but can be deduced from a richer latent state-space in which the dynamics is markovian. We introduce two linked dynamical models lifting sparse observations to dense trajectories guided by *observability* considerations, namely
+
+$$\text{System 1: } \begin{cases} z_d[n+1] &= f_1(z_d[n]) \\ s_d[n] &= h_1(z_d[n]) \end{cases}, \quad \text{System 2: } \begin{cases} \dot{s}(\mathbf{x}, t) &= f_2(s, \mathbf{x}, t) \\ z(\mathbf{x}, t) &= h_2(s, \mathbf{x}, t) \end{cases} \quad \forall (\mathbf{x}, t) \in \Omega \times [0, T] \quad (2)$$
+
+where for all  $n \in \mathbb{N}$ , we note  $s_d[n] = s(\mathcal{X}, n\Delta)$  the sparse observation at some instant  $n\Delta$  (the sampling rate  $\Delta$  is not necessarily equal to the sampling rate  $\Delta^*$  used for data acquisition, which we will exploit during training to improve generalization. This will be detailed later).
+
+**System 1** – is a discrete-time dynamical system where the available measurements  $s_d[n]$  are considered as *partial observations* of a latent state variable  $z_d[n]$ . We aim to derive an output predictor from System 1 to forecast trajectories of sparse observations auto-regressively from the sparse IC. As mentioned earlier, sparse observations are unlikely to be sufficient to perform predictions, hence we introduce a richer latent state variable  $z_d$  in which the dynamics is truly markovian, and observations  $s_d[n]$  are seen as measurements of the state  $z_d$  using the function  $h_1$ .
+
+**System 2** – is a continuous-time dynamical system describing the evolution of the to-be-predicted dense trajectory  $S(s_0, \mathbf{x}, t)$ . It introduces continuous observations  $z(\mathbf{x}, t)$  such that  $z(\mathbf{x}, n\Delta) = z_d[n]$ . The insight is that the state representation  $z_d[n]$  obtained from System 1 is designed to contain sufficient information to predict  $s_d[n]$ , but not necessarily to predict the dense state. Formally,  $z_d$  represents solely the *observable part* of the state, in the sense of control theory.
+
+At inference time, we forecast at query location  $(\mathbf{x}, t)$  with a 2-step algorithm: **(Step-1)** System 1 is used as an output predictor from the sparse IC  $s_d[0]$ , and computes a sequence  $z[0], z[1], \dots$ , which we refer to as “*anchor states*”. This sequence allows the dynamics to be Markovian, provides sufficient information for the second state estimation step and holds information to predict the sparse observations, allowing supervision during training. **(Step-2)** We derive a *state observer* from System 2 leveraging the anchor states over the whole time domain to estimate the dense solution at an arbitrary location in space and time (see figure 1). Importantly, for a given IC, the anchor states are computed only once and reused within System 2 to estimate the solution at different points.
+
+{4}------------------------------------------------
+
+### 3.2 THEORETICAL ANALYSIS
+
+In this section, we introduce theoretical results supporting the use of Systems 1 and 2. In particular, we show that using System 1 to forecast the sparse observations in latent space  $z_d$  rather than directly operating in the physical space leads to smaller upper bounds on the prediction error. Then, we show the existence of a state estimator from System 2 and compute an upper bound on the estimation error depending on the length of the sequence of anchor states.
+
+**Step 1** – consists of computing the sequence of anchor states guided by an output prediction task of the sparse observations. As classically done, we introduce an encoder (formally, a state observer)  $e(s_d[0])=z_d[0]$  coupled to System 1 to project the sparse IC into a latent space  $z_d$ . Following System 1, we compute the anchor states  $z_d$  auto-regressively (with  $f_1$ ) in the latent space. The sparse observations are extracted from  $z_d$  using  $h_1$ . In comparison, existing baselines (Pfaff et al., 2020; Sanchez-Gonzalez et al., 2020; Stachenfeld et al., 2021) maintain the state in the physical space and discard the intermediate latent representation between iterations. Formally, let us consider approximations  $\hat{f}_1, \hat{h}_1, \hat{e}$  (in practice realized as deep networks trained from data  $\mathcal{D}$ ) of  $f_1, h_1$  and  $e$  and compare the prediction algorithm for the classic auto-regressive (AR) approach and ours
+
+$$\text{Classic AR: } \hat{s}_d^{\text{ar}}[n] := (\hat{h}_1 \circ \hat{f}_1 \circ \hat{e})^n (s_d[0]) \quad \text{Ours: } \hat{s}_d[n] := \hat{h}_1 \circ \hat{f}_1^n \circ \hat{e}(s_d[0]) \quad (3)$$
+
+Classical AR approaches re-project the latent state into the physical space at each step and repeat “encode-process-decode”. Our method encodes the sparse IC, advances the system in the latent space, and decodes toward the physical space at the end. A similar approach has also been explored in Wu et al. (2022); Kochkov et al. (2020), albeit in different contexts, without theoretical analysis.
+
+**Proposition 1** Consider a dynamical system of the form of System 1 and assume the existence of a state observer  $e$  along with approximations  $\hat{f}_1, \hat{h}_1, \hat{e}$  with Lipschitz constants  $L_f, L_h, L_e$  respectively such that  $L_h L_f L_e \neq 1$ . If there exist  $\delta_f, \delta_h, \delta_e \in \mathbb{R}^+$  such that  $\forall (\mathbf{z}, \mathbf{s}) \in \mathbb{R}^{n_z} \times \mathbb{R}^{n_s}$
+
+$$|f_1(\mathbf{z}) - \hat{f}_1(\mathbf{z})| \leq \delta_f, \quad |h_1(\mathbf{z}) - \hat{h}_1(\mathbf{z})| \leq \delta_h, \quad |e(\mathbf{s}) - \hat{e}(\mathbf{s})| \leq \delta_e \quad (4)$$
+
+for the Euclidean norm  $|\cdot|$ , then for all integer  $n > 0$ , with  $\hat{s}_d[n]$  and  $\hat{s}_d^{\text{ar}}[n]$  as in equation 3,
+
+$$|s_d[n] - \hat{s}_d[n]| \leq \delta_h + L_h \left( \delta_f \frac{L_f^n - 1}{L_f - 1} + L_f^n \delta_e \right) \quad (5)$$
+
+$$|s_d[n] - \hat{s}_d^{\text{ar}}[n]| \leq \delta \frac{L^n - 1}{L - 1} \quad (6)$$
+
+with  $\delta = \delta_h + L_h \delta_f + L_h L_f \delta_e$  and  $L = L_h L_f L_e$ .
+
+*Proof:* See appendix B.
+
+This result shows that falling back to the physical space at each time step degrades the upper bound of the prediction error. Indeed, if  $L < 1$ , the upper bound converges trivially to zero when  $n$  increases, and hence can be ignored. Otherwise, the upper bound for the classic AR scheme appears to be more sensitive to approximation errors  $\delta_h, \delta_f$  and  $\delta_e$  compared to our approach (for a formal comparison, see appendix C). Intuitively it means that information is lost in the observation space, which thus needs to be re-estimated at each iteration when using the classic AR scheme. By maintaining a state variable in the latent space, we allow this information to flow readily between each step of the simulator (see [blue frame](#) in figure 1).
+
+**Step 2** – The state estimator builds upon System 2 and relies on the set of anchor states from the previous step to estimate the dense physical state at arbitrary locations in space and time. Formally, we look for a function  $\psi_q$  leveraging the sequence of anchor states  $z_d[0], \dots, z_d[q]$  (simulated from the sparse IC  $s_d[0]$ ) to retrieve the dense solution<sup>3</sup>. In what follows, we show that (1) such a function  $\psi_q$  exists and (2) we compute an upper bound on the estimation error depending on the length of the sequence. To do so, consider the functional which outputs the anchor states from any IC  $s_0 \in \mathcal{S}$
+
+$$\mathcal{O}_p(s_0) = \left[ h_2(s_0(\mathcal{X})) h_2(S(s_0, \mathcal{X}, \Delta)) \cdots h_2(S(s_0, \mathcal{X}, p\Delta)) \right] = \left[ z_d[0] \cdots z_d[p] \right] \quad (7)$$
+
+In practice, the ground truths  $z_d[n]$  are not perfectly known, as they are obtained from a data-driven output predictor (step 1) using the sparse IC. Inspired from Janny et al. (2022b), we state:
+
+<sup>3</sup>Since the simulation is conducted up to  $T$ , and considering the time step  $\Delta$ , in practice  $q \leq \lfloor \frac{T}{\Delta} \rfloor$
+
+{5}------------------------------------------------
+
+**Proposition 2** Consider a dynamical system defined by System 2 and equation 7. Assume that
+
+A1.  $f_2$  is Lipschitz with constant  $L_{s_2}$ ,
+
+A2. there exists  $p > 0$  and a strictly increasing function  $\alpha$  such that  $\forall s_a, s_b \in \mathcal{S}^2$  and  $\forall q \geq p$
+
+$$|\mathcal{O}_q(s_a) - \mathcal{O}_q(s_b)| \geq \alpha(q)|s_a - s_b|_{\mathcal{S}} \quad (8)$$
+
+where  $|\cdot|_{\mathcal{S}}$  is an appropriate norm for  $\mathcal{S}$ .
+
+Then,  $\forall q \geq p$ , there exists  $\psi_q$  such that, for  $(\mathbf{x}, t) \in \Omega \times [0, T]$  and  $\delta_n$  such that  $\hat{\mathbf{z}}_d[n] = \mathbf{z}_d[n] + \delta_n$ , for all  $n \leq q$ ,
+
+$$\psi_q(\mathbf{z}_d[0], \dots, \mathbf{z}_d[q], \mathbf{x}, t) = S(\mathbf{s}_0, \mathbf{x}, t) \quad (9)$$
+
+$$\left| S(\mathbf{s}_0, \mathbf{x}, t) - \psi_q(\hat{\mathbf{z}}_d[0], \dots, \hat{\mathbf{z}}_d[q], \mathbf{x}, t) \right|_{\mathcal{S}} \leq 2\alpha(q)^{-1} |\delta_0|_q e^{L_{s_2} t}. \quad (10)$$
+
+where  $|\delta_0|_q = [\delta_0 \cdots \delta_q]$ .
+
+*Proof.* See appendix D. Assumption A2. states that the longer we observe two trajectories from different ICs, the easier it will be to distinguish them, ruling out systems collapsing to the same state. Such systems are uncommon since forecasting their trajectory becomes trivial after some time. This assumption is related to *finite-horizon observability* in control theory, a property of dynamical systems guaranteeing that the (markovian) state can be retrieved given a finite number  $p$  of past observations. Equation 8 is associated with injectivity of  $\mathcal{O}_q$ , hence the existence of a left inverse mapping the sequence of anchor states to the IC  $\mathbf{s}_0$ .
+
+Proposition 2 highlights a trade-off on the performance of  $\psi_q$ . On one hand, longer sequences of anchor states are harder to predict, leading to a larger  $|\delta_0|_q$ , which impacts the state estimator  $\psi_q$  negatively. On the other hand, longer sequences hold more information that can still be leveraged by  $\psi_q$  to improve its estimation, represented by  $\alpha(q)^{-1}$  in equation 10. In contrast to competing baselines or conventional interpolation algorithms, our approach takes this trade-off into account, by explicitly leveraging the sequence to estimate the dense solution, as will be discussed below.
+
+**Discussion and related work** – the competing baselines can be analyzed using our setup, yet in a weaker configuration. For instance, one can see Step 2 as an interpolation process, and replace it with a conventional interpolation algorithm, which typically relies on spatial neighbors only. Our method not only exploits spatial neighborhoods but also leverages temporal data, improving the performance, as shown in proposition 2 and empirically corroborated in Section 4.
+
+MAgNet (Boussif et al., 2022) uses a reversed *interpolate-forecast* scheme compared to ours. The IC  $\mathbf{s}_d[0]$  is interpolated right from the start to estimate  $\mathbf{s}_0$  (corresponding to our Step 2, with  $q=1$ ), and then simulated with an auto-regressive model in the physical space (with the classic AR scheme). Propositions 1 and 2 show that the upper bounds on the estimation and prediction error are higher than ours. Moreover, if the number of query points exceeds the number of known points ( $|\Omega| \gg |\mathcal{X}|$ ), the input of the auto-regressive solver is filled with noisy interpolations, which impacts performance.
+
+DINO (Yin et al., 2022) is a very different approach leveraging a spatial implicit neural representation modulated by a context vector, whose dynamics is modeled via a learned ODE. This approach is radically different than ours and arguably involves stronger hypotheses, such as the existence of a learnable ODE modeling the dynamics of a suitable weight modulation vector. In contrast, our method relies on arguably more sound assumptions, i.e. the existence of an observable discrete dynamics explaining the sparse observation, and the finite-time observability of System 2.
+
+### 3.3 IMPLEMENTATION
+
+The implementation follows the algorithm described in the previous section: **(Step-1)** rolls out predictions of anchor states from the IC, **(Step-2)** estimates the state at the query position from these anchor states. The encoder  $\hat{e}$  from Step 1 is a multi-layer perceptron (MLP) which takes as input the sparse IC  $\mathbf{s}_d[0]$  and the positions  $\mathcal{X}$  and outputs a latent state variable  $\mathbf{z}_d[0]$  structured as a graph, with edges computed with a Delaunay triangulation. Hence, each anchor is a graph  $\mathbf{z}_d[n] = \{\mathbf{z}_d[n]_i\}$ , but we will omit index  $i$  over graph nodes in what follows if not required for understanding.
+
+We model  $\hat{f}_1$  as a multi-layer Graph Neural Network (GNN) (Battaglia et al., 2016). The anchor states  $\mathbf{z}_d[n]$  are defined at fixed time steps  $n\Delta$ , which might not match  $\Delta^*$  used in the data  $\mathcal{T}$ . We
+
+{6}------------------------------------------------
+
+found it beneficial to choose  $\Delta = k \times \Delta^*$  with  $k > 1 \in \mathbb{N}$  such that the model can be queried *during training* on time points  $t \in \mathcal{T}$  that do not match exactly with every time-steps in  $z_d[0], z_d[1], \dots$ , but rather on a subset of them, hence encouraging generalization to unseen time. The observation function  $\hat{h}_1$  is an MLP applied on the vector at node level in the graph  $z_d$ .
+
+The state estimator  $\psi_q$  is decomposed into a Transformer model (Vaswani et al., 2017) coupled to a recurrent neural network to provide an estimate at query spatio-temporal query position  $(\mathbf{x}, t)$ . First, through cross-attention we translate the set of anchor states  $z_d[n]$  (one embedding per graph node  $i$  and per instant  $n$ ) into a set of estimates of the continuous variable  $\mathbf{z}(\mathbf{x}, t)$  conditioned at the instant  $n\Delta$ , which we denote  $z_{n\Delta}(\mathbf{x}, t)$  (one embedding per instant  $n$ ). Following advances in geometric mappings in computer vision (Saha et al., 2022), we use multi-head cross-attention to *query* from coordinates  $(\mathbf{x}, t)$  to *Keys* corresponding to the nodes  $i$  in each graph anchor state  $z_d[n], \forall n$ :
+
+$$z_{n\Delta}(\mathbf{x}, t) = f_{\text{mha}}(\mathbf{Q} = \zeta_\omega(\mathbf{x}, t), \mathbf{K} = \mathbf{V} = \{z_d[n]_i\} + \zeta_\omega(\mathcal{X}, n\Delta)), \quad // \text{ attention over nodes } i \quad (11)$$
+
+where  $\mathbf{Q}, \mathbf{K}, \mathbf{V}$  are, respectively, *Query*, *Key* and *Value* inputs to the cross-attention layer  $f_{\text{mha}}$  (Vaswani et al., 2017) and  $\zeta_\omega$  a Fourier positional encoding with a learned frequency parameter  $\omega$ . Finally, we leverage a state observer to estimate the dense solution at the query point from the sequence of conditioned anchor variables, over time. This is achieved with a Gated Recurrent Unit (GRU) Cho et al. (2014) maintaining a hidden state  $\mathbf{u}[n]$ ,
+
+$$\mathbf{u}[n] = r_{\text{gru}}(\mathbf{u}[n-1], z_{n\Delta}(\mathbf{x}, t)), \quad \hat{\mathbf{s}}(s_0, \mathbf{x}, t) = D(\mathbf{u}[q]), \quad (12)$$
+
+which shares similarities with conventional state-observer designs in control theory (Bernard et al., 2022). Finally, an MLP  $D$  maps the final GRU hidden state to the desired output, that is, the value of the solution at the desired spatio-temporal coordinate  $(\mathbf{x}, t)$ . See appendix E for details.
+
+### 3.4 TRAINING
+
+Generalization to new input locations during training is promoted by creating artificial generalization situations using sub-sampling techniques of the sparse sets  $\mathcal{X}$  and  $\mathcal{T}$ .
+
+**Artificial generalization** – The anchor states  $z_d[n]$  are computed at time rate  $\Delta$  larger than the available rate  $\Delta^*$ . This creates situations *during training* where the state estimator  $\psi_q$  does not have access to a latent state perfectly matching with the queried time. We propose a similar trick to promote spatial generalization. At each iteration, we sub-sample the (already sparse) IC  $s_d[0]$  randomly to obtain  $\tilde{s}_d[0]$  defined on a subset of  $\mathcal{X}$ . We then compute the anchor states  $\tilde{z}_d$  using System 1. On the other hand, the query points are selected in the larger set  $\mathcal{X}$ . Consequently, System 2 is exposed to positions that do not always match with the ones in  $z_d[n]$ . Note that the complete domain of definition  $\Omega \times [0, T]$  remains unseen during training.
+
+**Training objective** – To reduce training time, we randomly sample  $M$  query points  $(\mathbf{x}_m, \tau_m)$  in  $\mathcal{X} \times \mathcal{T}$  at each iteration, with a probability proportional to the previous error of the model at this point since its last selection (see appendix E) and we minimize the loss
+
+$$\mathcal{L} = \underbrace{\sum_{k=1}^K \sum_{m=1}^M \left| S(s_0^k, \mathbf{x}_m, \tau_m) - \psi_q(\tilde{z}_d[0|q], \mathbf{x}, \tau_m) \right|^2}_{\mathcal{L}_{\text{continuous}}} + \underbrace{\sum_{n=0}^{\lfloor T/\Delta \rfloor} \left| \tilde{s}_d[n] - \hat{h}_1(\tilde{z}_d[n]) \right|^2}_{\mathcal{L}_{\text{dynamics}}}, \quad (13)$$
+
+with  $\tilde{z}_d[n] = \hat{f}_1^n \circ \hat{e}(\tilde{s}_d[0])$ .  $\mathcal{L}_{\text{continuous}}$  supervises the model end-to-end, and  $\mathcal{L}_{\text{dynamics}}$  trains the latent anchor states  $z_d$  to predict the sparse observations from the IC.
+
+## 4 EXPERIMENTAL RESULTS
+
+**Experimental setup** –  $\mathcal{X} \times \mathcal{T}$  results from sub-sampling  $\Omega \times [0, T]$  with different rates to control the difficulty of the task. We evaluate on three highly challenging datasets (details in appendix F): **Navier** (Yin et al., 2022; Stokes, 2009) simulates the vorticity of a viscous, incompressible flow driven by a sinusoidal force acting on a square domain with periodic boundary conditions. **Shallow Water** (Yin et al., 2022; Galewsky et al., 2004) studies the velocity of shallow waters evolving on the tangent surface of a 3D sphere. **Eagle** (Janny et al., 2023) is a challenging dataset of turbulent airflow generated by a moving drone in a 2D environment with many different scene geometries.
+
+We evaluate our model against three baselines representing the state-of-the-art in continuous simulations. **Interpolated MeshGraphNet (MGN)** (Pfaff et al., 2020) is a standard multi-layered GNN
+
+{7}------------------------------------------------
+
+|  |  | Navier |  |  | Shallow Water |  |  | Eagle |  |
+|-|-|-|-|-|-|-|-|-|-|
+|  |  | High | Mid | Low | High | Mid | Low | High | Low |
+| DINO<br>(Yin et al., 2022) | In- $\mathcal{X}$ | 1.557 | 1.130 | 1.878 | <b>0.1750</b> | <b>0.1814</b> | 0.2733 | 287.3 | 302.7 |
+|  | Ext- $\mathcal{X}$ | 1.600 | 1.253 | 5.493 | 4.638 | 13.40 | 21.55 | 381.7 | 489.6 |
+| Interp. MGN<br>(Pfaff et al., 2020) | In- $\mathcal{X}$ | 1.913 | 0.9969 | 0.6012 | 0.3663 | 0.2835 | 0.7309 | <b>64.44</b> | 83.58 |
+|  | Ext- $\mathcal{X}$ | 2.694 | 4.784 | 14.80 | 1.744 | 4.221 | 8.187 | 173.4 | 241.5 |
+| <i>Time Oracle (n.c.)</i> | In- $\mathcal{X}$ |  | <i>n/a</i> |  |  | <i>n/a</i> |  |  | <i>n/a</i> |
+|  | Ext- $\mathcal{X}$ | <i>0.851</i> | <i>4.204</i> | <i>15.63</i> | <i>1.617</i> | <i>4.327</i> | <i>8.522</i> | <i>147.0</i> | <i>221.2</i> |
+| MAGNet<br>(Boussif et al., 2022) | In- $\mathcal{X}$ | 18.17 | 6.047 | 8.679 | 0.3196 | 0.3358 | 0.4292 | 99.79 | 124.5 |
+|  | Ext- $\mathcal{X}$ | 35.73 | 26.24 | 57.21 | 10.21 | 23.20 | 30.55 | 194.3 | 260.7 |
+| <b>Ours</b> | In- $\mathcal{X}$ | <b>0.1989</b> | <b>0.2136</b> | <b>0.2446</b> | 0.2940 | 0.3139 | <b>0.2700</b> | 70.02 | <b>78.83</b> |
+|  | Ext- $\mathcal{X}$ | <b>0.2029</b> | <b>0.2463</b> | <b>0.5601</b> | <b>0.4493</b> | <b>1.051</b> | <b>2.800</b> | <b>90.88</b> | <b>117.2</b> |
+
+Table 1: **Space Continuity** – we evaluate the spatial interpolation power of our method vs. the baselines and standard interpolation techniques. We vary the number of available measurement points in the data for training from High (25% of simulation grid), Middle (10%), and Low (5%) amount of points and show that our model outperforms the baselines. Evaluation is conducted over 20 frames in the future (10 for *Eagle*) and we report the MSE to the ground truth solution ( $\times 10^{-3}$ ).
+
+used auto-regressively and extended to spatiotemporal continuity using physics-agnostic interpolation. **MAGNet** (Boussif et al., 2022) interpolates the IC at the query position in latent space before using MGN. The original implementation assumes knowledge of the target graph during training, including new queries. When used for superresolution, the authors kept the ratio between the amount of new query points and available points constant. Hence, while MAGNet is queried at unseen locations, it also benefits from more information. In our setup, the model is exposed to a fixed number of points but does not receive more samples during evaluation. This makes our problem more challenging than the one addressed in Boussif et al. (2022). **DINO** (Yin et al., 2022) models the solution as an Implicit Neural Representation (INR)  $s(\mathbf{x}, \alpha_t)$  where the spatial coordinates  $\mathbf{x}$  are fed to a MFN (Fathony et al., 2021) and  $\alpha_t$  is a context vector modulating the weights of the INR. The dynamics of  $\alpha$  is modeled with a Neural-ODE, where the dynamics is an MLP. We share common objectives with DINO and take inspiration from their evaluation tasks yet in a more challenging setup. Details of the baselines are in appendix F. We highlight a caveat on MAGNet: the model can handle a limited amount of new queries, roughly equal to the number of observed points. Our task requires the solution at up to 20 times more queries than available points. In this situation, the graph in MAGNet is dominated by noisy states from interpolation, and the auto-regressive forecaster performs poorly. During evaluation, we found it beneficial to split the queries into chunks of 10 nodes and to apply the model several times. This strongly improves the performance at the cost of an increased runtime.
+
+**Space Continuity** – Table 1 compares the spatial interpolation power of our method versus several baselines. The MSE values computed on the training domain ( $\text{In-}\mathcal{X}=\mathcal{X}$ ) and outside ( $\text{Ext-}\mathcal{X}=\Omega\setminus\mathcal{X}$ ) show that our method offers the best performance, especially for the Ext-domain task, which is our aim. To ablate dynamics and evaluate the impact of trained interpolations, we also report the predictions of a *Time Oracle* which uses sparse ground truth values at all time steps and interpolates (bicubic) spatially. This allows us to assess whether the method is doing better than a simple axiomatic interpolation. While MGN offers competitive in-domain predictions, the cubic interpolation fails to extrapolate reliably on unseen points. This can be seen in the In/Ext gap for Interpolated MGN which is very close to the Time Oracle error. MAGNet, which builds on a similar framework, is hindered by the larger amount of unobserved data in the input mesh. At test time, the same number of initial condition points are provided but the method interpolates substantially more points. DINO achieves a very low In/Ext gap, yet fails on highly (5%) down-sampled tasks. One of the key difference with DINO is that the dynamics relies on an internal ODE for the temporal evolution of a modulation vector. In contrast, our model uses an explicit auto-regressive backbone, and time forecasting is handled in an arguably more meaningful space, which we conjecture to be the reason why we achieve better results (see fig. 5 in the appendix).
+
+**Time Continuity** – is a step forward in difficulty, as the model needs to interpolate not only to unseen spatial locations (datasets are undersampled at 25%) but also on intermediate timesteps ( $\text{Ext-}\mathcal{T}$ , Table 2). All models perform well on *Shallow Water*, which is relatively easy. Both DINO and MAGNet leverage a discrete integration scheme (Euler for MAGNet and RK4 for DINO) allowing querying the model between timesteps seen at training. These schemes struggle to capture the data dependencies effectively and therefore the methods fail on *Navier* (see also Figure 6 for qualitative
+
+{8}------------------------------------------------
+
+![Figure 2: Results on Eagle. A grid of flow prediction heatmaps for the Eagle dataset. The columns represent time steps t0, t0+2, t0+4, t0+6, t0+8, and t0+10. The rows represent different models: Ground Truth, Ours, DiNo, MeshGraphNet, and MagNet. A color bar on the right indicates the magnitude of the flow prediction error, ranging from 0 (blue) to 35 (red).](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+Figure 2: Results on Eagle. A grid of flow prediction heatmaps for the Eagle dataset. The columns represent time steps t0, t0+2, t0+4, t0+6, t0+8, and t0+10. The rows represent different models: Ground Truth, Ours, DiNo, MeshGraphNet, and MagNet. A color bar on the right indicates the magnitude of the flow prediction error, ranging from 0 (blue) to 35 (red).
+
+Figure 2: **Results on Eagle** – Per point error of the flow prediction on an *Eagle* example in the Low spatial down-sampling scenario. Our model exhibits lower errors as also shown in Tables 1 and 2.
+
+|  |  | Navier |  |  | Shallow Water |  |  | Eagle |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|
+|  |  | 1/1 | 1/2 | 1/4 | 1/1 | 1/2 | 1/4 | 1/1 | 1/2 | 1/4 |
+| DiNo<br>(Yin et al., 2022) | In- $\mathcal{T}$ | 1,590 | 36.31 | 46.02 | 3,551 | 6,005 | 6,249 | 444.5 | 447.1 | 448.6 |
+|  | Ext- $\mathcal{T}$ | n/a | 39.42 | 54.72 | n/a | 6,015 | 6,265 | n/a | 479.4 | 470.7 |
+| Interp. MGN<br>(Pfaff et al., 2020) | In- $\mathcal{T}$ | 2,506 | 4,834 | 12.77 | 1,408 | 1,289 | 1,333 | 203.4 | 210.4 | 263.3 |
+|  | Ext- $\mathcal{T}$ | n/a | 5,922 | 36.43 | n/a | 1,287 | 1,355 | n/a | 209.8 | 263.8 |
+| Spatial Oracle (n.c) | In- $\mathcal{T}$ |  | n/a |  |  | n/a |  |  | n/a |  |
+|  | Ext- $\mathcal{T}$ | n/a | 1,296 | 28.58 | n/a | 0,003 | 0,119 | n/a | 29.46 | 54.53 |
+| MagNet<br>(Boussif et al., 2022) | In- $\mathcal{T}$ | 31.51 | 135.0 | 243.9 | 7,804 | 6,433 | 1,884 | 227.9 | 220.3 | <b>225.8</b> |
+|  | Ext- $\mathcal{T}$ | n/a | 142.8 | 255.5 | n/a | 6,291 | 1,947 | n/a | 229.8 | <b>230.6</b> |
+| <b>Ours</b> | In- $\mathcal{T}$ | <b>0.2019</b> | <b>0.1964</b> | <b>0.4062</b> | <b>0.4115</b> | <b>0.4278</b> | <b>0.4549</b> | <b>108.0</b> | <b>106.1</b> | 278.6 |
+|  | Ext- $\mathcal{T}$ | n/a | <b>0.2138</b> | <b>11.36</b> | n/a | <b>0.4326</b> | <b>0.4802</b> | n/a | <b>119.9</b> | 306.9 |
+
+Table 2: **Time Continuity** – we evaluate the time interpolation power of our method vs. the baselines. Models are trained and evaluated with 25% of  $\Omega$ , and with different temporal resolutions (full, half, and quarter of the original). The Spatial Oracle (*not comparable!*) uses the exact solution at every point in space, and performs temporal interpolation. Evaluation is conducted over 20 frames in the future (10 for *Eagle*) and we report MSE compared to the ground truth solution ( $\times 10^{-3}$ ).
+
+results). *Eagle* is particularly challenging, the main source of error being the spatial interpolation, as can be seen in Figure 2 – our method yields lower errors in flow estimation.
+
+**Many more experiments** – are available in appendix G. We study the **impact of key design choices**, artificial generalization, and dynamical loss. We show qualitative results on time interpolation, time extrapolation on the *Navier* dataset. We **explore generalization to different grids**. We provide more empirical evidence of the soundness of Step 2 in an **ablation study** (including comparison with attentive neural process Kim et al. (2018), an attention-based structure somehow close to ours), and **observe attention maps** on several examples. We show that our **state estimator goes beyond local interpolation**, as conventional interpolation algorithms would do. Finally, we also measure the **computational burden** of the discussed methods and show that our approach is more efficient.
+
+![A small grid of images showing attention maps for the Eagle dataset. The maps are colorful, with red and yellow indicating areas of high attention and blue indicating areas of low attention. The maps are overlaid on the flow field, showing the model's focus on specific regions.](f5aaecb6473222e3d65f65164fab048e_img.jpg)
+
+A small grid of images showing attention maps for the Eagle dataset. The maps are colorful, with red and yellow indicating areas of high attention and blue indicating areas of low attention. The maps are overlaid on the flow field, showing the model's focus on specific regions.
+
+## 5 CONCLUSION
+
+We exploit a double dynamical system formulation for simulating physical phenomena at arbitrary locations in time and space. Our approach comes with theoretical guarantees on existence and accuracy without knowledge of the underlying PDE. Furthermore, our method generalizes to unseen initial conditions and reaches excellent performances outperforming existing methods. Potential applications of our model goes beyond fluid dynamics and can be applied to various PDE-based problem. Yet, our approach relies on several hypotheses such as regular time sampling and observability. Finally, for known and well-studied phenomena, it would be interesting to add physics priors in the system, a nontrivial extension that we leave for future work.
+
+{9}------------------------------------------------
+
+**Reproducibility** – the detailed model architecture is described in the appendix. For the sake of reproducibility, in the case of acceptance, we will provide the source code for training and evaluating our model, as well as trained model weights. For training, we will provide instructions for setting up the codebase, including installing external dependencies, pre-trained models, and pre-selected hyperparameter configuration. For the evaluation, the code will include evaluation metrics directly comparable to the paper’s results.
+
+**Ethics statement** – While our simulation tool is unlikely to yield unethical results, we are mindful of potential negative applications of improving fluid dynamics simulations, particularly in military contexts. Additionally, we strive to minimizing the carbon footprint associated with our training processes.
+
+## 6 ACKNOWLEDGEMENTS
+
+We recognize support through French grants “*Delicio*” (ANR-19-CE23-0006) of call CE23 “*Intelligence Artificielle*” and “*Remember*” (ANR-20-CHIA0018), of call “*Chaires IA hors centres*”. This work was performed using HPC resources from GENCI- IDRIS (Grant 2023-AD010614014).
+
+## REFERENCES
+
+- Peter Battaglia, Razvan Pascanu, Matthew Lai, Danilo Jimenez Rezende, et al. Interaction networks for learning about objects, relations and physics. *Neural Information Processing Systems*, 2016.
+- Pauline Bernard, Vincent Andrieu, and Daniele Astolfi. Observer design for continuous-time dynamical systems. *Annual Reviews in Control*, 2022.
+- Emmanuel De Bézenac, Arthur Pajot, and Patrick Gallinari. Deep learning for physical processes: Incorporating prior scientific knowledge. *Journal of Statistical Mechanics: Theory and Experiment*, 2019.
+- Oussama Boussif, Yoshua Bengio, Loubna Benabou, and Dan Assouline. Magnet: Mesh agnostic neural pde solver. In *Neural Information Processing Systems*, 2022.
+- Johannes Brandstetter, Daniel E. Worrall, and Max Welling. Message passing neural PDE solvers. In *International Conference on Learning Representations*, 2022.
+- Shengze Cai, Zhiping Mao, Zhicheng Wang, Minglang Yin, and George Em Karniadakis. Physics-informed neural networks (pinns) for fluid mechanics: A review. *Acta Mechanica Sinica*, 2021.
+- Ricky TQ Chen, Yulia Rubanova, Jesse Bettencourt, and David K Duvenaud. Neural ordinary differential equations. *Neural Information Processing Systems*, 2018.
+- Kyunghyun Cho, Bart Van Merriënboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio. Learning phrase representations using rnn encoder-decoder for statistical machine translation. *arXiv preprint*, 2014.
+- Filipe de Avila Belbute-Peres and J Zico Kolter. Simple initialization and parametrization of sinusoidal networks via their kernel bandwidth. In *International Conference on Learning Representations*, 2023.
+- MWMG Dissanayake and Nhan Phan-Thien. Neural-network-based approximations for solving partial differential equations. *Communications in Numerical Methods in Engineering*, 1994.
+- Emilien Dupont, Arnaud Doucet, and Yee Whye Teh. Augmented neural odes. *Neural Information Processing Systems*, 2019.
+- Rizal Fathony, Anit Kumar Sahu, Devin Willmott, and J Zico Kolter. Multiplicative filter networks. In *International Conference on Learning Representations*, 2021.
+- Marc Anton Finzi, Andres Potapczynski, Matthew Choptuik, and Andrew Gordon Wilson. A stable and scalable method for solving initial value pdes with neural networks. In *International Conference on Learning Representations*, 2023.
+
+ Rest of paper (reference and Appendix) is removed.
