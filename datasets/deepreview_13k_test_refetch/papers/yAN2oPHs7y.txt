@@ -1,0 +1,473 @@
+
+
+{0}------------------------------------------------
+
+# NEURO-SYMBOLIC RULE LISTS
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Machine learning models deployed in sensitive areas such as healthcare must be interpretable to ensure accountability and fairness. Rule lists (**if** Age  $<$  35  $\wedge$  Priors  $>$  0 **then** Recidivism = True, **else if** Next Condition ...) offer full transparency, making them well-suited for high-stakes decisions. However, learning such rule lists presents significant challenges. Existing methods based on combinatorial optimization require feature pre-discretization and impose restrictions on rule size. Neuro-symbolic methods use more scalable continuous optimization yet place similar pre-discretization constraints and suffer from unstable optimization. To address the existing limitations, we introduce NYRULES, an end-to-end trainable model that unifies discretization, rule learning, and rule order into a single differentiable framework. We formulate a continuous relaxation of the rule list learning problem that converges to a strict rule list through temperature annealing. NYRULES learns both the discretizations of individual features, as well as their combination into conjunctive rules without any pre-processing or restrictions. Extensive experiments demonstrate that NYRULES consistently outperforms both combinatorial and neuro-symbolic methods, effectively learning simple and complex rules, as well as their order, across a wide range of datasets.
+
+## 1 INTRODUCTION
+
+Machine learning models are increasingly used in high-stakes applications such as healthcare (Deo, 2015), credit risk evaluation (Bhatore et al., 2020), and criminal justice (Lakkaraju & Rudin, 2017), where it is vital that each decision is fair and reasonable. Proxy measures such as Shapley values can give the illusion of interpretability, but are highly problematic as they can not faithfully represent a non-additive models decision process (Gosiewska & Biecek, 2019). Instead, Rudin (2019) argues that it is crucial to use inherently interpretable models, to create systems with human supervision in the loop (Kleinberg et al., 2018).
+
+For particularly sensitive domains such as stroke prediction or recidivism, so called *Rule Lists* are a popular choice (Letham et al., 2015) due to their fully transparent decision making. A rule list predicts based on nested "if-then-else" statements and naturally aligns with the human-decision making process. Each rule is active if its conditions are met, e.g. "if Thalassemia = normal  $\wedge$  Resting bps  $<$  151", and carries a respective prediction, i.e. "**then**  $P(\text{Disease}) = 10\%$ ". A rule list goes through a set of rules in a fixed order, and makes its prediction using the first applicable rule. We show an example rule list for the Heart disease (Detrano et al., 1989) learned with our method in Figure 1, which is highly accurate and easy to understand.
+
+Inferring rule lists from data is a challenging combinatorial optimization problem, as there are super exponentially many options in the number of features. Existing approaches use greedy heuristics (Proenca & van Leeuwen, 2020), sample based on fixed priors (Yang et al., 2017) and even attempt to find globally optimal solutions (Angelino et al., 2018) using branch-bound. However, they all depend on the pre-discretization of continuous features, which in practice deteriorates their performance. That is, features such as "Resting bps" are typically discretized using 2 – 5 fixed thresholds. Increasing the granularity of pre-processing leads to a combinatorial explosion of the search space, which creates issues in scalability for exact methods and in accuracy for heuristics.
+
+Recently, following the paradigm of neuro-symbolic learning, methods based on continuous optimization were proposed to solve rule learning problems with gradient descent (Wang et al., 2021; Qiao et al., 2021). Nevertheless, neural methods too require to pre-discretize of the features. Most
+
+{1}------------------------------------------------
+
+```
+
+054
+055         if Chest pain = asymptomatic  $\wedge$  Exercise chest pain = 0  $\wedge$  0.88 < ST depression < 5.24
+056             then P(Disease) = 94%
+057         else if Chest pain = asymptomatic  $\wedge$  45.50 < age < 66.42  $\wedge$  Sex = female
+058             then P(Disease) = 87%
+059         else if Resting bps < 151  $\wedge$  Ex. chest pain = 0  $\wedge$  ST depr. < 2.65  $\wedge$  Thalassemia = normal
+060             then P(Disease) = 10%
+061         else if Chest pain = not (atypical  $\vee$  asymptomatic)  $\wedge$  Resting bps < 176  $\wedge$  Max HR > 137
+062             then P(Disease) = 15%
+063         else if Chest pain = asymptomatic  $\wedge$  1.46 < ST depression < 5.00
+064             then P(Disease) = 58%
+065         else P(Disease) = 52%
+066
+067
+
+```
+
+Figure 1: Rule list learned with NYRULES on the Heart Disease dataset. NYRULES jointly optimizes thresholds, rule aggregation and ordering into a rule list.
+
+related is the work by Dierckx et al. (2023), who extend neuro-symbolic learning to rule lists by a fixed ordering layer such that the neural network resembles a proper rule list. However, their inability to adapt rule order or thresholds results in unstable training and often subpar accuracy.
+
+To overcome all limitations of prior works, we propose NYRULES, a novel method for learning rule lists differentially and end-to-end. That is, we unify the learning of predicates, their assembly into rules, and the final order of the rule list into a single architecture. Instead of relying on pre-discretized features, NYRULES learns the discretization of the features as well as which features to aggregate to conjunctive rules. We employ soft approximations of threshold functions (predicates) and combine them using a novel differentiable logical conjunction, which alleviates vanishing gradients issues of previous work. Finally, we introduce a learnable rule priority that is grounded into a strict ordering at the end of training. Altogether, this gives us a holistic differentiable relaxation of rule lists, which can be learned end-to-end. Empirically, we show that NYRULES outperforms the state-of-the-art on a plethora of datasets, especially where exact thresholding is required.
+
+## 2 PRELIMINARIES
+
+We consider a dataset of  $n$  pairs  $\{(\mathbf{x}, y)\}_{i=1}^n$  consisting of the *descriptive feature vector*  $\mathbf{x} \in \mathcal{X}$  with  $d$  real-valued features  $x_i \in \mathbb{R}$ , and the discrete-valued *target label*  $y \in \mathcal{Y}$ . We assume each sample  $(\mathbf{x}, y)$  to be a realization of a pair of random variables  $(X, Y) \sim P_{X, Y}$ , drawn iid.
+
+### 2.1 RULES
+
+We consider predictive rules  $r : \mathcal{X} \rightarrow \mathcal{Y}$  for supervised classification, which map input samples to predictions. A rule is comprised of an *antecedent*  $a : \mathcal{X} \rightarrow \{0, 1\}$ , which determines whether the rule is applicable to a sample  $\mathbf{x}$  or not. Should the antecedent's condition be met, the *consequent*  $c \in \mathcal{Y}$  governs the models prediction. A predictive rule is defined as
+
+$$r(x) = \begin{cases} c & \text{if } a(x) = 1 \\ \bar{c} & \text{else} \end{cases}$$
+
+If the antecedent is not met, an alternate prediction  $\bar{c} \in \mathcal{Y}$  is made. In rule lists, which are introduced shortly, the *else* case is covered by yet another rule.
+
+The antecedent of a rule must be interpretable. In particular, we examine rules given in form of a *logical conjunction* of predicates  $\pi$ , e.g. the rule “if Thalassemia = normal  $\wedge$  Resting bps < 151” from the introduction. Each predicate  $\pi_i$  represents the presence/absence of a certain characteristic in an individual  $\mathbf{x}$ , e.g “Resting bps < 151”. For tabular data, where  $\mathcal{X} = \mathbb{R}^d$ , clear and meaningful semantic concepts are usually defined as *parameterized thresholding* functions on individual feature variable  $X_i$ , i.e.
+
+$$\pi(x_i; \alpha, \beta) = \mathbb{1}[\alpha \leq x_i \leq \beta] .$$
+
+{2}------------------------------------------------
+
+![Diagram of the NYRULES architecture. On the left, an 'Input' column shows features x1, x2, x3, ..., xp. These are connected to a 'Predicates' column containing boxes for pi_hat(x, alpha_i, beta_i). Each predicate box is connected to a 'Rules' column containing boxes for a_hat_j(x). Each rule box is connected to a vertical 'Gumbel-Softmax' block. This block outputs priorities p1, p2, ..., pk. To the right of the Gumbel-Softmax block is a 'Rule-List' column containing indicator boxes I_hat_j(x). Each indicator box is connected to a final output node 'y' on the far right. The connections from the indicator boxes to 'y' are labeled c1, c2, ..., ck.](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+108            **Input**            **Predicates**            **Rules**            **Rule-List**
+
+109             $\alpha < x < \beta$              $\hat{\pi}_1 \wedge \hat{\pi}_2 \wedge \dots$             If  $\hat{a}_3$  then  $c_3$ , else if  $\dots$
+
+110
+
+111
+
+112
+
+113
+
+114
+
+115
+
+116
+
+117
+
+118
+
+119
+
+120
+
+Diagram of the NYRULES architecture. On the left, an 'Input' column shows features x1, x2, x3, ..., xp. These are connected to a 'Predicates' column containing boxes for pi\_hat(x, alpha\_i, beta\_i). Each predicate box is connected to a 'Rules' column containing boxes for a\_hat\_j(x). Each rule box is connected to a vertical 'Gumbel-Softmax' block. This block outputs priorities p1, p2, ..., pk. To the right of the Gumbel-Softmax block is a 'Rule-List' column containing indicator boxes I\_hat\_j(x). Each indicator box is connected to a final output node 'y' on the far right. The connections from the indicator boxes to 'y' are labeled c1, c2, ..., ck.
+
+121
+
+122 Figure 2: NYRULES architecture. The input  $\mathbf{x} \in \mathbb{R}^d$  is discretized into soft predicates  $\hat{\pi}$  using
+
+123 learnable threshold  $\alpha_j, \beta_j \in \mathbb{R}^d$  and then combined into  $k$  rules  $\hat{a}_j(\mathbf{x})$ . The rules are sorted by their
+
+124 priority  $p_j$ , where using the Gumbel-Softmax function, we approximate the indicator function  $I_j$  of
+
+125 the active rule with highest priority  $\hat{I}_j(\mathbf{x})$ . The final prediction is computed by taking the weighted
+
+126 sum of the consequents  $c_j$  and indicator  $I_j$ .
+
+127
+
+128
+
+129 As we are considering only rules based on logical conjunctions, the conjunction of multiple predi-
+
+130 cates on the same feature can always be represented by a single set of thresholds. If no condition is
+
+131 placed on a feature  $x_i$ , then the corresponding thresholds are given by  $-\infty$  and  $\infty$  resp. This allows
+
+132 us to define the class of antecedent  $a$  rule functions as a logical conjunction of predicates as per
+
+133
+
+134
+
+135
+
+$$a(\mathbf{x}; \theta) = \bigwedge_{i=1}^d \pi(x_i; \alpha_i, \beta_i) ,$$
+
+136
+
+137 parameterized by  $\theta \in \mathbb{R}^{2 \times d}$ . Hence, rule-based methods aggregate multiple rules into a performant
+
+138 classifier that is easily human interpretable.
+
+139
+
+140 **Rule lists** (Cohen, 1995) model nested if-then-else classifiers. To make a prediction, we traverse the
+
+141 set of rules in a fixed order and use the consequent of the first rule, whose antecedent applies. Given
+
+142 a set of  $k$  rules  $(a_j, c_j)$ , each rule is assigned its *unique* priority  $p_j \in \mathbb{N}$ . To classify a sample  $\mathbf{x}$  with
+
+143 a rule list  $rl : \mathcal{X} \rightarrow \mathcal{Y}$ , that rule  $r_j$  with the highest priority is used whose antecedent holds, i.e.
+
+144
+
+145
+
+$$\begin{aligned}
+ & rl(\mathbf{x}; \Theta, \mathbf{p}) = c_j \\
+ & \text{such that } a_j(\mathbf{x}; \theta_j) = 1 \wedge (\forall i \neq j : a_i(\mathbf{x}) = 0 \vee p_j > p_i) .
+ \end{aligned}
+ \tag{1}$$
+
+146
+
+147 Informally, a rule list is as a nested if-then-else structure, as commonly used in programming. The
+
+148 *else* case is realized through an always-on rule with the lowest priority.
+
+149
+
+###### 150 3 DIFFERENTIABLE RULE LISTS 151
+
+152 In this section we introduce **Neuro-Symbolic Rule Lists**, or short NYRULES. We show the archi-
+
+153 tecture of NYRULES in Figure 2. The first step is to transform the continuous input features into
+
+154 binary **predicates** such as “18 < Age < 30” to use as a basic building blocks for rule construction. In
+
+155 contrast to all existing methods, NYRULES avoids the need for pre-discretization and instead learns
+
+156 a task specific thresholding of the features.
+
+157
+
+158 Next, we combine the learned predicates into **rules**  $\hat{a}_j(\mathbf{x})$ , where  $\hat{a}$  is a differentiable function
+
+159 that behaves like a logical conjunction for binary predicates, but is also able to handle soft predicates
+
+160  $\hat{\pi} \in [0, 1]$ . In particular, our formulation encourages interpretable, succinct rules using weights  $\mathbf{w}_j$
+
+161 and alleviates the problem of vanishing gradients compared to previous formulations.
+
+162 Finally, we aggregate a set of  $k$  rules into a **rule list** rule list as introduced in Eq. (1).  $I_j(\mathbf{x})$  indicates
+
+163 if rule  $j$  is to be used for the prediction, i.e. whether it is active ( $\hat{a}(\mathbf{x}) = 1$ ) and has the highest
+
+{3}------------------------------------------------
+
+162  
+163  
+164  
+165  
+166  
+167  
+168  
+169  
+170  
+171  
+172  
+173  
+174  
+175  
+176  
+177  
+178  
+179  
+180  
+181  
+182  
+183  
+184  
+185  
+186  
+187  
+188  
+189  
+190  
+191  
+192  
+193  
+194  
+195  
+196  
+197  
+198  
+199  
+200  
+201  
+202  
+203  
+204  
+205  
+206  
+207  
+208  
+209  
+210  
+211  
+212  
+213  
+214  
+215
+
+![Figure 3: Three plots illustrating soft predicates. (a) Soft predicate $\hat{\pi}(x; t_\pi)$ for different temperatures $t_\pi$ (0.1, 0.05, 0.025). The curves show a smooth transition from 0 to 1 as $x$ increases, with lower temperatures resulting in sharper transitions. (b) Softness of rule $\hat{a}(x)$ for different temperatures $t_\pi$. The plot shows the absolute difference $|a(x) - \hat{a}(x)|$ decreasing as $t_\pi$ decreases, with a grey shaded area representing the variance. (c) Differentiable logical conjunction $\hat{a}(x)$ over two features $x_1$ and $x_2$. The heatmap shows a smooth, differentiable approximation of a logical AND function.](7fb5215fd72210a2e4cce6df55550c89_img.jpg)
+
+Figure 3: Three plots illustrating soft predicates. (a) Soft predicate \$\hat{\pi}(x; t\_\pi)\$ for different temperatures \$t\_\pi\$ (0.1, 0.05, 0.025). The curves show a smooth transition from 0 to 1 as \$x\$ increases, with lower temperatures resulting in sharper transitions. (b) Softness of rule \$\hat{a}(x)\$ for different temperatures \$t\_\pi\$. The plot shows the absolute difference \$|a(x) - \hat{a}(x)|\$ decreasing as \$t\_\pi\$ decreases, with a grey shaded area representing the variance. (c) Differentiable logical conjunction \$\hat{a}(x)\$ over two features \$x\_1\$ and \$x\_2\$. The heatmap shows a smooth, differentiable approximation of a logical AND function.
+
+(a) Soft predicate  $\hat{\pi}(x; t_\pi)$  for different temperatures  $t_\pi$ .
+
+(b) Softness of rule  $\hat{a}(x)$  for different temperatures  $t_\pi$ . The grey corresponds to the variance.
+
+(c) Differentiable logical conjunction  $\hat{a}(x)$  over two features.
+
+Figure 3: The soft predicate with different temperatures (a) approaches the true thresholding with decreasing temperature (b). Multiple soft predicates are combined into a conjunctive rule (c).
+
+priority  $p_j$ . We use the Gumbel-Softmax function Jang et al. (2017a) to approximate this indicator and formulate a differentiable relaxation for the entire rule list that allows us to jointly optimize a rule list from discretization parameters to rule order. All our approximations converge towards strict logical operators at the end of training, i.e. NYRULES converges to a crisp rule list.
+
+### 3.1 CONJUNCTIVE RULES
+
+We begin with the antecedent  $a$  of a rule that makes up the “if . . .” condition of a rule.
+
+**Thresholding Layer.** As the building blocks of every rule we consider thresholding functions  $\pi(x_i; \alpha, \beta) = \mathbb{1}[\alpha \leq x_i \leq \beta]$  on individual features  $x_i$  as predicates  $\pi$ . It is common practice to employ equal-width/frequency binning for continuous features  $X_i$  and thus obtain a fixed number of predicates. The potential solution may become more accurate by increasing the number of bins, but also comes at a much higher optimization difficulty.
+
+Neural rule learning methods also require to pre-discretize continuous features, since the thresholding function is not continuous at the bounds  $\alpha$  and  $\beta$ , and has gradient of 0 elsewhere. To address these issues, we use the soft binning function as introduced by Yang et al. (2018) as
+
+$$\hat{\pi}(x_i; \alpha, \beta, t_\pi) = \frac{e^{\frac{1}{t_\pi}(2x_i - \alpha_i)}}{e^{\frac{1}{t_\pi}x_i} + e^{\frac{1}{t_\pi}(2x_i - \alpha_i)} + e^{\frac{1}{t_\pi}(3x_i - \alpha_i - \beta_i)}}.$$
+
+The resulting function approximates a thresholding function, where the softness of said function is controlled by a temperature parameter  $t_\pi$ . We show  $\hat{\pi}$  using different temperatures  $t_\pi$  in Figure 3a. Just as the Figure suggests, in the limit  $t_\pi \rightarrow 0$  the soft predicate converges to the true thresholding function  $\pi(x_i; \alpha, \beta)$  (shown in Appendix A.1), i.e.  $\lim_{t_\pi \rightarrow 0} \hat{\pi}(x_i; \alpha, \beta, t_\pi) = \pi(x_i; \alpha, \beta)$ . Therefore, we use temperature annealing to increase crispness of the predicates  $\alpha$  and  $\beta$  as the training progresses. We begin start with a higher temperature  $t_\pi$ , which results in smoother predicates  $\hat{\pi}$  and avoids exploding/vanishing gradients with respect to  $\alpha, \beta$ . That means that initially, our predicates are not strictly binary but soft instead, i.e.  $\hat{\pi}(x_i) \in [0, 1]$ .
+
+In the end, we seek to obtain strict logical rules for use in a rule list. Hence, we continuously decrease the temperature  $t_\pi$  so that in the end  $\forall x_i : \hat{\pi}(x_i) \approx 1 \vee \hat{\pi}(x_i) \approx 0$ , except at the boundaries itself, where if  $x_i = \alpha \vee x_i = \beta : \hat{\pi}(x_i) = \frac{1}{2}$ . We show the softness of rules based on soft predicates in Figure 3a. When the temperature is annealed close to zero, the predicates become increasingly binary and the difference to the true thresholding function vanishes.
+
+**Logical conjunction.** To learn rule antecedents, we need to flexibly combine the trainable predicates  $\hat{\pi}(x_i)$  into a logical conjunction. To this end, we introduce a differentiable logical conjunction function  $\hat{a}$  specifically designed for soft predicates. We omit from the notation  $\alpha, \beta$  and  $t_\pi$  for brevity. We require the logical conjunction to satisfy three conditions:
+
+$$\hat{a}(\pi) = \begin{cases} 1, & \text{if } \forall \pi(x_i) = 1 \\ 0, & \text{if } \exists \pi(x_i) = 0 \\ \in [0, 1] & \text{else.} \end{cases}$$
+
+{4}------------------------------------------------
+
+We base our approach on the *reciprocal* of the predicate  $\hat{\pi}(x)^{-1}$ , aggregated by the weighted harmonic mean proposed by Xu et al. (2024), which is given by
+
+$$\hat{a}(\mathbf{x}) = \frac{\sum_{i=1}^d w_i}{\sum_{i=1}^d w_i \hat{\pi}(x_i)^{-1}}.$$
+
+This function fulfills all the outlined criteria: if  $\forall \hat{\pi}(x_i) = 1$ , the function evaluates to 1, while if  $\exists \hat{\pi}(x_i) = 0 \rightarrow \hat{a}(\mathbf{x}) = 0$ . Additionally, by setting the corresponding weight of a predicate  $w_i$  to 0, the network can disable predicates and thus obtain more succinct rules. Its main drawback is the issue of vanishing gradients in the case of  $\hat{\pi}(x_i) = 0$ .
+
+The partial derivatives of the rule function  $\hat{a}$  with respect to its parameters are given by
+
+$$\frac{\partial \hat{a}(\mathbf{x})}{\partial \hat{\pi}(x_j)} = \frac{w_j \left( \sum_{i=1}^d w_i \right)}{\hat{\pi}(x_j)^2 \left( \sum_{i=1}^d w_i \hat{\pi}(x_i)^{-1} \right)^2}, \quad \frac{\partial \hat{a}(\mathbf{x})}{\partial w_j} = \frac{\sum_{i=1}^d w_i \hat{\pi}(x_i)^{-1} - \hat{\pi}(x_j)^{-1}}{\left( \sum_{i=1}^d w_i \hat{\pi}(x_i)^{-1} \right)^2}.$$
+
+Consider the case where there is a predicate  $\hat{\pi}(x_l) = 0$  with  $w_l > 0$ . Then the partial derivative of all other predicates  $\hat{\pi}(x_j)$  is zero, as the reciprocal  $\hat{\pi}(x_l)^{-1}$  is in the denominator and  $\lim_{x_l \rightarrow 0} \hat{\pi}(x_l)^{-1} = \infty$ . Similar, with respect to the weights  $w_i$ , the derivative is zero, as the squared reciprocal in the denominator dominates the term. This is a significant issue, as with increasingly crisp predicates  $\hat{\pi}(x_i) \rightarrow 0$ , the gradient vanishes if the rule has an inactive predicate.
+
+We solve this issue by relaxing the requirements of the soft conjunction. That is, we allow a slack of  $\epsilon$  when  $\exists \hat{\pi}(x_i) = 0$ . Hence, we do not require the conjunction to take a value of zero but only  $\hat{a}(\mathbf{x}) \leq \epsilon$  instead. To this end, we modify the reciprocal and resulting logical conjunction using a weight dependent constant  $\eta$  as
+
+$$\eta = \frac{\epsilon}{\sum_{i=1}^d w_i}, \quad \hat{a}(\mathbf{x}) = \frac{\sum_{i=1}^d w_i}{\sum_{i=1}^d w_i \frac{1+\eta}{\hat{\pi}(x_i)+\eta}}.$$
+
+With this relaxed formulation, we now obtain gradients that do not vanish once a predicate is inactive. We show in Appendix A.3 that in the limit for all inactive predicates  $\forall i : \hat{\pi}(x_i) = 0$  the partial derivatives with respect to the predicates  $\frac{\partial \hat{a}(\mathbf{x})}{\partial \hat{\pi}(x_j)} \approx \frac{w_j}{\sum_{i=1}^d w_i}$  are still non-zero, whereas the  $\frac{\partial \hat{a}(\mathbf{x})}{\partial w_j} > 0$  if there is at least one active predicate  $\hat{\pi}(x_i) > 0$  with  $w_i > 0$ . That is, the gradient does not vanish anymore if a rule contains an inactive predicate. Intuitively, the weight-dependent constant  $\eta$  automatically adjusts the amount of slack such that when the rule is mostly inactive, i.e. most  $w_i$  are small, the slack is increased and the gradient flow in this rule increases. While if a rule is mostly active, the slack is decreased and the gradient is not influenced by  $\eta$ . We perform an ablation in Section 5.2, where we observe that using the relaxed conjunction instead of its unbounded counterpart  $\hat{a}(\mathbf{x}) \leq \epsilon$  improves the average  $F_1$  score by 1.7x and in some cases even by 4x.
+
+**Differentiable Rule.** With the predicates and the logical conjunction in place, the rule antecedent
+
+$$\lim_{t \rightarrow 0} \hat{a}(\mathbf{x}) = \begin{cases} 1 & \text{if } \forall i : w_i = 0 \vee \hat{\pi}(x_i) = 1 \\ 0 & \text{else} \end{cases}$$
+
+can be flexibly learned. As the rule consequent, which is the “then . . .” part of a rule, we use a logit vector  $\mathbf{c} \in \mathbb{R}^l$  in the classification setting with  $l$  classes. A singular rule is then defined as
+
+$$\text{if } \hat{a}(\mathbf{x}) = 1 \text{ then } \arg \max_{m \in \{1, \dots, l\}} c_m, \text{ else } \dots$$
+
+The “else” case in a rule list is handled by a subsequent rule, the mechanism of which we will discuss in the following section.
+
+### 3.2 SOFT RULE LISTS
+
+A rule list consists of a set of  $k$  rule tuples  $\{(a_j, c_j, p_j)\}_{j=1}^k$ , made up of an antecedent  $a_j : \mathcal{X} \rightarrow \{0, 1\}$ , a consequent  $c_j \in \mathbb{R}^l$  and a unique priority  $p_j \in \mathbb{R}^+$ . A sample is classified using the
+
+{5}------------------------------------------------
+
+prediction of the rule with highest priority and active antecedent as per Eq. (1). To allow for continuous optimization, we reformulate the  $rl(\mathbf{x})$  as a linear combination of consequents  $c_j$ . That is, we combine the antecedent  $a_j$  and priority  $p_j$  into the *active priority*  $a_j^p$  as
+
+$$a_j^p(\mathbf{x}) = a_j(\mathbf{x}) \cdot p_j.$$
+
+The arg max indicator  $I_j(\mathbf{x}) = \mathbb{1}[j = \arg \max_{j \in \{1, \dots, k\}} a_j^p(\mathbf{x})]$  of the active priority vector  $\mathbf{a}^p$  indicates with which rule the prediction is to be made. Hence, we can re-write the rule list simply as  $rl(\mathbf{x}) = \sum_{j=1}^k I_j(\mathbf{x})c_j$ .
+
+**Continuous Relaxation.** To learn a rule list, we initially relax the constraint to  $\sum_{j=1}^k \hat{I}_j(\mathbf{x}) = 1$  and hence allow multiple rules to contribute, weighted by their active priority  $a_j^p$ . To this end, we use the *Gumbel-Softmax* (Jang et al., 2017b), which is a variant of the reparameterization trick and provides a differentiable approximation to the argmax function. Given the active priority  $\mathbf{a}^p$  and a temperature  $t_{rl}$ , the Gumbel-Softmax is defined as
+
+$$\hat{I}_j(\mathbf{x}; t_{rl}) = \text{softmax} \left( \frac{\mathbf{a}^p + \mathbf{g}}{t_{rl}} \right),$$
+
+where  $\mathbf{g} \in \mathbb{R}^k$  is random noise sampled from the Gumbel distribution. The Gumbel-Softmax approach interpolates between the strict one-hot encoding of a rule list and a linear combination weighted by the rule priorities. In particular, in the limit  $t_{rl} \rightarrow 0$ , the Gumbel-Softmax converges to the arg max function. Thus, the soft rule list is given by
+
+$$\hat{rl}(\mathbf{x}) = \sum_{j=1}^k c_j \cdot \hat{I}_j(\mathbf{x}).$$
+
+We plot the impact of the relaxation with regard to different temperatures  $t_n$  in Figure 4. We start training with a positive temperature  $t_{rl} = 0.5$ , where the rule with highest active priority has on average 0.75 of the weight, whilst the other rules contribute the remaining 0.25. We continuously decrease the temperature  $t_{rl}$  towards zero, so that in the end the indicator  $\hat{I}_j$  of the actual rule dominates with a weight of 0.99. With an appropriate annealing schedule NYRULES starts training using a relaxed rule list, which it can optimize, and continuously moves towards a strict rule list. After training, we convert the soft rule list into a crisp rule list. We construct each rule  $r(\mathbf{x})$  as a conjunction of all predicates with  $a_i > 0$  and use as lower/upper bound the parameters  $\alpha_i$  and  $\beta_i$ . We then order the rules based on their priority  $p_j$  and construct a strict rule list  $rl(\mathbf{x})$ . To learn the antecedents, we parameterize  $c_j = \text{softmax}(\hat{c}_j)$ , where  $\hat{c}_j \in \mathbb{R}^l$  is a learnable vector i.e. the logits.
+
+### 3.3 ENTIRE ARCHITECTURE
+
+Our model takes as input any real-valued feature vector  $\mathbf{x} \in \mathbb{R}^d$ , where we first one-hot encode the categorical features into binary features. For any instantiation of our model, the number of rules  $k$  and the number of classes  $l$  is fixed beforehand. We show the resulting architecture in Figure 2.
+
+First, NYRULES discretizes the input features into  $j \in \{1, \dots, k\}$  sets of  $d$  predicates such as “18 < Age < 30” or “Diabetes = True”. Each set of predicates is then composed into the antecedent of rule  $j$ , using the respective weights  $\mathbf{w}_j \in \mathbb{R}^d$ . The activation vector  $\hat{\mathbf{a}} \in [0, 1]^k$  represents the activation of rules such as “if Age < 30 ∧ Diabetes = True”.
+
+Next, NYRULES computes the active priority  $a_j^p = \mathbf{r} \circ \mathbf{p}$  and passes it through the Gumbel-Softmax function to obtain the approximate arg max of the rule list  $\hat{\mathbf{I}}$ . The prediction  $rl(\mathbf{x})$  is computed by taking the weighted sum of consequents  $rl(\mathbf{x}) = \sum_{j=1}^k \hat{I}_j \cdot c_j$ .
+
+![Figure 4: A line graph showing the weight of the highest priority rule, I_max(x), during training as the rule list temperature t_rl decreases. The x-axis is 'Rulelist temperature t_rl' ranging from 0.5 to 0.1. The y-axis is 'I_max(x)' ranging from 0 to 1. A green line starts at approximately 0.75 at t_rl = 0.5 and increases to nearly 1.0 at t_rl = 0.1. A grey shaded area around the green line represents the variance.](67020988167474f5810b295ba0fdc993_img.jpg)
+
+Figure 4: A line graph showing the weight of the highest priority rule, I\_max(x), during training as the rule list temperature t\_rl decreases. The x-axis is 'Rulelist temperature t\_rl' ranging from 0.5 to 0.1. The y-axis is 'I\_max(x)' ranging from 0 to 1. A green line starts at approximately 0.75 at t\_rl = 0.5 and increases to nearly 1.0 at t\_rl = 0.1. A grey shaded area around the green line represents the variance.
+
+Figure 4: Weight of highest priority rule  $\hat{I}_{\max}(\mathbf{x})$  during training with decreasing temperature  $t_{rl}$ . The grey corresponds to the variance.
+
+{6}------------------------------------------------
+
+### 3.4 OBJECTIVE
+
+Lastly, we turn to the learning setup. We train NYRULES in a standard supervised learning setting given an arbitrary loss function  $\ell$  and a sample of the data distribution  $P_{X,Y}$ . In the following, we use the cross-entropy loss for binary classification tasks, i.e.  $\ell(\text{rl}(\mathbf{x}; \Theta), y) = -y \log(\text{rl}(\mathbf{x}; \Theta)) - (1-y) \log(1 - \text{rl}(\mathbf{x}; \Theta))$ , though in principle any differentiable loss function  $\ell$  can be used.
+
+**Minimum-Support** Besides the chosen loss function, we propose a regularization term to ensure that each rule represents a non-trivial amount of points. That is, akin to the minimum support requirement in classical rule lists or decision trees, we penalize rules that are never used or used too often. To this end, we add a regularization term based off the rule usage indicator  $\hat{I}_j(\mathbf{x}_i)$ . We compute the coverage, i.e. the fraction of points where each individual rules is active, over the training set  $\{\mathbf{x}_i\}_{i=1}^n$  as  $\text{cov}_j = \frac{1}{n} \sum_{i=1}^n \hat{I}_j(\mathbf{x}_i)$ . The support regularizer is then given by
+
+$$\mathcal{R}(\Theta) = \frac{1}{k} \sum_{j=1}^k \max(0, \text{cov}_{\min} - \text{cov}_j)^2 + \max(0, \text{cov}_j - \text{cov}_{\max})^2 ,$$
+
+where  $\text{cov}_{\min}$  and  $\text{cov}_{\max}$  are user-specified minimum and maximum supports. We weight the regularization term using a hyperparameter  $\lambda$ . The overall objective given a training set  $\{(\mathbf{x}_i, y_i)\}_{i=1}^n$  is then to optimize the rule list parameters  $\Theta = (\beta_1, \alpha_1, \dots, \beta_k, \alpha_k, \mathbf{w}_1, \dots, \mathbf{w}_k, \mathbf{p})$  as
+
+$$\arg \min_{\Theta} \frac{1}{n} \sum_{i=1}^n \ell(\text{rl}(\mathbf{x}_i; \Theta), y_i) + \lambda \mathcal{R}(\Theta) .$$
+
+## 4 RELATED WORK
+
+Rule lists were introduced in the early 90s (Cohen, 1995) and have since been used in various applications, such as healthcare (Deo, 2015), criminal justice (Angelino et al., 2018), and credit risk evaluation (Bhatore et al., 2020). Similarly, decision trees (Breiman, 2017), which can also be easily transformed into rules by tracing the path from the root to the leaf, have also been widely used in practice. The approaches use greedy combinatorial optimization to find the best rule set. Instead of relying on the greedy growing of the model, Wang et al. (2017); Yang et al. (2017) propose Bayesian rule lists, a probabilistic model, where the complexity of the model is controlled by a prior, which is specified by the user. In practice, these priors result in short rule lists but can harm the performance if misspecified. To automate the trade-off between complexity and accuracy, Proenca & van Leeuwen (2020); Papagianni & van Leeuwen (2023) propose an MDL-based approach, which uses an MDL-score for model selection. In practice, this results in more accurate and concise rule lists compared to previous approaches. There are also approaches that attempt to find optimal rule lists (Angelino et al., 2018; Aivodji et al., 2022). Due to the expensive combinatorial optimization, exact methods are not applicable beyond trivially sized datasets and have to severely restrict the search space in terms of rule size, feature quantization and number of rules.
+
+Instead of using combinatorial optimization, neuro-symbolic approaches have been proposed to learn rule classifiers. Qiao et al. (2021) proposes the first approach to learn rule sets in an end-to-end scheme. They formulate a novel neural architecture that uses continuous relaxations of logical operators. Here, techniques from the field of fuzzy logics are used to differentiably optimize logical operations such as negation, disjunction and conjunction (van Krieken et al., 2022). After training, the rules are extracted from the network. This is extended by Wang et al. (2021) to a deeper architecture that allows to learn more complicated rules; however, this often results in worse interpretability. Walter et al. (2024) propose to learn rules for binary data that are not only predictive but also descriptive, which improves explainability but reduces accuracy. Kusters et al. (2022) introduce a differentiable approach to dynamically learn rule predicates, but focuses on linear decision boundaries which can not be translated into interpretable single feature thresholds. Dierckx et al. (2023) extend the approach of Qiao et al. (2021) by introducing a hierarchy among the rules, allowing to learn rule lists. Although these methods resolve the scalability issue, they still rely on pre-discretization of the features, similar to the combinatorial approaches. In contrast, NYRULES learns discretizations on the fly while being highly scalable and accurate.
+
+{7}------------------------------------------------
+
+|  | NYRULES | RLNET | RRL | DRNET | GREEDY | CLASSY | CORELS | SBRL | RIPPER | XGBOOST |
+|-|-|-|-|-|-|-|-|-|-|-|
+| Adult | 0.80 ± 0.01 | 0.76 ± 0.01 | 0.77 ± 0.03 | 0.78 ± 0.01 | 0.75 ± 0.02 | <b>0.81</b> ± 0.00 | 0.80 ± 0.0 | 0.67 ± 0.02 | 0.80 ± 0.0 | 0.79 ± 0.01 |
+| Android Malware | 0.92 ± 0.0 | <b>0.95</b> ± 0.01 | 0.92 ± 0.03 | <b>0.95</b> ± 0.01 | 0.86 ± 0.01 | 0.94 ± 0.03 | 0.33 ± 0.01 | n/a | 0.86 ± 0.03 | 0.96 ± 0.03 |
+| COMPAS | 0.66 ± 0.01 | 0.65 ± 0.02 | 0.59 ± 0.02 | 0.61 ± 0.02 | 0.66 ± 0.02 | <b>0.67</b> ± 0.02 | 0.65 ± 0.01 | 0.32 ± 0.01 | 0.65 ± 0.01 | 0.68 ± 0.01 |
+| Covid19CU | 0.62 ± 0.03 | 0.60 ± 0.05 | 0.63 ± 0.03 | 0.48 ± 0.07 | 0.63 ± 0.02 | <b>0.60</b> ± 0.06 | 0.61 ± 0.03 | 0.38 ± 0.03 | <b>0.64</b> ± 0.02 | <b>0.64</b> ± 0.02 |
+| Credit Card | <b>0.79</b> ± 0.01 | 0.77 ± 0.02 | 0.75 ± 0.05 | 0.75 ± 0.02 | <b>0.79</b> ± 0.01 | <b>0.79</b> ± 0.01 | 0.79 ± 0.0 | 0.54 ± 0.03 | <b>0.76</b> ± 0.05 | 0.68 ± 0.0 |
+| German Credit | <b>0.72</b> ± 0.03 | 0.71 ± 0.04 | 0.71 ± 0.03 | 0.15 ± 0.13 | 0.67 ± 0.04 | 0.67 ± 0.06 | 0.61 ± 0.04 | 0.58 ± 0.03 | 0.71 ± 0.04 | 0.68 ± 0.02 |
+| Credit Scoring | <b>0.86</b> ± 0.02 | 0.84 ± 0.02 | 0.82 ± 0.03 | 0.45 ± 0.04 | <b>0.86</b> ± 0.02 | 0.85 ± 0.02 | 0.74 ± 0.04 | <b>0.86</b> ± 0.02 | <b>0.86</b> ± 0.02 | 0.84 ± 0.02 |
+| Diabetes | 0.73 ± 0.02 | 0.70 ± 0.03 | 0.73 ± 0.07 | 0.44 ± 0.14 | 0.71 ± 0.04 | 0.70 ± 0.04 | 0.70 ± 0.03 | 0.52 ± 0.13 | <b>0.74</b> ± 0.07 | 0.71 ± 0.03 |
+| Electricity | <b>0.75</b> ± 0.0 | 0.69 ± 0.03 | 0.63 ± 0.09 | 0.61 ± 0.01 | <b>0.75</b> ± 0.0 | 0.59 ± 0.01 | 0.70 ± 0.01 | 0.47 ± 0.03 | <b>0.75</b> ± 0.01 | 0.83 ± 0.0 |
+| FICO | <b>0.70</b> ± 0.01 | 0.67 ± 0.02 | 0.64 ± 0.03 | 0.63 ± 0.02 | 0.69 ± 0.01 | 0.67 ± 0.02 | 0.63 ± 0.02 | 0.36 ± 0.01 | <b>0.70</b> ± 0.01 | 0.71 ± 0.01 |
+| Heart Disease | 0.78 ± 0.04 | 0.74 ± 0.02 | 0.72 ± 0.04 | 0.51 ± 0.1 | 0.71 ± 0.05 | 0.77 ± 0.06 | 0.68 ± 0.05 | 0.56 ± 0.21 | <b>0.80</b> ± 0.05 | 0.78 ± 0.09 |
+| Hepatitis | 0.79 ± 0.06 | 0.77 ± 0.07 | 0.78 ± 0.08 | 0.18 ± 0.04 | 0.73 ± 0.08 | 0.74 ± 0.07 | <b>0.82</b> ± 0.04 | 0.70 ± 0.07 | 0.75 ± 0.09 | 0.70 ± 0.07 |
+| Juvenile | 0.88 ± 0.02 | 0.87 ± 0.01 | 0.88 ± 0.01 | <b>0.89</b> ± 0.01 | 0.83 ± 0.01 | 0.88 ± 0.01 | 0.80 ± 0.02 | n/a | 0.03 ± 0.01 | 0.71 ± 0.03 |
+| Magic | <b>0.79</b> ± 0.01 | 0.77 ± 0.01 | 0.72 ± 0.03 | 0.77 ± 0.03 | 0.75 ± 0.01 | 0.71 ± 0.01 | 0.72 ± 0.01 | 0.55 ± 0.06 | 0.77 ± 0.0 | 0.85 ± 0.0 |
+| Phishing | 0.91 ± 0.01 | 0.93 ± 0.0 | 0.83 ± 0.06 | <b>0.94</b> ± 0.0 | 0.89 ± 0.0 | <b>0.92</b> ± 0.01 | 0.27 ± 0.01 | 0.87 ± 0.02 | 0.89 ± 0.0 | 0.95 ± 0.0 |
+| Phoneme | <b>0.79</b> ± 0.02 | 0.71 ± 0.01 | 0.72 ± 0.03 | 0.69 ± 0.02 | 0.76 ± 0.01 | <b>0.79</b> ± 0.02 | 0.74 ± 0.01 | 0.71 ± 0.04 | 0.77 ± 0.01 | 0.85 ± 0.01 |
+| QSAR | <b>0.83</b> ± 0.03 | <b>0.83</b> ± 0.02 | 0.80 ± 0.01 | 0.52 ± 0.02 | 0.82 ± 0.03 | 0.82 ± 0.03 | 0.72 ± 0.01 | 0.72 ± 0.02 | 0.79 ± 0.03 | 0.84 ± 0.02 |
+| Ring | <b>0.92</b> ± 0.02 | 0.81 ± 0.01 | 0.83 ± 0.04 | 0.33 ± 0.02 | 0.56 ± 0.02 | 0.65 ± 0.03 | 0.63 ± 0.02 | 0.68 ± 0.02 | 0.74 ± 0.04 | 0.94 ± 0.0 |
+| Titanic | 0.77 ± 0.02 | 0.74 ± 0.03 | 0.69 ± 0.06 | 0.45 ± 0.09 | <b>0.78</b> ± 0.02 | 0.77 ± 0.02 | 0.66 ± 0.04 | 0.16 ± 0.02 | 0.75 ± 0.03 | 0.76 ± 0.03 |
+| Tokyo | 0.91 ± 0.03 | 0.91 ± 0.02 | 0.91 ± 0.01 | 0.25 ± 0.09 | 0.88 ± 0.01 | <b>0.92</b> ± 0.02 | 0.87 ± 0.03 | <b>0.92</b> ± 0.03 | <b>0.92</b> ± 0.03 | <b>0.92</b> ± 0.02 |
+| Rank | <b>2.60</b> | 4.50 | 5.20 | 6.85 | 4.72 | 4.00 | 9.92 | 7.56 | 3.50 | n/a |
+
+Table 1: Comparison of different rule list methods on 20 real world datasets. Each rule list is set to (maximum) length 10. We report the  $F_1$  score under 5-fold cross validation and provide XGBOOST as a benchmark. NYRULES is consistently the best or close to the best performing method.
+
+## 5 EXPERIMENTS
+
+We compare NYRULES against optimal rule lists (CORELS, Angelino et al. 2018), scalable Bayesian rule lists (SBRL, Yang et al. 2017), MDL-based rule lists (CLASSY, Proenca & van Leeuwen 2020), greedily learned rule lists from decision trees (GREEDY), as well as the neural rule lists (RLNET, Dierckx et al. 2023). Additionally, we compare with two neuro-symbolic rule set methods, namely RRL (Wang et al. 2021) and DRNET (Qiao et al. 2021), and provide a reference point for achievable performance in form of XGBOOST. We provide the source code in the Supplementary Material.
+
+### 5.1 REAL WORLD
+
+We begin with a comprehensive comparison on 20 real world datasets from domains such as medicine and finance for binary classification. The dataset characteristics and sources can be found in the Appendix B. For all methods, we grid search the best hyperparameter set using 5 hold-out datasets and use that configuration for all datasets (see Appendix C). To simulate real world conditions, in which interpretability is paramount, we limit each method to a budget of  $\{10, 15, \dots, 30\}$  rules. We report the  $F_1$  score weighted by class frequency, averaged over 5-fold cross validation for 10 rules and excluding XGBOOST for rank computation in Table 1, and show the trend for increasing budget in Figure 5a. Experiments that timed out after 24 hours are indicated by *n/a*.
+
+**Overall.** Across all datasets, the neural RLNET and RRL and the heuristic CLASSY and GREEDY are closely matched, achieving an average rank between  $3.5 - 4.5$  out of 8 methods, while the exact methods CORELS and SBRL performance is subpar. In contrast, NYRULES performance stands out, achieving an average rank of **2.30**. Across all datasets, NYRULES is either the best or close to the best performing method, which shows the robustness of our method across different domains. The accuracy score, provided in Appendix D, paints a similar picture with NYRULES ranking first.
+
+Amongst all datasets, NYRULES performs particularly well on the Ring dataset, where it outperforms the next best method by **0.13**  $F_1$  points. Upon closer inspection, the Ring dataset uniqueness lies in its exclusively continuous features, making it an ideal benchmark to evaluate the impact of continuous feature handling. Here, the ability of NYRULES to learn exact thresholds becomes a significant competitive edge. For applications in medicine, where continuous biomarkers such as blood pressure or cholesterol levels are often key indicators, NYRULES could potentially improve the accuracy of rule lists whilst maintaining full interpretability. Furthermore, in the Appendix E, we closely investigate under which conditions methods benefit/struggle using synthetic data.
+
+**Rule List Length.** We plot the average  $F_1$  score, normalized by the dataset maximum, under an increasing number of rules in Figure 5a. NYRULES remains the best performing method for both short and long rule lists, where for short rule lists GREEDY is closest but deteriorates with more rules, whereas CLASSY is subpar for short rule lists but comes closer with more rules. We further
+
+{8}------------------------------------------------
+
+![Figure 5: Performance and rule characteristics of NYRULES. (a) Relative F1-score under increasing number of rules (10 to 30). NYRULES (blue) maintains a high score around 0.95, while RLNET (orange) and CLASSY (green) show lower scores. (b) Distribution of NYRULES rule lengths across datasets, showing a power-law distribution with a peak at 2 predicates. (c) Ablation study of F1 score with vs without relaxed conjunction. NYRULES with relaxed conjunction (blue area) outperforms the strict conjunction (red area) by a large margin.](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+Figure 5: Performance and rule characteristics of NYRULES. (a) Relative F1-score under increasing number of rules (10 to 30). NYRULES (blue) maintains a high score around 0.95, while RLNET (orange) and CLASSY (green) show lower scores. (b) Distribution of NYRULES rule lengths across datasets, showing a power-law distribution with a peak at 2 predicates. (c) Ablation study of F1 score with vs without relaxed conjunction. NYRULES with relaxed conjunction (blue area) outperforms the strict conjunction (red area) by a large margin.
+
+(a) Relative  $F_1$ -score under increasing number of rules.
+
+(b) Distribution of NYRULES rule lengths across all datasets.
+
+(c) Ablation:  $F_1$  score with vs without relaxed conjunction.
+
+Figure 5: NYRULES is accurate for both short and long rule lists (a). The lengths of the learned rules follow a power law (b), and consist of mostly succinct and some detailed rules. Using the relaxed conjunction  $\hat{a}(\mathbf{x}) \leq \epsilon$  is always better (blue area) and improves the  $F_1$  score on average by 0.3 (c).
+
+analyze the length of individual rules learned by NYRULES, i.e. the number of predicates, in Figure 5b, as a proxy measure for the ease of comprehension of the rules learned by NYRULES. In general, shorter rules are easier to understand, though this can come at a decrease in trust/perceived utility Fürnkranz et al. (2020). The analysis of the distribution of rule lengths across all datasets indicates that they follow a power-law distribution, with a peak at 2 predicates. That is, most rules are simple and some are more complex. Whilst the majority of rules stays below 10 predicates, NYRULES is able to learn rules with up to 25 predicates, which is a testament to its flexibility. In the end, to assess for a particular use case, whether a rule list learned by NYRULES is more interpretable and trustworthy than one learned by another method, a user study is required.
+
+**Multi-class Classification.** We focus in this paper on differentially learning the rules and their order, and less so on the consequences. To allow extensive comparison against all methods, we focus on binary classification. To run NYRULES on multi-class datasets, we simply need to expand the dimension of the consequent vector to the number of classes, i.e.  $c \in \mathbb{R}^l$ . We provide results for multi-class classification in the Table 2. NYRULES remains the highest ranking method on average, with a rank of 1.50, and shows that it is not only limited to binary classification.
+
+**Runtime.** Lastly, we examine the scalability of NYRULES in contrast to other rule lists. We provide the average runtime of each method across all benchmarks in Figure 6. NYRULES on average takes 75s per dataset. This is faster than DRNET, RLNET, and SBRL, but significantly slower than the greedy approaches GREEDY, CLASSY and the neural RRL, which all take below 10s per dataset. In general, NYRULES incurs a computational overhead compared to the greedy methods but compensates for it in terms of classification accuracy. RRL optimizes only a rule set instead of a rule list and avoids the more costly rule list optimization, which explains its faster runtime.
+
+### 5.2 ABLATION STUDIES
+
+Finally, we perform an ablation to assess the efficacy of the relaxed conjunction  $\hat{a}(\mathbf{x}) \leq \epsilon$ . To this end, we re-ran NYRULES on all datasets without this adjustment, i.e. with  $\epsilon = 0$ , and plot the difference to the original  $F_1$  score in Figure 5c. We observe that on most datasets the relaxed conjunction outperforms the strict conjunction by a large margin, and on average by 0.3  $F_1$  points. The strict conjunction is not superior on any dataset to the relaxed conjunction. The extent of improvement stresses the importance of non-vanishing gradients and highlights the contribution of relaxing the logical conjunction by NYRULES.
+
+We also perform ablation studies for the thresholding and rule ordering and provide the complete results in the Appendix F. We find the  $F_1$  of NYRULES on average is degraded by 0.04 and 0.03 resp. for uniform and kmeans based thresholding. The difference is highly dataset and discretization dependent. For example, the performance on Adult drops by 0.04 using uniform but by 0.14 for kmeans thresholding. In general, while fixed binning can sometimes achieve reasonable results, it requires users to tune the discretization manually. On the other hand, the learned discretization by NYRULES performs at least as well as the fixed binning and outperforms it on many datasets.
+
+For the rule ordering, we find that the  $F_1$  of NYRULES is degraded by 0.04 on average, with the largest drop on the Credit Card and Adult datasets. These datasets contain many samples
+
+{9}------------------------------------------------
+
+![Bar chart showing average runtime in seconds for five methods: SH, RL, NYRULES, CLASSY, and GREEDY. NYRULES has the highest runtime at approximately 1000 seconds, while the others are below 200 seconds.](4e0ade2f41b66d5602160da5cc978274_img.jpg)
+
+| Method | Runtime (s) |
+|-|-|
+| SH | ~150 |
+| RL | ~150 |
+| NYRULES | ~1000 |
+| CLASSY | ~150 |
+| GREEDY | ~150 |
+
+Bar chart showing average runtime in seconds for five methods: SH, RL, NYRULES, CLASSY, and GREEDY. NYRULES has the highest runtime at approximately 1000 seconds, while the others are below 200 seconds.
+
+Figure 6: Average runtime over all benchmarked datasets.
+
+| Dataset | NYRULES | RLNET | CLASSY | GREEDY |
+|-|-|-|-|-|
+| Car | 0.83 | <b>0.84</b> | 0.83 | 0.05 |
+| ecoli | <b>0.84</b> | 0.78 | 0.75 | 0.55 |
+| Iris | <b>0.95</b> | 0.83 | 0.94 | 0.56 |
+| Yeast | <b>0.54</b> | 0.41 | 0.52 | 0.21 |
+| Avg. Rank | <b>1.50</b> | 2.25 | 2.25 | 4.00 |
+
+Table 2:  $F_1$  scores for multi-class classification. NYRULES is the best performing method on average.
+
+( $n > 30.000$ ) and likely allow learning of many specific rules with sufficient samples. Here, finding a correct ordering of rules is crucial. Hence, we see that the learned rule ordering can improve the performance of NYRULES on larger datasets. Overall, the ablation studies demonstrate the efficacy of each component of NYRULES, which together allow it to outperform the competition.
+
+## 6 CONCLUSION
+
+We propose NYRULES, a differentiable relaxation of the rule list learning problem that converges to a strict rule list through temperature annealing. NYRULES learns both the discretizations of individual features, and how to compile these features into conjunctive rules without any pre-processing or restrictions. We also learn the rule-order differentially by introducing a priority score that determines the ordering. NYRULES is able to learn rules of any complexity using specifically optimized predicates and order them in a way that maximizes the predictive performance of the model. As a result, we obtain both highly interpretable, but also accurate rule lists that can assist decision making in a wide range of applications. We demonstrated the effectiveness of NYRULES in extensive real-world and synthetic experiments. We show that NYRULES consistently outperforms both combinatorial and neuro-symbolic methods on a variety of datasets.
+
+**Limitations.** Whilst NYRULES is a powerful tool for interpretable rule learning, it is not without limitations. First and foremost, the rules that NYRULES learns do not allow to draw any causal conclusions about the data generating process without any further assumptions. Thus, they should only be used to assist in decision making and not as a substitute for domain knowledge. Compared to CORELS, we can not give any optimality guarantees on the learned rule list within the search space, but explore a much larger search space that leads to empirically better results. The number of rules in a NYRULES rule list is fixed and must be set beforehand. In our evaluation, we use rule length as a quantitative measure to compare the complexity of rule lists. This choice is supported by early explainability research, which indicates that humans find shorter rules easier to comprehend than longer ones (Huysmans et al., 2011). Nonetheless this proxy is not perfect and does not capture all aspects of interpretability. Hence to undoubtedly determine, which methods is most explainable, a user study would be necessary, which is left for future work. In addition, there are hyperparameters and temperature schedules that need to be set. Whilst we have observed a degree of robustness to these hyperparameters, they require tuning for optimal performance. Lastly, the current rule language is limited to logical conjunctions of thresholded features. Adding disjunctions and more complex logical predicates would be a natural extension of the current work and is something we plan to explore in the future.
+
+**Future Work.** In addition to the expansion of the rule language, there are several other directions in which NYRULES could be extended. For example, the current rule list model is only designed for binary classification tasks, hence to extend it to multi-class classification, is crucial for a wider range of applications. In that context, we also plan to derive a non-conformity score from the rule list model for conformal prediction. Extending NYRULES to regression tasks opens up a wide range of new applications to benefit from interpretable rule lists. Another exciting direction of future work is the adaption of NYRULES to structured data, such as images or graphs. With appropriate predicate functions that extract meaningful concepts in those domains, rule list models could be used as more interpretable and accountable deep learning models.
+
+ Rest of paper (reference and Appendix) is removed.

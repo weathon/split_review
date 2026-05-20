@@ -1,0 +1,273 @@
+
+
+{0}------------------------------------------------
+
+# RESHAPE AND ADAPT FOR OUTPUT QUANTIZATION (RAOQ): QUANTIZATION-AWARE TRAINING FOR IN-MEMORY COMPUTING SYSTEMS
+
+**Anonymous authors**
+
+Paper under double-blind review
+
+## ABSTRACT
+
+In-memory computing (IMC) has emerged as a promising solution to address both the computation and data-movement challenges posed by modern AI models. IMC takes advantage of the intrinsic parallelism of memory hardware and performs computation on data in-place directly in the memory array. To do this, IMC typically relies on analog operation, which enables high energy and area efficiency. However, analog operation makes analog-to-digital converters (ADCs) necessary, for converting results back to the digital domain. This introduces an important new source of quantization error, impacting inference accuracy. This paper proposes a Reshape and Adapt for Output Quantization (RAOQ) approach to overcome this issue, which comprises two classes of mechanisms motivated by the fundamental impact and constraints of ADC quantization, including: 1) mitigating ADC quantization error by adjusting the statistics of activations and weights, through an activation-shifting approach (A-shift) and a weight reshaping technique (W-reshape); 2) adapting AI models to better tolerate ADC quantization, through a bit augmentation method (BitAug) to aid SGD-based optimization. RAOQ demonstrates consistently high performance across different scales of neural network models for image classification, object detection, and natural language processing (NLP) tasks at various bit precisions, achieving state-of-the-art accuracy with practical IMC implementations.
+
+## 1 INTRODUCTION
+
+Rapid advances in AI have greatly impacted various application domains, including computer vision, natural language processing, speech, etc. Recent generative AI breakthroughs have pushed the strength of AI even further, producing remarkably realistic and imaginative outputs, blurring the line between human- and machine-generated content (OpenAI, 2023; Chowdhery et al., 2022). However, increasing AI capability has come from increasing model complexity, with a sharp rise in both the number of compute operations and the number of model parameters, placing huge demands on hardware resources (Villalobos et al., 2022; Smith et al., 2022).
+
+This has driven the development of specialized hardware architectures to accelerate AI model computations. While digital accelerators have been widely deployed to improve compute efficiency, they do not address the large amount of data movement involved, which has been shown to pose a critical energy and performance bottleneck in state-of-the-art (SOTA) models (Verma et al., 2019). In-memory computing (IMC), on the other hand, performs computations in place on stored data, providing an approach to simultaneously address both compute efficiency and data movement.
+
+While both digital and analog IMC have been proposed, providing various advantages and trade-offs towards energy efficiency and accuracy, this work focuses on energy-aggressive highly-parallel analog IMC, addressing the critical bottleneck within the architecture via algorithmic solutions. A fundamental requirement of analog IMC is the need for analog-to-digital converters (ADCs), to provide compute outputs back to the digital domain for further processing. Importantly, ADCs introduce an additional source of quantization, which can substantially degrade accuracy in SOTA AI models. The level of quantization error from the ADC is fundamentally set by the level of IMC parallelism, which also directly sets the compute efficiency and throughput advantage.
+
+{1}------------------------------------------------
+
+Unlike quantization of activations and weights, whose clipping parameters can be directly optimized during training, ADC quantization on the compute results does not provide this degree of freedom and thus requires new methods to address. Previous works introduce artificial clipping to model ADC quantization at the hardware design stage (Gonugondla et al., 2020; Sakr & Shanhagh, 2021). However, this limits hardware flexibility in supporting various types of models, which may present different ADC-input data distributions and thus require different optimal clipping values.
+
+To address such quantization challenges, this paper presents Reshape and Adapt for Output Quantization (RAOQ), to tackle the challenges at the algorithmic level. As neural networks generally are sensitive to drastic changes, we first perform quantization-aware training (QAT) for activations and weights only, and then apply RAOQ, in another stage of training with ADC quantization introduced. We explore RAOQ across multiple applications, i.e., image classification, object detection, and natural language processing (NLP), on ImageNet (Deng et al., 2009), COCO 2017 (Lin et al., 2014), and SQuAD 1.1 (Rajpurkar et al., 2016) datasets, respectively. To the best of our knowledge, this work is the first to demonstrate approaches that enable IMC for inference across various scales of models and challenging datasets/tasks. The major contributions of our work are as follows:
+
+1. We conduct an analysis of the relationship between neural network activations, weights, and ADC quantization. We identify the statistical attributes of activations and weights that yield a high signal-to-quantization-noise ratio (SQNR) in the presence of ADC quantization.
+2. We propose an activation-shifting method (A-shift) motivated by the preferred statistical attributes for activations, and a weight-reshaping technique via kurtosis regularization (W-shape) motivated by the preferred statistical attributes for weights.
+3. We propose bit augmentation (BitAug), where the model is augmented in the dimension of ADC bit precision to aid the optimization process, assisting model adaptation to ADC quantization.
+4. We conduct experiments on different models and tasks (i.e., ResNet18/50 (He et al., 2016), MobileNetV2 (Sandler et al., 2018), EfficientNet-lite0 (Tan & Le, 2019), YOLOv5s (Jocher et al., 2022), BERT-base/large (Devlin et al., 2018)), and across different quantization levels for activations, weights, and ADCs. The consistently high performance achieved by our proposed methods provides promise for their generalizability across challenging AI tasks.
+
+## 2 BACKGROUND AND RELATED WORKS
+
+### 2.1 IN-MEMORY COMPUTING (IMC)
+
+IMC aims to address both compute and data-movement costs in matrix-vector multiplications (MVMs), which are dominant operations in modern AI models. This is achieved by storing matrix weights in a 2D array of memory bit cells as shown in Fig. 1a, and accessing compute results over many weight bits, rather than accessing the individual weight bits themselves. Specifically, this is achieved by performing multiplication in each bit cell between stored weight data and provided input data, and then accumulation to reduce the products in each column to a single compute result. The level of reduction, set by the row parallelism of IMC operation, thus determines the energy efficiency and throughput gains.
+
+To enable energy- and area-efficient computation within the constrained bit cells, IMC can leverage analog operation, where the compute results then need to be converted back to the digital domain via ADCs (Valavi et al., 2019; Lee et al., 2021b; Deaville et al., 2022; Yin et al., 2020; Hsieh et al., 2023). Such analog operation raises two challenges. First, it is sensitive to noise sources, which degrade the output signal-to-noise ratio (SNR). Researchers have proposed algorithmic noise-aware training approaches to overcome this (Zhang et al., 2022; He et al., 2019), but which have only shown success in simple tasks (MNIST, CIFAR-10/100 datasets) at low levels of IMC row parallelism. Instead, recent work has moved to a high-SNR form of IMC, overcoming such analog noise, enabling scale-up to higher levels of row parallelism (Jia et al., 2022; Lee et al., 2021a). This has left SOTA analog IMC primarily subject to the second challenge, which is ADC quantization. As an example, Fig. 1b shows the degraded SQNR due to ADC quantization and inference accuracy in ResNet50 on ImageNet. Consequently, such quantization prevents IMC from scaling up and poses an ultimate limitation to the IMC efficiency and throughput. While ADC precision can be increased for higher SQNR and accuracy, this brings substantial hardware cost, with ADCs showing dominating energy
+
+{2}------------------------------------------------
+
+consumption (Lee et al., 2021a). This work introduces efficient algorithmic approaches to address the critical challenge in IMC systems today, which is ADC quantization, doing so without incurring additional hardware costs, to demonstrate applicability on a critical set of models.
+
+![Figure 1: (a) An illustration of an MVM operation via IMC. (b) SQNR and accuracy degradation due to ADC quantization. (c) Learning curves for conventional QAT with ADC quantization involved.](3cab54230d8ae3b786ddda81346602cc_img.jpg)
+
+Figure 1 consists of three subplots. (a) shows a memory array with weights  $w_{i,j}$  and inputs  $x_i$  being processed by an ADC to produce outputs  $y_j$ . (b) is a line graph showing Accuracy (%) and SQNR (dB) versus ADC bit precision (6 to 11). The 'w/ ADC' curve shows a sharp drop in accuracy and SQNR as bit precision decreases, while the 'w/o ADC' curve remains relatively flat. (c) is a line graph showing Accuracy (%) versus Epoch (0 to 30) for different ADC bit precisions (4b, 6b, 7b, 8b, 9b). The 'No ADC' curve shows the highest accuracy, while the '4b ADC' curve shows the lowest accuracy.
+
+Figure 1: (a) An illustration of an MVM operation via IMC. (b) SQNR and accuracy degradation due to ADC quantization. (c) Learning curves for conventional QAT with ADC quantization involved.
+
+Figure 1: (a) An illustration of an MVM operation via IMC. (b) SQNR and accuracy degradation due to ADC quantization. (c) Learning curves for conventional QAT with ADC quantization involved.
+
+### 2.2 QUANTIZATION-AWARE TRAINING (QAT)
+
+QAT restores model accuracy, which may otherwise degrade due to quantization noise, through a training process that adapts the model parameters. QAT methods have been proposed to successfully demonstrate SOTA accuracy in aggressively quantized networks (Jacob et al., 2017; Gupta et al., 2015; Louizos et al., 2018; Bhalgat et al., 2020; Jain et al., 2019; Zhou et al., 2016; Nagel et al., 2022; Wang et al., 2022; Park et al., 2022; Esser et al., 2019). However, previous QAT mainly focuses on quantization from inputs (i.e., weight and activation), not considering ADC quantization on the compute outputs in IMC. As a result, IMC shows substantially degraded model accuracy even with conventional QAT, as seen in Fig. 1c.
+
+To address ADC quantization in IMC, Jin et al. (2022) introduces a modified straight-through estimator (STE) (Bengio et al., 2013) along with calibration and rescaling techniques to assist the QAT process, demonstrating ResNet models on CIFAR-10/100 datasets. Sun et al. (2021) proposes a non-uniform activation quantization scheme and a reduced quantization range, validating on the CIFAR-10 dataset. Wei et al. (2020) proposes modified minmax quantizers for activations and weights to incorporate hardware statistics of IMC, testing on MNIST and CIFAR-10 datasets. While these prior works show success on relatively simple datasets, their success has not transferred to more complicated datasets and AI tasks. In this work, we propose improved QAT techniques to enable SOTA accuracy applicable to various bit precisions on more challenging models and tasks.
+
+## 3 ANALYSIS AND RATIONALE FROM ADC QUANTIZATION
+
+To formally define the IMC ADC quantization problem, let  $x \in \mathbb{R}^M$  be a data vector of the activation  $X$  and let  $w \in \mathbb{R}^M$  be a vector of an output channel of the weight  $W$ . Denote  $\bar{x}$  and  $\bar{w}$  as their quantized counterparts, an IMC column then computes a portion of MVM:
+
+$$y = \langle \bar{x}, \bar{w} \rangle = \sum_{i=1}^M \bar{w}_i \bar{x}_i. \quad (1)$$
+
+Note that convolutions can be converted to MVMs via *im2col* operations. For a  $b_a$ -bit activation,  $b_w$ -bit weight,  $b_a$ -bit ADC, and memory with dimension  $M \times N$ , assuming symmetric quantization is applied to weights, the ADC quantization and its quantization step  $\Delta_a$  is defined as
+
+$$\bar{y} = \left\lfloor \text{clip} \left( \frac{y}{\Delta_a}, n_a, p_a \right) \right\rfloor \quad (2)$$
+
+$$\Delta_a = \frac{2M(2^{b_a} - 1)(2^{b_w} - 1)}{2^{b_a} k}, \quad (3)$$
+
+where  $\lfloor \cdot \rfloor$  denotes the floor operation. Similar to conventional QAT, the gradient of the floor operation is approximated using STE (Bengio et al., 2013). Above,  $(n_a, p_a) = (-2^{b_a-1}, 2^{b_a-1} - 1)$ , and
+
+{3}------------------------------------------------
+
+$k$  is a positive integer, serving as a hardware design parameter to provide fixed clipping (due to the ADC’s supported input range). Eq. 3 assumes unsigned activations. For signed activations, we can simply replace  $2^{b_s} - 1$  by  $2^{b_s} - 1$ . In general,  $\Delta_a$  is fixed for given hardware and is not trainable at the algorithmic level. Fig. 2a shows the distribution of an ADC input from ImageNet dataset via the ResNet50 model. We see that the input concentrates around a small portion of the ADC range, resulting in a small signal, relative to the quantization step  $\Delta_a$ . A choice of large  $k$  could help to have a finer step  $\Delta_a$ , but would potentially introduce substantial clipping error. As different layers and models lead to different statistics of the compute outputs (ADC inputs), there is no optimal  $\Delta_a$  to rule them all. Thus, with no algorithmically controllable parameters for ADC quantization, the only degrees of freedom left are parameters applicable to the activations and weights.
+
+![Figure 2: (a) Histogram of ADC input (pre-activation) for k=1, 2, 4, 8. (b) SQNR (dB) vs Variance of ADC input for k=1, 2, 4, 8. (c) Scatter plot of Var[Y] vs E[X^2]. (d) Scatter plot of Var[Y] vs Var[W].](7fb5215fd72210a2e4cce6df55550c89_img.jpg)
+
+Figure 2: (a) Histogram of ADC input (pre-activation) for k=1, 2, 4, 8. (b) SQNR (dB) vs Variance of ADC input for k=1, 2, 4, 8. (c) Scatter plot of Var[Y] vs E[X^2]. (d) Scatter plot of Var[Y] vs Var[W].
+
+Figure 2: (a) Distributions of ADC input (compute output). (b) Relationship between ADC SQNR and the variance of ADC input  $Var[Y]$ . (c-d) Relationship of the variance of ADC input to the  $2^{nd}$  moment of the quantized activation and the variance of the quantized weight.
+
+Based on observations in Fig. 2a, we prefer the variance of the ADC input  $Var[Y]$  to be maximized in order to maximize signal power and utilize as many ADC quantization levels as possible. This is explicitly shown in Fig. 2b, via the post-ADC SQNR. This focus on  $2^{nd}$ -order statistics, makes it natural to consider the dependence on the  $2^{nd}$  moment of the activation  $X$  and weight  $W$ . Before the training starts, activations and weights are independent of each other, and  $Var[Y]$  is proportionally set by  $E[X^2]$  and  $E[W^2]$ . However, during and after training, generally the assumption of independence does not hold, as  $X$  and  $W$  exhibit correlation through the neural network learning process. Nonetheless, we postulate that a more narrow relationship holds, namely that there is direct dependence between the  $2^{nd}$  moments, and we conduct an empirical study to validate this. We randomly sample images from CIFAR10 and ImageNet datasets, and also randomly generate input data. We use ResNet50 and MobileNetV2 as example networks to perform standard QAT, since these contain the network structures encountered in most SOTA models. To manage computation complexity, we only take the first few layers of these models for this study. In Fig. 2c-2d, we plot the variance of the ADC input  $Var[Y]$  vs.  $E[X^2]$  and  $E[W^2]$ , respectively, and observe a proportional relationship. Further, since neural network weights are typically symmetrically distributed around zero (Bhalgat et al., 2020),  $E[W^2]$  can be taken to be  $Var[W]$ , and we postulate that  $Var[Y]$  can be increased by maximizing  $Var[W]$  and  $E[X^2]$ , to improve IMC SQNR in the presence of ADC quantization. This rationale forms the basis of the W-reshape and A-shift techniques that form the proposed ROAQ approach described below. In the following sections, we use  $\mathcal{L}_Q$  to denote the loss during the QAT stage of training and use  $\mathcal{L}_A$  to denote the loss during the RAOQ stage of training, after QAT.
+
+## 4 RESHAPE AND ADAPT FOR OUTPUT QUANTIZATION (RAOQ)
+
+### 4.1 SQNR ENHANCEMENT
+
+**Weight reshaping (W-reshape).** To maximize  $Var[W]$ , one option is to perform aggressive scaling during quantization. However, this is expected to introduce substantial clipping error, posing an adverse trade-off with weight distortion. Thus, we seek an alternate approach to increasing  $Var[W]$ , by adapting the distribution shape to avoid severe clipping.
+
+Neural network weights typically exhibit a symmetric distribution in the exponential family, e.g., normal distribution or Laplace distribution (Banner et al., 2019; Shkolnik et al., 2020), which results
+
+{4}------------------------------------------------
+
+in relatively low variance. We therefore propose a penalty on weights to drive towards a distribution with a large variance, in a manner where the penalty does not degrade previous accuracy. This is achieved by introducing a kurtosis loss as a function of the quantized weights. Kurtosis describes the tailedness of a distribution, and such loss is defined as the standardized 4<sup>th</sup> moment, i.e.,
+
+$$\kappa = \mathbb{E} \left[ \left( \frac{\bar{W} - \mu_{\bar{W}}}{\sigma_{\bar{W}}} \right)^4 \right], \quad (4)$$
+
+where  $\bar{W}$  is the quantized weight,  $\mu_{\bar{W}}$  and  $\sigma_{\bar{W}}$  denote the mean and standard deviation of  $\bar{W}$ .
+
+This encourages the majority of  $\bar{W}$  to be concentrated in the tails of the distribution (Moors, 1986). This is different from (Shkolnik et al., 2020), where kurtosis loss is applied on the floating-point weights specifically to drive them towards a uniform distribution, which maximizes their quantization robustness. Since our interest is in improving ADC quantization, rather than weight quantization, we apply more aggressive kurtosis loss on the already quantized weights, which are determined by both the statistics of the floating point weights and the quantization parameters. We analyze the impact of W-reshape on the QAT accuracy and provide details in Appendix A. This loss, computed at each layer, is summed up to produce the final loss and then combined with the original loss function  $\mathcal{L}_c$  against the ground truth during the QAT stage, i.e.,
+
+$$\mathcal{L}_Q = \mathcal{L}_c + \lambda_\kappa \sum_l \kappa_l, \quad (5)$$
+
+where  $\lambda_\kappa$  is a coefficient to balance the two loss terms, and  $l$  is an index for neural network layers. Fig. 3a (top) shows a comparison between the quantized weight with and without incorporating the kurtosis loss. We can see that the proposed method successfully reshapes the weight distribution to have a much larger variance, i.e.,  $4\times$  more than the case without  $\mathcal{L}_\kappa$ .
+
+![Figure 3: (a) Demonstration of W-reshape and A-shift for 4b weights and activations. (b) SQNR improvement under ADC quantization.](3ef2266eb61ae3929cdae1742c1f526e_img.jpg)
+
+Figure 3 consists of two main parts, (a) and (b). Part (a) is titled '(a)' and contains two rows of plots. The top row is labeled 'W-reshaps' and shows two histograms of quantized weights. The left histogram has a y-axis from 0 to 5000 and an x-axis from -5 to 5. The right histogram has a y-axis from 0 to 1500 and an x-axis from -5 to 5. An arrow labeled  $\kappa$  points from the left histogram to the right one. The bottom row is labeled 'Ashift' and shows three plots. The first is a histogram of activations  $x$  with x-axis from 0 to 80 and y-axis from 0 to 8. The second is a histogram of  $\bar{x}$  with x-axis from 0 to 15 and y-axis from 0 to 8. The third is a histogram of  $\bar{x}_s$  with x-axis from -6 to 6 and y-axis from 0 to 8. Above the second and third histograms is the equation  $\bar{x}_s = \bar{x} - \beta$ . Above the first and second histograms is the equation  $\text{clip}(\frac{x - \beta}{s_x}, 0, 15)$ . Part (b) is titled '(b)' and contains two plots. The top plot is titled 'Distributions of ADC input' and shows two histograms of ADC input. The left histogram has x-axis from -256 to 256 and y-axis from 0 to 4. The right histogram has x-axis from -5000 to 5000 and y-axis from 0 to 3. A red line labeled 'A-shift + W-reshape' is shown. The bottom plot is titled 'Improved SQNR of ADC quantization' and shows a line graph of SQNR (dB) vs ADC bit precision (0 to 11). Four lines are shown: 'w/ Wreshape + Ashift' (solid blue), 'w/o Wreshape + Ashift' (dashed orange), 'Wreshape only' (dashed green), and 'Ashift only' (dashed red). A red arrow points from the 'Ashift only' line to the 'w/ Wreshape + Ashift' line.
+
+Figure 3: (a) Demonstration of W-reshape and A-shift for 4b weights and activations. (b) SQNR improvement under ADC quantization.
+
+Figure 3: (a) Demonstration of W-reshape and A-shift for 4b weights and activations. (b) SQNR improvement under ADC quantization. This can be directly observed in terms of the utilization of the ADC intervals. The proposed techniques provide nearly  $5\times$  utilization improvement.
+
+**Activation shifting (A-shift)** In order to maximize the 2<sup>nd</sup> moment of the activation, it is desirable for activations to exhibit a concentration of mass at considerably large absolute values, i.e., distancing the mass from zero, so that the input distribution to the ADC has maximum variance. However, this is typically not the case with activations derived from functions like SiLU (Elfwing et al., 2018) and GELU (Hendrycks & Gimpel, 2016), which inherently exhibit significant mass distribution around small values in close proximity to zero, as shown in Fig. 3a (bottom left).
+
+Exploiting the fact that quantizing these activations as a signed number or unsigned number does not have much impact on the overall performance (Bhalgat et al., 2020), we propose to treat them as an unsigned number during quantization, and then convert them to a signed number. This yields a distribution moved away from zero, to the advantage of ADC quantization. Such an unsigned-to-signed conversion can be implemented by a simple shift:
+
+$$\bar{x}_s = \left[ \text{clip} \left( \frac{x - \beta}{s_x}, 0, 2^{b_x} - 1 \right) \right] - 2^{b_x-1} = \bar{x} - 2^{b_x-1} \quad (6)$$
+
+{5}------------------------------------------------
+
+where  $\lceil \cdot \rceil$  denotes round operation,  $\beta$  and  $s_x$  are trainable quantization parameters. Fig. 3a (bottom) shows the entire A-shift process. We observe that the mass of  $\bar{x}_s$  is concentrated at the most negative values, hence having an extremely large  $2^{nd}$  moment. On the contrary, quantizing activations directly to a signed number prevents such a shift operation, resulting in a much smaller  $2^{nd}$  moment. To quantitatively verify our arguments, we compute the numerical values of the  $2^{nd}$  moment for the quantized activation from the proposed method and from signed quantization based on Fig. 3a, ending up with 57.9 and 3.89, respectively. Our proposed approach produces a much greater  $2^{nd}$  moment, roughly  $15\times$  higher. Additionally, ReLU activation functions naturally suit the A-shift approach, as they explicitly force the output activations to be unsigned numbers. With such shifting, the IMC computation becomes
+
+$$y = \sum_{i=1}^M \bar{w}_i \bar{x}_i = \sum_{i=1}^M \bar{w}_i \bar{x}_{s,i} + \underbrace{2^{bx-1} \bar{w}_i}_{\text{offset}} \quad (7)$$
+
+The additional offset introduced by A-shift can be precomputed offline and thus does not add any overhead when performing inference on IMC systems. The applicability of A-shift on IMC with other number representations are described in Appendix B.
+
+**Impact of W-reshape and A-shift** Fig. 3b summarizes the results obtained by applying W-reshape and A-shift on ImageNet dataset. A particularly useful view is looking at the distribution of the ADC input. We consider the utilization of ADC quantization range to quantitatively analyze the results, i.e.,  $\frac{\# \text{ of occupied ADC quantization intervals}}{\text{Total ADC quantization intervals}}$ . Fig. 3b (top) shows an example of an 8-bit ADC, resulting in 3.52% and 21.7% utilization without and with W-reshape and A-shift, respectively. We also compute the variance of these two cases to justify our results, which leads to 0.094 and 8.535 respectively. These improvements can be directly related to the increased SQNR illustrated in Fig. 3b (bottom).
+
+### 4.2 SQNR ADAPTATION FOR NEURAL NETWORKS
+
+![Figure 4: Loss surfaces with A-shift and W-reshape applied for 4-bit activations and weights. The figure consists of four contour plots labeled (a) w/o ADC, (b) 8-bit ADC, (c) 7-bit ADC, and (d) 6-bit ADC. Each plot shows a loss surface with contours representing different levels of the loss function. The surfaces are relatively smooth and show a clear minimum point, indicating that the optimization process is stable even with quantization.](e1dda754c2c88a8ad0b968aea4fc0786_img.jpg)
+
+Figure 4: Loss surfaces with A-shift and W-reshape applied for 4-bit activations and weights. The figure consists of four contour plots labeled (a) w/o ADC, (b) 8-bit ADC, (c) 7-bit ADC, and (d) 6-bit ADC. Each plot shows a loss surface with contours representing different levels of the loss function. The surfaces are relatively smooth and show a clear minimum point, indicating that the optimization process is stable even with quantization.
+
+Figure 4: Loss surfaces with A-shift and W-reshape applied for 4-bit activations and weights.
+
+**Bit augmentation (BitAug).** Quantization fundamentally sacrifices information in exchange for model compression. While the SQNR is improved through Eq. 4 - Eq. 7, quantization imposed by the ADC is observed to make SGD-based optimization more challenging during training. Fig. 4 shows the loss surfaces of MobileNetV2 in two randomly selected parameter dimensions for visualization (Li et al., 2018). As seen, ADC quantization causes a less smooth surface with additional local minima. These attributes reduce the likelihood of arriving at preferred (low-loss) minima during the training process. Approaches are thus required to adapt the model to this extra quantization. We seek an approach that facilitates a greater volume of information to be backpropagated so that the model parameters can be optimized more effectively. Inspired by NetAug (Cai et al., 2021) where a tiny model is inserted into larger models during training, we augment the network with ADCs of different bit precisions. At each iteration, we first pass the desired ADC bit to the model and then pass other bit precisions from a pre-defined set  $\mathbb{B}$  to the model. The general form of BitAug is
+
+$$\mathcal{L}_A = \mathcal{L}(\theta, b_a) + \lambda_b \sum_{i=1}^B \mathcal{L}(\theta, b_{a,i}), \quad (8)$$
+
+where  $\theta$  denotes the network parameters,  $\lambda_b$  is the coefficient of the BitAug loss,  $B$  is the size of the BitAug set  $\mathbb{B}$ , and  $b_{a,i}$  is a sample from the set. Elements in  $\mathbb{B}$  are chosen to be neighbors of the target ADC bit precision. Given the complexity of optimization with ADC quantization, we simply employ the assistance of other bit precisions. The information associated with the various ADC bit
+
+{6}------------------------------------------------
+
+precisions is subsequently represented in their respective gradients, which get accumulated during the backward path for more optimal updating of model parameters, i.e.,
+
+$$\theta^{t+1} = \theta^t - \eta \frac{\partial \mathcal{L}(\theta^t, b_a)}{\partial \theta^t} - \eta \lambda_b \sum_{i=1}^B \frac{\partial \mathcal{L}(\theta^t, b_{a,i})}{\partial \theta^t}, \quad (9)$$
+
+where  $t$  indicates the current training step and  $\eta$  denotes learning rate. However, such an aggregation of multiple augmented models is computationally expensive. Following a similar strategy as (Cai et al., 2021), we randomly sample an ADC bit precision for each iteration, i.e.,
+
+$$\mathcal{L}_A = \mathcal{L}(\theta, b_a) + \lambda_b \mathcal{L}(\theta, \tilde{b}_a), \quad (10)$$
+
+where  $\tilde{b}_a$  is a uniformly sampled bit precision from  $\mathbb{B}$ . We observe that doing this not only improves the computational efficiency by a factor of  $B$ , but also achieves better performance than running all ADC bit precisions simultaneously. We include a quantitative study in Appendix C. The selection of  $\mathbb{B}$  is also critical. For instance, if we only sample lower precision ADC, we are essentially adding noise to the training process, which causes accuracy degradation. Our empirical results show that a good choice is to choose 1-bit lower and 2-bit higher than the desired ADC bit precision, i.e.,  $\mathbb{B} = \{b_a - 1, b_a + 1, b_a + 2\}$ . A more detailed analysis of BitAug is provided in Appendix F.
+
+## 5 EXPERIMENTS
+
+### 5.1 EXPERIMENTAL SETUP
+
+We consider a general IMC architecture as shown in Fig. 1a. While exploring different IMC architectures is not the focus of this paper, we include experiments on the impact of RAOQ on various IMC configurations in Appendix D for interested readers. In this section, we focus on an IMC system with aggressive memory dimensions of  $512 \times 512$ , taking 4-bit inputs and processing 4-bit weights, with ADCs having  $k = 4$ . Higher-precision activations and weights are mapped to the IMC via matrix tiling.
+
+The proposed methods are evaluated on different AI tasks. To preserve the fidelity of critical information, we do not map depthwise convolutions in the MobileNet family, and the second matrix-matrix multiplication in the self-attention module of BERT (BMM2) to the IMC system. This is justified as these layers account for a small number of computations in the overall model (i.e.,  $< 7\%$  for depthwise convolutions in MobileNetV2 and  $< 1.5\%$  for BMM2 in BERT), thus giving minor energy-efficiency advantage by execution via IMC. The first and last layers are kept in 8-bit. We start from pre-trained FP32 models, and first perform QAT based on LSQ+ (Bhalgat et al., 2020) on activations and weights with the proposed W-reshape and A-shift methods. We then add ADC quantization along with other RAOQ techniques for another stage of training. Experiments are performed on Nvidia A100 GPUs. Further training details are described in Appendix E.
+
+### 5.2 RESULTS
+
+Table 1 summarizes the results for 4-bit and 8-bit activations and weights. We sweep the ADC bit precision to demonstrate the robustness and generalizability of our approaches. All QAT (without ADC involved) accuracy matches SOTA results. For a fair comparison, we also perform conventional QAT (i.e., without any proposed methods involved) for ADC quantization. As seen, the proposed RAOQ significantly outperforms conventional QAT in all cases.
+
+**Image classification.** We choose ResNet, MobileNet, and EfficientNet-lite models for evaluation using top-1 accuracy on ImageNet dataset. Our proposed RAOQ restores the performance to high accuracy across the activation/weight and ADC bit precisions considered. Particularly, some cases of 9-bit ADC even outperform the no-ADC baseline. We start to observe accuracy degradation at low precision ADCs, with  $\leq 0.3\%$  drop in the 8-bit case, and with  $< 0.8\%$  drop in the 7-bit case.
+
+**Object detection.** We evaluate YOLOv5s on COCO 2017 dataset in terms of mAP. Although YOLOv5s involves more complicated network structures compared to the above CNN models for image classification, our approach restores the significantly degraded accuracy to the level close to no-ADC case, with a  $< 1\%$  drop for 8-bit and 9-bit ADCs, and  $< 2\%$  drop for 7-bit ADC.
+
+{7}------------------------------------------------
+
+Table 1: Evaluation of RAOQ with various activation, weight, and ADC bit precisions.
+
+| Model | FP32 | $b_x, b_w$ | No ADC | $b_a = 7$ |  | $b_a = 8$ |  | $b_a = 9$ |  |
+|-|-|-|-|-|-|-|-|-|-|
+|  |  |  |  | QAT* | RAOQ | QAT* | RAOQ | QAT* | RAOQ |
+| ResNet18 | 69.76 | 8,8 | 70.66 | 60.12 | 70.28 | 66.03 | 70.46 | 66.65 | 70.60 |
+|  |  | 4,4 | 70.49 | 59.42 | 70.23 | 65.71 | 70.45 | 66.61 | 70.49 |
+| ResNet50 | 76.23 | 8,8 | 76.53 | 65.47 | 76.25 | 73.83 | 76.46 | 75.01 | 76.51 |
+|  |  | 4,4 | 76.31 | 65.25 | 76.15 | 72.05 | 76.27 | 74.16 | 76.32 |
+| MobileNetV2 | 71.81 | 8,8 | 71.89 | 62.09 | 71.57 | 66.72 | 71.79 | 69.13 | 71.93 |
+|  |  | 4,4 | 70.47 | 61.51 | 70.22 | 66.67 | 70.46 | 68.55 | 70.45 |
+| EfficientNet-lite0 | 75.12 | 8,8 | 74.31 | 61.27 | 73.58 | 68.11 | 74.08 | 68.85 | 74.21 |
+|  |  | 4,4 | 72.84 | 61.21 | 72.18 | 67.03 | 72.76 | 67.85 | 72.82 |
+| YOLOv5s | 37.20 <sup>°</sup> | 8,8 | 36.60 | 1.30 | 34.73 | 8.02 | 35.82 | 24.03 | 36.41 |
+|  |  | 4,4 | 33.78 | 10.13 | 32.23 | 20.32 | 33.49 | 28.49 | 33.89 |
+| BERT-base | 88.58 | 8,8 | 88.24 | 66.35 | 87.40 | 83.04 | 87.84 | 84.82 | 88.11 |
+|  |  | 4,4 | 87.75 | 64.46 | 87.31 | 82.43 | 87.67 | 84.53 | 87.75 |
+| BERT-large | 91.00 | 8,8 | 90.58 | 58.37 | 89.60 | 79.58 | 90.09 | 85.92 | 90.38 |
+|  |  | 4,4 | 89.57 | 62.11 | 88.67 | 80.18 | 89.08 | 85.01 | 89.55 |
+
+\* Conventional QAT (i.e., without RAOQ techniques) with ADC quantization present. <sup>°</sup> Result trained by ourselves in FP32 rather than original mixed-precision.
+
+**NLP.** We use BERT models, implemented based on (Wolf et al., 2020), to demonstrate for the question-answering task on SQuAD 1.1 dataset. The results are evaluated in terms of the F1 score. Once again, our proposed RAOQ successfully restores the degraded accuracy, with  $< 1\%$ ,  $< 0.5\%$ , and  $< 0.2\%$  accuracy drops for 7-bit, 8-bit, and 9-bit ADCs, respectively.
+
+### 5.3 COMPARISON WITH OTHER METHODS
+
+As mentioned, previous algorithmic works focus on ADC quantization in IMC on small datasets. Thus, Table 2 shows a comparison of our proposed RAOQ approach with other works on the CIFAR-10 dataset. These works are based on various memory technologies (e.g., SRAM, ReRAM). For a fair comparison, we construct the same model, following the same configurations as these works (e.g., bit precisions, memory dimensions, applicable hardware noise levels), and then apply our RAOQ approach. We see that RAOQ outperforms all other methods, leading to much less degradation regardless of IMC technology and configurations.
+
+Table 2: Comparison of different methods for ADC quantization on CIFAR-10.  $M$  denotes the memory inner-dimension, and the column IMC indicates accuracy under ADC quantization.
+
+| Model | Method | $b_x, b_w, b_a$ | $M$ | FP32 | No ADC | IMC | Degradation |
+|-|-|-|-|-|-|-|-|
+| ResNet20 | (Jin et al., 2022) | 4,4,7 | 9 | — | 91.60 | 91.00 | -0.60 <sup>b</sup> |
+|  |  | 4,4,3 | 9 | — | 91.60 | 81.70 | -9.30 <sup>b</sup> |
+|  | RAOQ | 4,4,7 | 9 | 92.32 | 92.23 | 92.32 | +0.09 <sup>b</sup> |
+| ResNet18 <sup>a</sup> | (Sun et al., 2021) | 4,4,4 | 256 | 88.87 | — | 86.55 | -2.32 <sup>c</sup> |
+|  | RAOQ | 4,4,4 | 256 | 92.10 | 92.13 | 90.48 | -1.65 <sup>c</sup> |
+| ResNet18 | (Wei et al., 2020) | 2,2,4 | 9 | 92.01 | 89.62 | 83.37 | -6.25 <sup>b</sup> |
+|  |  | 2,2,4 | 36 | 92.01 | 89.62 | 87.56 | -2.06 <sup>b</sup> |
+|  | RAOQ | 2,2,4 | 9 | 93.21 | 92.26 | 91.90 | -0.36 <sup>b</sup> |
+|  |  | 2,2,4 | 36 | 93.21 | 92.26 | 91.81 | -0.45 <sup>b</sup> |
+
+<sup>a</sup> Channels are reduced to 1/4 of the original ResNet18. <sup>b</sup> Accuracy drop of IMC ADC quantization with respect to no-ADC case. <sup>c</sup> Accuracy drop with respect to FP32.
+
+{8}------------------------------------------------
+
+### 5.4 ABLATION STUDY
+
+We investigate the impact of each proposed technique in RAOQ. In particular, we use BERT-base, MobileNetV2, and ResNet50 with 4-bit activations and weights, and an 8-bit ADC to perform the study. The results are summarized in Table 3. The first row corresponds to the case where conventional QAT methods are applied to IMC with ADC quantization. Each check mark indicates the presence of a specific technique. As seen, all of the proposed techniques improve the degraded performance due to ADC quantization. Comparatively, A-shift and BitAug exhibit more significant impacts on the network performance, one contributing to boosting SQNR and the other responsible for model optimization.
+
+Table 3: Impact of different methods. The check mark indicates the use of the corresponding method.
+
+| A-shift | W-reshape | BitAug | BERT-base | MobileNetV2 | ResNet50 |
+|-|-|-|-|-|-|
+|  |  |  | 82.43 | 66.67 | 72.05 |
+| ✓ |  |  | 84.24 | 68.07 | 75.77 |
+|  | ✓ |  | 83.06 | 67.61 | 75.01 |
+|  |  | ✓ | 85.10 | 68.13 | 75.65 |
+| ✓ | ✓ |  | 86.12 | 69.73 | 76.02 |
+| ✓ | ✓ | ✓ | 87.67 | 70.46 | 76.27 |
+
+## 6 IMC SYSTEM PERFORMANCE
+
+In this section, we analyze the value of our proposed approaches in handling ADC quantization. Generally, scaling up ADC bit precision brings costs in hardware energy, as shown in Fig. 5 based on a survey of design reported in the literature (Murmann). The ADC energy cost scales considerably at higher precision, and thus directly affects the energy efficiency advantages of IMC systems. Fig. 5 further depicts the IMC energy efficiency for various ADC precisions, compared to fully-optimized digital accelerators. The IMC efficiency is modeled from (Lee et al., 2021a), while the digital-accelerator energy is from (Jouppi et al., 2017), both in the same silicon technology (28nm CMOS), measured as the number of Tera operations per second per Watt (TOPS/W) for 8-bit activation and weight computations. While IMC demonstrates a dramatic energy efficiency advantage over digital accelerators, the advantage drops significantly as ADC precision is increased. With the observed trade-off between conventional QAT-based inference accuracy and energy efficiency, our proposed algorithmic RAOQ approach enables significant improvement in this trade-off.
+
+![Figure 5: Energy efficiency of IMC. The plot shows Energy (pJ) on the left y-axis (log scale from 10^-3 to 10^0) and TOPS/W on the right y-axis (log scale from 10^-3 to 10^0) versus ADC bit precision (6 to 16). A solid blue line represents IMC, which starts at approximately 10^-1 pJ for 6-bit precision and decreases to about 10^-2 pJ at 16-bit precision. A dashed red line represents Digital accelerators, which remains constant at approximately 10^-1 pJ across all precisions. An inset graph shows a zoomed-in view of the IMC energy efficiency curve between 6 and 15-bit precision, highlighting the sharp decrease in energy as precision increases.](e8ff6e66c77a8e96203c9f8db8f0986f_img.jpg)
+
+Figure 5: Energy efficiency of IMC. The plot shows Energy (pJ) on the left y-axis (log scale from 10^-3 to 10^0) and TOPS/W on the right y-axis (log scale from 10^-3 to 10^0) versus ADC bit precision (6 to 16). A solid blue line represents IMC, which starts at approximately 10^-1 pJ for 6-bit precision and decreases to about 10^-2 pJ at 16-bit precision. A dashed red line represents Digital accelerators, which remains constant at approximately 10^-1 pJ across all precisions. An inset graph shows a zoomed-in view of the IMC energy efficiency curve between 6 and 15-bit precision, highlighting the sharp decrease in energy as precision increases.
+
+Figure 5: Energy efficiency of IMC.
+
+## 7 CONCLUSION
+
+Analog IMC has shown substantial promise to simultaneously enhance compute efficiency and data-movement costs for AI inference. However, the associated ADC quantization restricts the accuracy of SOTA models applied to challenging tasks. While increasing ADC bit precision reduces the effects of quantization, this comes with a significant energy cost. In this work, we propose RAOQ to tackle such quantization. Specifically, we propose W-reshape and A-shift, to maximize the SQNR following ADC quantization via adjusting the statistics of weights and activations. We further propose BitAug to improve the optimization process. Our work has been evaluated on various datasets, models, and bit precisions, achieving consistently high accuracy. The generalizability and robustness of our proposed methods demonstrate the feasibility of applying IMC to challenging AI tasks.
+
+{9}------------------------------------------------
+
+## 8 REPRODUCIBILITY
+
+The detailed training configurations are described in Appendix E, including the training procedure, hyperparameter settings, learning curves, as well as compute resources needed to perform our experiments. The training of each model is described separately for clarity. In Appendix E.4, we provide a code example to implement our proposed RAOQ method, associated with a sample log file of MobileNetV2 training. For readers who are interested in other IMC configurations, we provide studies on different IMC configurations in Appendix D, other than those presented in the main manuscript. All of our proposed methods can be directly applied except that a small adjustment needs to be made for A-shift for different IMC types, as detailed in Appendix B.
+
+## REFERENCES
+
+- Ron Banner, Yury Nahshan, and Daniel Soudry. *Post Training 4-Bit Quantization of Convolutional Networks for Rapid-Deployment*. Curran Associates Inc., Red Hook, NY, USA, 2019.
+- Yoshua Bengio, Nicholas Léonard, and Aaron C. Courville. Estimating or propagating gradients through stochastic neurons for conditional computation. *ArXiv*, abs/1308.3432, 2013.
+- Yash Bhalgat, Jinwon Lee, Markus Nagel, Tijmen Blankevoort, and Nojun Kwak. Lsq+: Improving low-bit quantization through learnable offsets and better initialization. In *Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops*, pp. 696–697, 2020.
+- Han Cai, Chuang Gan, Ji Lin, and Song Han. Network augmentation for tiny deep learning. *arXiv preprint arXiv:2110.08890*, 2021.
+- Jungwook Choi, Swagath Venkataramani, Vijayalakshmi Srinivasan, K. Gopalakrishnan, Zhuo Wang, and Pierce I-Jen Chuang. Accurate and efficient 2-bit quantized neural networks. In *Conference on Machine Learning and Systems*, 2019. URL <https://api.semanticscholar.org/CorpusID:96438794>.
+- Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, et al. Palm: Scaling language modeling with pathways. *arXiv preprint arXiv:2204.02311*, 2022.
+- Peter Deaville, Bonan Zhang, and Naveen Verma. A 22nm 128-kb mram row/column-parallel in-memory computing macro with memory-resistance boosting and multi-column adc readout. In *2022 IEEE Symposium on VLSI Technology and Circuits (VLSI Technology and Circuits)*, pp. 268–269, 2022. doi: 10.1109/VLSITechnologyandCir46769.2022.9830153.
+- Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei. Imagenet: A large-scale hierarchical image database. In *2009 IEEE conference on computer vision and pattern recognition*, pp. 248–255. Ieee, 2009.
+- Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. *arXiv preprint arXiv:1810.04805*, 2018.
+- Qing Dong, Mahmut E. Sinangil, Burak Erbageci, Dar Sun, Win-San Khwa, Hung-Jen Liao, Yih Wang, and Jonathan Chang. A 351tops/w and 372.4gops compute-in-memory sram macro in 7nm finfet cmos for machine-learning applications. In *2020 IEEE International Solid-State Circuits Conference - (ISSCC)*, pp. 242–244, 2020. doi: 10.1109/ISSCC19947.2020.9062985.
+- Stefan Elfwing, Eiji Uchibe, and Kenji Doya. Sigmoid-weighted linear units for neural network function approximation in reinforcement learning. *Neural Networks*, 107:3–11, 2018.
+- Steven K Esser, Jeffrey L McKinstry, Deepika Bablani, Rathinakumar Appuswamy, and Dharmendra S Modha. Learned step size quantization. *arXiv preprint arXiv:1902.08153*, 2019.
+- Sujan Kumar Gonugondla, Charbel Sakr, Hassan Dbouk, and Naresh R Shanbhag. Fundamental limits on energy-delay-accuracy of in-memory architectures in inference applications. *IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems*, 41:3188–3201, 2020.
+
+ Rest of paper (reference and Appendix) is removed.
