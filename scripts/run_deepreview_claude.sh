@@ -10,12 +10,12 @@ export OPENAI_DEFAULT_MODEL="glm-5.1"
 export HARSH_MODEL="claude_sdk:claude-opus-4-7"
 export MERGER_MODEL="claude_sdk:claude-opus-4-7"
 export NEUTRAL_MODEL="deepseek-v4-flash"
-export OUTPUT_CSV="fresh_cal_sonnet.csv"
-export MERGE_LOG="fresh_cal_sonnet.log" 
+export OUTPUT_CSV="fresh_cal_opus.csv"
+export MERGE_LOG="fresh_cal_opus.log" 
 export CONCURRENCY=3
-export MAX_PAPERS=300
+export MAX_PAPERS=100
 export CALIBRATION_SET="deepreview"
-export REVIEWS_DIR="fresh_cal_sonnet"
+export REVIEWS_DIR="fresh_cal_opus"
 
 ollama serve & 
 

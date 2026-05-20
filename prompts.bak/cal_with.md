@@ -10,11 +10,11 @@ How retrieval works:
 
 What to put in your batch of queries:
 - 2-3 queries by the paper's specific strength/weakness patterns. Do NOT restrict by score for these.
-- 2-3 queries that anchor each score band on a topic similar to the paper:
-   - "<topic>" with avg human score >= 8
-   - "<topic>" with avg human score around 5-8
-   - "<topic>" with avg human score 3-5
-   - "<topic>" with avg human score <3
+- 3 queries that anchor each score band on a topic similar to the paper:
+   - "<topic>" with avg human score > 7.5
+   - "<topic>" with avg human score >3.5 and <7.5
+   - "<topic>" with avg human score < 3.5
+  You have to read at least one paper per bin, even if they are not closely related. 
 
   You can pass `low_score` / `high_score` numeric filters to `calibration_search` per-query (see tool schema). Use these exact bands. If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 
