@@ -36,8 +36,8 @@ If after round 2 you still cannot decide between, say, 5.5 and 6.5 because all y
 - Score distribution: extreme scores are rare but valid. If the paper is truly exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
 - Do NOT cluster scores around 5. The score should be relative to retrieval samples, calibrated to where the paper actually sits.
 - The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
-- The nice to have SHOULD be considered as weakness in comparsion
+- The nice-to-have SHOULD be considered as weakness in comparsion
 
 ## Reporting
 
-When reporting your score, list every anchor paper retrieved across all rounds (not just the ones you read in full). For each anchor give the path, its avg human score, the round it came from, and one sentence on how it compares to the paper under review. State the round-1 bracket explicitly, then explain how round 2 (and 3, if used) narrowed it to the final score.
+When reporting your score, list every anchor paper you read and think is relevant. For each anchor, give the path, its average human score, the round it came from, and 3-4 sentences on its strengths and weaknesses that are similar to the current paper, and compare them. 
