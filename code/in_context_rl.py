@@ -11,15 +11,15 @@ from openai import OpenAI
 
 dotenv.load_dotenv("../.env")
 
-REVIEW_DIR = Path("../results/fresh_cal")
-RATINGS_CSV = Path("../datasets/deepreview_13k_train/ratings.csv")
+REVIEW_DIR = Path("../results/test_mini_detail")
+RATINGS_CSV = Path("../../review_agent/iclr2026_new/ratings.csv")
 
 SYSTEM_PROMPT = """You are doing in-context reinforcement learning to learn how to score papers from assisted reviews.
 
 Task:
-- On every turn you receive a paper review written by an assistant reviewer.
+- On every turn you receive a paper review written by an assistant reviewer. The review includes the assistant's own predicted score and decision at the bottom.
 - You must predict the ground-truth average human score for the paper (a number between 1 and 10, on a 0.5 grid).
-- The review itself contains an assistant-predicted score at the very bottom; that prediction may be biased. Use the review CONTENT, not the assistant's score, as your primary signal, but you may use the assistant's score as one input.
+- The assistant's predicted score may be biased. Treat it as one input alongside the review content; learn from the feedback below how much to trust and correct it.
 - After each prediction we will tell you the ground-truth score and the signed error (predicted - ground_truth). Positive error => you over-predicted; negative error => you under-predicted.
 - Use the running history of signed errors to recalibrate your future predictions. The goal is for the absolute error to improve over time.
 
@@ -32,13 +32,12 @@ Output format (strict):
 ... your step-by-step calibration reasoning, referencing prior signed errors and the current review ...
 </reasoning>
 <score>NUMBER</score>
+
+The score included in the review is a good starting point but often not very accurate. 
 """
 
 def load_review(paper_id: str) -> str:
-    text = (REVIEW_DIR / f"{paper_id}.md").read_text(encoding="utf-8")
-    text = re.sub(r"MY FINAL SCORE:\s*<score>[\d.]+</score>", "MY FINAL SCORE: <score>[HIDDEN]</score>", text)
-    text = re.sub(r"MY FINAL DECISION:\s*<decision>[^<]+</decision>", "MY FINAL DECISION: <decision>[HIDDEN]</decision>", text)
-    return text
+    return (REVIEW_DIR / f"{paper_id}.md").read_text(encoding="utf-8")
 
 
 def parse_score(text: str) -> float:
@@ -87,8 +86,10 @@ def main():
     for i, pid in enumerate(paper_ids, 1):
         review = load_review(pid)
         gt = float(df.loc[pid, "avg_score"])
-
-        user_msg = f"Paper {i}/{args.n_steps} (id={pid}).\n\nAssisted review:\n\n{review}\n\nPredict the ground-truth average human score for this paper."
+        if "<score>-100</score>" in review:
+            print(f"[{i}/{args.n_steps}] {pid} has no score in review, skipping")
+            continue
+        user_msg = f"Paper {i}/{args.n_steps} (id={pid}).\n\nAssisted review:\n\n{review}\n\nPredict the ground-truth average human score for this paper.jfierujf"
         messages.append({"role": "user", "content": user_msg})
 
         resp = client.chat.completions.create(
@@ -106,7 +107,7 @@ def main():
         messages.append({"role": "assistant", "content": out})
         messages.append({
             "role": "user",
-            "content": f"Ground-truth score for paper {i} (id={pid}) was {gt:.2f}. Your signed error (pred - gt) was {signed_err:+.2f}. Use this to recalibrate future predictions.",
+            "content": f"Ground-truth score for paper {i} (id={pid}) was {gt:.2f}. Your signed error (pred - gt) was {signed_err:+.2f}. Use this to recalibrate future predictions.jfierujf",
         })
 
     print("\n=== Summary ===")

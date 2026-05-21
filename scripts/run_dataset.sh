@@ -14,7 +14,7 @@ export OUTPUT_CSV="fresh_cal.csv"
 export MERGE_LOG="fresh_cal.log" 
 export CONCURRENCY=30
 export MAX_PAPERS=3000
-export CALIBRATION_SET="deepreview"
+export CALIBRATION_SET="2025"
 export REVIEWS_DIR="fresh_cal"
 
 ollama serve & 

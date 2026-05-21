@@ -1,13 +1,14 @@
-Now I have enough anchors to calibrate. Let me synthesize the final review.
+Now I have a thorough picture. Let me write the consolidated review.
 
 ## Summary
-This paper conducts a thorough re-examination of the ICLR 2025 Oral paper that introduced min-p sampling. Through re-analysis of the original data, extensive hyperparameter-controlled benchmark sweeps (≈6000 A100-hours across 9 models), and investigation of community adoption claims, the authors demonstrate that all four lines of evidence originally offered for min-p's superiority are unsupported. The paper distills six practical lessons for rigorous empirical ML research.
+This paper presents a comprehensive re-examination of the ICLR 2025 Oral paper "Turning Up the Heat: MIN-P Sampling for Creative and Coherent LLM Outputs." Through re-analysis of the original human evaluation data (revealing omitted data, incorrect statistical pooling, and mischaracterized qualitative feedback), an extensive NLP benchmark sweep controlling for hyperparameter tuning volume via a novel Best-of-N methodology, scrutiny of LLM-as-a-Judge evaluations (showing asymmetric hyperparameter tuning and evidence of selective reporting), and documentation of retracted community-adoption claims, the authors demonstrate that the original paper's own evidence invalidates its central claim that min-p sampling is superior. From this case study, the paper distills six concrete, actionable methodological lessons for more rigorous empirical ML research.
 
 ## Strengths
-- **Rigorous re-analysis of human evaluations with corrected statistics (Sec. 2):** The discovery that 1/3 of collected human evaluation scores (for basic sampling) were omitted without justification, combined with a correct statistical re-analysis (Bonferroni correction, Intersection-Union Test, proper visualization with confidence intervals), directly undermines the original paper's central claim. This analysis alone is independently fatal to the original conclusions. Table 1 and Figure 1 provide clear, reproducible evidence.
-- **Novel Best-of-N hyperparameter-controlled benchmark methodology (Sec. 3):** The sweep across 9 models, 4 samplers, 31 temperatures, and multiple hyperparameters employs a subsampling analysis that equalizes hyperparameter tuning volume across methods. This methodology — measuring how maximum performance improves as hyperparameter budget increases — is a genuine methodological contribution that can detect cherry-picking and is reusable beyond this case study. Figures 4 and 5 show min-p does not consistently outperform other samplers under fair comparison.
-- **Multi-pronged, convergent evidence:** The paper does not rely on a single line of attack. It systematically dismantles all four evidence pillars of the original paper: human evaluations (Sec. 2), NLP benchmarks (Sec. 3), LLM-as-a-judge evaluations (Sec. 4), and community adoption claims (Sec. 5). The convergence of independent analyses — omitted data, misapplied statistics, unequal hyperparameter tuning, selective reporting, and unsubstantiated metrics — makes the overall case compelling.
-- **Actionable, empirically grounded lessons (Sec. 6):** The six lessons (fair hyperparameter control, rigorous statistical testing, data transparency, scrutiny of qualitative summaries, methodological clarity, and consistent reporting) flow naturally from the case study findings and are directly useful to reviewers and researchers.
+- **Multi-pronged, independent evidence:** The case against the original paper's claims is built from four independent lines of evidence (human evaluations, NLP benchmarks, LLM-as-a-Judge, community adoption), each analyzed with distinct methodology. Convergence across lines substantially strengthens the conclusion.
+- **Novel Best-of-N methodology for hyperparameter control (Section 3.1):** The subsampling-based analysis that equalizes hyperparameter search volume across samplers is a genuinely novel contribution with applicability beyond this case study. Figures 4–5 show convincingly that min-p's advantage evaporates when search effort is equalized.
+- **Rigorous statistical re-analysis (Section 2.2):** The use of paired one-sided t-tests with Bonferroni correction, plus an Intersection-Union Test, correctly matches the original paper's "consistently outperforms across all settings" claim. Table 1 and Figure 1 present the corrected analysis clearly and convincingly.
+- **Discovery and impact of omitted data (Section 2.1):** The finding that one-third of human evaluation scores (for basic sampling) were excluded without justification, and that including them changes conclusions, is a concrete, reproducible finding that directly undermines the original results.
+- **Actionable, evidence-grounded lessons (Section 6):** The six lessons are each directly tied to a specific failure documented in the case study, making them concrete rather than abstract. The Lesson 1 (control for hyperparameter volume) is particularly valuable and novel in its operationalization.
 
 ## Weaknesses
 
@@ -18,59 +19,62 @@ None.
 None.
 
 ### Minor
-- **GSM8K-only benchmark sweep (Sec. 3):** The original paper reported results on both GSM8K and GPQA, but this re-analysis covers only GSM8K due to compute constraints. The authors acknowledge this limitation in the paper. The omission narrows the benchmark evidence slightly, though the human evaluation re-analysis independently carries the core conclusion, and the scope of the GSM8K sweep (9 models, 31 temperatures, 6 hyperparameters per sampler) remains substantial.
-- **LLM-as-a-judge selective reporting evidence relies on informal communication (Sec. 4.3):** The claim that the higher of two min-p scores and the lower of two top-p scores were reported is supported by a publicly shared Telegram link from the original first author, rather than by a self-contained, independently verifiable source within the paper. While the specific win-rate values are stated (52.01 vs. 50.14 for min-p; 50.07 vs. 50.43 for top-p), the evidential basis is less rigorous than the rest of the paper's analysis. This does not undermine the overall argument but weakens one sub-claim.
+- **NLP sweep limited to GSM8K (Section 3):** The extensive hyperparameter sweep covers only GSM8K CoT, not GPQA (the second benchmark reported in the original paper). The authors acknowledge this is due to compute budget (~6000 A100-hours). While the scale and consistency of the GSM8K results across 9 models and two prompt formats make a reversal on GPQA unlikely, the absence leaves a small residual uncertainty about whether the conclusion fully generalizes. The paper would benefit from a brief qualitative discussion of how likely GPQA results would differ.
+- **Selective-reporting evidence relies on non-archival source (Section 4.3):** The claim that the original paper reported the higher of two scores for min-p and the lower for top-p is serious and central to Lesson 6. The evidence is a Telegram link shared by the original first author. While there is no reason to doubt the claim, the permanence and verifiability of a Telegram link are weaker than an archived repository or screenshot. The authors should ensure this evidence is preserved in an archival form for the final version.
+- **Unsupported assertion in Section 5:** The statement that the camera-ready version's revised community-adoption wording "remains misleading" (line 317) is asserted without elaboration or demonstration of why it is misleading. This slightly weakens an otherwise carefully evidenced section.
 
 ### Trivial
-- The "blueprint" framing in the title and abstract slightly over-promises relative to the paper's actual structure, which is overwhelmingly a detailed case-study critique rather than a generalizable methodological framework. The lessons in Sec. 6 are valuable but are presented as a bullet list rather than a systematic "blueprint."
+- The "still misleading" claim noted above could also be resolved trivially by either providing a brief justification or removing the phrase.
+- Minor presentation: the x-axis labels in Figures 4–5 require the reader to recall that basic sampling saturates early due to having only one hyperparameter; a brief note in the caption would improve readability.
 
 ## Nice-to-Haves
-- **Formalize the NLP benchmark conclusion with a bootstrap or statistical test.** The Best-of-N curves in Figures 4-5 provide qualitative evidence; a formal procedure (e.g., bootstrap estimate of the probability that min-p is best under equal hyperparameter tuning) would make the methodology more directly reusable and the conclusion more statistically grounded.
-- **Make the LLM-as-a-judge selective reporting evidence self-contained.** Including a small table that reproduces the original Table 3(b) alongside the full set of available hyperparameter results, and documenting the exact source (screenshot or archived link), would make this sub-claim irrefutable without relying on external communication.
-- **A concise "what to check" checklist for reviewers and authors** (comparing methods, correcting for multiple comparisons, requiring full data release, etc.) would make the lessons more immediately actionable.
+- Including the originally-flawed low-diversity human evaluation data in the statistical re-analysis (even with a caveat about top-p's poor hyperparameter choice) would close any lingering questions about why those data were sidelined and reinforce the conclusion.
+- A brief discussion of how the Best-of-N analysis assumption of uniform random sampling from a discrete grid relates to real-world practitioner behavior (where prior knowledge may guide hyperparameter choices) would add nuance and preempt potential criticism.
+- Making code/data availability links prominent in the main text (rather than only in the stripped appendix) would strengthen the paper's own transparency message.
 
 ## Removed Points
 These points are flagged to be removed, treat them with caution:
-- *"The paper would benefit from a more detailed account of how the win-rate values were obtained and cross-checked"* — This is partially valid but redundant with the Minor weakness already listed about the informal evidence. Merged.
-- *"Acknowledge the GSM8K-only limitation more explicitly in the body (not just the Discussion)"* — The paper already states "Due to our compute budget, we only evaluated GSM8K CoT" in the body (line ~208). This criticism does not correspond to a real gap in the paper.
+
+- **Harsh critic's concern about restricting to "high-diversity" setting being a limitation:** REMOVED. The paper explicitly justifies this restriction on three grounds (lines 68-69): the original authors' own recommendation, the poor choice of top-p's hyperparameter in low-diversity, and the fact that the high-diversity setting is most favorable to min-p's claimed advantage. This is a conservative test, not a limitation.
+- **Harsh critic's "adversarial tone" of introduction:** REMOVED. This is a subjective stylistic judgment, not a substantive weakness. The paper's tone is factual and measured throughout.
+- **Harsh critic's reproducibility concerns about the critique itself (links in stripped appendix):** REMOVED per hard rule — the appendix was stripped by the parser; the original submission has these.
+- **Strength Finder's generic strengths ("addressed an important problem," "targeted interesting question"):** REMOVED as generic. Kept only concrete, evidence-backed strengths.
+- **Harsh critic's concern about annotation procedure not being described precisely enough (whether blind):** DEMOTED and REMOVED. This is a minor procedural detail that does not affect the core finding.
 
 ## Novel Insights
-Beyond the paper's own contributions, the reviews converge on an insight worth highlighting: this case study demonstrates that even peer-reviewed, high-scoring, Oral-accepted papers can contain multiple compounding evaluation errors (omitted data, uncorrected multiple comparisons, unequal hyperparameter tuning, selective reporting, unverifiable claims) that collectively produce a misleading picture. The fact that these errors span four independent lines of evidence and were not caught during the ICLR review process underscores a systemic gap between the scrutiny applied during review and the scrutiny needed to validate empirical claims. The paper's value lies not just in correcting one result but in making this gap visible and providing concrete tools (the Best-of-N methodology, the statistical testing checklist) to close it.
+The paper's most significant novel insight is operational rather than conceptual: the Best-of-N subsampling methodology for controlling hyperparameter search volume provides a concrete, replicable tool for detecting when a method's reported advantage is an artifact of asymmetric tuning effort rather than genuine superiority. While the principle that "more tuning can create illusory gains" is broadly understood, the paper provides the first systematic method I've seen to quantify and visualize this effect — turning a vague suspicion into a falsifiable test. This methodology is likely to be adopted beyond this case study.
 
 ## Suggestions
-- Consider adding a one-sentence explicit statement in Sec. 3 that GPQA was not re-evaluated due to compute limits, and briefly argue why the GSM8K findings are sufficient (e.g., it was the primary benchmark in the original paper, and the human evaluation re-analysis independently invalidates the core claim).
-- The LLM-as-a-judge section would be strengthened by archiving the Telegram evidence in a persistent, citable form (e.g., a screenshot in the appendix or an archived web link), so future readers can verify the selective reporting claim without relying on ephemeral communication.
+- For the NLP sweep, add a sentence or short paragraph qualitatively discussing why the GSM8K results are unlikely to reverse on GPQA (e.g., the consistency across 9 models and two prompt formats, the fundamental nature of hyperparameter-tuning bias).
+- Either provide a brief justification for why the camera-ready community-adoption wording "remains misleading" or remove the phrase. A single example would suffice.
+- Archive the Telegram evidence (e.g., as a screenshot in a repository) and mention this in the paper for the selective-reporting claim in Section 4.3.
 
 ## Score and Decision
 
-**Calibration anchors used:**
+### Calibration anchors
 
-Round 1 (bracketing):
-- `85X9awoVtv` (2.50) — Data controller auditing; much weaker, not comparable
-- `lvHHWDJCcr` (3.40) — Model selection metrics; weaker, less thorough
-- `x8mr9zGkpr` (3.00) — Dataset complexity vs. hyperparameters; weaker, narrower
-- `sSWGqY2qNJ` (3.33) — Indeterminate probability; not comparable
-- `esh9JYzmTq` (4.67) — Distribution shift in RL; weaker, less significant
-- `50P9TDPEsh` (4.67) — LLM critique ability; different topic
-- `kiwyQsZIGP` (5.00) — Few-shot learning benchmarks; mixed reviews, clarity issues
-- `CHGcP6lVWd` (6.20) — Energy-based AutoEval; overstated claims, mixed reviews
-- `KbetDM33YG` (8.00) — Online GNN evaluation; stronger, more novel method
-- `6s5uXNWGIh` (8.00) — MLE-Bench; different topic (benchmark construction)
-- `PdaPky8MUn` (8.00) — Never Train from Scratch; clean methodological critique with strong novelty
+**Round 1 (bracketing):**
+- `x8mr9zGkpr.md` (3.00): Attributing Model Behavior — weak paper on data complexity. Our paper is substantially stronger.
+- `GbEmJmnQCz.md` (4.40): Is Memorization Actually Necessary — critique of prior work with re-analysis. Our paper is more comprehensive, better evidenced.
+- `55EO8gSCBT.md` (5.50): Experimental Design for Nonstationary Optimization — empirical study of methodology. Our paper has clearer contribution and stronger evidence.
+- `GqI4fTVUXC.md` (6.00): NTK Theory vs Practice — critical empirical examination. Comparable in spirit but our paper is more thorough and has broader lessons.
+- `6s5uXNWGIh.md` (8.00): MLE-Bench — strong original benchmark contribution. Our paper is a critique, not an original resource; sits below this tier.
 
-Round 2 (narrowing):
-- `6z4YKr0GK6` (6.00) — ScienceAgentBench; benchmark paper, different approach
-- `bcynT7s2du` (6.33) — Martingale ICL; theoretical, different topic
-- `jw2fC6REUB` (6.40) — CURIE scientific benchmark; less comparable
-- `E8gYIrbP00` (6.75) — Beyond correlation: human uncertainty in evaluation; related topic, clarity issues, narrower scope
-- `tr0KidwPLc` (7.33) — Evaluating LLMs at instruction following; comparable quality, benchmark construction
-- `Im2neAMlre` (7.33) — One slice is not enough: T2I evaluation; rigorous methodology, metric validity concerns
-- `sKYHBTAxVa` (7.33) — LiveBench; contamination-free benchmark, different topic
-- `KS8mIvetg2` (7.50) — Proving test set contamination; novel audit method, some computational concerns
+**Round 1 bracket: 5.5–7.5**
 
-**Round 1 bracket:** 6.0 – 8.0
+**Round 2 (narrowing):**
+- `fXJCqdUSVG.md` (6.50): On Evaluating Durability of Safeguards — critique paper with case studies and lessons. Our paper is more comprehensive (4 evidence lines vs 2 methods), has novel methodology (Best-of-N), and more actionable lessons.
+- `om5z1n0mXA.md` (6.00): Rethinking Graph Classification Datasets — re-examination of benchmarks. Our paper has stronger evidence and broader implications.
 
-**Round 2 narrowing:** The paper is comparable to "Proving Test Set Contamination" (7.50) in significance and execution quality — both perform rigorous audits of existing practices with novel methodological contributions. It is stronger than "Beyond correlation" (6.75), which had presentation and scope limitations, and stronger than "One slice is not enough" (7.33), which had concerns about metric validity. It sits slightly below "Never Train from Scratch" (8.0), which had greater methodological novelty and more surprising empirical findings. The paper's comprehensive multi-evidence approach and the independent decisiveness of the human evaluation re-analysis place it solidly in the 7.5 range.
+The paper is clearly stronger than the 6.00 anchors and modestly stronger than the 6.50 safeguards paper (more comprehensive, more methodological novelty, more generalizable lessons). It does not reach the 8.0 tier of original resource contributions. Score: **7.0**.
 
-MY FINAL SCORE: <score>7.5</score>
+### Scoring dimensions
+- **Originality:** High for a meta-scientific paper — the Best-of-N methodology is novel, and the comprehensive multi-evidence structure is distinctive.
+- **Importance:** High — exposing flawed methodology in a high-visibility oral paper and providing concrete remedies serves the community.
+- **Claims supported:** Well-supported across four independent lines of evidence. Minor gaps (GPQA, Telegram source) do not undermine the central conclusions.
+- **Soundness of experiments:** Rigorous. Statistical tests are correctly chosen and applied. The NLP sweep is extensive (9 models, ~6000 GPU-hours).
+- **Clarity:** Well-written, well-structured, effective visualizations.
+- **Value to community:** High — the six lessons are actionable and the case study serves as a teachable example for reviewers and researchers.
+
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

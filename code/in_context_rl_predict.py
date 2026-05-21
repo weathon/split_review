@@ -18,10 +18,7 @@ RATINGS_CSV = Path("../datasets/deepreview_13k_test_mini/ratings.csv")
 
 
 def load_review(path: Path) -> str:
-    text = path.read_text(encoding="utf-8")
-    text = re.sub(r"MY FINAL SCORE:\s*<score>[\d.]+</score>", "MY FINAL SCORE: <score>[HIDDEN]</score>", text)
-    text = re.sub(r"MY FINAL DECISION:\s*<decision>[^<]+</decision>", "MY FINAL DECISION: <decision>[HIDDEN]</decision>", text)
-    return text
+    return path.read_text(encoding="utf-8")
 
 
 def parse_score(text: str) -> float:
@@ -83,7 +80,7 @@ def main():
         gt_binary = str(row["gt_binary"]).strip()
 
         review = load_review(rf)
-        user_msg = f"Test paper (id={pid}).\n\nAssisted review:\n\n{review}\n\nPredict the ground-truth average human score for this paper."
+        user_msg = f"Test paper (id={pid}).\n\nAssisted review:\n\n{review}\n\nPredict the ground-truth average human score for this paper.jfierujf"
         messages = prefix_messages + [{"role": "user", "content": user_msg}]
 
         try:

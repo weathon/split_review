@@ -1,0 +1,78 @@
+Now let me do calibration searches.## Summary
+The paper proposes TrojanTO, the first post-training action-level backdoor attack against trajectory-optimization (TO) models (DT, GDT, DC). It combines (1) an empirical study of which factors (target action, trigger dimensions/values, reward manipulation) matter for backdooring TO models, and (2) a three-component method (trajectory filtering, batch poisoning, alternating training) that reaches an average CP of 0.701 across six D4RL tasks at only a 0.3% poisoning rate.
+
+## Strengths
+- Genuine novelty in framing: the paper formalizes a post-training, action-level threat model for TO models that prior work (Baffle/IMC/TrojDRL) does not address (Sections 2 and 3.3). Combined with the practical 0.3% data budget, this is a real conceptual extension rather than a relabeling.
+- Comprehensive empirical study of factors (Section 4 with Tables 1, 2, 3, Figure 1). Showing that target-action choice matters enormously (e.g., Walk: 1.000 ASR for target '1' vs 0.110 for target '0') is a useful diagnostic that motivates evaluating across diverse target types rather than the standard fixed '1'.
+- The headline comparison in Table 4 is anchored across six D4RL tasks × three TO architectures × three target action types averaged over three seeds, and the proposed method beats the stronger of the two baselines (IMC, 0.551 → 0.701 CP) by a non-trivial margin.
+- Component ablations (Table 5) are run across all three model families and demonstrate that removing BP or AT specifically degrades ASR (0.719 → 0.528/0.507) while removing TF or BP degrades BTP (0.914 → 0.850/0.836), giving a clear per-component story.
+- The paper does not stop at a pure attack contribution — it tests persistence (Section 6.3), trigger noise robustness (Section 6.4), and several defenses (Section 6.5, with fine-tuning identified as the most effective), broadening the contribution beyond a single number.
+
+## Weaknesses
+
+### Fatal
+None.
+
+### Major
+- **Loss specification is internally inconsistent between Section 5.2 and Section 5.3.** Section 5.2 closes with "the final objective L is defined as the weighted sum of two components, i.e., L = L_p + λ L_c" (line after Eq. 6). Section 5.3's bi-level objective (Eq. 7) instead has the inner minimization for the model use `λ L_p + (1 − λ) L_c`. These are different combinations with the same symbol λ, and the paper never reconciles them or states which is actually used at training time. Since λ controls the central effectiveness–stealth trade-off the paper claims to balance, this ambiguity directly affects whether a reader can reproduce or interpret the experiments.
+- **The headline comparison against Baffle is between a policy-level attack and an action-level attack on an action-level metric.** Sections 2 and 3.2 explicitly distinguish policy-level objectives (manipulating long-term return) from action-level objectives (forcing a specific action under the trigger), and describe Baffle as policy-level. Reporting Baffle's ASR/CP against TrojanTO and concluding "superior stealth and attack efficiency" (Section 6.1) is an apples-to-oranges comparison: Baffle was not built to optimize the metric on which it is being scored. IMC is a fairer comparator and TrojanTO still beats it (0.701 vs 0.551), so the contribution survives; but the much-emphasized "105% improvement over Baffle" headline rests on a mismatch the paper itself created in Section 2.
+
+### Minor
+- **Section 4.3's "reward manipulation is negligible" generalization is supported in the main text by a single environment × single target type.** Figure 1 covers only Walk with target type '1' — precisely the regime where Table 1 already shows ASR ≈ 1.0, i.e., the backdoor is saturated and reward manipulation has the least room to matter. The conclusion is then used to justify removing reward edits from the entire method. Repeating this study on an unsaturated regime (e.g., 'arithmetic' or 'fixed random' targets, where Table 1 reports ASR ≈ 0.4–0.5) is what the claim actually requires. The paper notes "more results are provided in Appendix K.1," which softens this concern but the main-text evidence as written does not carry the claim.
+- **The trajectory-filtering heuristic ("longer trajectories are more representative of successful behavior," Section 5.1) is locomotion-specific.** It is reasonable for Hopper/HalfCheetah/Walker2d where episode length is a proxy for "did not fall," but AntMaze rewards short trajectories that reach the goal, and Kitchen/Pen have task-specific structure. The ablation in Table 5 averages over all six environments, so the reader cannot see whether TF helps or hurts on the tasks where its premise breaks. A per-task TF column would settle this and is the kind of analysis the paper otherwise does well.
+- **CP=0 entries in Table 4 are aggregated rather than foregrounded.** DT/Walk for Baffle shows mean ASR=0.328 and mean BTP=0.581 but mean CP=0.000. The footnote explains CP is computed per-run before averaging, which implies all three seeds produced CP=0 (i.e., one of ASR/BTP was zero in each individual run). That is a strong negative finding about Baffle on this cell and deserves to be discussed, not averaged into "0.342 → 0.701".
+- **Unexplained empirical anomalies in Section 4.2.** Table 2 shows that using all dimensions as the trigger yields ASR=0.000 on both Half and Walk — a stronger trigger that destroys the backdoor. This is reported but not explained; in a paper whose contribution rests on understanding the trigger–target coupling, the mechanism by which "more is worse" matters.
+- **The "halfway switch" design choice in Section 5.3 is unjustified.** "After expending half of the designated training budget, the optimization exclusively focuses on updating the model parameters." No principled motivation is given, and no ablation varies this switchpoint. This sits squarely inside the named AT component and is the kind of design knob the otherwise-thorough ablation table should isolate.
+
+### Trivial
+- The Section 6.3 narrative claims "minor degradation as persistence duration increases," but Table 6 is not monotone: for Hopper, k=15 (0.880) > k=10 (0.847); for Walk, k=15 (0.973) > k=5 (0.876). The point about the context-window bound is correct, but the "minor monotone degradation" framing does not match the data.
+- Tables 6 and 7 report ±0.000 on the majority of entries across three seeds; either rounding is too aggressive or the metric is effectively deterministic at that precision. Reporting one more decimal place or a clearer note on rounding would help.
+
+## Nice-to-Haves
+- Break out Table 4 by target type (per '1', 'fixed random', 'arithmetic') so the reader can see whether the improvement over IMC is driven by saturating-easy targets or genuinely holds on the harder ones — Table 1 makes clear the regimes are qualitatively different.
+- Diagrammatic mapping from Section 4 findings to the three TrojanTO components (Section 4.1 → diversity of evaluation targets; Section 4.2 → trigger learning in AT; Section 4.3 → omission of reward edits in BP). This would frame the method as a principled response to the empirical study rather than ablation discoveries plus an algorithm.
+- A per-task TF column in the ablation (Table 5) for AntMaze/Kitchen/Pen specifically, to address the heuristic-mismatch concern above.
+- Make the adversary's compute budget (gradient steps on the trigger via MI-FGSM, alternating iterations, etc.) explicit alongside the 0.3% data-budget figure, so "stealthiness" is measured on all relevant axes.
+
+## Removed Points
+These points are flagged to be removed, treat them with caution.
+
+- *"The ASR threshold ε is never specified in the main text."* Section 3.4 defines ε but the value is given in Appendix I (per the "Implementation details are provided in Appendix I" pointer in Section 4 and the reproducibility statement). Appendix content is stripped by the parser; per the hard rules, this is not a paper-side defect and should not weigh against the work. It is, however, worth noting in a rebuttal that ε belongs in the main text given how much depends on it.
+- *"The paper's 'broad applicability to DT, GDT, and DC' overstates: these are three sibling architectures from the same DT family."* This is a framing nit rather than a substantive defect; the paper does test three distinct architectures with different inductive biases (transformer, graph transformer, convolutional), which is the standard breadth in this subfield.
+- *"The adversary's observation-perturbation capability presumes pixel/sensor-level access that should be made explicit."* The threat model in Section 3.3 already states observation manipulation explicitly; whether such access is physically realistic is outside the paper's stated scope.
+- *Strength: "thorough defense evaluation across multiple methods."* Most defense detail is in the appendix; in the main text Section 6.5 gives only a one-paragraph summary, so this is not a load-bearing strength of the main paper.
+- *Strength: "investigates an important and underexplored security threat."* Generic; not retained as a numbered strength.
+
+## Novel Insights
+The most interesting cross-cutting observation surfaced by the reviews is the structural one: in continuous action spaces, the choice of target action governs the *difficulty* of the backdoor, not just its effect — boundary actions are essentially free, while interior or arithmetic targets are much harder. Combined with Table 2 showing that an "everywhere" trigger destroys the signal, this hints at a non-trivial geometric story about which (state-dimension, target-action) pairs are actually learnable backdoors in a sequence model. The paper does not develop this beyond the empirical tables, but it is a real contribution to how the community should evaluate action-level backdoors going forward. Otherwise: None beyond the paper's own contributions.
+
+## Suggestions
+- Reconcile Eq. 6's `L = L_p + λ L_c` with Eq. 7's `λ L_p + (1 − λ) L_c` — pick one parameterization, redefine λ once, and update both sections.
+- Move the definition of ε into Section 3.4 (or at least surface its value and rationale there), since every ASR number depends on it.
+- Add a properly action-level Baffle variant (or another non-trivial action-level data-poisoning baseline) so that the Section 6.1 headline is not comparing across attack objectives.
+- Repeat the Section 4.3 reward-manipulation study on at least one non-saturated target ('arithmetic' or 'fixed random') in the main text.
+- Report Table 4 split by target type, and report per-task TF ablations to address the AntMaze/Kitchen/Pen concern about the length heuristic.
+- Foreground rather than absorb the CP=0 cells: a sentence acknowledging that Baffle catastrophically fails on DT/Walk would make the comparison more credible, not less.
+
+## Evaluation Axes
+- **Originality.** Real. Post-training, low-budget action-level backdoors against TO models do not appear to have been formalized before; the threat-model taxonomy (pre-/during-/post-training) in Section 3.3 is a useful framing.
+- **Importance.** Moderate-to-high. TO models are increasingly used in embodied and offline-RL settings, and "modify the released checkpoint" is a more realistic adversary than "control the entire training loop."
+- **Claim support.** Mostly supported but with rough edges: the central numerical claim depends on a baseline (Baffle) trained for a different metric, and the "reward manipulation is unnecessary" claim is anchored to a saturated experiment in the main text. Neither sinks the paper; both should be tightened.
+- **Soundness of experiments.** Generally sound — six tasks, three architectures, three seeds, three target types — but the loss-equation inconsistency and the unjustified halfway switch in AT are concrete soundness gaps inside the proposed method itself.
+- **Clarity.** Generally clear; the framework figure (Fig. 2), the metric definitions, and the threat model are well presented. The biggest clarity defect is the λ inconsistency.
+- **Value to community.** Useful both as an attack contribution and as the Section 4 diagnostic that future action-level backdoor work in continuous spaces should evaluate across diverse target actions, not just '1'.
+
+## Score and Decision
+
+Anchors consulted:
+
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/em0gAL8fbK.md` (Temporal-logic multi-vehicle backdoor on offline RL AD, avg 4.0, Reject, Round 1). Similar in framing — backdoor attack on offline-RL agents, multi-trigger study — but narrower (one AD setting), with a much higher poisoning rate (~15%) and a less compelling threat-model argument. TrojanTO is broader (6 D4RL tasks × 3 TO architectures), more stealthy (0.3%), and has a clearer baseline comparison via IMC. TrojanTO is meaningfully stronger.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/UhW2wA1pRV.md` (Robust DRL against behavior manipulation, avg 5.5, Reject, Round 1). Similar empirical-attack/defense scope for RL; weaknesses listed by reviewers (limited demos analysis, missing related work, motivation gaps) are comparable in nature and weight to those for TrojanTO (notational gap in λ, baseline asymmetry, saturated-regime experiment). TrojanTO has a more clearly novel threat model (post-training on TO models) and broader empirical eval. Roughly on par to slightly above.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/nhub8Pjp7y.md` (PETA — Trojan attacks on PEFT via bi-level optimization, avg 5.75, Reject, Round 2). Most structurally similar: a post-training backdoor that uses bi-level optimization to balance attack and clean performance. Reviewers there valued the practical setting but penalized limited technical novelty (bi-level optimization itself is borrowed) and old baselines. TrojanTO faces a parallel critique (bi-level borrowed from IMC; Baffle is the main old baseline; some loss notation muddle), but compensates with a clearer "first-in-domain" claim (TO models) and a more comprehensive empirical study. TrojanTO is roughly comparable, slightly stronger on breadth.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/vRyp2dhEQp.md` (Efficient backdoor attacks in real-world data-constrained scenarios, avg 5.75, Accept, Round 2). Comparable scope and similar "novel threat-model + method tuned for it" structure. The reviewer split (3, 6, 6, 8) shows the same pattern likely to apply to TrojanTO — disagreement on novelty, agreement that the empirical case is reasonable. About on par.
+- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/S1Bv3068Xt.md` (BALD: backdoor attacks against embodied LLM-based decision making, avg 6.25, Accept, Round 1). Broader scope (three attack mechanisms, multiple LLMs, two domains) than TrojanTO; the accepted reviews emphasized breadth and clear methodology. TrojanTO is narrower in mechanism diversity but deeper on a single mechanism. Slightly weaker than BALD overall.
+
+Bracket from Round 1: roughly 4.5–6.0. Round 2 narrowing places the paper close to the 5.75 cluster (PETA, Efficient Backdoor Attacks, Universal Jailbreak Backdoors), with the structural baseline-asymmetry and loss-notation issues pulling it slightly below the accepted members of that cluster. Final placement: **5.5**.
+
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

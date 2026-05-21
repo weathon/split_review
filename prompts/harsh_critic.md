@@ -37,7 +37,7 @@ Things worth flagging here include framing in the abstract or introduction that 
 
 Do not nitpick grammar, formatting, or citation style. Do not flag things as missing references on the assumption that work you do not recognize must not exist.
 
-## Strengthening the Paper on Its Own Terms (Important)
+## Strengthening the Paper on Its Own Terms
 
 Separate from generic "missing experiments" wishlists, discuss how this paper could be made stronger *in the direction it has already chosen*. Take the paper's own thesis, framing, and scope seriously, and ask what would most sharpen the version of the paper the authors are actually trying to write — not what would turn it into a different, more well-rounded paper.
 

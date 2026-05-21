@@ -3,7 +3,7 @@
 All these rules can be one time override by user.
 
 ## Python Runtime
-Always use the conda env called `neg`. Do not create new envs, do not `pip install` into base, do not switch interpreters.
+Always use the conda env called `neg`. Do not create new envs, do not `pip install` into base, do not switch interpreters. (note: this is in /home/wg25r/miniconda/envs/neg and NOT /home/wg25r/miniconda3)
 
 Use .env for API keys.
 
@@ -17,6 +17,8 @@ This is research code, NOT a production system. Optimize for **iteration speed a
 - Hard-coded paths, top-level side-effecting code, notebook-style `# %%` cells, and inline `print()` debugging are all idiomatic. Match the existing style of the repo.
 - Save artifacts and write files freely. Disk is cheap; recomputing expensive runs is not.
 - When in doubt, do the simplest thing that works for the next experiment, not the thing that would survive a code review at a SaaS company.
+- Do not use ("","","") to concat string, use """xyz"""
+- Do not make ANY assumptions, ask the user for any decisions
 
 ## Scope discipline
 
@@ -88,3 +90,7 @@ If you're orchestrating a multi-stage pipeline:
 - If a stage errors, **either retry or raise**. Never return empty and let downstream stages consume the empty result as if it were valid output.
 - Every external call (API, subprocess, file I/O at boundaries) should log enough that a failure is debuggable after the fact. Not structured logging, just a `print` with the input summary and the error.
 - Don't catch broad `Exception` to keep the loop going. If you don't know what failure you're handling, you're hiding it.
+
+
+## Cost
+Each paper review with DeepSeek API is about 0.05 USD, with GPT is about 1 USD, each CSPaper call is about 5 USD. Think and verify before you run your code. 
