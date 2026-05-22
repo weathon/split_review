@@ -76,3 +76,55 @@ DeepSeek flash 的相关性不差：全量集合 Spearman raw 是 0.6242，高�
 Opus 的核心优势不是 Pearson，而是排序、校准和决策更稳。在全量集合上 Opus Spearman raw 是 0.6707，MAE 是 1.1913，bias 只有 +0.4658，decision accuracy 是 75.3%。在 249 篇重叠集合上，Opus 也比 DeepSeek flash 有更高 Spearman、更低 MAE、更低 bias、更高 AUROC 和更高 decision accuracy。
 
 所以目前判断是：DeepSeek flash 有一定 ranking 能力，问题主要不是完全不会评，而是分数尺度和接受倾向偏高；这个 bias 可以后处理校准，但 review 内容质量和最终 decision 仍然需要结合 full review 文件逐篇看。
+
+## Paired bootstrap 显著性
+
+在 Opus 和 DeepSeek flash 的 249 篇重叠集合上，按 paper 成对 bootstrap 20,000 次，比较 Opus - DeepSeek 的差值：
+
+| 指标 | 差值 | 95% CI | 结论 |
+|---|---:|---:|---|
+| Spearman | +0.0365 | [-0.0372, +0.1108] | 不显著 |
+| Pearson | -0.0019 | [-0.1025, +0.0924] | 不显著 |
+| AUROC | +0.0239 | [-0.0272, +0.0749] | 不显著 |
+| Decision acc | +0.0683 | [-0.0080, +0.1446] | 边缘趋势 |
+| MAE | -0.3927 | [-0.5066, -0.2730] | Opus 显著更好 |
+| absolute bias | -0.7833 | [-0.9048, -0.6711] | Opus 显著更好 |
+
+因此，Opus 的 raw 优势主要显著体现在 calibration / MAE / bias。Spearman 和 AUROC 虽然更高，但这个 overlap 样本下不能说显著。
+
+## 线性校准后的 MAE
+
+在同一 249 篇 overlap 上做线性回归校准 `pred_score -> gt_avg_score`：
+
+| 系统 | raw MAE | in-sample calibrated MAE | leave-one-out calibrated MAE |
+|---|---:|---:|---:|
+| Opus | 1.1941 | 1.1101 | 1.1211 |
+| DeepSeek flash | 1.5867 | 1.1614 | 1.1703 |
+
+校准公式：
+
+- Opus: `calibrated = 0.9851 * pred_score - 0.3931`
+- DeepSeek flash: `calibrated = 1.2388 * pred_score - 2.5775`
+
+校准后，DeepSeek flash 的 MAE 从 1.5867 降到 1.1703，和 Opus 的 1.1211 很接近。说明 DeepSeek flash 的主要 raw 问题是高分 bias / scale，而不是完全没有 ranking signal。
+
+## Human one-vs-rest 对比
+
+在同一 249 篇 overlap 上，human one-vs-rest baseline：
+
+| Human baseline | Spearman | Pearson | MAE |
+|---|---:|---:|---:|
+| one-vs-rest | 0.5955 | 0.6251 | 1.5258 |
+
+paired bootstrap vs human one-vs-rest：
+
+| 系统 | 指标 | model-human diff | 95% CI | 结论 |
+|---|---|---:|---:|---|
+| Opus | Spearman | +0.0783 | [+0.0018, +0.1584] | 勉强显著更高 |
+| DeepSeek flash | Spearman | +0.0418 | [-0.0381, +0.1254] | 不显著 |
+| Opus | raw MAE | -0.3317 | [-0.4880, -0.1733] | 显著更好 |
+| DeepSeek flash | raw MAE | +0.0609 | [-0.1191, +0.2442] | 不显著 |
+| Opus | LOO calibrated MAE | -0.4047 | [-0.5579, -0.2489] | 显著更好 |
+| DeepSeek flash | LOO calibrated MAE | -0.3555 | [-0.5073, -0.2000] | 显著更好 |
+
+最终读法：Opus 和 DeepSeek flash 的 ranking 都在 human one-vs-rest 附近或更高；只有 Opus 的 Spearman 勉强显著高于 human。线性校准后，两者 MAE 都显著好于 human one-vs-rest。
