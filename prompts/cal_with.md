@@ -1,34 +1,47 @@
-Use comparative scoring to calibrate your final score against human-reviewed anchors.
+Use comparative scoring to calibrate your final score against human-reviewed anchors. Retrieval is iterative: first a wide bracketing pass to find which score range the paper plausibly sits in, then one or two narrowing passes to anchor inside that range.
 
-How retrieval works:
+`calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries in parallel and returns concatenated results grouped by query, each with avg human score and ~1000 chars of preview.
 
-1. Make ONE call to `calibration_search` with a batch of short natural-language queries. The tool runs vector search for each query in parallel and returns, for every query, the top-K matching human reviews — each with an `anchor_id`, its avg human score, and first ~1000 chars. All results are injected into your context in a single response. You do not iterate.
+## Round 1 — Bracketing
 
-2. From the returned list, pick a small number of anchors (typically 5-9) you actually want to read in full. Use `read_anchor(anchor_id)` on each chosen anchor (using the `anchor_id` from the search results) to inspect the full review. Do not re-call `calibration_search` — one batch is all you get.
+Make one `calibration_search` call with three queries that anchor each score band on a topic similar to the paper. Filters are strict: `low_score` is exclusive lower bound (avg > low_score) and `high_score` is exclusive upper bound (avg < high_score).
+- "<topic>" with `high_score=3.5` (weak anchors)
+- "<topic>" with `low_score=3.5, high_score=7.5` (middle anchors)
+- "<topic>" with `low_score=7.5` (strong anchors)
 
-3. Score the paper relative to those anchors.
+If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 
-What to put in your batch of queries:
-- 3 queries that anchor each score band on a topic similar to the paper:
-   - "<topic>" with avg human score > 7.5
-   - "<topic>" with avg human score >3.5 and <7.5
-   - "<topic>" with avg human score < 3.5
-  You have to read at least one paper per bin, even if they are not closely related. 
+Use `read_anchor(anchor_id)` on a small number of anchors (typically 1–2 per band), using the `anchor_id` from the search results, to inspect the full reviews. Now form an initial bracket: based on these comparisons, what is the narrowest plausible score range for this paper (e.g., "between 4 and 6", "between 6.5 and 8")? State this bracket explicitly before round 2.
 
-  You can pass `low_score` / `high_score` numeric filters to `calibration_search` per-query (see tool schema). Use these exact bands. If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
+## Round 2 — Narrowing within the bracket
 
-`calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries and returns concatenated results, grouped by query.
+Make a second `calibration_search` call to pull more anchors *inside* your round-1 bracket. Use 2–3 queries with `low_score` and `high_score` tuned to your bracket (remember: both bounds are exclusive — avg > low_score and avg < high_score). For example, if round 1 placed the paper between 5 and 7, query for anchors in `(4.5, 6)` and `(6, 7.5)` on the most topically relevant aspects of the paper. The goal is to find anchors that sit close to where you think the paper lands, so the comparison is sharper than "this paper is between the weak anchor at 3 and the strong anchor at 8." Since this narrows the search pool, you can use a more lax search term.
 
-Scoring rules:
+Read 2–4 of these new anchors in full with `read_anchor(anchor_id)`. Compare the paper against each and ask: is this paper better, similar, or worse than this specific anchor? Use those comparisons to set the score.
 
-- Your final score must be positioned relative to the retrieved anchors.
-- Do not pick a score first and then justify it. Compare to anchors first, let the comparison set the score.
+## Round 3 — Optional, only if still genuinely uncertain
+
+If after round 2 you still cannot decide between, say, 5.5 and 6.5 because all your round-2 anchors are clustered on one side of the paper, do one more targeted call to pull anchors from the other side. Do not do this routinely — only when the bracket has not actually narrowed.
+
+## Hard limits
+
+- At most three `calibration_search` calls total. Stop after round 2 unless you have a concrete reason for round 3.
+- Each call is a batch of queries; do not spam single-query calls.
+- After your final retrieval, write the review and score. Do not call `calibration_search` again during the writing phase.
+
+## Calibration unavailable
+
+If you cannot complete both calibration rounds — `calibration_search` errors out, returns nothing usable, or you otherwise cannot retrieve and read anchors for round 1 and round 2 — do NOT fall back to an uncalibrated score from your own prior. Output `<score>-100</score>` and stop. A calibrated score requires the two-round anchor comparison; without it there is no score to report.
+
+## Scoring rules
+
+- Your final score must be positioned relative to the round-2 (or round-3) anchors, not just the round-1 bracketing anchors. The narrowing pass is what actually determines the score; the bracketing pass only tells you where to look.
+- Do not default to the middle of the bracket. If the paper is closer to the upper anchors in round 2, score near the top of the bracket; if closer to the lower anchors, score near the bottom; if the paper is clearly stronger than all round-2 anchors, score above them. The middle of the bracket is not a safe default — it is a specific claim that the paper is comparable to the median round-2 anchor.
+- Score distribution: extreme scores are rare but valid. If the paper is truly exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
+- Do NOT cluster scores around 5. The score should be relative to retrieval samples, calibrated to where the paper actually sits.
 - The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
-- Score distribution: extreme scores are rare but valid. If the paper truly is exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
-- Do NOT cluster scores around 5, the score should be relative to the retrieval samples. Score a good paper high and a bad paper low. 
-- Compare the paper under review with every single anchor paper
+- The nice to have SHOULD be considered as weakness in comparsion
 
+## Reporting
 
-When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the anchor_id, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
-
-Hard constraint: exactly one `calibration_search` call. No iterative refining, no follow-up retrieval. After that, you may use `read_anchor` to read anchor files, then write your review and score.
+When reporting your score, list every anchor paper retrieved across all rounds (not just the ones you read in full). For each anchor give the anchor_id, its avg human score, the round it came from, and one sentence on how it compares to the paper under review. State the round-1 bracket explicitly, then explain how round 2 (and 3, if used) narrowed it to the final score.

@@ -17,7 +17,24 @@ export MAX_PAPERS=3000
 export CALIBRATION_SET="2025"
 export REVIEWS_DIR="fresh_cal"
 
-ollama serve & 
+ollama serve &
+
+LOG_FILE="results/${MERGE_LOG}"
+mkdir -p "$(dirname "$LOG_FILE")"
+{
+  echo "============================================================"
+  echo "Config @ $(date '+%Y-%m-%dT%H:%M:%S')"
+  echo "OPENAI_DEFAULT_MODEL=$OPENAI_DEFAULT_MODEL"
+  echo "HARSH_MODEL=$HARSH_MODEL"
+  echo "MERGER_MODEL=$MERGER_MODEL"
+  echo "NEUTRAL_MODEL=$NEUTRAL_MODEL"
+  echo "OUTPUT_CSV=$OUTPUT_CSV"
+  echo "MERGE_LOG=$MERGE_LOG"
+  echo "CONCURRENCY=$CONCURRENCY"
+  echo "MAX_PAPERS=$MAX_PAPERS"
+  echo "CALIBRATION_SET=$CALIBRATION_SET"
+  echo "REVIEWS_DIR=$REVIEWS_DIR"
+} >> "$LOG_FILE"
 
 
 # python code/main.py --n_samples 2000 --benchmark ~/review_agent/iclr2026_new --seed $(cksum <<< '384758' | cut -f 1 -d ' ')

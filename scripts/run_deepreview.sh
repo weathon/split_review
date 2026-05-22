@@ -46,7 +46,7 @@ export OPENAI_DEFAULT_MODEL="glm-5.1"
 export HARSH_MODEL="deepseek-v4-flash"
 export MERGER_MODEL="deepseek-v4-flash"
 export NEUTRAL_MODEL="deepseek-v4-flash"
-export SWEEP_NAME="original_nocal"
+export SWEEP_NAME="final_deepreview_cal"
 export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
 export MERGE_LOG="${SWEEP_NAME}/merge.log" 
 export CONCURRENCY="${CONCURRENCY:-50}"
@@ -56,7 +56,26 @@ export CALIBRATION_SET="deepreview"
 export PAPERS_DIR="$HOME/review_agent/iclr2026_new/papers"
 export REVIEWS_DIR="${SWEEP_NAME}/reviews"
 
-/home/wg25r/miniconda/envs/neg/bin/python code/main.py --n_samples "$MAX_PAPERS" --no_cal --benchmark ~/review_agent/iclr2026_new --seed $(cksum <<< '384758' | cut -f 1 -d ' ')
+LOG_FILE="results/${MERGE_LOG}"
+mkdir -p "$(dirname "$LOG_FILE")"
+{
+  echo "============================================================"
+  echo "Config @ $(date '+%Y-%m-%dT%H:%M:%S')"
+  echo "OPENAI_DEFAULT_MODEL=$OPENAI_DEFAULT_MODEL"
+  echo "HARSH_MODEL=$HARSH_MODEL"
+  echo "MERGER_MODEL=$MERGER_MODEL"
+  echo "NEUTRAL_MODEL=$NEUTRAL_MODEL"
+  echo "SWEEP_NAME=$SWEEP_NAME"
+  echo "OUTPUT_CSV=$OUTPUT_CSV"
+  echo "MERGE_LOG=$MERGE_LOG"
+  echo "CONCURRENCY=$CONCURRENCY"
+  echo "MAX_PAPERS=$MAX_PAPERS"
+  echo "CALIBRATION_SET=$CALIBRATION_SET"
+  echo "PAPERS_DIR=$PAPERS_DIR"
+  echo "REVIEWS_DIR=$REVIEWS_DIR"
+} >> "$LOG_FILE"
+
+/home/wg25r/miniconda/envs/neg/bin/python code/main.py --n_samples "$MAX_PAPERS"  --benchmark ~/review_agent/iclr2026_new --seed $(cksum <<< '384758' | cut -f 1 -d ' ')
 # use some test as training
 # python code/main.py --n_samples 2000 --benchmark datasets/deepreview_13k_train/ --no_cal --include_cal_papers --seed $(cksum <<< '2343' | cut -f 1 -d ' ')
 # python code/main.py --n_samples 500 --benchmark datasets/deepreview_13k_test_uniform --seed $(cksum <<< '2343' | cut -f 1 -d ' ')

@@ -38,8 +38,8 @@ weave.init("openai-agents")
 from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
 from agents.model_settings import ModelSettings
 
-_MODEL_SETTINGS = ModelSettings(extra_body={})
-# _MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["deepseek"]}, "effort": "medium"})
+# _MODEL_SETTINGS = ModelSettings(extra_body={})
+_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["deepseek"]}, "effort": "medium"})
 import dotenv
 dotenv.load_dotenv()
 os.environ["OPENAI_DEFAULT_MODEL"] = os.getenv("OPENAI_DEFAULT_MODEL", "z-ai/glm-5.1")
@@ -389,7 +389,7 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
         extractor_resp = await custom_client.chat.completions.create(
             model="deepseek/deepseek-v4-flash",
             messages=[
-                {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text."},
+                {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text. If the review contains no numeric score, output <score>-100</score>."},
                 {"role": "user", "content": merged_review},
             ],
             extra_body={"reasoning": {"enabled": False}},

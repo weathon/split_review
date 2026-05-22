@@ -21,7 +21,7 @@ async def extract(review_text: str) -> tuple[float | None, str | None]:
     resp = await client.chat.completions.create(
         model="deepseek/deepseek-v4-flash",
         messages=[
-            {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text."},
+            {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text. If the review contains no numeric score, output <score>-100</score>."},
             {"role": "user", "content": review_text},
         ],
         extra_body={"reasoning": {"enabled": False}},

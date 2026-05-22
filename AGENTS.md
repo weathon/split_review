@@ -72,6 +72,7 @@ The user needs to know when their input was modified before being processed. Lou
 ## Don't trust git or mtimes for state
 
 - `git log` / `git show` / commit timestamps describe history, not what's on disk now. To know what a script does, read the script. To know what a result file contains, `grep` or load it.
+- Do not infer which code/prompt version produced a run from a commit alone. Experiment directories, prompts, scripts, logs, and result files are often not synced snapshots; different files may come from different times or manual edits. Judge a run by the actual result files and logs that were written for that run.
 - Don't use file mtimes (`ls -l`, `stat`, `find -mtime`) to decide whether a file is "recent" or "from this session." Editor saves, reruns, and `touch` update mtimes for unrelated reasons. Judge by contents.
 
 ## Communication

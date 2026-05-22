@@ -1,76 +1,95 @@
-Now let me do calibration searches.Calibration search is unavailable due to credit issues. I'll proceed with the review based on my analysis of the paper and standard conference review calibration.
-
 ## Summary
-The paper proposes the **Agent GPA (Goal-Plan-Action) framework** for evaluating LLM agents, decomposing evaluation into five core metrics (Goal Fulfillment, Logical Consistency, Execution Efficiency, Plan Quality, Plan Adherence) plus two auxiliary tool-related judges (Tool Selection, Tool Calling). Each is implemented as a custom-prompted LLM-as-judge with few-shot calibration, and validated on TRAIL/GAIA against TRAIL's baseline judge, an internal data-agent dataset (n=17), and a TRAIL/SWE-bench transfer test with GEPA prompt optimization. The framework reports 95% error coverage and 86% localization on TRAIL/GAIA vs. ~55%/49% for the TRAIL baseline.
+The paper proposes the **Agent GPA (Goal-Plan-Action) framework** for evaluating LLM agents, decomposing evaluation into specialized LLM-judge metrics (Goal Fulfillment, Logical Consistency, Execution Efficiency, Plan Quality, Plan Adherence, plus Tool Selection/Tool Calling). It validates the framework on TRAIL/GAIA (148 traces, 570 annotated errors), an internal ANON-Data-Agent (17 traces), and a preliminary TRAIL/SWE-bench study, including a GEPA prompt-optimization analysis.
 
 ## Strengths
-- **Clear, usable conceptual decomposition.** Sec. 3 derives judges from the Goal/Plan/Action Venn diagram in a way that is intuitive and produces six distinct measurement instruments with documented prompts (Fig. 1, Appendix B).
-- **Substantial empirical lift on the main benchmark.** Table 2 shows GPA covers 267/281 (95%) of TRAIL/GAIA test errors vs. 151–154/281 (~54%) for the TRAIL baseline, and Table 5 shows localization 241/281 (86%) vs. 87–138/281 (31–49%). Even granting the methodological caveats below, the gap is large and reproducible enough to be informative.
-- **Per-judge profiles are differentiated and interpretable.** Table 3 shows TC reaching F1 > 0.92 with precision 0.88; TS as a high-recall (0.97) specialist; LC, EE intermediate. This supports the paper's framing of judges as occupying distinct precision-recall niches.
-- **Reliability is measured, not asserted.** Table 7 reports Krippendorff's α over 5 runs on 59 traces, with five of six judges above 0.7 (EE: 0.934, TS: 0.907, TC: 0.878). This is uncommon rigor for LLM-as-judge papers.
-- **Cross-domain transfer with GEPA.** Tables 8–9 show GEPA-optimized LC recall improves from 28.8% to 75.3% on TRAIL/SWE-bench, a non-trivial generalization signal for a different agent architecture and task family.
+- **Substantial recall and localization improvements over a monolithic baseline judge.** Table 2 shows GPA judges collectively flag 95.0% (267/281) of TRAIL-annotated errors vs. 54.8% (154/281) for the TRAIL judge with control flow; Table 5 shows 85.8% localization vs. 49.1% (with control flow). High-impact errors are captured at 100% / 91.5% respectively.
+- **Stability is empirically measured.** Table 7 reports Krippendorff's α > 0.7 on 5 of 6 metrics across 5 independent runs (EE α = 0.934, TS α = 0.907), and Figure 2 reports a Semantic Consistency Index over rationales — uncommon rigor for an LLM-judge paper.
+- **Concrete demonstration of prompt-optimization transfer (GEPA).** On TRAIL/SWE-bench (Table 9), GEPA-optimized prompts raise LC recall from 28.8% → 75.3% and TC recall from 60.4% → 77.1% without manual retuning, providing real (if narrow) evidence of cross-domain transfer.
+- **Human-alignment numbers are concrete.** Table 4: 0.881 bucketed accuracy for LC on the test set; Table 10: 82% average 3-point agreement and NMAE 0.059/0.118 on the internal data agent.
 
 ## Weaknesses
 
 ### Fatal
-None. The framework, datasets, and procedures are real and the core empirical evidence is genuine.
+None — the issues below are serious but do not unambiguously invalidate the framework given the evidence on the page.
 
 ### Major
-- **The headline GPA vs. TRAIL comparison is structurally confounded** — Table 2's 95% vs. 54% comparison contrasts an ensemble of six independently-prompted judges, each with architecture-aware custom instructions and 1–2 few-shot examples drawn from the dev split (Sec. 4.1.2), against a single TRAIL judge. The paper does test the baseline both with and without the architecture description, but never gives the baseline analogous few-shot calibration, nor reports an ensembled TRAIL-style baseline. The lift therefore mixes three effects — dimensional decomposition, ensembling, and per-judge calibration — without disentangling them. This is the load-bearing claim in the abstract; an ablation isolating decomposition-vs.-ensembling would materially change how the contribution should be read.
-- **Precision on the Plan-related judges undercuts the "targeted debugging" pitch** — Table 3 reports PA precision 0.52 and PQ precision 0.37 on test; Table 6 (localization) shows PQ precision 0.35. The paper itself frames the framework's distinctive contribution as per-dimension localization, but a third to a half of plan-related flags are false positives. The paper attributes this to small sample size (only 14 PQ errors) and reframes PA as "liberal" and TC as "conservative" — that reframing is reasonable for TC, but for PQ at precision 0.35 it is closer to recasting low precision as a feature.
+- **Headline comparison is structurally asymmetric.** Table 2 contrasts the *union* of six specialized GPA judges against a *single* TRAIL judge. Six independent flagging opportunities will mechanically catch more errors than one. To isolate the contribution of the *taxonomic decomposition* (rather than just the *number of probes*), the paper should run six TRAIL-style judges with role specifications matched to GPA, or report a per-judge vs. TRAIL comparison. As written, the 95% vs. 55% headline conflates "decomposition matters" with "more judges flag more things."
+- **Goal Fulfillment is named in the abstract and listed first in Figure 1, but never evaluated in Tables 1, 3, 4, 5, 6, 7, 8.** Section 5 then claims "logical consistency serves as a strong proxy for success" — a claim that requires correlating LC scores with actual goal achievement, which no experiment in the body performs. This is an internal coherence problem: the user-facing metric the framework is sold on is exactly the one not tested.
+- **Precision is the framework's weakest property and is downplayed.** Table 3 reports PA precision 0.52 and PQ precision 0.37 on the test set; Table 6 shows PQ localization precision 0.35 and TC localization recall 0.41. Because six high-recall judges run on every trace, false positives compound at the union level — yet the 95% "coverage" number is reported only at the union and the precision discussion stays per-judge. The paper does not report combined precision (any-judge-flags vs. annotated-error), which is the metric a practitioner using GPA would actually experience. The paper attributes PA/PQ precision to small sample size but never reconciles this with the headline.
+- **Coverage of the taxonomy is partly definitional.** Section 4.1.2: "Two human annotators independently reviewed all TRAIL/GAIA errors… and assigned each error to one or more GPA dimensions." Finding 1's claim that "all 570 errors can be categorized by at least one of our LLM judges" is downstream of a procedure in which the authors mapped TRAIL errors onto GPA categories. The taxonomic-coverage claim therefore cannot be falsified on the GAIA set. (Note: the 95% LLM-judge recall in Table 2 is a separate empirical number and is *not* tautological, but the framework-level coverage claim in Finding 1 is.)
 
 ### Minor
-- **Abstract's "80% to over 95%" agreement range does not cleanly match Table 4.** The body's bucketed 3-point accuracy ranges from 0.356 (EE, test) to 0.881 (LC, test); the 80%+ floor appears to depend on off-by-one accuracy on a 4-point scale, which is a much weaker agreement criterion than the abstract's framing suggests. Tightening the abstract to specify the metric would resolve this.
-- **"Complete coverage of all 570 errors" is partly tautological.** Sec. 4.1.3's first finding hinges on human annotators (working for this paper) mapping every TRAIL error onto Goal/Plan/Action dimensions (Sec. 4.1.2). Since Goal/Plan/Action together are exhaustive almost by construction, the meaningful coverage claim is what the *judges* catch (95%), not what the categories accommodate (100%). The framing should be adjusted to claim taxonomic adequacy rather than completeness.
-- **GEPA results in Sec. 4.1.5 use a meta-judge oracle whose alignment with humans is not reported.** Table 8 footnote indicates the meta-judge replaces manual review for GEPA grading, but the meta-judge is not itself calibrated against human annotations in the way the main Sec. 4.1.3 judges are. The GEPA numbers are therefore not directly comparable to the human-graded coverage in Table 2 without a calibration step.
-- **"Logical consistency serves as a strong proxy for success" (Sec. 5)** is not directly demonstrated — there is no experiment in the paper relating LC scores to final task success. Either an analysis tying LC to task outcomes should be added, or the claim softened.
-- **Internal ANON-Data-Agent validation is thin.** n=17 traces, only 2 of 6 judges evaluated (LC and EE). The paper acknowledges this, but still presents 82% 3-point agreement as a second-dataset validation; the sample size does not support generalization claims about production deployment.
-- **SWE-bench transfer excludes the framework's distinctive judges.** Sec. 4.1.5 drops PQ, PA, and TS because the CodeAct agent doesn't plan explicitly or use multiple tools. The remaining transfer (LC, EE, TC) is real but doesn't exercise the planning-focused contribution that motivates the GPA decomposition.
+- **Evaluation has circularity risk.** Each judge prompt uses "1-2 few-shot examples drawn from the development (dev) dataset as labeled by human annotators" (Section 4.1.2), and the same annotators map errors and verify judgments. With a 50/50 dev/test split from the same 148-trace pool (same agent, same tools), the test set is closer to a held-out sanity check than to a generalization probe.
+- **Meta-judge transition in GEPA results is not flagged as a methodology shift.** Table 8 reports GEPA results graded by a "strongly aligned LLM judge verifier" rather than the human verification used in earlier tables. Some of the GEPA recall gains (e.g., LC 80.7 → 87.7) could reflect meta-judge leniency rather than judge quality; the paper should disambiguate.
+- **SWE-bench transfer story rests on only 3 of 6 judges** (LC, EE, TC; PA/PQ/TS excluded because the CodeAct agent has no explicit planner). The Section 4.1.5 framing that GPA "generalizes effectively to unseen agentic tasks" is stronger than this 3-judge slice supports.
+- **The internal ANON-Data-Agent study is small and one-sided.** With n=17 traces, only LC and EE evaluated, no measured downstream effect of the "incorporated" architectural changes, the case study is anecdotal rather than evidential. Confidence intervals on the 82% agreement number are not reported.
+- **The "LC as a strong proxy for success" conclusion (Section 5) is unsupported in the body.** No table in the paper measures correlation between LC scores and task-level goal completion; this claim should be removed or directly tested.
 
 ### Trivial
-None of substance.
+- LC is defined to cover prior-context grounding, system-instruction adherence, error recovery, *and* self-generated to-do completion (Section 3). This grab-bag definition plausibly explains both why LC dominates Table 1 and why LC is the slowest-converging metric on stability (Section 4.1.4).
 
 ## Nice-to-Haves
-- A small case study showing GPA-driven diagnosis leading to a measurable downstream agent improvement (the ANON-Data-Agent narrative gestures at this but does not show before/after numbers).
-- Single-judge ablations within GPA: if LC + EE + TC alone reach near-90% coverage, the practical contribution may be three judges rather than six.
-- Flag-set Jaccard across runs in addition to Krippendorff's α — actionability is about which spans/errors get flagged, not just scalar scores.
-- A judge-precision analysis on traces with no annotated errors (the current tables condition on annotated errors existing).
-- Disambiguate the localization criterion (any-span match vs. parent/child credit), which matters for Table 5–6 interpretation.
+- Report a single combined GPA verdict (any-judge-flags) with both precision and recall against TRAIL annotations, so the false-positive cost of the union is visible alongside the recall gain.
+- Provide one out-of-distribution coverage test: a held-out annotated trace set from a different agent that was *not* pre-mapped to GPA categories.
+- Run a causal end-to-end loop: use GPA to identify weak dimensions in an agent, apply targeted fixes, and report both GPA-score and downstream-task-success deltas. Section 4.2 sets this up but does not close it.
+- Evaluate Goal Fulfillment directly on GAIA (which has gold answers) and report its correlation with the other five metrics, especially LC. This both validates the proxy claim and brings the lead metric into the evaluation.
 
 ## Removed Points
-These points were flagged in the harsh review but removed/demoted — treat with caution:
-
-- *"Existence of cited datasets/models cannot be independently verified"* — not raised, but per hard rules, any reproducibility doubt rooted in the existence of cited entities (TRAIL, GAIA, SWE-bench, Claude-4-Sonnet, GEPA) is removed by policy.
-- *"Same data preprocessing for baseline TRAIL"* — speculative. Sec. 4.1.2 describes the preprocessing as a TRAIL-derived step; absent positive evidence that the baseline was run on differently preprocessed data, this should not be raised as a confound.
-- *Section 3 Venn-derivation lacks formal justification* — the harsh critic notes the choice of intersections is "presented as obvious." This is a presentation preference; the carve-up is intuitively defensible and the empirical work justifies it. Demoted from substantive weakness to a stylistic preference.
-- The *Strength Finder's claim that GPA "captures 100% of the 570 TRAIL/GAIA errors"* is retained but reinterpreted: it is a taxonomic-mapping claim, not a detection claim, and the appropriate empirical headline is the 95% / 86% detection-and-localization figures.
+*These points were flagged in inputs but removed; treat them with caution.*
+- *Strength claim that 95% coverage demonstrates the framework's value irrespective of judge count* — conflicts with the structural-asymmetry weakness; the strength must be qualified, not standalone.
+- *Strength claim that the GEPA result demonstrates generalization to a new domain* — qualified by the fact that only 3 of 6 judges were tested and the meta-judge methodology changed; not invalid, but weaker than presented in the Strength Finder.
+- *Harsh-critic Section 4.2 demand for confidence intervals on the 82% number with n=17* — n=17 is small but CIs on a small qualitative case study are not standard practice; demoted to a nice-to-have rather than a weakness.
+- *Generic concerns about Section 3's Venn-diagram justification* — kept only as trivial since the definitional broadness is real but does not undermine the framework's experimental claims.
 
 ## Novel Insights
-None beyond the paper's own contributions. The most interesting empirical observation is the differentiation among per-judge precision-recall profiles (TC conservative, TS/PA liberal) and the implication that judge ensembles should be chosen by application — but this is the paper's own argument, not a meta-insight emergent from review.
+None beyond the paper's own contributions. The reviews surface a useful observation that the framework's headline metric (union recall) and its weakest property (per-judge precision) are reported on different axes — this is a synthesis of points already in the paper rather than a new insight.
 
 ## Suggestions
-- Add an ensembled-TRAIL baseline (six runs of the TRAIL prompt with category-specific foci, union of flags) to isolate the decomposition contribution from the ensembling contribution.
-- Add a single-judge GPA variant with matched calibration to the TRAIL baseline to separate the dimensional carve-up from few-shot tuning.
-- Reconcile the abstract's "80% to over 95%" with Table 4 by specifying which metric supports each end of the range, or by leading with the 3-point bucketed accuracy.
-- Either drop the "logical consistency is a strong proxy for success" claim from Sec. 5 or add the supporting LC-vs.-task-success analysis.
-- Calibrate the meta-judge used in Sec. 4.1.5 against human grading on a held-out subset so the GEPA results in Table 8 are comparable to Table 2.
-- Sharpen PQ and PA either by expanding the error set with synthetic plan failures or by reframing their role as recall-oriented flags requiring human review.
-- Add a small ANON-Data-Agent before/after case study showing how GPA-driven diagnosis led to a measurable agent improvement — this is the natural validation of the paper's "targeted debugging" thesis.
+- Replace or supplement Table 2 with a per-judge GPA-vs.-TRAIL comparison and a multi-probe TRAIL baseline using GPA-style role prompts. Without this, the headline number cannot isolate the contribution of decomposition.
+- Add a combined-verdict precision/recall table at the union level on TRAIL test, so practitioners can read the actual false-positive rate.
+- Remove the "logical consistency serves as a strong proxy for success" sentence from Section 5 or back it up with an LC-vs-goal-success correlation table on GAIA.
+- Add Goal Fulfillment to every evaluation table where the other five judges appear, even if results are weaker — the asymmetric absence of the lead metric is conspicuous.
+- Document the meta-judge transition in Section 4.1.5 explicitly and report at least one cross-check between meta-judge and human grading on overlapping traces.
 
----
+## Axis-by-axis Evaluation
+- **Originality:** Moderate. The GPA decomposition is a reasonable conceptual reorganization but related taxonomies (TRAIL, MAST) already exist; the contribution is operationalization into specialized judges.
+- **Importance of question:** High — reference-free, decomposed agent evaluation is a real need.
+- **Support for claims:** Mixed. Per-judge tables support per-judge claims; the union-level "95% coverage" claim is undermined by the asymmetric baseline and the missing combined-precision number.
+- **Soundness of experiments:** Moderate. Krippendorff's α and GEPA experiments are well-executed; the headline coverage comparison is structurally unfair, GF is missing, and circularity (dev/test from same pool with annotator-derived few-shots) is not addressed.
+- **Clarity:** Generally clear; the disconnect between abstract-level Goal Fulfillment emphasis and the evaluation tables is the main internal-consistency issue.
+- **Value to community:** Real but bounded — a useful debugging taxonomy with usable prompts, packaged with stability analysis. Less load-bearing as a replacement for monolithic evaluators given the precision and fairness gaps.
 
-## Axis-by-axis assessment
+## Calibration
 
-- **Originality:** Moderate. The Goal-Plan-Action decomposition is a sensible reorganization of existing evaluation concerns rather than a fundamentally new measurement paradigm. The combination with GEPA-driven prompt optimization and the per-judge precision-recall typology is a nice engineering synthesis.
-- **Importance of research question:** High. Reference-free, dimension-localized agent evaluation is a real and underserved need.
-- **Whether claims are well supported:** Mixed. The 95%/86% headline numbers are real but rest on a confounded comparison; the "complete coverage" framing is partly tautological; the abstract's agreement range does not match the body's strongest metric.
-- **Soundness of experiments:** Mostly sound, with the structural confound in Table 2/5 being the chief weakness. Consistency analysis (Table 7) and the GEPA transfer (Tables 8–9) are well-executed; the ANON-Data-Agent component is too small to load-bear.
-- **Clarity of writing:** Good. The framework is laid out cleanly and the tables are easy to read.
-- **Value to the research community:** Real, especially for practitioners building agent eval pipelines. The framework and prompts would be reusable. With the framing tightened, this would be a useful contribution.
+**Round 1 anchors retrieved:**
+- `o3V7OuPxu4.md` (avg 3.00, Round 1, weak): StarCraft II agent eval benchmark — rejected, narrow scope. The GPA paper is more rigorous.
+- `BltaWJZMeR.md` (avg 3.20, Round 1, weak): DataSciBench — rejected, ground-truth and metric concerns. GPA is more carefully validated.
+- `RuY1r1PDdQ.md` (avg 3.00, Round 1, weak): FAITHQA evaluation benchmark — rejected. GPA is better designed.
+- `oWm80iR1m9.md` (avg 3.00, Round 1, weak): SOP-Agent — rejected. Different scope.
+- `zAdUB0aCTQ.md` (avg 6.20, Round 1, middle): AgentBench — accepted, broad multi-environment agent eval. GPA narrower, less mature.
+- `roNSXZpUDN.md` (avg 6.50, Round 1, middle): τ-bench — accepted, well-defined interaction protocol. Stronger than GPA.
+- `fp6t3F669F.md` (avg 6.25, Round 1, middle): AgentQuest — accepted, long-horizon eval. Better-validated than GPA.
+- `6z4YKr0GK6.md` (avg 6.00, Round 1, middle): ScienceAgentBench — accepted, expert-validated, 102 tasks. Stronger curation than GPA's 148 traces.
+- `6s5uXNWGIh.md` (avg 8.00, Round 1, strong): MLE-Bench — substantially stronger.
+- `UHPnqSTBPO.md` (avg 8.00, Round 1, strong): Trust-or-Escalate — provable guarantees; far stronger than GPA.
+- `tc90LV0yRL.md` (avg 8.67, Round 1, strong): Cybench — far stronger.
+- `syThiTmWWm.md` (avg 7.75, Round 1, strong): Null-models cheating LLM benchmarks — far stronger insight.
 
-## Score and Decision
+**Round-1 bracket: between ~3.5 and ~6.0.** The paper is clearly above DataSciBench-class rejects but below ScienceAgentBench-class accepts.
 
-Without successful calibration retrieval, I anchor against my prior on ICLR-style framework/evaluation papers. This paper sits in the borderline range: the framework is sensible and the engineering is solid, but the central quantitative claim is structurally confounded, the abstract overstates the agreement evidence, and the "targeted debugging" pitch is in tension with PQ/PA precision figures the paper itself reports. None of these are fatal — the framework would survive a revision — but as written the contribution is overstated relative to the evidence. I score it just below the borderline.
+**Round 2 anchors retrieved:**
+- `87YOFayjcG.md` (avg 5.25, Round 2): JudgeLM — rejected, related LLM-judge work with self-evaluation bias concerns. Similar tier; GPA has more thorough stability analysis but bigger headline-comparison fairness issue.
+- `dwQIVcW1du.md` (avg 5.20, Round 2): Hierarchical code debugging — rejected. Tangentially related, similar level of validation.
+- `gtkFw6sZGS.md` (avg 5.33, Round 2): Generative judge — accepted, borderline. Similar tier; GPA roughly comparable.
+- `GO4Sd6LUuY.md` (avg 4.25, Round 2): EC-Agent — rejected, limited novelty. GPA is stronger.
+- `gKM8wwsTOg.md` (avg 4.80, Round 2): AgentMonitor — rejected, similar framework-validation issues. Very close comparator.
+- `l30moNjSY9.md` (avg 6.00, Round 2): DebugAgent — accepted, CV error-slice debugging. Stronger validation than GPA.
+- `7PQnFTbizU.md` (avg 5.67, Round 2): Agent-E — rejected with mixed signals. Similar tier.
+- `gZky2pakRK.md` (avg 5.75, Round 2): HAICOSYSTEM — rejected. Similar tier, more empirical sandbox content.
 
-MY FINAL SCORE: <score>5.0</score>
+The paper sits closest to JudgeLM (5.25), AgentMonitor (4.80), and Agent-E (5.67) — all rejected LLM-evaluation or agent-framework papers with real engineering content and central validation concerns. GPA's structural fairness issue with the headline comparison and absence of GF from evaluation push it slightly below JudgeLM (which has only the GPT-4-as-teacher-and-judge bias). The paper is above DataSciBench-tier rejects but clearly below DebugAgent (6.00) and ScienceAgentBench (6.00) accepts.
+
+**Final placement: ~4.0** — closer to AgentMonitor (4.80) than to JudgeLM (5.25), reflecting the unresolved fairness issue with the central comparison plus the conspicuous omission of Goal Fulfillment, partially offset by the substantive stability and GEPA analyses.
+
+MY FINAL SCORE: <score>4.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

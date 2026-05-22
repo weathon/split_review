@@ -18,4 +18,20 @@ ollama serve &
 OLLAMA_PID=$!
 trap "kill $OLLAMA_PID 2>/dev/null" EXIT
 
+LOG_FILE="results/${MERGE_LOG}"
+mkdir -p "$(dirname "$LOG_FILE")"
+{
+  echo "============================================================"
+  echo "Config @ $(date '+%Y-%m-%dT%H:%M:%S')"
+  echo "OPENAI_DEFAULT_MODEL=$OPENAI_DEFAULT_MODEL"
+  echo "HARSH_MODEL=$HARSH_MODEL"
+  echo "MERGER_MODEL=$MERGER_MODEL"
+  echo "NEUTRAL_MODEL=$NEUTRAL_MODEL"
+  echo "SUBAGENT_MODEL=$SUBAGENT_MODEL"
+  echo "OUTPUT_CSV=$OUTPUT_CSV"
+  echo "MERGE_LOG=$MERGE_LOG"
+  echo "CONCURRENCY=$CONCURRENCY"
+  echo "MAX_PAPERS=$MAX_PAPERS"
+} >> "$LOG_FILE"
+
 python code/main.py --n_samples 200 --benchmark datasets/icml2025_position/ --position --seed $(cksum <<< '🍍position' | cut -f 1 -d ' ')

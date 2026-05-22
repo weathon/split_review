@@ -2,7 +2,7 @@
 """
 Standalone calibration agent: reads uncalibrated reviews from
 results/original_nocal/reviews/*.md, runs the SAME calibration logic the merger
-uses (calibration_search MCP tool + prompts/cal_with.md), and writes a new CSV
+uses (calibration_search MCP tool + prompts/cal_with_sdk.md), and writes a new CSV
 with a calibrated_score column. Review files are left untouched.
 
 Deepreview calibration set only. Model via CAL_MODEL (default claude-opus-4-7).
@@ -53,7 +53,7 @@ with open(OUT_CSV, "r", newline="") as f:
 _csv_lock = asyncio.Lock()
 _sem = asyncio.Semaphore(CONCURRENCY)
 
-# The cal_with.md protocol drives calibration_search; here we ask the agent to
+# The cal_with_sdk.md protocol drives calibration_search; here we ask the agent to
 # score the given review (not a paper) and emit both score and decision tags.
 USER_PROMPT = """\
 You are calibrating an already-written paper review. Do NOT re-review the paper.

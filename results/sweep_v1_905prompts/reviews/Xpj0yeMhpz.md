@@ -1,0 +1,4 @@
+Now I have enough information. Let me write the final consolidated review.
+
+## Summary
+This paper decouples the class label from the target concept in class-wise machine unlearning, introducing three new mismatch scenarios (target mismatch, model mismatch, data mismatch) beyond the conventional all-matched setting. It analyzes the forgetting dynamics through a "representation gravity" lens and proposes TARF (TARget-aware Forgetting), a unified three-phase framework combining annealed gradient ascent on forgetting data with target-aware gradient descent on selected retaining data. Experiments across CIFAR-10/100, Tiny-ImageNet, ImageNet-1k, and real-world case studies on stable diffusion and TOFU demonstrate that TARF consistently achieves the lowest overall Gap to the Retrained

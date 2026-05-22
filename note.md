@@ -83,9 +83,22 @@ review 内容显示旧 prompt DeepSeek 和 905381a prompt DeepSeek 的差异不�
 - 分析时明确区分：
   - prompt 差异
   - model 能力差异
+  - provider / routing 差异
   - score calibration/bias
   - parser artifact
   - benchmark sample mismatch
+
+## Provider routing 是强混杂因素
+
+后面检查 `results/final_deepreview_cal/merge.log` 和对应 review 文件时，发现一些异常输出不是本地 path/id 工具链错误能解释的：
+
+- 多篇 review 直接输出中文拒答：`你好，我无法给到相关内容。`
+- 有 review 截断在半句话，导致没有最终 score tag。
+- 有 review 把 prompt 模板本身吐进正文，模板里的 `<score>-100</score>` 被 parser 抓成最终分数，即使后面正文里还有真实分数。
+
+这些异常和 `read_anchor(anchor_id)` / path schema 不匹配无关；log 里没有看到 `read_anchor` not found、invalid anchor id、No such file 这类本地工具错误。后来从 OpenRouter 日志确认，这些请求由第三方 provider 提供，而不是 DeepSeek 官方 provider。
+
+教训：OpenRouter 上同一个模型名不等于同一个实际服务质量。第三方 provider routing 可以造成明显的拒答、截断、prompt 泄漏和格式不稳定，进而显著影响 corr / MAE / failure rate。这不是说对应 run 一律作废；而是分析 run 差异时必须把 provider 作为独立变量记录下来，不能把 provider 造成的退化误归因到 prompt 或模型本身。
 
 ## Opus / DeepSeek / Human 的最终比较
 
