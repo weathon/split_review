@@ -1,17 +1,20 @@
-Now I have enough understanding of the paper. Let me run calibration searches.Initial bracket: Between 5.0 and 7.5. The paper has clear engineering contributions and SOTA numbers but a notable evidential gap (no diversity metrics) and weak isolated ablations. Let me narrow.I have enough anchors. Let me write the final review.
+Initial bracket: between 5.5 and 7.5. The paper has substantial empirical achievements (1-NFE on 20B-scale matching teacher), but framing concerns and missing ablations exist. Let me narrow with anchors in this range.Now I have enough context to write the consolidated review. Comparing against anchors:
+- **SiDA (6.25, accept)**: similar pattern — adversarial + score distillation, strong empirical results, limited ablation. Reviewers noted unclear generalization, missing ablations.
+- **Guided SiD (6.5, accept)**: incremental SiD variant with strong T2I results.
+- **InstaFlow (7.0, accept)**: One-step T2I, accepted with notable scale demonstrations.
 
-Bracketing summary: The paper sits in the 5.5–7.0 range, closest to SiDA (6.25) and Guided SiD (6.5) (both 1-step T2I distillation accepts), but it scales further (20B). The diversity-metric gap is a real evidential weakness, but the engineering contribution at 20B and the no-aux-model design are genuinely novel.
+TWINFLOW shows more ambitious scale (20B vs CIFAR/ImageNet-64 for SiDA) and competitive 1-NFE results matching 100-NFE teacher. But framing concerns (largely parameter-shared DMD) and missing diversity metrics drag it slightly. I place this near SiDA / Guided SiD level around 6.0.
 
 ---
 
 ## Summary
-TWINFLOW proposes a one-step generative training framework that eliminates auxiliary trained models (GAN discriminators, fake-score networks) and frozen teachers by extending the flow-matching time interval from [0,1] to [−1,1] and using a single network to simultaneously parameterize "real" and "fake" velocity fields at +t and −t. The method derives a velocity-matching rectification loss from a DMD-style KL gradient and demonstrates full-parameter 1-NFE training on Qwen-Image-20B, achieving 0.86 GenEval / 86.52 DPG-Bench at 1-NFE versus 0.87 / 88.32 for the 100-NFE original.
+TWINFLOW proposes a one-/few-step generative training framework for flow-matching models that extends the time domain to t ∈ [-1, 1], with negative time used to learn a "fake" velocity field and positive time used for the real velocity field. The KL divergence between fake and real distributions is recast as a velocity-matching rectification loss, allowing a single model to play generator/real-score/fake-score roles without external discriminators or frozen teachers. Empirically, full-parameter training on Qwen-Image-20B yields a 1-NFE GenEval score (0.86) nearly matching the 100-NFE teacher (0.87), and SANA-0.6B/1.6B 1-NFE results exceed SANA-Sprint and RCGM.
 
 ## Strengths
-- **No auxiliary or frozen teacher models** — Table 1 establishes the design clearly: zero auxiliary trained models vs. 1–2 for DMD variants, and zero frozen teachers vs. 1 for DMD/consistency distillation. This is not just a presentation point but enables the scaling result.
-- **Full-parameter 1-NFE training at 20B is a real engineering contribution** — Figure 2(b) and Table 3 substantiate the claim: DMD2/SANA-Sprint OOM at batch size 1 on Qwen-Image-20B, while TWINFLOW runs at batch size 24 with 76GB. Even with LoRA fake-score, DMD*/SiD* visibly mode-collapse where TWINFLOW does not. The 20B demonstration itself is rare in the 1-step literature.
-- **Strong 1-NFE GenEval numbers on small and large models** — Table 4: TWINFLOW-0.6B reaches 0.83 GenEval at 1-NFE vs. RCGM-0.6B (0.80) and SANA-Sprint-0.6B (0.72). Table 2: Qwen-Image-TWINFLOW reaches 0.86 GenEval / 86.52 DPG-Bench at 1-NFE, within 0.01 / 1.80 of the 100-NFE original.
-- **Principled derivation tying velocity matching to KL minimization** — Eqs. (3)–(9) derive the rectification loss by substituting the score–velocity relation into the DMD-style KL gradient, giving a self-contained theoretical motivation rather than an ad hoc objective.
+- **Memory efficiency demonstrated at the 20B scale.** Fig. 2b shows DMD2 and SANA-Sprint OOM at batch size 1 on Qwen-Image-20B (>80GB), while TWINFLOW runs at batch size 24 in 76GB. This is concrete, not hand-waved, and is what unlocks full-parameter Qwen-Image-20B training in Tab. 3.
+- **Strong 1-NFE results that approach the 100-NFE teacher at 20B.** Tab. 2 shows Qwen-Image-TWINFLOW at 1-NFE reaches GenEval 0.86 / DPG 86.52 versus 0.87 / 88.32 for the 100-NFE original; Tab. 3 reports 0.89 with longer training. Tab. 4 shows TWINFLOW-0.6B/1.6B at 1-NFE outperforms SANA-Sprint and RCGM on GenEval.
+- **Principled velocity-matching derivation.** Eqs. (3)–(6) connect KL divergence between fake/real distributions to a velocity difference Δ_v under linear transport, motivating the rectification loss in Eq. (9) as something more than a heuristic distillation target.
+- **Clear positive ablation of the TwinFlow loss.** Fig. 4b shows that adding ℒ_TwinFlow yields a 27-point DPG-Bench improvement (59.50 → 86.52) on Qwen-Image at 1-NFE, attributing the gain to the proposed objective rather than to incidental training changes.
 
 ## Weaknesses
 
@@ -19,68 +22,78 @@ TWINFLOW proposes a one-step generative training framework that eliminates auxil
 None.
 
 ### Major
-- **No diversity diagnostics on TWINFLOW, while mode collapse is used to disqualify competitors.** The paper aggressively flags Qwen-Image-Lightning ("generates almost identical images for the same prompt", §4.2 footnote) and DMD*/SiD* ("severe diversity degradation (mode collapse)", Table 3 caption) and offers only "visual comparisons in App. E.1" as the diagnostic for itself. GenEval, DPG-Bench, and WISE all measure prompt-following / compositional correctness — they do not penalize mode collapse, which is the dominant failure mode of 1-step generators. Without per-prompt pairwise-distance, FID, or recall on the same Qwen-Image-20B model, the "1-NFE matches 100-NFE" headline cannot be evaluated symmetrically against the mode-collapse claims the paper makes about competitors. This is the single most consequential evidential gap.
-- **The central ablation bundles L_adv and L_rectify.** Figure 4(b) only toggles L_TwinFlow (= L_adv + L_rectify) on/off. The paper sells two ideas — (i) the twin-trajectory negative-time mechanism (L_adv) and (ii) the velocity-matching rectification (L_rectify) — but the reader cannot tell which one drives the gains. If L_rectify alone explains most of the improvement, the paper's twin-trajectory framing should change; if L_adv is necessary, the reader needs to see it. As written, the experiments do not isolate the paper's titular conceptual contribution.
+- **The "no auxiliary trained model" framing is largely a relabeling.** Eq. (2)'s ℒ_adv explicitly trains the same network at negative time to model the *fake* velocity via flow matching, and Eq. (6) only goes through because F_θ(x_t, −t) is treated as v_fake. So the network is concurrently parameterizing generator, real velocity, and fake velocity — the three roles in DMD/DMD2 — with parameter sharing across signed-time conditioning. The contribution is real (parameter sharing makes DMD memory-feasible at 20B), but the way it is sold in Tab. 1 ("0 auxiliary trained models") and in the contribution list ("avoids standard adversarial networks during training") obscures rather than illuminates this. A more honest framing as parameter-shared DMD with signed-time conditioning would make the comparisons in Tab. 1 and Tab. 3 easier to interpret correctly.
+- **No ablation separates ℒ_adv from ℒ_rectify.** Fig. 4b ablates ℒ_TwinFlow = ℒ_adv + ℒ_rectify as a single block. Since ℒ_rectify is the load-bearing piece in the derivation (the one that actually implements the KL-gradient as a velocity-matching loss), and ℒ_adv alone would already act as a powerful regularizer that teaches the network to model its own fake samples at negative time, the reader cannot tell which component is doing the work behind the 59.50 → 86.52 jump. This is the most important missing ablation given the paper's claim that the velocity-matching loss is what enables high-quality 1-NFE generation.
+- **No quantitative diversity / mode-collapse measurement, despite that exact axis being used to dismiss baselines.** Tab. 2 dismisses Qwen-Image-Lightning ("almost identical images for the same prompt"), and Tab. 3 flags DMD*/SiD* with "severe diversity degradation," but no recall, LPIPS-among-samples, or similar number is reported for *any* method, including TWINFLOW itself. Given that ℒ_adv trains the network on its own outputs — a dynamic that can in principle induce collapse — and that Qwen-Image-Lightning's GenEval (0.85) is essentially on par with TWINFLOW's (0.86), the qualitative dismissal of competitors leaves a real evidential gap. A uniform diversity number across Qwen-Image-Lightning, DMD*, SiD*, and TWINFLOW would be substantially more probative than another compositional benchmark.
 
 ### Minor
-- **Single-network self-bootstrap is asserted, not analyzed.** Section 3.2 substitutes F_θ(x_t, +t) as the real score and F_θ(x_t, −t) as the fake score, with L_adv responsible for training the negative branch to track the *current* generator's output distribution and L_rectify simultaneously moving the generator. In DMD, this dual role is filled by a separately trained, repeatedly-updated network. The paper provides no plot of L_adv tracking the moving fake distribution, no analysis of whether the negative branch lags or catches up. The stability is plausible (the empirics work), but the central theoretical claim — that you can eliminate the fake-score network rather than just merging it — would benefit from explicit dynamics.
-- **The 20B baseline staging is asymmetric.** Table 3 shows raw VSD/DMD/SiD OOM, then runs them with a LoRA fake-score where DMD*/SiD* mode-collapse. The scalability claim would be more honest with a best-effort DMD2 baseline using activation checkpointing or gradient accumulation, even on a larger setup.
-- **Eq. (8) gradient-path/sg handling is compressed.** The chain from Eq. (6) to Eq. (9) goes through one "∝" and the introduction of sg[·] in one step; given this is the crux of the derivation, an explicit, line-by-line treatment would strengthen the soundness story.
-- **Qwen-Image-RCGM 1-NFE drop (0.82 → 0.52) deserves explanation.** This 0.30-point collapse anchors the headline 20B comparison; without explanation it reads as an anomaly rather than a fair reference point.
-- **λ sweep is thin.** Five points {0, 1/3, 1/2, 1, 2} without error bars (Fig. 4a) is weak support for the inverted-U interpretation.
+- **Eq. (8) has notation that absorbs a load-bearing factor.** ∂x_{t'}^fake/∂θ is written as proportional to −∂F_θ(z,0)/∂θ via "∝", silently folding the γ(t') time-dependent factor into the proportionality. A second term "at t=1, r=0" appears without derivation. The downstream loss in Eq. (9) ends up correct in spirit (a stop-gradient surrogate with the right gradient direction), but the casualness of "∝" in a section whose purpose is to give a rigorous KL-to-velocity-matching derivation undercuts the section's claim. A cleaner derivation would help.
+- **The moving-target nature of the fake-score head is not discussed.** Standard DMD does multiple inner updates of the fake score per generator step because the generator's distribution is shifting; here, the same θ updates both, so F_θ(x_t, −t) must track the moving generator while being itself being updated. The paper does not discuss the resulting bias or whether ℒ_adv ever "lags" the generator. The method works empirically, but a one-paragraph discussion or a small experiment varying the ℒ_adv weight would be valuable.
+- **Sensitivity to λ is non-trivial and only studied on one model.** Fig. 4a shows DPG-Bench varies by ~4 points between λ = 1/3 and λ = 2 on Qwen-Image. The paper does not report whether λ = 1/3 transfers across SANA, OpenUni, and Qwen-Image scales, or whether per-scale tuning is required.
+- **The SANA-Sprint DPG-Bench shortfall is dismissed by speculation.** Sec. 4.3 ends by attributing the DPG-Bench underperformance to "data-driven" issues that can be "effectively closed by training on larger, higher-quality datasets." This is plausible but uncorroborated; acknowledging the comparison as inconclusive on this benchmark would be more honest than projecting the gap away.
+- **Fig. 4c is interpreted but not clearly explained.** The "comfort regime shifts" claim is not anchored to a specific NFE-vs-step trend visible in the heatmap; the figure mostly reads as "more training is better at all NFE."
 
 ### Trivial
-None worth listing.
+- The limitations section (Sec. 5) only mentions task/modality breadth and does not surface λ sensitivity, the moving-target issue, or diversity risk — all of which are method-internal and would belong there.
 
 ## Nice-to-Haves
-- Add per-prompt pairwise CLIP-image distance across multiple noise seeds, FID against a held-out set, and recall on Qwen-Image-20B-TWINFLOW. A side-by-side with Qwen-Image-Lightning on the same diagnostic would turn the asymmetric mode-collapse claim into a symmetric measurement.
-- A qualitative probe of negative-t sampling at inference: does the model emit something sensible (coherent fake-data flow) or only artifacts (purely a regularizer)? This would characterize what the negative branch actually learned.
-- A separate ablation of L_adv vs. L_rectify vs. their combination.
-- Justification for N=2 in the any-step formulation (Sec. 3.3) — currently asserted without comparison to N=0 or N=1.
-- Report variance across seeds for 1-NFE numbers where the gap over RCGM is within plausible run-to-run noise (e.g., SANA-0.6B 0.83 vs. RCGM-0.6B 0.80).
+- An FID or human-preference number on Qwen-Image-20B at 1-NFE alongside GenEval/DPG would substantiate the "matches 100-NFE original" claim on a metric that is sensitive to fidelity/diversity rather than compositional alignment.
+- Discussion of compute parity for "Ours (longer training)" in Tab. 3 — its 0.89 GenEval is the headline above-teacher number, and the reader needs the training compute used relative to baselines.
+- A short ablation on z = z^fake versus independent noise in Sec. 3.1 would close a design knob currently mentioned in one sentence.
 
 ## Removed Points
-*These points were flagged for removal — treat them with caution.*
+These points are flagged to be removed; treat them with caution.
 
-- **Harsh critic's framing of the diversity gap as "fatal/structural."** Demoted to Major. The criticism itself is real and verifiable, but it does not invalidate the paper's core scalability or prompt-following claims; it weakens one specific framing ("matches 100-NFE in quality"). Demoting to Major rather than Fatal per the rule against speculative-fatal claims.
-- **"Existence of cited tools/benchmarks/models" type concerns.** None present in inputs, but flagged per hard rule.
-- **Strength Finder's "principled derivation" framed as full-strength** — partially kept but tempered by the Minor weakness that the derivation is compressed at Eq. (8). The strength is real but not as airtight as framed.
+- **"Self-adversarial framing is purely decorative."** (Harsh critic, point 3.) This largely duplicates the framing critique already captured in Major #1 and amounts to a label dispute — the underlying mechanism is captured by the parameter-shared DMD re-framing.
+- **"Tab. 3 baselines forced into LoRA-only fake scores."** (Harsh critic, point 4 in part.) Per the hard rules, asymmetric comparisons that disfavor the *baselines* are not a weakness when the paper transparently acknowledges the constraint (Tab. 3 explicitly notes "raw" baselines OOM and that DMD/VSD/SiD therefore use LoRA fake scores). The paper is honest about the asymmetry, and the asymmetry exists precisely because the baselines cannot scale — which is the engineering claim being made. The diversity-metric-gap part of this critique is kept in Major #3.
+- **"RCGM delta deserves more than half a sentence."** Section 2 already places TWINFLOW within the RCGM framework as the base any-step loss plus ℒ_TwinFlow, and Tabs. 2/3/4 include RCGM as a direct competitor; the delta is concrete (ℒ_TwinFlow). Demoted to a presentation nit.
+- **Generic "principled derivation" strength.** Phrased too generally — the actual derivation has the Eq. (8) issue noted in Minor #1. Kept only as a clean structural strength (velocity matching ↔ KL).
 
 ## Novel Insights
-The negative-time-conditioning trick — extending the flow-matching time axis to [−1, 1] so a single network parameterizes both the noise→data and noise→fake-data velocity fields — is a clean reformulation that subsumes the role of DMD's separately trained fake-score network into a single set of weights. Coupled with the observation that under linear transport the KL gradient between fake and real distributions reduces to a velocity difference (Eq. 6), this gives a memory-saving 1-step distillation recipe that the authors plausibly demonstrate scales to 20B. Beyond the paper's own contributions, the merged reviews do not surface additional novel insight.
+None beyond the paper's own contributions. The most genuinely useful synthesis is the harsh critic's observation that the contribution is best understood as parameter-shared DMD with signed-time conditioning, which yields the same KL-gradient structure as DMD but collapses three model copies into one — a memory-feasibility result rather than a structurally new objective. This re-framing does not require any insight external to the paper, but it makes the contribution land more cleanly.
 
 ## Suggestions
-- Add the diversity diagnostics described above on Qwen-Image-20B; turn the mode-collapse criticism into a measurement.
-- Ablate L_adv vs. L_rectify separately.
-- Add a training-time tracking plot of how well F_θ(·, −t) approximates the current generator's output distribution, to support the conceptual claim that a separate fake-score net is unnecessary.
-- Expand the derivation around Eq. (8) and clarify the gradient-path/sg handling.
-- Justify the N=2 any-step choice with a small ablation against N=0 / N=1.
+- Re-frame the contribution as parameter-shared DMD with signed-time conditioning, and explicitly state that ℒ_adv concurrently trains the fake-score role of the network. This concedes nothing real and makes the comparisons in Tab. 1 and Tab. 3 easier to interpret.
+- Add an ablation separating ℒ_adv from ℒ_rectify on Qwen-Image-20B. This is the single most important experiment for clarifying which component drives the 27-point DPG gain.
+- Report a uniform diversity number (e.g., LPIPS-among-samples across seeds at fixed prompts, or recall) for TWINFLOW, Qwen-Image-Lightning, DMD*, and SiD*. The current paper accuses two baselines of mode collapse without quantification and is silent on whether the proposed method has the same property.
+- Tighten Eq. (8): write the time-dependent factor explicitly rather than absorbing it into "∝", and derive both terms on the right-hand side.
+- Add an explicit discussion of the moving-target dynamics between ℒ_adv (fake-score role) and the generator role of the same θ, ideally with a stability check (e.g., training curves for ℒ_adv weight ablation).
+- Add a short test of λ transfer across SANA-0.6B/1.6B, OpenUni, and Qwen-Image-20B to confirm whether λ = 1/3 generalizes or requires per-scale tuning.
 
----
+## Evaluation on Standard Axes
+- **Originality:** Moderate. The signed-time twin-trajectory construction is a new presentation, but mechanistically the method is close to a parameter-shared variant of DMD; the contribution is best framed as an engineering re-organization rather than a new objective family.
+- **Importance of research question:** High. One-/few-step generation at 20B parameters is a genuine open problem; making DMD-style distribution matching fit in memory at this scale is practically valuable.
+- **Whether claims are well supported:** Mixed. The empirical claims about 1-NFE matching 100-NFE on GenEval/DPG-Bench are well supported by Tabs. 2–4. The claim of being "auxiliary-free" is supported in a literal parameter-count sense (Tab. 1) but mischaracterizes the method's functional structure. The diversity claim against baselines is asserted without measurement.
+- **Soundness of experiments:** Reasonable scale and baseline selection; the missing L_adv vs L_rectify ablation and absent diversity metric are the two notable gaps.
+- **Clarity of writing:** Generally clear; Sec. 3.2's derivation is the weakest point, and the framing in Tab. 1 / Sec. 1 is somewhat tendentious.
+- **Value to the research community:** Real. A method that brings 1-NFE generation to 20B without three model copies, with publicly released code and weights, is a useful contribution even if the framing is oversold.
 
-## Axis Evaluation
-- **Originality.** Moderate-to-high. Negative-time conditioning to internalize the fake-score role into a single network is a clean idea; the derivation tying twin-trajectory velocity matching to DMD-style KL minimization is a useful unification.
-- **Importance of research question.** High. 1-step T2I at 20B scale is practically valuable; eliminating auxiliary networks is the main pain point in DMD-class scaling.
-- **Whether claims are well supported.** Mixed. Prompt-following claims (GenEval, DPG-Bench, WISE) are well backed. The implicit quality/diversity claim ("matches the original 100-NFE model") is *not* well supported because no diversity diagnostic is given for the proposed method while the same diagnostic is used rhetorically against competitors.
-- **Soundness of experiments.** Adequate. Headline numbers are strong; key ablation is bundled, baseline staging at 20B is partly forced by OOM realities but flatters the conclusion.
-- **Clarity of writing.** Good overall; the derivation around Eq. (8) is the main rough patch.
-- **Value to the community.** Solid. The 20B demonstration and the code/model release make this a useful reference point for scaling 1-step generation.
+## Anchor Comparisons
 
----
+| Path | Avg Score | Round | Comparison |
+|---|---|---|---|
+| WxLwXyBJLw.md (Flow Matching for One-Step Sampling) | 3.25 | 1 | Much weaker — small-scale experiments, theory-focused with limited empirical support. TWINFLOW is well above. |
+| QKqWnNkwPL.md (Self-distillation for diffusion) | 3.00 | 1 | Much weaker — straightforward self-distillation idea with thin evaluation. TWINFLOW is well above. |
+| RFJGFrMvYj.md (TCIG) | 1.50 | 1 | Far weaker — limited novelty/evaluation. Not comparable. |
+| MBkoYFftRa.md (Inner Loop Feedback) | 3.00 | 1 | Weaker — engineering acceleration with modest gains and unclear claims. TWINFLOW is well above. |
+| B5IuILRdAX.md (Flow Generator Matching) | 5.00 | 1 | Closer; one-step flow matching but small-scale (CIFAR-10) with weaker text-to-image story. TWINFLOW above. |
+| 1k4yZbbDqX.md (InstaFlow) | 7.00 | 1 | InstaFlow accomplishes one-step from SD-1.5 with a clean rectified-flow procedure and broad ablations. TWINFLOW's 20B demonstration is more ambitious, but its framing/ablation gaps prevent it from clearing this bar. |
+| HMVDiaWMwM.md (Guided SiD) | 6.50 | 1 | Comparable-tier; SiD variant with CFG twist on T2I, accepted with mixed-positive reviews. TWINFLOW is at roughly the same caliber. |
+| jK5r1HBfym.md (Regularized DMD) | 4.00 | 1 | Weaker — DMD variant for unpaired translation, less impactful. TWINFLOW is above. |
+| OlzB6LnXcS.md (Shortcut Models) | 8.00 | 1 | Stronger — clean single-network/single-phase method with consistent 8s across reviewers. TWINFLOW is below this bar due to framing and ablation gaps. |
+| xDrFWUmCne.md (LD3) | 8.00 | 1 | Stronger — clean and theoretically grounded. TWINFLOW below. |
+| DJSZGGZYVi.md (REPA) | 9.00 | 1 | Significantly stronger, broad acceptance. TWINFLOW well below. |
+| N8Oj1XhtYZ.md (SANA) | 8.50 | 1 | Stronger systems contribution. TWINFLOW below. |
+| lS2SGfWizd.md (SiDA) | 6.25 | 2 | Closest analog — adversarial + score distillation, strong empirical numbers, reviewers liked the results but flagged limited ablation. TWINFLOW is comparable in caliber: more ambitious scale (20B vs 64²), but with framing and diversity-metric gaps that SiDA did not have on its own terms. |
+| Pf85K2wtz8.md (Deep MMD Gradient Flow) | 5.75 | 2 | Slightly weaker — small-scale, no T2I scaling. TWINFLOW slightly above. |
+| dlIMcmlAdk.md (Noise-free Score Distillation) | 6.50 | 2 | Comparable-tier work in distillation space. TWINFLOW around the same. |
+| eAKmQPe3m1.md (PixArt-α) | 7.00 | 2 | Stronger — broader systems-level contribution with cleaner story. TWINFLOW below. |
+| q5sOv4xQe4.md (HART) | 6.80 | 2 | Stronger systems demonstration in visual generation. TWINFLOW slightly below. |
+| kNjrhD67LP.md (TINT) | 7.00 | 2 | Less topically relevant. |
 
-## Anchors
+**Round-1 bracket:** between 5.5 and 7.5 — clearly above the rejected weak anchors (3.0–5.0), but below the cleanly-accepted strong anchors (8.0+).
 
-- **`lS2SGfWizd.md` — SiDA: Adversarial Score Identity Distillation (avg 6.25, Round 2).** One-step adversarial distillation on EDM/EDM2, FID-based evaluation on CIFAR/ImageNet-64/512. Strengths similar to TWINFLOW: clean adversarial integration, SOTA 1-step numbers. Weaknesses: small image resolutions, limited ablations, unclear generalization to transformer-based diffusion. TWINFLOW is more ambitious in scale (20B parameter T2I vs. EDM2-XXL ImageNet-512) and uses prompt-following metrics, but TWINFLOW does not report FID, which is exactly the diversity-sensitive metric SiDA does report. Net: TWINFLOW is somewhat above SiDA on contribution and scale.
-
-- **`HMVDiaWMwM.md` — Guided SiD (SiD-LSG): Data-Free One-Step T2I (avg 6.50, Round 2).** Data-free 1-step distillation of SD1.5/2.1, reports FID 8.15 and CLIP. Strengths: practical CFG variants for the fake-score network, comprehensive experiments. Weaknesses cited by reviewers: claim of "first to use CFG in fake-score training" disputed, missing comparison with SwiftBrush v2 / DMD2, expensive training protocol. TWINFLOW operates at much larger scale (20B vs. ~1B) and offers a structurally simpler training pipeline (no aux models at all). However Guided SiD reports diversity-sensitive FID; TWINFLOW does not. Net: comparable contribution tier, with TWINFLOW pulled slightly down by the diversity-metric blind spot.
-
-- **`1k4yZbbDqX.md` — InstaFlow (avg 7.00, Round 1).** Rectified-flow-based 1-step T2I on SD; strong conceptual contribution (reflow), strong empirics. TWINFLOW's empirical and engineering claims are closer in spirit; TWINFLOW arguably scales further but has the diversity-metric gap that InstaFlow does not. Net: TWINFLOW likely a step below InstaFlow.
-
-- **`OlzB6LnXcS.md` — One Step Diffusion via Shortcut Models (avg 8.00, Round 1).** Single-network, single training phase, step-size-conditioned generator. Conceptually adjacent (shortcut models are referenced in the paper, Eq. 1). Shortcut Models is cleaner conceptually and more thoroughly evaluated. TWINFLOW is clearly below this anchor in evidential rigor though comparable in conceptual interest.
-
-- **`B5IuILRdAX.md` — One-step Flow Matching Generators / FGM (avg 5.00, Round 1).** Comparable concept; rejected partly for limited experimental scope. TWINFLOW is clearly above this anchor due to the 20B demonstration and SOTA numbers.
-
-Positioning: clearly above FGM (5.0); slightly above SiDA (6.25); roughly at or just below Guided SiD (6.5); below InstaFlow (7.0); well below Shortcut Models (8.0). Settling on 6.0 — solid engineering and conceptual contribution, pulled down meaningfully but not catastrophically by the evidential gap on diversity and the bundled ablation.
+**Round-2 narrowing:** Round-2 anchors most relevant — SiDA (6.25), Guided SiD (6.5), Noise-free SD (6.5) — cluster at the 6.0–6.5 band. TWINFLOW's scale is more impressive than SiDA's, but its framing oversell, missing L_adv vs L_rectify ablation, and absent diversity metric pull it back to roughly SiDA's level. Slightly below InstaFlow (7.0) because of the framing and ablation gaps. Final score: **6.0**.
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,13 +1,13 @@
-Now I have enough calibration. Let me write the final review.
+Now I have enough calibration. Let me write the consolidated review.
 
 ## Summary
-Insertion Language Models (ILMs) propose a new sequence-generation paradigm that inserts one token at a time at jointly-predicted (position, vocabulary) coordinates, paired with a learned stop classifier on top of a single transformer encoder. The training uses a deliberately biased denoising loss whose target is the normalized count of tokens between two visible positions in the original sequence (Eq. 2). Evidence is presented on two synthetic planning tasks (star-graph paths, Zebra puzzles) and two small text corpora (LM1B, TinyStories+ROC), where ILM dominates MDMs on variable-length planning and is competitive on text and arbitrary-length infilling.
+The paper introduces Insertion Language Models (ILMs), a denoising sequence model that learns to insert tokens at arbitrary positions of a partial sequence, governed by a learned binary stop head. The training objective replaces a naive (high-variance) Monte Carlo denoising estimator with a biased target that maps each gap to the normalized count of vocabulary items appearing in that gap. Empirical results cover star-graph and Zebra-puzzle planning tasks plus LM1B / TinyStories text generation and infilling with ~85M-parameter transformers.
 
 ## Strengths
-- **Crisp demonstration of MDMs' failure mode on variable-length structure**: On Star_hard (asymmetric arms, max path length 12), ILM reaches 99.1% exact-match accuracy while MDM is at 21.0% and ARM at 23.0% (Table 1). The gap is large enough, and the task carefully enough designed, that it really does isolate the architectural property being argued for: absolute-position MDMs cannot place the junction node correctly when arm lengths vary, while ILM's insertion mechanism resolves this iteratively (§5.1.1).
-- **Zebra-puzzle result corroborates the planning story**: ILM at 90.0% closes most of the gap to oracle-ordered ARM (91.2%) and clearly beats vanilla ARM (81.2%) and MDM (82.6%) (Table 1, §5.2). The configuration matches Shah et al. (2024), so the comparison is on accepted footing.
-- **Genuinely new parameterization, not a re-skin of MDM**: The single-encoder backbone with a joint (position × vocab) softmax (Eq. 4) and a shared-backbone stop classifier (§3.1) lets ILM avoid AdaLN/time conditioning that MDMs use, while still doing more than MDM (variable-length infilling without slot count).
-- **Honest reporting on text NLL**: The paper explicitly notes ARM beats both MDM and ILM on NLL under matched training steps and attributes this to token-efficiency differences (§5.3.1) rather than burying the result.
+- **Striking planning results on variable-length star graphs.** Table 1 reports ILM at 100/100/99.1 on Star_easy/medium/hard, while MDM collapses to 36.5/21.0 on the medium and hard variants and ARM falls to 23.0 on hard. This is a real, quantitative demonstration that ILMs handle variable-length out-of-order generation where the obvious baselines fail.
+- **Convincing Zebra Puzzle result.** ILM at 90.0% exact-match (Table 1) outperforms vanilla-trained ARM (81.2) and MDM (82.6), and approaches oracle-ordered ARM (91.2). This is a non-trivial constraint-satisfaction task and the comparison to the oracle is informative.
+- **Real flexibility on arbitrary-length infilling.** Section 5.3.2 / Table 3 shows ΔNLL gains over MDM on TinyStories single-segment, LM1B single-segment, and LM1B multi-segment infilling — a regime where MDMs are structurally handicapped because the number of masks is fixed in advance.
+- **Honest discussion of limitations.** Section 6 acknowledges that ILMs underperform ARMs on text under matched gradient steps, that hidden-state caching is unavailable, and that scaling is unaddressed. The reproducibility statement provides anonymized code.
 
 ## Weaknesses
 
@@ -15,61 +15,84 @@ Insertion Language Models (ILMs) propose a new sequence-generation paradigm that
 None.
 
 ### Major
-- **Headline MDM-vs-ILM text comparison is confounded by MDM's runaway generation length.** In Table 2 the MDM produces sequences with mean length **985 on Stories (training mean 205)** and **85 on LM1B (training mean 28)** — 3–5× the data distribution — while ILM undershoots (119, 21). At those lengths, much of MDM's output is plausibly padding or low-information continuations, which makes the per-token Llama NLL and the entropy directly incomparable across rows. The paper itself notes this length asymmetry as the explanation for MDM's high entropy, but does not run the natural fix: a length-controlled comparison (truncated MDM, or per-segment quality at matched length). Until that is done, the "ILM > MDM" text claim rests on an apples-to-oranges comparison.
-- **ILM's generation entropy is below the training-data entropy on both datasets** (ILM 2.80 vs LM1B 3.08; 3.76 vs Stories 4.19, Table 2). Low NLL together with low diversity is the classic signature of mode-collapsed generation, and an LLM judge (Prometheus-2, Figure 5) does not catch it. Adding at least one distinct-n / self-BLEU / MAUVE measurement at matched length would let the reader distinguish "ILM generates better text" from "ILM generates blander, more frequent text that scores well under a reference LM."
-- **The biased denoising objective is the load-bearing methodological move and is not justified in the main text.** Eq. 2 places equal mass on every token appearing between two visible positions, treating the gap as a multiset rather than a sequence. The conditional structure (picking one token changes which token should come next at the same gap) is therefore never directly trained. The paper acknowledges the bias and defers to Appendix D for a variance argument (§3, footnote 1; §6 omits this in limitations). Even granting the variance motivation, the paper provides no bound, simulation, or small-scale ablation against the unbiased estimator to show the bias is benign. This is the kind of foundational analysis that should sit in the main text given how central the approximation is.
+- **The biased training objective is acknowledged but not characterized.** Section 3 explicitly switches from the unbiased denoising estimator to a count-based target `d(k,v;x,b) = c_{i_k,i_{k+1}}(v;x)/n` to control variance, while inference (Eq. 4, Algorithm 2) samples a single (position, token) per step. The relationship between the count-distribution being trained on and the one-at-a-time insertion posterior being sampled from is the load-bearing assumption of the method, but the paper neither analyzes it on a tractable case, bounds the bias, nor compares against the unbiased (high-variance) baseline trained for matched compute. This is the central methodological claim — it deserves more than "Appendix D for details."
+- **MDM baseline is restricted to vanilla tau-leaping despite the paper itself citing fixes.** Section 5.3.1 uses tau-leaping for the MDM, and Section 4 explicitly lists Gong et al. (2024), Zheng et al. (2024), Campbell et al. (2024), and Ye et al. (2025) as approaches that address precisely the dependency-violation failure mode ILM is being compared against. The headline "ILMs solve what MDMs cannot" therefore mostly demonstrates "ILMs beat the weakest MDM sampler." Especially for star-graph and Zebra results, a top-k or flow-style MDM sampler should be the comparison point if those failure modes are the focus.
+- **"On par with ARMs" overstates Table 2.** ILM's NLL on LM1B is 4.67 vs ARM's 3.94 — a ~0.7 nat/token gap, not "on par." The Stories gap (2.14 vs 2.11) is close, but ILM also generates much shorter sequences than the dataset average on both corpora (119 vs 205 on Stories; 21 vs 28 on LM1B) and has lower-than-data entropy. Shorter, less diverse sequences scored under an external LM trivially help per-token NLL. The paper does not control for length or report this as a confound when claiming competitiveness, and Figure 5's Prometheus-judge bar chart is presented without numbers, making the verbal claim that ILM "outperforms ARM and MDM, particularly in coherence and consistency" hard to reconcile with the NLL ranking.
 
 ### Minor
-- **Insertion Transformer as a baseline is essentially a "drop the stop classifier" ablation.** IT (35.2 / 22.1 / 17.5 on the star tasks, Table 1) shares ILM's insertion mechanism and differs primarily in using EOS rather than a learned stop head. That is a useful ablation, but framing it as a comparison to a strong insertion-based baseline overstates what is being shown (§5.1.1).
-- **Single-seed numbers for Zebra puzzles and star graphs.** The Zebra ILM vs MDM gap is 8 points on a single configuration; for a planning-task headline result, at least min/max across a few seeds would tighten the claim (§5.2, Table 1).
-- **Llama-3.2-3B is the NLL evaluator and Prometheus-2 is the LLM judge.** These are not independent quality signals — both are LLM-based and tend to share preferences (e.g., for low-perplexity, generic text). Pairing them with a diversity metric (see Major above) would address the redundancy (§5.3.1).
-- **Infilling evaluation lacks a semantic-correspondence measure** (e.g., BLEU/ROUGE/embedding similarity to the gold span). $\Delta\text{NLL}_{\text{gt}}$ only tells you whether the infill is plausible *under a reference LM*, not whether it agrees with the actual removed text. Combined with the entropy observation, ILM may be winning by filling with bland, high-frequency phrasings (§5.3.2, Table 3).
-- **Loss weighting between insertion and stop heads is undiscussed.** §3 says the total objective is the sum of $\mathcal{L}^{\text{ilm}}_{\text{tok}}$ and $\mathcal{L}^{\text{ilm}}_{\text{stop}}$ with no relative weighting; whether the `<stp>` logit participates in the joint normalization of Eq. 4 or is carved into a separate sigmoid head is also not explicit.
+- **Figure 6's speed comparison disables KV caching for the ARM.** Section 6 mentions in passing that ILMs don't allow caching, but Figure 6 itself compares ILM to "ARM (w/o KV cache)" — a baseline nobody actually deploys. A reader skimming the figure will see ARM and ILM converging at similar wall-clock NLL, which is not the practical comparison.
+- **The "relative-position" explanation for the Star_medium/hard gap is muddled.** Section 5.1.1 attributes ILM's advantage to "relative position information" versus MDM's "absolute token positions," but Section 5 last paragraph states that MDMs here use DDiT, which itself uses RoPE (relative positions). The real distinction is fixed-canvas placement versus variable-length insertion, not relative-vs-absolute encoding. Since star graphs are the headline planning result, the proposed mechanism should match what is actually happening.
+- **ARM_O missing on Star_medium and Star_hard.** Table 1 reports the reverse-order ARM only on Star_easy and Zebra; on the harder star variants the entry is `—`. In a paper whose central claim is about generation ordering, the ordering-aware ARM should be evaluated on the harder splits — otherwise the apparent ILM win on Star_hard is only against an L→R ARM.
+- **Insertion Transformer (IT) baseline scores 35.2 on Star_easy** (Table 1) while MDM and ILM both reach 100. The text claims IT under/overshoots target length, but a near-random IT score makes it hard to attribute ILM's gains specifically to the count-based objective versus the dedicated stop classifier; an IT calibrated for length would isolate this.
+- **No infilling baselines beyond MDM.** The paper acknowledges FIM-ARM (Bavarian et al. 2022), GLM, BART, T5 in Section 4 but does not run any of them. The "greater flexibility on arbitrary-length text infilling" claim is therefore established only against MDM.
+- **Joint vs. two-step sampling, and the L_tok / L_stop loss weighting.** Section 3 mentions both sampling modes but does not analyze how two-step ancestral sampling interacts with the count-based target. The relative weighting of the insertion and stop losses is not stated, and length collapse on Stories (119 vs 205) and LM1B (21 vs 28) is plausibly sensitive to it.
 
 ### Trivial
-- The footnote acknowledging the ARM training-token-efficiency story (Table 2) belongs in the main text, since it directly affects how readers should interpret the comparison.
+- Table 1's text says "For Star_small" where it appears to mean Star_easy.
 
 ## Nice-to-Haves
-- A targeted MDM ablation using *relative* positions (or an ILM forced to use absolute positions) would convert the "MDMs fail because of absolute positions" claim from a plausible explanation into a causal one.
-- An NLL-vs-compute Pareto extension of Figure 6 plotted out to convergence (not just sampling-time tradeoff at fixed checkpoints) would let the ILM-vs-MDM training-budget comparison be made rigorously.
-- A small-scale ablation comparing the biased Eq. 2 estimator with the unbiased high-variance estimator on a task where both can be run to convergence (e.g., one of the planning tasks) would let the reader see whether the bias is empirically small.
+- A small tractable case where the true one-at-a-time insertion posterior can be enumerated, and a side-by-side of (i) what the count target trains toward, (ii) the unbiased Monte Carlo target, (iii) what generation actually samples. This would convert the method from "heuristic that works" into a principled choice.
+- Reframe the textual claims around out-of-order flexibility and infilling rather than ARM-competitive likelihood — the planning/infilling pair is the real contribution.
+- Multiple seeds / standard errors for Table 1 and Table 2; with single numbers, the 90.0 vs 81.2 Zebra gap is hard to weigh.
+- Length-controlled or length-conditioned generation in Table 2.
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution:*
-- **"The Star_easy ARM result is unfair framing of Bachmann & Nagarajan"** (harsh critic, §5.1.1) — the paper actually reports ARM_O at 100.0% on Star_easy *and* notes the ordering dependence in the text. Reasonable framing, not misleading.
-- **"Algorithm 2 is in a stripped appendix"** (harsh critic) — appendix is parser-stripped, exists in the original.
-- **"§6 limitations omit the bias in the objective"** (harsh critic) — already covered as a Major weakness about the biased objective itself; this is duplicative criticism.
-- **Strength: "ILM provides arbitrary-length infilling"** — kept but framed under the major comparison issues, since the headline infilling numbers (Table 3) inherit the same entropy / semantic-correspondence concern as unconditional generation.
-- **Strength: "ILM uses a simpler transformer than MDM"** (strength finder) — kept implicitly via the parameterization strength; the "simpler" framing is not really evidence of a contribution since the MDM AdaLN parameters are minor.
+*These points are flagged to be removed; treat them with caution.*
+
+- "The training target's bias is structural and not addressable by experiments alone." — The harsh critic frames this as fatal/structural, but the paper does acknowledge the bias and points readers to Appendix D (stripped from this extraction); demoting to Major as a real but addressable gap rather than fatal.
+- "The MDM-baseline issue is structural; the paper's narrative does not survive." — The narrative does require stronger baselines, but the comparison is not so asymmetric that the planning result becomes meaningless: a 100→21% MDM collapse on Star_hard is not plausibly explained away by sampler choice alone. Kept as Major rather than treated as fatal.
+- Generic strengths about "addressing an important problem" or "interesting research direction" — removed as boilerplate.
+- "On Zebra ILM is close to ARM_O at 91.2 but not decisive over the strongest baseline" — this is a reading of the result, not a defect: the paper itself frames it correctly as "even close to the performance of the oracle-decomposed ARM," which is fair.
 
 ## Novel Insights
-None beyond the paper's own contributions. The insertion-with-stop-classifier parameterization and the count-based biased objective are the genuinely original contributions; the reviewer commentary surfaces concerns but no new conceptual insight.
+None beyond the paper's own contributions. The framing of the position-versus-length distinction in MDMs is useful exposition but follows naturally from the architectural differences.
 
 ## Suggestions
-- Re-run Table 2 with MDM truncated (or EOS-trained) so that lengths match the training distribution, and report per-segment quality. This is the single change that would most strengthen the text story.
-- Add distinct-n or self-BLEU to Table 2 to address the sub-data entropy of ILM outputs head-on.
-- Add a paragraph (or appendix-pointer with summary in main text) on the bias of Eq. 2 — even a one-task empirical comparison against the unbiased estimator would substantially raise confidence.
-- Report seed variance (min/max or std across 3 seeds) for the Zebra and Star_hard accuracies in Table 1.
-- For infilling, add a semantic-correspondence metric (BLEU/ROUGE or sentence-embedding cosine) against the removed span.
+- Add at least one stronger MDM sampler (top-k from Zheng et al. 2024 or the flow-based sampler from Campbell et al. 2024) to Tables 1, 2, 3 and Figure 6 — the paper already cites these as the relevant fixes, so excluding them weakens the comparison.
+- Either run ARM_O on Star_medium / Star_hard or explain why it cannot be evaluated there.
+- Add length-conditioned generation or report length-normalized NLL when claiming competitiveness with ARM on text.
+- Replace "ARM (w/o KV cache)" in Figure 6 with the cached version, or add it alongside; clearly state which deployment regime each curve represents.
+- Add at least one fill-in-the-middle ARM baseline (e.g., Bavarian et al. 2022) to Table 3 for single-segment infilling, even if not for multi-segment.
+- Either tighten the relative-position narrative in Section 5.1.1 or replace it with the fixed-canvas-versus-insertion explanation, which is actually what distinguishes the methods.
+- Give numerical Prometheus-judge values, not just a bar chart, in Figure 5.
 
-## Calibration & Score
+## Axis-by-Axis Assessment
+- **Originality**: Moderate-to-good. Insertion-based generation is not new (Insertion Transformer, KERMIT), but combining it with a count-based denoising objective and a stop classifier in the modern MDM landscape is a sensible, well-motivated repositioning.
+- **Importance of question**: Real. Variable-length generation and arbitrary-length infilling are genuine limitations of MDMs that practitioners care about.
+- **Claim support**: Mixed. Planning claims are well-supported by Table 1; infilling claims well-supported within the scope (MDM-only baseline). Text-generation claims are overstated relative to evidence (LM1B NLL gap, length collapse).
+- **Soundness of experiments**: Acceptable but with real gaps — weak MDM sampler, missing ARM_O on harder star splits, no length control, single seeds.
+- **Clarity**: Generally clear, with one muddled explanation (relative vs absolute positions) in the central planning section.
+- **Value to the community**: Genuine. The insertion-based formulation, the variable-length stop head, and the planning results are likely to be useful reference points even if the text-generation evaluation is not headline-grade.
 
-Axes:
-- *Originality*: high — insertion-based generation with a joint position/vocab head and stop classifier is a genuinely new paradigm in this family, not a tweak.
-- *Importance*: meaningful — flexible-length, out-of-order generation is an active research direction with a real gap that ARMs and MDMs leave open.
-- *Soundness of claims*: mixed — the planning claims are strongly supported; the text-modeling claims are over-stated given the MDM length artifact and ILM's sub-data entropy.
-- *Soundness of experiments*: planning experiments are well-designed; text experiments need length-control and at least one diversity metric.
-- *Clarity*: clear writing, but the biased-objective decision is under-defended in the main body.
-- *Value to community*: a useful new point in the design space; the synthetic-task framing for diagnosing MDM failures is itself a contribution.
+## Anchor Comparison and Score Calibration
 
-**Anchors used:**
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/tyEyYT267x.md` — *Interpolating Autoregressive and Discrete Denoising Diffusion Language Models* (avg 8.0, round 1). Same problem family (interpolating AR / diffusion for flexible-length generation), but with explicit gradient-variance analysis, NELBO tightness theorems, SOTA on LM1B, and several benchmarks. ILM is less theoretically developed (the biased objective is not analyzed), and its text experiments do not establish SOTA — so the paper sits clearly below this anchor.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/sL2F9YCMXf.md` — *Energy-Based Diffusion Language Models* (avg 6.75, round 1). Novel mechanism on top of MDMs, with comparable AR perplexity. Reviewers noted entropy/quality tradeoffs and added-parameter concerns. ILM has a comparable level of novelty but is held back by the MDM-length confound and unaddressed entropy issue — roughly comparable, maybe slightly below.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/NRYgUzSPZz.md` — *Beyond Autoregression: Discrete Diffusion for Complex Reasoning and Planning* (avg 6.25, round 2). Closest analog: argues diffusion beats AR on synthetic planning (Countdown, Sudoku, SAT) with similarly dramatic accuracy gaps. ILM offers a stronger architectural contribution (insertion mechanism, not just reweighting) but ILM's text-generation story is weaker than MDM's planning story is strong. Comparable in spirit and roughly comparable in score.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MJNywBdSDy.md` — *Think while You Generate (DDPD)* (avg 5.75, round 2). Planner+denoiser decomposition for masked diffusion with clean theoretical grounding and broad empirical coverage. ILM has more novelty in the generative mechanism but less theoretical care around its key approximation. ILM is at or slightly above this anchor.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/sMyXP8Tanm.md` — *Your Absorbing Discrete Diffusion Secretly Models the Conditional Distributions of Clean Data (RADD)* (avg 6.20, round 2). Tight theoretical reparameterization for absorbing diffusion. ILM is a methods paper of comparable ambition, with weaker theoretical analysis but a more novel generative mechanism — roughly comparable.
+**Round 1 anchors retrieved (bracketing):**
+- `4y3GDTFv70.md` (avg 3.25, R1, weak): Theoretical LLM emergent-abilities paper — much less concrete than ILM; ILM is clearly stronger.
+- `NSBP7HzA5Z.md` (avg 3.00, R1, weak): Inductive transformer concept paper — sketchy, ILM is clearly stronger.
+- `uOnElfFuey.md` (avg 3.00, R1, weak): LM hardening into finite automata — narrow and speculative; ILM stronger.
+- `z3DMFpaP6m.md` (avg 3.00, R1, weak): Entropy metric paper — limited; ILM stronger.
+- `71mqtQdKB9.md` SEDD (avg 6.60, R1, middle): New training objective for discrete diffusion with strong theory; competitive with GPT-2. SEDD's theoretical grounding and SOTA-vs-GPT-2 results are stronger than ILM's text-gen results; ILM matches it on the "new paradigm" axis but is weaker empirically.
+- `Qn4HEhezKW.md` (avg 5.00, R1, middle): Diffusion LMs at scale via masked LM pretraining — comparable methodological ambition, but ILM has cleaner planning evidence.
+- `sL2F9YCMXf.md` Energy-Based Diffusion LM (avg 6.75, R1, middle): Improves diffusion LM via EBM, accepted. Stronger and more rigorous evaluation than ILM.
+- `1pTlvxIfuV.md` Reparameterized Discrete Diffusion (avg 5.50, R1, middle): Improves discrete diffusion for text — similar style of contribution, similar caveats.
+- `tyEyYT267x.md` SAR Diffusion (avg 8.00, R1, strong): Sets SOTA on language modeling benchmarks, enables arbitrary-length generation, careful variance analysis. Clearly stronger than ILM on the LM axis.
+- `SI2hI0frk6.md` Transfusion (avg 7.60, R1, strong): Multimodal scaling-laws paper — different scope, much heavier evaluation.
+- `84n3UwkH7b.md` (avg 8.00, R1, strong): Memorization in diffusion — different topic, less comparable.
+- `xoXn62FzD0.md` (avg 8.00, R1, strong): SMC for LLM control — different topic.
 
-The paper is clearly above the 5.5–5.75 anchors (DDPD, RDM) on novelty of the generative mechanism, comparable to the 6.0–6.25 anchors (RADD, Beyond Autoregression), and below 6.75 (EDLM) and 8.0 (BD3-LM) because of the unresolved text-experiment confounds and the unanalyzed bias in the objective. I land at **6.0**.
+**Round-1 bracket: between 5 and 7.**
 
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+**Round 2 anchors (narrowing):**
+- `0JjsZC0w8x.md` COrAL (avg 5.75, R2, narrow): Order-agnostic LM with quality–speed tradeoffs; weaknesses about novelty and task generalization. Comparable scope to ILM; ILM's planning results are stronger but text-gen story is weaker.
+- `aS1IhKdLPP.md` Reflection Window (avg 4.75, R2): selective refinement; ILM is clearly stronger.
+- `zkMRmW3gcT.md` (avg 4.80, R2): off-topic image generation; not very comparable.
+- `sgAp2qG86e.md` JetFormer (avg 6.25, R2): different scope; accepted.
+- `NRYgUzSPZz.md` Beyond Autoregression (avg 6.25, R2, narrow, most comparable): Uses discrete diffusion for planning (Countdown, Sudoku, SAT) with subgoal imbalance framing. Very directly comparable narrative; both papers show striking planning gains. ILM has comparable planning evidence and adds infilling, but lacks the clean theoretical framing (subgoal imbalance) and has weaker text-gen claims.
+- `MJNywBdSDy.md` Think while You Generate (avg 5.75, R2): plan-and-denoise diffusion; accepted. Methodologically tighter than ILM; ILM has broader scope.
+- `TyycdsNeeg.md` (avg 5.60, R2): PDE generative pretraining — off topic.
+- `UQVhOVhUi4.md` (avg 6.25, R2): graph generation diffusion — off topic.
+
+**Narrowing**: The most comparable round-2 anchors are "Beyond Autoregression" (6.25, planning via diffusion) and "Think while You Generate" (5.75, plan-and-denoise diffusion) and "COrAL" (5.75, order-agnostic LM). ILM has stronger out-of-order planning evidence than COrAL, comparable planning evidence to Beyond Autoregression but weaker conceptual framing, and broader empirical scope than Think while You Generate but with more overclaiming. ILM lands close to Beyond Autoregression and "Think while You Generate" on aggregate — modestly weaker than the 6.25 anchor because of the weak MDM baselines, biased-objective non-analysis, and "on par with ARMs" overclaim, but stronger than the 5.0 anchors. Final score: **5.5**.
+
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

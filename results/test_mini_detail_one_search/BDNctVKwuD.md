@@ -1,86 +1,92 @@
+Now I have sufficient calibration. Let me write the final consolidated review.
+
+---
+
 ## Summary
 
-This paper identifies a theoretical limitation of HiResCAM explanations: they are not uniquely determined from the softmax probabilities and can shift by an arbitrary matrix M without changing predictions. The authors propose ContrastiveCAMs, which are invariant to this shift and provide class-versus-class explanations. Using ContrastiveCAMs, they show that models often rely on non-core regions, and introduce Core-Focused Cross-Entropy (CFCE), a modified loss that penalizes non-core contributions while encouraging attention on core regions. Experiments on Hard-ImageNet, Oxford-IIIT Pets, and PASCAL VOC show dramatic improvements in feature alignment (IoU from ~30%→93% on Hard-ImageNet) while maintaining competitive accuracy, with approximate masks (SAM, bounding boxes) being viable substitutes for ground-truth masks.
+The paper identifies a theoretical limitation of HiResCAM explanations — they are not uniquely determined due to softmax shift-invariance, which can be amplified to an arbitrary matrix shift M (Theorem 3.2). To address this, the authors propose ContrastiveCAMs, which are invariant to M and provide granular class-versus-class explanations (Theorem 3.5). Using ContrastiveCAMs, they then develop Core-Focused Cross-Entropy (CFCE), a loss that penalizes non-core region contributions and encourages feature alignment. Experiments on Hard-ImageNet, Oxford-IIIT Pets, and PASCAL VOC demonstrate that CFCE-trained models improve alignment metrics and downstream segmentation performance.
 
 ## Strengths
 
-- **Theorem 3.2 identifies a genuine, non-trivial failure mode of HiResCAMs.** The proof that HiResCAMs can be additively shifted by an arbitrary matrix M while producing identical softmax probabilities is a novel theoretical contribution. This is not merely softmax shift-invariance recycled—the paper shows this invariance amplifies from a scalar a to a full matrix M in spatial dimensions, which is specific to how CAMs connect to logits (Eq. 3). Figure 1 provides a concrete illustration of the effect.
+1. **Novel theoretical result: HiResCAM non-uniqueness (Theorem 3.2).** The paper proves that HiResCAM explanations admit an arbitrary matrix shift M without changing the predicted probabilities. This is a clean, rigorous identification of a fundamental limitation of a widely-used explanation method, and prior work had not formalized it.
 
-- **ContrastiveCAMs (Defs. 3.3, 3.4) are proven M-invariant (Theorem 3.5) and provide class-versus-class explanations.** This directly addresses the identified limitation, and the pairwise explanation format yields additional information not available from standard CAMs, as demonstrated qualitatively in Figure 2.
+2. **Principled resolution via ContrastiveCAMs (Theorem 3.5).** ContrastiveCAMs are shown to be invariant to the spurious M-shift, providing a principled way to recover faithful attention maps. The construction is simple and the invariance proof is straightforward. The additional class-versus-class granularity is a useful byproduct.
 
-- **CFCE (Definition 4.5) is grounded in a constrained risk minimization objective (Definition 4.4) and proven consistent (Theorem 4.6).** Proposition 4.2 dissects cross-entropy into core/non-core contributions via ContrastiveCAMs, providing a clean theoretical basis for why standard CE can encourage reliance on non-core regions. The consistency theorem shows that optimizing the CFCE risk converges to the Bayes-optimal core-constrained risk in the realizable setting.
+3. **Proposition 4.2 + Remark 4.3: theoretical basis for why cross-entropy does not penalize non-core features.** The paper decomposes CE loss into core and non-core ContrastiveCAM contributions, formally showing that CE does not inherently incentivize core-region attention. This provides a theoretical explanation for shortcut learning that goes beyond empirical observation.
 
-- **Large quantitative gains in feature alignment on Hard-ImageNet (Table 2).** CFCE+KL achieves ContrastiveCAM IoU of 93.39% (vs. 30.27% for CE w/ Arch) and Gray Mask accuracy drops to 45.49% (vs. 76.53% for CE w/ Arch), indicating the model has shifted from relying on non-core regions to core regions. These are dramatic improvements over strong baselines (CORM, DFR).
+4. **Strong results on Hard-ImageNet using an independent alignment metric.** The paper reports **GradCAM IoU** (not ContrastiveCAM IoU) for Hard-ImageNet: CFCE+KL raises it from 16.25% (CE w/ Arch) to 51.52%. Since the loss directly operates on ContrastiveCAM, not GradCAM, this provides independent evidence that the method genuinely improves feature alignment. Relative Foreground Sensitivity also flips from negative (−0.23) to positive (+0.236).
 
-- **Approximate masks work competitively (Section 5.2).** CFCE with SAM-generated masks achieves IoU of 83.95% vs. 92.72% with ground-truth masks on Oxford-IIIT Pets binary setting, showing the method does not require expensive pixel-perfect annotations. Bounding boxes also work well, and the paper correctly notes KL regularization should not be used with boxes.
+5. **Downstream segmentation improvements on PASCAL VOC.** CFCE+KL-trained backbones improve segmentation IoU across most classes in both fine-tune and end-to-end settings. This demonstrates that the alignment gains transfer to a different task, providing further validation beyond the primary metric.
 
-- **Downstream segmentation improvements (Section 5.3).** Backbones pre-trained with CFCE+KL consistently improve IoU on PASCAL VOC segmentation, particularly in the end-to-end setting, demonstrating that core-focused training transfers to dense prediction tasks.
+6. **Practical viability with approximate masks.** The method works competitively with auto-generated SAM masks and bounding-box supervision on Oxford-IIIT Pets (e.g., 83.54% IoU with SAM masks in binary setting), demonstrating robustness to imperfect supervision and practical deployability.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **CFBCE — the multilabel adaptation used for PASCAL VOC — is not defined in the main text.** The PASCAL VOC table (lines 426-427) lists "CFBCE" and "CFBCE + KL" results, but the reader can only find the definition by consulting the appendix (which was stripped by the parser). How ContrastiveCAMs are aggregated for multiple positive classes is a non-trivial extension that deserves at least a brief description in the main paper. This hurts the paper's self-containedness for readers primarily interested in the multilabel setting.
+- **IoU metric unspecified for Oxford Pets and PASCAL VOC (Tables 3, 4).** The paper's alignment evaluation for Pets and PASCAL reports only "IoU (%)" without stating which explanation method (GradCAM, ContrastiveCAM, or other) was used to compute it. For Hard-ImageNet the paper explicitly reports GradCAM IoU and separates it from ContrastiveCAM IoU, establishing independent validation. The Pets and PASCAL tables lack this crucial detail. If the IoU was computed using ContrastiveCAM — the same explanation the CFCE loss directly penalizes and the KL term explicitly fits — then the headline numbers (e.g., 93.12% IoU on Pets valid set with CFCE+KL) conflate the training objective with the evaluation metric. The authors must specify and, at minimum, also report GradCAM or another independent IoU metric for these datasets.
 
-- **ContrastiveCAMs are not quantitatively validated against HiResCAMs on faithfulness metrics.** The paper's central claim is that ContrastiveCAMs provide "more faithful attention maps" (abstract, line 68), but the quantitative experiments primarily evaluate the downstream CFCE training loss, not ContrastiveCAM itself. There is no comparison of, e.g., deletion/insertion curves, pointing-game accuracy, or any faithfulness metric that would directly demonstrate that the M-invariance translates into empirically more reliable explanations. The redundancy ratio γ (Table 1) shows the removed component is non-negligible (20-37%), but this does not establish that HiResCAMs are *actually* less faithful—only that there exists a redundancy that ContrastiveCAM removes.
+- **KL regularization on binary masks is underspecified.** Definition 4.7 applies softmax to `λ₂H` where `H` is a binary mask. The per-spatial-location semantics of this operation are not explained — it is unclear how softmax normalizes a binary value at each spatial position. The three hyperparameters `λ₁, λ₂, λ₃` receive no sensitivity analysis.
 
 ### Minor
 
-- **Framing of the HiResCAM limitation is slightly overstated.** The paper claims HiResCAMs "fail to guarantee a faithful interpretation" (line 148) and the spurious shift can "completely corrupt" explanations. For a *fixed trained model* with specific weights, the logits and resulting HiResCAMs are uniquely determined. The ambiguity is about the inverse mapping from probabilities to CAMs—which is a valid theoretical observation, but does not mean that the actual CAM computed from a given model is corrupted in practice. The ContrastiveCAM proposal is well-motivated regardless; this is a framing issue more than a technical one.
+- **Figure 3's `ℒ_core` and `ℒ_Non-Core` values are undefined.** The table embedded in Figure 3 reports numerical values labeled `ℒ_core` and `ℒ_Non-Core` for CE and CFCE models. These quantities are never formally defined in the paper text (e.g., which classes they are summed over, what normalization is applied). This makes the quantitative comparison in the figure unreproducible as written.
 
-- **Hyperparameter values (λ₁, λ₂, λ₃) are omitted from the main text.** The regularized loss (Definition 4.7) introduces three hyperparameters whose values, sensitivity, or selection criteria are not discussed. While these are likely in the appendix, including a brief note or table would improve reproducibility and help readers assess how sensitive the method is to these choices.
+- **Accuracy drop on Hard-ImageNet not discussed as a trade-off.** CFCE reduces unablated accuracy from ~94% (CE/CE w/ Arch) to ~90% (CFCE+KL), a ~4-point drop. While core-region ablation accuracy and alignment improve dramatically, the paper does not explicitly discuss whether this accuracy trade-off is acceptable or how practitioners might navigate it.
 
-- **No systematic study of sensitivity to mask quality.** The SAM and BBOX experiments are a good start, but there is no analysis of how performance varies with, e.g., SAM threshold values, or with controlled corruption of ground-truth masks. The gap between GT (92.72% IoU) and SAM (83.54% IoU) in the binary setting is non-trivial, and the paper does not investigate whether this gap is primarily due to mask quality or some other factor.
+- **Hyperparameter sensitivity absent.** The three hyperparameters `λ₁, λ₂, λ₃` in the KL regularization term are given fixed values with no ablation study showing how performance varies across a range of settings. An ablation of at least `λ₁` on Hard-ImageNet would help establish robustness.
 
 ### Trivial
-None.
+
+- None beyond standard presentation formatting that is likely a parser artifact.
 
 ## Nice-to-Haves
 
-- An ablation study that removes the absolute-value non-core suppression term, or replaces the KL divergence with a simpler L₂ penalty, would clarify which component of CFCE drives the alignment improvement.
-- Including an explanation faithfulness baseline (e.g., Right-for-the-Right-Reasons or saliency-map regularization) would further contextualize the improvements.
-- A quantitative faithfulness comparison of ContrastiveCAM vs. HiResCAM (e.g., deletion/insertion on Hard-ImageNet) would directly validate the claim that M-invariance produces more reliable explanations.
-- The "CE w/ Arch" baseline zeroes the bias of the final linear layer. While the paper does mention this (line 225), making this more explicit where the baseline is first introduced would improve clarity.
+- A gradient analysis showing how the |CAM| term in CFCE propagates gradients to suppress non-core activations would clarify the mechanism.
+- Testing generalization to ViT or other non-convolutional architectures would broaden applicability.
+- A systematic perturbation analysis of mask quality (dilation/erosion of core region) would strengthen claims about robustness.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed after verification against the paper:
+- **Theorem 4.6 proof inaccessible (Critical Issue 2).** The harsh critic flagged that the proof of Theorem 4.6 is relegated to the appendix. Per instructions, the parser strips appendix content from all papers, and this is a parser artifact rather than an author error. The theorem statement is present and complete in the main paper. Removed on procedural grounds.
 
-- **"The 'w/ Arch' architectural modification is not described."** — *Removed.* The paper explicitly states at line 225: "By zero-ing the final bias vector (i.e., b := 0_C for h only)."
-- **"Missing comparison to Right-for-the-Right-Reasons or saliency-map regularization."** — *Removed.* The paper already compares against CORM and DFR, which are the most relevant baselines for core-risk minimization. The cited methods operate in a different paradigm (regularizing input gradients rather than feature-attribution maps).
-- **"The loss is ad-hoc and not derived from a principled framework."** — *Removed.* The loss is explicitly derived from the Core-Constrained Risk Minimization objective (Definition 4.4) and a consistency theorem (Theorem 4.6) is provided. The absolute-value modification is a natural relaxation of the constraint in Eq. (14).
-- **"Missing details about CFBCE in the main text."** — *Retained above as a Major weakness.* This is a genuine omission; the other parts of the criticism were more generic.
-- **Strength Finder: "addressed an important problem," "targeted an interesting question."** — *Removed.* These are generic/superficial and lack specific evidence.
+- **"Severity of HiResCAM limitation overstated."** The harsh critic claimed the HiResCAM non-uniqueness is a well-known consequence of softmax shift-invariance. However, the paper's result (Theorem 3.2) extends from the standard scalar shift to a *matrix* shift across spatial dimensions, which is not a trivial consequence and is a novel theoretical contribution. Removed as a factual misunderstanding.
+
+- **"Figure 1 conflates scalar logit shift with matrix shift."** The figure is a pedagogical illustration using scalar shifts for visual simplicity. The theorem formally treats the matrix case. Removed as an over-interpretation of an illustrative figure.
+
+- **"Baseline 'CE w/ Arch' poorly described."** The architectural modifications are detailed in Appendix C, which is stripped by the parser. Removed on procedural grounds.
+
+- **"No statistical significance tests."** Standard deviations are reported for all main results, which is adequate for this research setting. Removed as a generic expectation mismatch.
+
+- **"Definition 4.5 is ad-hoc."** Replaced by a minor weakness about underspecified KL regularization, as Theorem 4.6 is the stated theoretical justification. The critic's "ad-hoc" characterization is an opinion, not a verifiable flaw.
+
+- **Several nice-to-haves from the harsh critic's "Missing Experiments"** (independent alignment metric for Pets/PASCAL, ablation of λs, comparison with masking baselines). These overlap with the weaknesses above and are partially retained. The remainder (gradient analysis, failure cases, training dynamics, generalization to ViT) are moved to Nice-to-Haves as they extend beyond what is necessary for the paper's core claims.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. However, one observation emerges from the intersection of the two reviews: the paper's theoretical analysis (HiResCAM non-uniqueness → ContrastiveCAM → CE-core/non-core decomposition) is genuinely novel as a chain, but the empirical validation focuses almost entirely on the last link (CFCE improves alignment). The intermediate link (ContrastiveCAM is more faithful than HiResCAM) is argued theoretically but not empirically tested. This suggests a natural extension: a direct head-to-head faithfulness comparison would complete the chain and significantly strengthen the paper's narrative.
+Beyond the paper's own contributions, the most interesting observation from the review is that the gap between ContrastiveCAM IoU (93.39%) and GradCAM IoU (51.52%) for CFCE+KL on Hard-ImageNet reveals a genuine empirical finding: optimizing for one explanation method's alignment does transfer to another method, but with a substantial gap. This 42-point discrepancy is not a weakness but an informative signal about how different explanation methods respond to the same feature alignment pressure — and it highlights the importance of reporting multiple metrics, which the paper partially does for Hard-ImageNet but crucially not for the other datasets.
 
 ## Suggestions
 
-1. **Define CFBCE explicitly in the main text** — even a one-sentence description of how ContrastiveCAMs are aggregated over multiple positive classes for multilabel BCE would suffice.
-2. **Add a quantitative faithfulness experiment** comparing ContrastiveCAM vs. HiResCAM on a standard metric (e.g., deletion/insertion on Hard-ImageNet) to directly validate the M-invariance claim.
-3. **Report hyperparameter values** (λ₁, λ₂, λ₃) in a brief table in the main paper, and consider a small sensitivity analysis varying λ₁.
-4. **Tone down the characterization of the HiResCAM limitation** — the theoretical observation is valid and well-motivated, but describing it as causing HiResCAMs to "fail to guarantee a faithful interpretation" risks overstatement. The paper's own experiments show HiResCAM-based IoU at 30.27% (CE w/ Arch baseline) can be a useful signal.
+1. Specify exactly which explanation method (GradCAM, ContrastiveCAM, or other) is used for the IoU metric in Tables 3 and 4. Add at least one independent explanation method's IoU for Pets and PASCAL (as done for Hard-ImageNet's GradCAM column).
+2. Add a brief explanation of how softmax applies to a binary mask `H` in Definition 4.7, or clarify the intended semantics.
+3. Define `ℒ_core` and `ℒ_Non-Core` in the Figure 3 caption or table, including which classes are summed.
+4. Include a sensitivity analysis for at least `λ₁` (the KL regularization weight) on a benchmark like Hard-ImageNet.
+5. Discuss the accuracy-versus-alignment trade-off more explicitly — under what conditions is the ~4-point accuracy drop acceptable?
 
 ## Score and Decision
 
-**Anchor Papers (calibration batch):**
+**Calibration anchors used:**
 
-| Paper | Avg Score | Comparison |
-|---|---|---|
-| Unlearning-based Neural Interpretations (PBjCTeDL6o) | 8.00 | Stronger experimental breadth across multiple models and faithfulness metrics; our paper has slightly more novel theoretical contribution but narrower empirical validation |
-| Interpreting CLIP (5Ca9sSzuDp) | 8.00 | Deeper mechanistic analysis of model internals; our paper addresses a different problem with less analytical depth but more practical training intervention |
-| How to Probe (57NfyYxh5f) | 6.25 | Similar topic area (training-layer effects on explanations); our paper has stronger theoretical grounding and a more extensive empirical evaluation of the proposed method |
-| Simple Interpretable Transformer (bkdWThqE6q) | 6.00 | Comparable paper quality; our paper provides more theoretical novelty (theorems with proofs) while the anchor has a different contribution (architecture design) |
-| Learning Causal Alignment (ozZG5FXuTV) | 6.00 | Similar structure of using explainability to guide training; our paper's theoretical contribution (M-invariance) is more specific and provable |
-| Conceptualize Any Network (wZiH43e5Ah) | 3.00 | Much weaker empirical validation and less clear contribution; our paper is substantially stronger |
-| Counterfactual Image Generation (WYsLU5TEEo) | 2.50 | Poorly motivated, unclear writing, very limited experiments; our paper is far superior in all dimensions |
+| Path | Avg Score | Comparison |
+|------|-----------|------------|
+| `fdvSCcB7i8` (Feature Level Instance Attribution) | 3.00 | Much weaker — unclear method, missing novelty, unconvincing experiments. Current paper has stronger theory and results. |
+| `HXwrppoSPc` (COMiX) | 3.25 | Much weaker — insufficient novelty relative to prior work, unclear presentation. Current paper has clearer contributions. |
+| `3b8CgMO5ix` (Model guidance via explanations) | 5.50 | Somewhat weaker — mixed reviews, poor organization, missing comparisons. Current paper has stronger theoretical and experimental support. |
+| `CMqOfvD3tO` (CDAM) | 6.80 | Comparable but cleaner — clear motivation, comprehensive ablations, well-written. Current paper has stronger theory but evaluation gaps. |
+| `PBjCTeDL6o` (UNI — Unlearning-based Interpretations) | 8.00 | Stronger — thorough analysis, comprehensive experiments, clear presentation. Current paper is not at this level of polish. |
 
-The paper makes a genuine theoretical contribution (HiResCAM non-uniqueness, ContrastiveCAM M-invariance), grounds the training loss in a constrained optimization framework with consistency guarantees, and demonstrates large empirical improvements across three datasets. The weaknesses are about missing details (CFBCE definition, hyperparameters) and a missing empirical link (ContrastiveCAM faithfulness validation) rather than any fatal flaw. Relative to the calibration anchors, the paper sits clearly above the 6.0-6.25 papers in theoretical novelty and empirical strength, but below the 8.0 papers in experimental breadth and depth.
+The paper makes a genuine theoretical contribution (HiResCAM non-uniqueness, ContrastiveCAM invariance) and proposes a novel method that shows real improvements on independent metrics (GradCAM IoU on Hard-ImageNet, downstream segmentation). The main empirical weakness — unspecified IoU metrics for Pets and PASCAL — is verifiable from the paper and should be corrected, but does not invalidate the core evidence from Hard-ImageNet. The paper is clearly stronger than the 3.00–3.25 band (rejected for fundamental flaws) and the 5.50 band (unclear contributions). It is slightly below the 6.80 CDAM paper in terms of experimental clarity and completeness, but has stronger theoretical foundations. A score of 6.0 reflects a solid contribution with addressable weaknesses.
 
-MY FINAL SCORE: <score>6.5</score>
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

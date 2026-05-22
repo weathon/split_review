@@ -1,74 +1,99 @@
-Now let me check for calibration anchors.I have enough calibration data. The paper sits next to the ISE paper (the very baseline it improves on, scored 6.0) and the PFT paper (similar architectural defense, scored 4.25). AIR has more rigorous gradient-attack evaluation than either, but shares the "missing isolating ablation" weakness as ISE. My bracket is 5.0–6.0. Writing the final review now.
+Now I have enough information to write the final review.
+
+Based on my research:
+- Round 1 bracket: 3.5 (weak anchors) to ~6.5 (strong middle anchors like ISE at 6.0)
+- Round 2 anchors: ISE (6.0, Accept), PFT (4.25, Reject), Safety Layers (6.0, Accept), Improved GCG (6.25, Accept)
+- The paper extends ISE with a real architectural twist (per-layer injection) and shows substantial empirical gains, but the evidence has the likelihood-ASR concern and no adaptive attack.
 
 ## Summary
-The paper introduces Augmented Intermediate Representations (AIR), a defense against indirect prompt-injection that injects Instruction Hierarchy (IH) signals at every decoder layer via per-layer trainable embedding tables indexed by privilege level, rather than only at the input layer as in Delimiters or ISE. Evaluated on Llama-3.2-3B, Qwen-2.5-7B, and Llama-3.1-8B with both SFT and DPO, AIR reports a 1.6×–9.2× reduction in ASR on gradient-based attacks (Momentum-GCG, Astra) against Delim/ISE, with <2% utility degradation on AlpacaFarm and the best utility–separation trade-off on SEP under DPO.
+The paper proposes Augmented Intermediate Representations (AIR), a defense against indirect prompt injection that injects a learned per-layer privilege-level embedding into the intermediate token representations at every decoder block, rather than only at the input layer as in prior Delimiter (StruQ/SecAlign) and ISE methods. Across three models (Llama-3.2-3B, Qwen-2.5-7B, Llama-3.1-8B) trained with SFT and DPO, AIR reports 1.6×–9.2× ASR reductions on GCG and up to 145× on Astra (SFT) versus the next-best IH defense, with <2% utility degradation on AlpacaEval and the best utility×separation score on SEP under DPO.
 
 ## Strengths
-- **Large, consistent gradient-attack robustness gains.** Table 1 shows AIR achieves 1.6×–9.2× lower GCG ASR than the next-best defense across all three model sizes and both training regimes (e.g., 99.5% → 11.3% on Llama-3.1-8B SFT; 38% → 4.1% on Llama-3.2-3B SFT). Astra ASRs collapse to near-zero (0.1%, 0.9%, 1.0%) in several settings. These are concrete, large-magnitude wins on the headline metric.
-- **Negligible parameter overhead.** Section 4 calculates 0.4M extra parameters (~0.005% increase) for Llama-3.1-8B, which is genuinely cheap relative to the robustness improvement.
-- **Best utility–separation trade-off on SEP under DPO.** Figure 8 shows AIR-DPO Pareto-dominates Delim and ISE on the SEP benchmark for all three models, indicating the robustness gains transfer to a second, independently designed evaluation.
-- **Controlled, apples-to-apples training pipeline.** All injection mechanisms (Delim, ISE, AIR) share the identical two-stage training procedure, datasets, optimizer, and epoch counts (§5.2), so observed differences are attributable to the architectural change rather than training confounds.
+- **Concrete, large empirical gains over the right baselines.** Table 1 shows on Llama-3.2-3B (SFT) that GCG ASR drops from 48.1% (ISE) and 38.0% (Delim) to 4.1% with AIR; on Qwen-2.5-7B (DPO), Astra drops from 2.3% (ISE) / 19.9% (Delim) to 0.9% (AIR). The gap is consistent across all three model sizes and both training procedures, so the effect is not an artifact of one configuration.
+- **Method is cleanly specified and minimally invasive.** Eq. (1) and Fig. 4 give an unambiguous architectural change: an additive per-layer privilege embedding sj^k indexed by token privilege level. Parameter overhead is reported as ~0.005% for Llama-3.1-8B, which is concrete and small.
+- **Fair internal comparison.** Section 5.2 holds the training procedure (rounds, datasets, optimizer, LR) constant across Delim, ISE, and AIR, so the comparison isolates the injection mechanism. This is the right experimental control for the paper's central claim.
+- **Independent benchmark corroboration.** On SEP (Fig. 8), AIR with DPO achieves the best utility×separation score on all three models. SEP uses actual generation (probe/witness substring check), so this result is not affected by the likelihood-vs-generation issue that affects the GCG/Astra columns.
+- **Utility preservation.** Figure 6 shows AIR's win rate stays within ~2% of the non-adversarially trained baseline (and for some configurations exceeds it), demonstrating the defense does not materially damage helpfulness.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The contribution is well-defined and the gains are real on at least one fully generation-based metric (SEP). The most worrying issue (likelihood-based ASR for gradient attacks) shrinks the strength of the headline claim but does not invalidate it.
 
 ### Major
-- **Missing ablation isolating "per-layer injection" from "per-layer trainable parameters."** AIR conflates two changes: (a) making the IH signal available at every layer, and (b) using independently-trained embedding tables S_j per layer. The natural intermediate baselines (ISE-style segment embedding applied at every layer with shared/tied weights; AIR with tied S across layers) are absent. Without these, Table 1 supports the empirical claim "AIR > ISE/Delim" but does not test the paper's actual thesis ("inject IH at every layer is what matters"); the gains may stem largely from the added layer-conditional capacity rather than from the conceptual claim the paper makes. This is the most substantive scientific gap.
-- **Asymmetric attack budget across training regimes.** §5.4 reports 50 GCG steps for SFT but 200 for DPO models, with no convergence sanity check that the SFT attack has plateaued. Several SFT loss curves in Fig. 7 appear still trending downward at the cutoff; the SFT robustness claim is more sensitive to this than the DPO one. A consistent (or per-model converged) budget would tighten the headline number.
-- **Single fixed attack target weakens the generality claim.** All gradient-based and static robustness numbers use the literal target "hacked!" (§5.4), and ASR is measured by likelihood of that exact phrase. The 1.6×–9.2× number is therefore for one synthetic objective; the broader threat model in §1 (exfiltration, agentic hijacking) is not directly probed. Reporting GCG/Astra against a small set of varied targets would substantially strengthen the contribution.
+- **Gradient-attack ASR is computed from likelihood, not actual generations.** Section 5.4, line 302 explicitly states: *"ASR is measured using the likelihood (from model's logits) of generating the target phrase `hacked!`."* The headline "1.6×–9.2× lower GCG ASR" and "up to 145× lower Astra ASR" in Table 1 and the abstract are derived from this metric. The Zou et al. GCG convention, and the static-attack rows of the *same table*, use a substring check on the actual generation. Because GCG itself optimizes a likelihood proxy, a defense that flattens logits around the target without preventing it from being the argmax can look much better on likelihood than on greedy decode. The paper does not report a generation-based GCG/Astra ASR anywhere in the main text to corroborate. Until that number is reported, the magnitude (not the existence) of the gradient-attack improvement is not on firm ground. Figure 7 (average attacker loss) and the SEP results both still support a real effect, so this is a "shrinks the claim" issue, not a "kills the claim" issue.
+- **No defense-aware adaptive attack against AIR.** The threat model is white-box (Section 5.4), but the white-box attacks (momentum-GCG, Astra) are configured identically across Delim/ISE/AIR — they only optimize an input-side adversarial prefix and do not exploit knowledge of AIR's per-layer additive embedding tables. Given the long history in adversarial ML of input-layer augmentations being broken once attackers adapt to them, an adaptive attack (e.g., GCG augmented to drive post-augmentation hidden states toward the P₀ embedding region, or to minimize the privilege-aware separation in intermediate representations) is the natural and missing test. The paper's robustness claim under a white-box threat model is therefore upper-bounded by attacks that did not actually know about the defense.
 
 ### Minor
-- **The cosine-similarity motivation (Fig. 3) is a correlate, not a mechanism.** All three methods show the same monotonic increase in privilege-token similarity with depth; AIR is only modestly damped (0.55 → 0.88 vs. ISE's 0.55 → 0.92). It is reasonable to use this as a suggestive observation, but the paper occasionally implies it mechanistically explains why AIR is robust — which a >10× ASR gap is unlikely to follow from such a modest similarity gap. The framing in §3.2/§1 could be softened to an empirical observation, or replaced/supplemented by a probe-based diagnostic (e.g., privilege-classification accuracy from layer-l hidden states, or layer-wise attention mass on high- vs. low-privilege tokens).
-- **Single-seed numbers with no variance estimates over training runs.** Several Table 1 cells differ by <1 percentage point between methods on static attacks, and Astra ASR moves dramatically (e.g., 25.8 → 0.1) between adjacent configurations. The Fig. 7 shaded regions are over test instances, not training runs. Even a small number of seeded re-runs on the gradient-attack column would help readers calibrate which gaps are real.
-- **AIR-aware attack not clearly evaluated.** Astra is cited as "architecture-aware" but the paper does not explicitly state whether the optimization backpropagates through the per-layer S_j additions or treats AIR as a black box. For a new architectural defense, the most informative attack is one that knows the defense.
-- **SEP gap is small.** On SEP, AIR's separation scores are close to ISE under SFT (e.g., 3.1 vs. 3.1 on Llama-3.1-8B). The paper does not over-claim here, but readers should be aware the headline framing rests on the gradient-attack column.
-- **Utility below the None baseline for AIR-SFT on some models** (Fig. 8, Qwen-2.5-7B, Llama-3.1-8B). The body acknowledges this; the abstract does not.
+- **The Figure 3 motivation is partially mechanical for Delim.** For the Delim baseline, the two compared prompts differ by *one delimiter token*, so cosine similarity at layer 0 being ~1.00 reflects token overlap, not a genuine "signal degradation" story. For AIR/ISE the comparison is more meaningful since the input embeddings already differ, and AIR additionally injects new vectors per layer (which mechanically guarantees a lower similarity than ISE). The figure is therefore better read as showing "AIR's modification is detectable in hidden states" rather than as evidence that input-only IH signals are otherwise being lost. The mechanistic story in Section 3.2 leans more heavily on Fig. 3 than it can support.
+- **Single, short adversarial target.** All robustness experiments use the target string `hacked!`. The paper's framing (introduction, AgentDojo citation) is about agentic indirect prompt injection, where realistic payloads include URL exfiltration, refusal bypass, and longer strings. Without varying the target — even a small set of 5–10 — the gradient-attack results probe a narrow slice of what "robustness" means in the motivating setting.
+- **Abstract framing softens an SFT regression.** Section 6.2 acknowledges that for Qwen-2.5-7B and Llama-3.1-8B, AIR-SFT can have lower utility than the *None* baseline (which has only non-adversarial training). The abstract's "without significantly degrading utility" is true in the DPO setting but understates the SFT case. Worth flagging in the abstract and limitations.
+- **RoPE analogy is somewhat overstated.** Section 4 (line 163) compares AIR's per-layer additive injection to RoPE. RoPE injects *relative positional* information via rotation *inside attention*, not via additive constants on the residual stream. The more honest precedent is per-layer learned positional embeddings; the RoPE framing oversells the architectural similarity.
 
 ### Trivial
-- The "Similarity to Positional Embeddings" analogy in §4 is rhetorical rather than structural — RoPE injects positional information into attention rotations, not as a residual addition to the hidden state, so the structural parallel is loose.
+None of significance.
 
 ## Nice-to-Haves
-- Report whether the learned per-layer S_j actually develop layer-distinct structure (e.g., pairwise similarity / norm-by-layer of the learned tables). If they collapse to near-identical vectors, the layer-specific design is redundant; if they are distinct, the choice is empirically justified.
-- Run a probe-based diagnostic across layers (privilege classifier on hidden states, attention mass on different privilege segments) — these would either substantiate or replace the cosine-similarity motivation.
-- Vary the adversarial target across a small set of objectives and report variance.
-- Add the isolating ablation (tied-S AIR; ISE-applied-per-layer) — this is the single most informative experiment for the paper.
+- Re-run GCG/Astra with a greedy-decode + substring ASR (and ideally sampled-decode with low temperature for variance bars) and report alongside the likelihood-based numbers. If the gap survives, the claim is much stronger; if it shrinks, the framing changes to "AIR raises optimization difficulty for likelihood-based attackers," which is still publishable.
+- Construct at least one defense-aware adaptive attack. Cleanest version: assume the attacker knows the per-layer embedding tables (they ship with the model) and modify GCG's objective to additionally push post-augmentation hidden states toward the P₀ region.
+- Vary the adversarial target string across ~10 instances (including longer strings) and report average ASR. This is cheap and closes the "one short token" weakness without adding a new benchmark.
+- A small mechanistic analysis (e.g., attention to P₁ tokens in deep layers after AIR training, or the subspace AIR's embedding occupies) would convert Fig. 3's mostly-mechanical signal into a real explanation.
+- Report variance over training seeds (not just over test instances) for Fig. 7's shaded regions.
 
 ## Removed Points
-These points are flagged to be removed — treat them with caution.
+These points are flagged to be removed, treat them with caution.
 
-- **"AIR re-injects a privilege offset before each layer, mechanically lowering similarity by construction; Fig. 3 is decorative."** This is partially speculative — the figure does plot a meaningful quantity, and the paper does not over-claim mechanism in the formal contributions. I retained the substance as a Minor weakness (motivation is correlative, not mechanistic) but dropped the "decorative" framing.
-- **"The empirical gains may be coming from a privilege-gating mechanism inside attention/FFN rather than from preserving an input signal."** This is exactly the kind of speculation the harsh-critic protocol asks to demote — it depends on information not in the paper. The constructive form (run the tied-S ablation) is already kept as a Major weakness.
-- **"AIR-SFT utility falls below None baseline — abstract should mention it."** The body explicitly discusses this; calling it a deficiency of the abstract is a presentation nitpick, not a substantive weakness.
-- Strength: "Empirical evidence of signal degradation in input-only methods (Fig. 3)" — Conflicts with the verified Minor weakness that the figure is a correlate rather than mechanistic evidence. Demoted/removed in favor of the weakness.
-- Strength: "Consistent evaluation across diverse settings" — Real but generic; better captured implicitly by the headline-ASR strength.
+- *"No check that Delim/ISE reproductions match published numbers"* — The paper deliberately fixes training procedure across all IH mechanisms for a controlled comparison (Section 5.2), which is the correct experimental design; whether their Delim reproduction matches Wallace et al. 2024's exact numbers is not the central question. Demoted to a non-issue.
+- *"Static-attack rows are saturated near zero and oversell the table"* — All three defenses saturate, so the table's distinguishing power lies in the GCG/Astra/SEP rows, which is exactly how the paper interprets them in Section 6.1. Not a real problem.
+- *Generic strengths the Strength Finder listed about "breadth of 3 model sizes"* — Retained as a supporting (not core) strength; partial duplication with the core gain claim.
+- *"Variance is reported over test instances, not training seeds"* — Fair point but standard practice in this subfield; demoted from a Major to a Nice-to-Have.
+- *"Should be evaluated in agentic settings like AgentDojo, not AlpacaFarm/SEP"* — Scope creep relative to what the paper claims to do; included only as a mild nice-to-have (target diversity).
 
 ## Novel Insights
-None beyond the paper's own contributions. The core idea — distributing privilege-level signals across all decoder layers rather than only at the input — is the paper's contribution, and the empirical evidence supports that this is worth doing. No additional insight emerges from the reviews.
+None beyond the paper's own contributions. The core observation — that input-only IH signals fail to persist through depth, motivating per-layer injection — is the paper's own contribution. The reviews surface known concerns about robustness evaluation methodology (likelihood vs. generation, adaptive attacks) that are general to the adversarial-ML literature rather than novel insights specific to this work.
 
 ## Suggestions
-- Run the **tied-S AIR ablation** (single shared S across layers) and **ISE-applied-per-layer** to isolate "where to inject" from "how many parameters." This is the single experiment that would most strengthen the paper's central thesis.
-- Equalize the GCG budget across SFT and DPO (or show convergence), and report seed variance on the gradient-attack column.
-- Run a small **target-diversification sweep** for GCG/Astra (several distinct adversarial instructions) to broaden the robustness claim beyond "hacked!".
-- Either soften the "signal degradation" framing in §3.2 to an empirical observation, or replace Fig. 3 with a probe-based diagnostic that more directly tests the hypothesis (e.g., layerwise privilege-classification probe).
-- State explicitly in §5.4 whether Astra/GCG optimization routes gradients through the per-layer S_j tables, and if not, run an AIR-aware adaptive attack.
+- Add a Table-1-style row for greedy-decode generation-based ASR on GCG and Astra, even if it is only on the strongest model/training configuration, to anchor the likelihood-based numbers.
+- Implement and evaluate at least one defense-aware GCG variant; even a single setting where adaptive GCG bounds AIR's robustness would substantially strengthen the paper.
+- Adjust the abstract to acknowledge the SFT-utility regression on SEP rather than the blanket "without significantly degrading utility."
+- Soften or replace the RoPE analogy with a more accurate comparison to per-layer learned positional embeddings or hyper-network-style per-layer interventions.
 
----
+## Evaluation on standard axes
+- **Originality:** Moderate — incremental architectural twist on ISE (per-layer rather than input-only), but the move is clean and well-motivated.
+- **Importance of research question:** High — indirect prompt injection is a real and increasingly urgent vulnerability.
+- **Claims well supported:** Partially — Table 1 utility, SEP results, and the loss curves (Fig. 7) support a real effect; the *magnitude* of the GCG/Astra ASR reduction is partially undermined by the likelihood-based ASR.
+- **Soundness of experiments:** Mostly sound, with the metric and adaptive-attack gaps noted.
+- **Clarity of writing:** Good; method and setup are easy to follow.
+- **Value to research community:** Moderate-to-high — if the headline result holds under generation-based ASR and adaptive attacks, this is a useful and easy-to-adopt architectural change.
 
-**Axis evaluation.** *Originality:* moderate — a natural and well-motivated incremental extension of ISE/Delim. *Importance of the question:* high — indirect prompt injection is a central safety concern. *Whether the claims are well supported:* mixed — the empirical headline (1.6×–9.2× ASR reduction) is supported, but the mechanistic framing is not isolated by experiments. *Soundness of experiments:* solid setup, but missing the key ablation and an explicitly AIR-aware adaptive attack, and using one fixed adversarial target. *Clarity of writing:* clear, well-organized, easy to follow. *Value to the research community:* moderate — a useful, cheap architectural lever that practitioners can adopt; needs the disentangling ablation to be convincing about *why* it works.
+## Calibration anchors
 
-## Score and Decision
+Round 1 (bracket):
+- `3MDmM0rMPQ.md` (avg 3.00, Reject) — Task-specific safety guardrails; much narrower and weaker setup than AIR. AIR clearly above.
+- `5kMwiMnUip.md` (avg 1.40, Reject) — Jailbreak survey paper; AIR clearly far above.
+- `6QBHdrt8nX.md` (avg 3.33, Reject) — SafetyAnalyst; different topic. AIR clearly above.
+- `sjWG7B8dvt.md` (avg 6.00, Accept) — **ISE paper, the direct predecessor.** Read in full. AIR extends ISE's design with per-layer injection, reports larger gains under stronger attacks (GCG/Astra), and uses comparable evaluation breadth (3 models vs ISE's 3 models). Comparable in scope and contribution; AIR shows a stronger empirical headline but with the likelihood-ASR caveat that ISE did not have to navigate.
+- `l3bUmPn6u5.md` (avg 4.25, Reject) — **PFT paper.** Read in full. PFT proposes position-ID-based defense; reviewers complained about weak attacks, missing baselines, and unclear scope. AIR is clearly above PFT: stronger attacks (GCG, Astra), proper IH baselines (Delim, ISE), and a more substantive architectural change.
+- `2VmB01D9Ef.md` (avg 4.25, Reject) — AutoHijacker; an attack paper rather than defense.
+- `Q3oAX9HoH2.md` (avg 4.00, Reject) — Nested Gloss jailbreak; different topic.
+- `6Mxhg9PtDE.md` (avg 9.50, Accept) — "Safety alignment should be more than a few tokens deep"; conceptually adjacent (shallow vs. deep safety) but far more impactful and broadly scoped than AIR. AIR clearly below.
+- `tTPHgb0EtV.md` (avg 8.00, Accept), `UHPnqSTBPO.md` (avg 8.00, Accept), `syThiTmWWm.md` (avg 7.75, Accept) — Stronger papers on adjacent or different topics; AIR clearly below.
 
-**Anchors used:**
+Round 1 bracket: between **4.25 (PFT)** and **6.00 (ISE)** — most likely 5.0–6.0.
 
-- `sjWG7B8dvt.md` — ISE paper (avg score **6.00**, Accept). Round 1 + Round 2. This is the immediate predecessor and a direct comparable. ISE introduced segment embeddings at the input layer; reviewers accepted at 6.0 despite "merely adds an embedding layer" novelty concerns, missing-ablation concerns (e.g., concatenation vs. addition, capacity ablation), and questions about evaluation. AIR is a strictly more rigorous evaluation (three models, two training regimes, both static and gradient-based attacks, two benchmarks) of a similar-grain architectural change, but shares the central methodological gap (no ablation isolating the conceptual change from the parameter increase). Roughly comparable contribution scale; AIR slightly better-evaluated.
+Round 2 (narrowing):
+- `4FIjRodbW6.md` (avg 5.83, Accept) — TAR: tamper-resistant safeguards. Similar magnitude of architectural intervention with concrete gains; AIR is comparable in ambition but with a narrower scope.
+- `kUH1yPMAn7.md` (avg 6.00, Accept) — Safety Layers; uses internal representation analysis to localize safety mechanisms. Comparable methodological depth. AIR is similar in spirit.
+- `e9yfCY7Q3U.md` (avg 6.25, Accept) — Improved GCG techniques. Similar empirical rigor. Comparable contribution magnitude.
+- `0VZP2Dr9KX.md` (avg 5.25, Reject) — Baseline defenses against adversarial attacks; AIR is more methodologically targeted than this survey-style work.
+- `mzkpLkd1S8.md` (avg 5.25, Reject) — Vision Transformer nullspace robustness; tangentially related.
+- `cnecLUNs6w.md` (avg 4.67, Reject), `leFBpvYaPx.md` (avg 5.50, Reject) — Different domains.
+- `lXE5lB6ppV.md` (avg 5.75, Accept) — Task-specific fine-tuning safety risks; different scope.
+- `YGoFl5KKFc.md` (avg 4.75, Reject), `qIN5VDdEOr.md` (avg 6.00, Accept) — Adjacent.
 
-- `l3bUmPn6u5.md` — PFT paper (avg score **4.25**, Reject). Round 1 + Round 2. Position-based prompt-injection defense. Rejected for narrow problem framing, weak attack diversity (no GCG), unclear comparison to baselines, and questionable real-world relevance. AIR is clearly stronger: it includes gradient-based attacks (GCG, Astra), compares against the right baselines (Delim, ISE), and frames the threat model in line with the standard community formulation. AIR is well above PFT.
+Narrowed bracket: **5.0–6.0**. AIR is comparable in scope and quality to ISE (6.0) but with the likelihood-ASR concern that ISE did not face, and without the adaptive-attack evaluation that some weakly-acceptable papers in this space did include. It is clearly stronger than PFT (4.25). Placing it just below ISE feels right.
 
-- `kUH1yPMAn7.md` — Safety Layers (avg score **6.00**, Accept). Round 2. Analyzes which internal layers maintain safety; methodologically adjacent in spirit (layer-level mechanisms in alignment). Different problem but similar contribution flavor (architectural-mechanism insight + empirical validation). AIR is comparable on rigor and scope.
-
-**Comparative placement.** AIR is broadly comparable to ISE (6.0) — same problem area, same kind of architectural delta, similar caliber of missing-ablation issue — but AIR has notably more rigorous gradient-attack evaluation (this is a real plus over ISE), offset by a weaker motivating analysis (cosine similarity figure) and the missing tied-S ablation. Net: very slightly below ISE in my judgment, because the central thesis ("layer-wise injection is the key") is not actually isolated, and because the single-target evaluation bounds the generality claim. Clearly well above PFT (4.25).
+**Final score: 5.5.** The paper is a real contribution with substantive empirical gains and clean methodology, but the headline gradient-attack metric is non-standard and the white-box threat model is not evaluated with defense-aware attacks. These are fixable in revision, not fundamental flaws.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,18 +1,20 @@
-Now let me draft the final review.
+Now I have a thorough understanding of the paper and the calibration anchors. Let me write the consolidated review.
 
 ## Summary
 
-The paper introduces SCaSML (Simulation-Calibrated Scientific Machine Learning), a framework that corrects pre-trained surrogate models (PINNs, GPs) for high-dimensional semi-linear parabolic PDEs at inference time. The core technical contribution is the derivation of a "Structural-preserving Law of Defect" — a semi-linear PDE whose solution is exactly the surrogate's error — combined with solving this defect PDE via Multilevel Picard (MLP) stochastic simulation. The authors provide a theoretical product-form error bound (Theorem 2.5) and empirical results on five PDE families up to 160 dimensions showing 20–80% error reduction over the uncorrected surrogate.
+The paper introduces SCaSML, a framework that combines a pre-trained surrogate model (PINN or GP) for high-dimensional semi-linear parabolic PDEs with a Multilevel Picard (MLP) Monte Carlo simulation of the error (defect) PDE. The key technical insight is that the defect PDE inherits the semi-linear structure of the original PDE, enabling the use of efficient stochastic solvers. The authors provide a theoretical error bound showing the final error is a product of surrogate and simulation errors, and empirically demonstrate 20–80% error reduction on problems up to 160 dimensions.
 
 ## Strengths
 
-1. **Structural-preserving defect PDE derivation (Fact 2.3).** The paper derives that the defect PDE inherits the semi-linear structure of the original problem. This is genuinely novel compared to classical defect correction for grid-based methods; it is the key insight that enables using MLP solvers on the error equation. This is the paper's clearest intellectual contribution.
+1. **Novel combination of defect correction with Monte Carlo solvers for high-dimensional PDEs.** The insight that the defect PDE preserves semi-linear structure (Fact 2.3, Equation 7) is technically sound and practically important — it enables the use of MLP methods for the correction step, which would not be possible if the defect equation changed structural form. The paper explicitly contrasts this with classical defect correction contexts where no such structural preservation exists for neural-network surrogates (Section 2.2).
 
-2. **Theoretical product-form error bound (Theorem 2.5, Corollary 2.6).** The final global L² error is bounded by the *product* of the surrogate error and the MLP simulation error, yielding an improved scaling law from O(m^{-γ}) to O(m^{-γ-1/2+o(1)}). The empirical confirmation in Figure 4b (steeper slopes for SCaSML across d=20–80) directly supports this claim.
+2. **Theoretical product-form error bound (Theorem 2.5, Corollary 2.6).** The claim that SCaSML's final error is bounded by $E(M,N) \cdot (C_F e(\tilde{u}))$ — the product of MLP simulation error and surrogate error — is a non-trivial result. It predicts that better surrogates directly reduce the cost of the correction step, and Corollary 2.6 translates this into an improved scaling law from $O(m^{-\gamma})$ to $O(m^{-\gamma-1/2+o(1)})$. This provides a principled theoretical foundation for why the hybrid approach should outperform either component alone.
 
-3. **Consistent empirical improvement across high-dimensional benchmarks (Table 1).** Relative L² error reductions are demonstrated on five PDE problems (LCD, VB-PINN, VB-GP, LQG, DR) at dimensions ranging from 10 to 160. For example, the 20d VP-PINN error drops from 1.17×10⁻² (surrogate) to 4.03×10⁻³ (SCaSML). The method works with both PINN and GP surrogates, confirming generality.
+3. **Consistent empirical improvement across challenging high-dimensional problems.** Table 1 shows SCaSML achieving the lowest error among surrogate, naive MLP, and SCaSML across 5 problem classes (LCD, VB-PINN, VB-GP, LQG, DR) at dimensions up to 160. The improvements are substantial (e.g., VB-PINN 20d: 1.17e-02 → 4.03e-03, a 66% reduction). The inference-time scaling plots (Figure 3b) and improved convergence slopes (Figure 4b) corroborate the predicted behavior.
 
-4. **Graceful handling of failure cases.** On the 100d LQG problem, the naive MLP solver fails catastrophically (relative L² error 5.63×10⁰) while SCaSML achieves 5.53×10⁻², demonstrating that the hybrid approach is indispensable in challenging high-dimensional regimes.
+4. **Demonstrated effectiveness where pure simulation fails.** On the LQG problem (strongly nonlinear HJB), the naive MLP solver produces relative $L^2$ errors of ~5.27–5.63 (essentially meaningless), while SCaSML refines the surrogate from ~0.08–0.11 to ~0.055–0.099. This shows the method can succeed in regimes where pure Monte Carlo breaks down.
+
+5. **Clean writing and clear organization.** The paper is well-structured, with a clear warm-up (linear case) building intuition before the semi-linear extension, and a clear separation of methodological, theoretical, and experimental sections.
 
 ## Weaknesses
 
@@ -21,66 +23,65 @@ None.
 
 ### Major
 
-- **Missing baseline: surrogate-controlled Monte Carlo.** The paper compares against the surrogate alone and a naive MLP solver, but omits the most natural competitor: using the surrogate as a control variate in a standard Feynman–Kac estimator for the *original* PDE. This simpler approach would compute u(s,x) ≈ û(s,x) + (1/N) Σ_i [g(X_T^i) - û(T,X_T^i) + ∫_s^T ε(t,X_t^i) dt] — using the same ingredients (surrogate, residual ε, Monte Carlo paths) without deriving or solving a separate defect PDE. Comparing SCaSML against this baseline would isolate whether the multilevel defect-correction machinery provides additional benefit beyond straightforward bias correction. Without it, one cannot tell if the improvements come from the defect formulation itself or simply from adding Monte Carlo sampling with the surrogate as a predictor. This is a significant experimental gap that limits the strength of the empirical claims.
+1. **Main results do not control for total computational budget.** Table 1 shows SCaSML using dramatically more compute than the surrogate alone (e.g., LCD 60d: 0.28s vs. 37.59s; VB-GP 80d: 1.69s vs. 60.69s) and substantially more than naive MLP (e.g., VB-GP 80d: 10.12s vs. 60.69s). The headline "20–80% error reduction" does not distinguish between genuine algorithmic superiority and spending more compute. The paper mentions fixed-budget comparisons in Appendix G.7, but the main text presents unequal-budget results as the primary evidence. Without a controlled comparison in the main paper, the reader cannot assess whether the same compute allocated to an improved surrogate or a better-tuned MLP would yield equal or better accuracy. This is the most significant weakness and should be addressed by moving the fixed-budget analysis into the main text.
+
+2. **Theoretical proof sketch in the main text is too loose to fully support the claimed scaling law.** Section 2.4 asserts a variance scaling of $O(m^{-2\gamma})$ and a final rate of $O(m^{-\gamma-1/2})$, but several technical steps are glossed over. The analysis does not explicitly bound how the Lipschitz constant of the modified nonlinearity $\tilde{F}$ interacts with the surrogate error $e(\tilde{u})$, nor how evaluating surrogate gradients and Hessians along MLP paths affects the cost. The claim that $E(M,N)$ is "independent of the surrogate" is stated without justification in the main text. The full proofs are deferred to the appendix (which was stripped by the parser), leaving the main text's argument as an intuition rather than a verifiable proof.
 
 ### Minor
 
-- **Asymmetric clipping thresholds without sufficient ablation.** For VB-PINN, LQG, and DR, the naive MLP uses a much larger clipping threshold than SCaSML (e.g., 10 vs. 0.1 for LQG, 10 vs. 0.01 for DR). The paper justifies this by noting the defect has smaller magnitude — which is reasonable — but does not demonstrate that the naive MLP was tuned over clipping values. For LCD the thresholds are matched (both use 0.5(d+1)), making this asymmetry controllable. A brief ablation over clipping values for the naive MLP would eliminate any concern that its poor performance is a tuning artifact rather than an inherent limitation.
+1. **Unequal hyperparameter choices across methods.** For the LCD problem, the clipping threshold is the same for both SCaSML and naive MLP (0.5(d+1)). However, for VB-PINN (1.0 vs. 0.01), LQG (10 vs. 0.1), and DR (10 vs. 0.01), thresholds differ. The paper justifies this for LQG ("reflecting the smaller magnitude of the defect"), but the VB-PINN and DR explanations are less specific ("to handle the nonlinearity"). Since clipping directly controls MLP stability, the asymmetry raises the question of whether the naive MLP baseline is being operated in a suboptimal regime. The LCD results (same threshold, SCaSML still wins) provide partial reassurance, but a systematic sensitivity analysis would strengthen the comparison.
 
-- **No ablation on surrogate quality.** All experiments use surrogates with moderate to good accuracy. The method's behavior when e(û) is large (i.e., a deliberately poor surrogate) is unexplored. Does the correction degrade gracefully or catastrophically when the surrogate is unreliable? This is an important practical question the paper does not address.
+2. **Novelty is somewhat overstated.** Multiple claims of "the first" (first physics-informed inference-time scaling framework, first derivation preserving semi-linear structure, first inference-time scaling algorithm) are imprecise. The defect PDE (7) is derived by a straightforward subtraction, and the semi-linear structure is inherited algebraically rather than "preserved" through a non-trivial construction. The analogy to LLM inference-time scaling is evocative but does not add technical depth. The paper also mentions the control-variate interpretation only in the conclusion without engaging with the extensive literature on ML-based control variates for Monte Carlo (e.g., in computational finance). These framing issues do not invalidate the contribution but misrepresent its novelty relative to existing techniques.
 
-- **Theoretical exposition in the main text is quite brief.** The proof sketch for Theorem 2.5 (lines 201–235) is a few paragraphs of intuition; a reader who does not consult the appendix cannot evaluate the assumptions or the argument. A slightly more detailed statement of the key assumptions and the structure of the proof would improve the main paper's self-containedness without requiring the full appendix derivation.
+3. **Missing comparison with other high-dimensional PDE solvers.** The baselines are limited to the surrogate itself and a naive MLP solver. Comparisons with deep BSDE methods, backward SDE solvers, tensor-train approaches, or other established high-dimensional PDE methods would help situate SCaSML's practical value. The paper claims to be a "principled method to fuse the speed of machine learning with the rigor of numerical simulation," but only compares against one side of that fusion.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- A sensitivity study of MLP hyperparameters (number of levels, base sample size M) beyond the fixed n=2, M=10 used in the main table would strengthen the empirical picture. The scaling plots in Figure 3b hint at improvement with more samples, but a systematic sweep would be informative.
-
-- The paper reports timing for the surrogate (forward pass), naive MLP, and SCaSML, but not the training time of the surrogates themselves. Adding the training wall-clock time to the discussion would help readers assess total cost.
-
-- A discussion of the computational overhead of evaluating the PDE residual ε along each path (which involves second-order derivatives of the surrogate) would be helpful for practitioners assessing the method's practicality.
+1. Pointwise error maps (2D projections of high-dimensional problems) to visually illustrate spatial correction patterns. The paper references Appendix G.6 for this, but these would be valuable in the main text.
+2. Variance comparison plots showing the MLP estimator variance for the defect vs. the original PDE, directly validating the variance-reduction mechanism.
+3. Systematic ablation on surrogate quality (varying training data size) to empirically confirm that SCaSML benefits more from better surrogates, as the theory predicts.
 
 ## Removed Points
 
-Weaknesses from the inputs that were removed with justification:
-
-- **"Elastic compute claim not demonstrated"** — REMOVED. The paper explicitly states: *"More experiments, including statistical significance tests (p ≪ 0.001, Appendix G.4) and fixed-budget efficiency comparisons (Appendix G.7), are shown in the Appendix G."* The appendix was stripped by the parser, so these experiments exist in the original submission.
-
-- **"Section 2.2 incorrectly implies iterative methods need nested MC loops"** — REMOVED. The paper already discusses that *"iterative updates produce only approximate corrections, whereas our law of defect is an exact analytical identity."* The alternative of a single Newton step initialized with the surrogate is not the same as SCaSML's exact correction, and the paper's argument about nested MC loops for iterative methods is directed at multi-step iterations, not single-step alternatives.
-
-- **"Too high-level MLP description"** — REMOVED per soft rule on scope-creep. The paper provides the key structure and defers implementation details to Appendix B.2.1 as is standard.
-
-- **"Missing code release"** and **"typos/formatting"** — REMOVED per hard rules.
-
-- **"Overly assertive tone / 'first' claims"** — REMOVED as a subjective style concern.
+- **"The paper never asks whether spending the same additional compute purely on the surrogate..."** — This is factually incorrect. The paper explicitly states "fixed-budget efficiency comparisons (Appendix G.7)" on line 247. The concern about unequal compute is valid and retained as a Major weakness, but the claim that it was never asked is removed.
+- **"The naive MLP may simply be operated in an unrealistic regime"** (regarding clipping thresholds) — Partially addressed by LCD using identical thresholds and by the paper's justification for LQG. Retained as a Minor weakness but softened.
+- **"The distinction from classical defect-correction methods... is a red herring"** — The paper's distinction (Section 2.2) has merit: neural-network surrogates lack the asymptotic error expansions that classical defect correction exploits, and iterative nonlinear solvers suffer from nested Monte Carlo degradation. This is a substantive argument, not a red herring.
+- **Several formatting/presentation nitpicks and generic "could add more experiments" requests** from the harsh critic — removed per filtering rules.
+- **Strength Finder's generic claims about "addressing an important problem"** — removed as superficial.
+- **"The proof sketch conflates two different sources of error"** — This is restating the same concern as Weakness #2; merged.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews surface a tension that the paper does not fully resolve: while the error bound product structure (Theorem 2.5) elegantly separates surrogate and simulation contributions, the experimental evaluation elides the same separation by not controlling for total compute. This gap between the paper's theoretical framing (co-design of training and inference budgets) and its empirical practice (reporting unequal-budget gains) is the most insightful observation to emerge from the combined reviews.
 
 ## Suggestions
 
-1. Add the surrogate-controlled Monte Carlo baseline to demonstrate that the defect-correction formulation provides additive value over direct bias correction.
-2. Include a brief clipping-threshold ablation for the naive MLP on at least one problem to demonstrate tuning robustness.
-3. Add an experiment with a deliberately poor surrogate (e.g., undertrained PINN) to investigate the method's behavior when e(û) is large.
+1. Move the fixed-budget comparison (currently Appendix G.7) into the main paper. Plot relative error vs. total runtime (surrogate training + inference) for SCaSML, an improved surrogate with equivalent additional training compute, and a pure MLP with equivalent additional samples. This directly addresses the most significant weakness.
+2. Report clipping thresholds in a single table with justification for each problem, and include a sensitivity analysis showing how results vary with threshold choices.
+3. Tone down the "first" novelty claims and explicitly discuss connections to control variate methods in computational finance and multi-fidelity Monte Carlo, positioning the contribution more precisely.
+4. Add wall-clock timing breakdowns showing how SCaSML's cost is distributed (surrogate evaluation, gradient computation, Monte Carlo path simulation) to help readers understand when the method is practical.
 
 ## Score and Decision
 
-**Calibration anchors:**
+### Calibration Anchors
 
 | Path | Avg Score | Comparison |
 |------|-----------|------------|
-| `fU8H4lzkIm.md` (PhyMPGN) | 8.00 | Stronger empirical validation and more comprehensive baselines; SCaSML has a stronger theoretical contribution but weaker experiments. SCaSML is ~2.5 points lower. |
-| `wVADj7yKee.md` (SINGER) | 6.33 | Similar-level paper — both have theoretical analysis and high-dim experiments, but SCaSML has a more significant missing-baseline gap. SCaSML is ~0.8 points lower. |
-| `4KKqHIb4iG.md` (Backprop-free PDE) | 5.60 | SCaSML has stronger theory and higher-dimensional experiments, though both have validation gaps. SCaSML is slightly stronger. |
-| `Q9OGPWt0Rp.md` (PINN meta-learning) | 5.25 | SCaSML has more extensive experiments and theoretical analysis. SCaSML is somewhat stronger. |
-| `KA2Rit4ky1.md` (PDETime) | 4.80 | Less related (time-series), weaker theoretical contribution. SCaSML is stronger. |
-| `ewZSzO6bts.md` (Scaling laws) | 3.75 | Less related; SCaSML is stronger in contribution density for its intended domain. |
-| `LwAG269lIq.md` (Adjoint PDE discovery) | 3.00 | Much weaker experimental validation and unclear contributions. SCaSML is substantially stronger. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/HDmmwwTIlf.md | 2.50 | Much weaker paper: limited to 1D, very sparse experiments, poor writing. SCaSML is substantially stronger in scope, theory, and execution. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/LwAG269lIq.md | 3.00 | Both are method papers, but this one is far less ambitious (PDE discovery, not solving). SCaSML has more extensive experiments and a clearer contribution. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/R5FzCFR5yU.md | 3.33 | Hybrid numerical-PINN approach but with very narrow scope. SCaSML handles higher dimensions and stronger theory. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/hghJJJUJJR.md | 3.00 | Operator learning paper with limited experiments. SCaSML has more thorough evaluation. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/Q9OGPWt0Rp.md | 5.25 | Both are PINN improvement methods. This paper's meta-learning approach is conceptually simpler; SCaSML has stronger theoretical grounding but less controlled experiments. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/4KKqHIb4iG.md | 5.60 | Both target neural PDE solvers. SCaSML's theory (product error bound) is more novel, but this paper's experiments are cleaner. Comparable quality. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/f3xXPDCh8Q.md | 5.50 | Both make strong novelty claims. Unisolver's universal solver framing is arguably more impactful but also more overclaimed. SCaSML has cleaner math but less thorough comparison baselines. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/wVADj7yKee.md | 6.33 | Both solve high-dimensional PDEs. SINGER has stronger theoretical guarantees (stability, semigroup) but works only up to 20d; SCaSML reaches 160d. SINGER's experiments are broader (8 PDEs); SCaSML's are more focused. Accept-quality paper. |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/fU8H4lzkIm.md | 8.00 | PhyMPGN is cleaner: thorough experiments, clear baselines, practical contribution on irregular meshes. SCaSML is more ambitious in dimensionality but has weaker experimental controls (unequal compute budgets). |
+| /home/wg25r/split_review/datasets/deepreview_13k_calibration/uKZdlihDDn.md | 7.60 | Diffusion model for fluid simulation — different problem class but well-executed with clear baselines. SCaSML's theoretical contribution is stronger but the experimental validation is less convincing. |
 
-The paper has a genuinely novel core idea (structural-preserving defect PDE for ML-based PDE solvers) and a theoretically grounded error bound with supporting experiments up to 160 dimensions. However, the missing surrogate-controlled Monte Carlo baseline is a real gap that prevents the empirical claims from being fully convincing. The paper would benefit significantly from addressing this baseline and adding a clipping-threshold ablation. Relative to the calibrated anchors, this paper's contribution is solid but the experimental methodology has room for improvement; it is closest to SINGER (6.33) but with a more significant missing baseline, placing it slightly below.
+The paper has a genuinely novel core idea and a clean theoretical result, but the experimental evaluation's primary evidence (Table 1) is undermined by the unequal-compute confound, and the theoretical proof is only sketched in the main text. This places it between the medium-scoring anchors (5.0–5.6, where execution gaps weaken otherwise interesting ideas) and the accept-quality SINGER paper (6.33, which has better-controlled experiments and presentation). The compute-budget issue is the single decisive factor: if the fixed-budget analysis in Appendix G.7 confirms SCaSML's superiority under equal compute, the paper would be in the 6–6.5 range; based solely on the main text as presented, it sits around 5.5.
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

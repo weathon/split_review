@@ -1,82 +1,93 @@
-Now I have all the information I need. Let me write the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-The paper proposes HOMIL, a multi-instance learning framework for whole-slide image classification that extends ABMIL by incorporating second-order moments (covariance matrices) alongside first-order attention-weighted means. Computational cost is managed through DBSCAN clustering, which compresses patch representations by grouping similar patches. Evaluations on CAMELYON16 and TCGA-NSCLC show HOMIL achieves the best accuracy (96.98%, 93.24%) and AUC (99.23%, 97.41%) among nine baselines while being substantially faster than recent methods like MambaMIL, TransMIL, and HMIL (310s vs 7200s on CAMELYON16). Ablation studies confirm both the clustering module and the second-order moment contribute positively.
+This paper proposes HOMIL, an extension of attention-based MIL (ABMIL) for whole-slide image classification that augments the standard first-order (attention-weighted mean) aggregation with a second-order (covariance) term computed over DBSCAN-clustered patch features. The method achieves the best reported accuracy, AUC, and F1 on CAMELYON16 and TCGA-NSCLC among the baselines tested, while also reducing runtime relative to most competitors.
 
 ## Strengths
 
-1. **Consistent top performance with dramatically lower runtime.** On CAMELYON16, HOMIL achieves the highest ACC (96.98%), AUC (99.23%), and F1 (96.54%) across nine baselines, while its total 5-fold runtime (310s) is over 23× faster than MambaMIL (7200s) and 35× faster than HMIL (10800s) (Table 1). On TCGA-NSCLC the same pattern holds (Table 2). This combination of accuracy and efficiency is the paper's strongest empirical contribution.
+- **Novel integration of second-order statistics into MIL for WSI.** The idea of using a covariance-derived representation alongside mean-pooled features is a natural extension of ABMIL that the paper implements concretely. The ablation study (Table 3, CAMELYON16) supports the contribution: disabling the second-order term ("w/o SOM") drops ACC from 96.98% to 95.98% and F1 from 96.54% to 94.94%, indicating the term captures complementary information.
 
-2. **Ablation study validates both key components.** Removing the clustering module (w/o CM) drops ACC by 1.26% and increases runtime by 71%; disabling the second-order stream (w/o SOM) drops ACC by 1.00% and F1 by 1.60% (Table 3). This provides direct quantitative evidence that both components are individually beneficial and synergistic.
+- **Consistent state-of-the-art results across two standard benchmarks.** On CAMELYON16 (Table 1) and TCGA-NSCLC (Table 2), HOMIL achieves the highest ACC, AUC, and F1 among all nine compared baselines, including strong recent methods such as MambaMIL and HMIL. The gains over ABMIL are 2.26% ACC on CAMELYON16 and 2.19% ACC on TCGA-NSCLC.
 
-3. **Clean statistical framing and clear motivation.** The paper formalizes ABMIL's aggregation as a first-order moment estimator (\(\mu = \sum_i a_i \mathbf{h}_i\)) and motivates the covariance matrix as a natural second-order extension (Sections 3.1-3.2). This provides a conceptually elegant framing that distinguishes HOMIL from prior work.
+- **Substantial computational efficiency over complex baselines.** The adaptive DBSCAN clustering compresses the representation from thousands of patches to K clusters (compression ratios 0.18 and 0.16), yielding total 5-fold runtimes of 310s on CAMELYON16 (vs. 455s for ABMIL, 7,200s for MambaMIL) and 3,685s on TCGA-NSCLC (vs. 48,710s for TransMIL). This is a practical advantage for large-scale WSI analysis.
 
-4. **Comprehensive and controlled evaluation.** Nine MIL baselines are compared under a unified codebase with identical feature extractor (CONCH, 512-d), the same patient-level 5-fold splits, and consistent evaluation metrics (Tables 1, 2). The comparison is fairer than many WSI papers that draw numbers from different papers.
+- **Well-structured ablation study.** The ablation (Table 3) isolates the contributions of both the clustering module (CM) and the second-order moment (SOM), showing that each component improves accuracy and that the full model outperforms the additive effects of the individual components.
 
 ## Weaknesses
 
 ### Major
 
-None.
+- **Lack of statistical significance testing.** The paper reports mean ± standard error over 5 folds. On CAMELYON16, HOMIL achieves 96.98±2.43% ACC vs. ABMIL's 94.72±2.18%, and the ablation variant "w/o SOM" achieves 95.98±2.68% — all with overlapping error bars. No paired test (e.g., Wilcoxon signed-rank) or confidence intervals for the differences are provided. Given that the improvements are modest (2–3%) and the error bars overlap, the reader cannot assess whether the gains are statistically reliable. This is the most serious weakness because it undermines confidence in the core empirical claim.
+
+- **Unvalidated central claim about DBSCAN's adaptive behavior.** The paper states repeatedly that DBSCAN "forms large clusters for abundant normal tissues and small clusters for rare pathological regions" (Section 4.2, line 120), but provides no empirical evidence for this claim. No histograms of cluster sizes stratified by tissue type, no visualizations of cluster assignments on WSIs, and no quantitative analysis linking cluster size to diagnostic relevance are presented. This claim is central to the paper's narrative and should have been directly validated.
+
+- **No comparison against any form of second-order or covariance-based MIL baseline.** The paper introduces second-order statistics to MIL, yet none of the nine baselines use covariance or bilinear pooling. A natural minimal baseline would be ABMIL with a per-patch covariance matrix (computed directly on the original patches, without clustering) vectorized via a simple operation (e.g., flattening the upper triangle + MLP). Without such a comparison, it is impossible to attribute the gains specifically to the second-order moment versus the clustering + second-order combination, or to determine whether the complex 1D-convolution vectorization is actually necessary.
 
 ### Minor
 
-1. **Modest accuracy gains with no statistical significance testing.** On CAMELYON16, HOMIL's ACC improvement over the strongest baseline MambaMIL is +0.50% (96.98±2.43 vs 96.48±1.37); on TCGA-NSCLC it is +0.35% over HMIL. Standard errors overlap substantially for most pairwise comparisons. The paper reports no significance tests (paired t-test, Wilcoxon, or DeLong test for AUC). While this level of reporting is common in the WSI-MIL literature, the paper's claims of "significant improvement" and "state-of-the-art" would be stronger with formal significance assessment. — *Evidence: Tables 1, 2; grep confirms no mention of significance tests.*
+- **Mismatch between the statistical framing and the actual computation.** The paper motivates the method by discussing the covariance of *patch* feature vectors (Section 3.2, Eq. Σ = Σ_i (h_i - μ)(h_i - μ)^⊤), but the actual implementation computes Σ_k (g_k - v^(1))(g_k - v^(1))^⊤ where g_k are *cluster centroids* (mean-pooled within-cluster features). This is a covariance of cluster centroids, not of the original patch distribution — within-cluster variance (the very variability the paper argues first-order moments miss) is discarded by the mean pooling that produces each g_k. The paper acknowledges this shift in the introduction (lines 28–29: "both moments are computed based on cluster representations rather than individual patches"), but the conceptual framing in Section 3.2 still sets expectations the implemented method does not meet. This disconnect between motivation and execution weakens the paper's intellectual coherence.
 
-2. **"Attention-weighted covariance" is imprecisely named.** Section 4.3.3 calls the second-order representation an "attention-weighted covariance matrix," but the formula \(\mathbf{C} = \sum_k \tilde{\mathbf{g}}_k \tilde{\mathbf{g}}_k^\top\) weights each centered outer product equally rather than by attention scores \(a_k\). The centering uses \(\mathbf{v}^{(1)}\) (which is attention-weighted), so the matrix is a scatter matrix centered by the attention-weighted mean — not strictly an attention-weighted covariance. This is a terminological imprecision rather than a methodological flaw, and the representation still captures meaningful second-order information, but the naming is misleading. — *Evidence: Lines 151–157.*
+- **The covariance vectorization via 1D convolution is empirically motivated but unablated.** The paper compresses a 512×512 matrix to a 512-dim vector using row-wise 1D convolution with T=4 kernels of length 64, followed by two nested max-pooling operations. The choices (m=64, T=4, double max-pooling) are stated but not justified by ablation against alternatives (flattening the upper triangle, eigenvalue-based pooling, global average pooling, etc.). This makes the design appear ad hoc and harms reproducibility.
 
-3. **Covariance vectorization design is not ablated.** The compression of the \(d \times d\) covariance matrix into a \(d\)-dimensional vector uses row-wise 1D convolution with 4 kernels of size 64 followed by two stages of max-pooling (Section 4.3.3). This specific design choice (kernel count, kernel size, pooling strategy) is presented without justification or ablation. Alternative approaches (flattened upper-triangle + linear projection, matrix log, eigenvalue features) are not examined. The contribution of the covariance information is validated by the ablation study (w/o SOM drops performance), but the specific vectorization pipeline's design decisions remain unexamined. — *Evidence: Lines 160–172, Table 3 (no variant comparing vectorization methods).*
-
-4. **DBSCAN adaptive granularity claim is asserted but not validated.** The paper motivates DBSCAN by arguing that normal tissues form large clusters and pathological regions form small clusters or outliers (Sections 2.2, 4.2). This is a plausible property but no empirical evidence is provided — no cluster size distribution analysis, no visualization of cluster assignments on actual slides, and no comparison to fixed-resolution clustering (e.g., k-means). The clustering module's overall efficacy is validated (w/o CM hurts performance, Table 3), but the specific adaptive-granularity mechanism remains unsupported. — *Evidence: Lines 47–48, 120–121; no cluster-size analysis or visualization in Section 5.*
+- **Terminology imprecision in "attention-weighted covariance."** The covariance matrix C = Σ_k (g_k - v^(1))(g_k - v^(1))^⊤ centers using v^(1) (which is attention-weighted), but the sum over clusters is unweighted — each cluster centroid contributes equally. The "attention-weighted" label is therefore partially misleading.
 
 ### Trivial
 
-None.
+- **Figure 1 description is somewhat confusing.** The text says the "Dimensionality Reducer" → "DBSCAN" branch operates on reduced features (d=32), but cluster features g_k are aggregated from the original d-dimensional h_i. The figure does not make this distinction clear.
 
 ## Nice-to-Haves
 
-- **Statistical significance tests** (paired test across folds) would strengthen the evidence for the claimed improvements.
-- **Cluster-size analysis** (histograms stratified by slide diagnosis, or a figure showing cluster assignments overlaid on a WSI) would validate the adaptive granularity claim.
-- **Ablation of the covariance vectorization** (e.g., comparing the conv-based method to simpler alternatives) would strengthen the second-order module's design justification.
-- **Varying DBSCAN parameters** to show accuracy as a function of compression ratio would clarify the efficiency-accuracy trade-off.
+- **Provide standard deviations alongside standard errors** in Tables 1–3 so readers can assess variability.
+- **Compare with a simple second-order baseline** (e.g., ABMIL + per-patch covariance + flattened upper-triangle + MLP) to isolate the value of clustering and the dedicated vectorization design.
+- **Validate the DBSCAN adaptive-cluster claim** with cluster-size histograms stratified by tissue type (if region labels are available) or with attention-overlay visualizations on WSIs.
+- **Ablate the covariance vectorization** by testing alternatives (flattened upper triangle, eigenvalue pooling, global average pooling).
+- **Add the sensitivity analysis from the Appendix** into the main paper.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+These points were raised by reviewers but are removed (with justification):
 
-- **"Covariance computation contradicts the paper's description / is not attention-weighted"** — softened. The equation is indeed an unweighted sum of centered outer products, not a per-term attention-weighted sum. However, the centering *is* attention-weighted, so the representation is a valid scatter matrix around the attention-weighted mean. Calling this "inconsistent" or a "structural weakness" overstates the severity; it is a terminological imprecision.
-- **"w/o CM runtime increase is surprising; the paper should clarify"** — removed. The runtime increase from 310s (full) to 530s (w/o CM) is a 71% increase, which is fully expected: removing clustering means processing all raw patches instead of cluster centroids. The critic's confusion here is unwarranted.
-- **"Code release and reproducibility concern"** — removed per hard rules (no criticizing release status).
-- **"Missing related work on adaptive pooling / hierarchical approaches"** — removed per hard rules (cannot verify existence of external work).
-- **"Missing appendix content / missing proofs"** — removed per hard rules (parser strips appendices).
-- **"Formatting and style nitpicks"** — removed per hard rules.
-- **"The second-order stream is a core contribution, this lack of principled design is a structural weakness"** — downgraded. The core contribution (second-order moments are helpful) is validated by the ablation study; the specific vectorization is an engineering choice that could be improved but does not undermine the core idea.
+- *"Covariance matrix is unnormalized (no 1/n factor)"* — The paper never claims to compute a proper statistical covariance; it computes an unnormalized scatter matrix, which is standard in deep learning (e.g., in Global Covariance Pooling). This is a non-issue.
+
+- *"Runtime improvement over ABMIL is modest (310s vs 455s)"* — A 32% reduction in runtime is practically meaningful, and the improvement over more complex baselines (MambaMIL: 7,200s; TransMIL: 48,710s) is substantial. The framing as "modest" is unjustified.
+
+- *"ABMIL becomes a special case misleading because non-singleton clusters"* — The paper explicitly qualifies "when second-order moments are omitted **and** each cluster contains a single patch" (line 29–30). This is a well-formed theoretical statement, not a practical claim.
+
+- *"Must compare with second-order pooling methods (Bilinear CNNs, G2DeNet)"* — These are image-level classification methods, not MIL methods for WSI analysis. The reviewer did not name any specific MIL method using second-order statistics in the WSI setting. The missing baseline for a direct patch-level covariance approach is addressed in Minor Weaknesses above.
+
+- *"Missing related works"* — Removed per instruction (cannot verify existence).
+
+- *"Formatting/typo/style criticisms"* — These are parser artifacts or do not affect the paper's technical merit.
+
+- *"Reproducibility concerns about hyperparameters"* — The paper provides the key parameters (PCA d'=32, ε=65th percentile, minPts=4, m=64, T=4). The remaining details are standard.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews did not surface observations about the paper that the authors themselves did not make.
+The review process surfaces one observation not foregrounded in the paper: the covariance vectorization via 1D convolution with dual max-pooling is essentially learning a compact binary descriptor per row of the scatter matrix — it aggregates local correlation patterns within each row independently, discarding inter-row structure. This is a very different inductive bias from, say, eigenvalue decomposition (which captures global rank structure) or flattened upper-triangle (which preserves all pairwise interactions). The paper never acknowledges or motivates this design choice, but it is arguably the most distinctive aspect of the representation pipeline. A reader interested in second-order MIL would benefit from understanding whether this specific vectorization is critical to the performance or whether simpler alternatives work equally well.
 
 ## Suggestions
 
-1. Rename the "attention-weighted covariance matrix" to "scatter matrix centered by the attention-weighted mean" throughout, or modify the formula to include per-term attention weighting (\(\mathbf{C} = \sum_k a_k \tilde{\mathbf{g}}_k \tilde{\mathbf{g}}_k^\top\)).
-2. Add a brief ablation comparing different covariance vectorization methods (e.g., flattened upper-triangle + linear layer, eigenvalue statistics) to justify the current design.
-3. Include a figure showing cluster-size distributions for a few sample slides, colored by ground-truth diagnosis, to validate the adaptive-granularity claim.
-4. Add a paired significance test (e.g., Wilcoxon signed-rank across folds for ACC, DeLong test for AUC) to support the claim of improvement over baselines.
+1. **Add statistical significance tests** (paired Wilcoxon signed-rank or a confidence interval for the difference in means over the 5 folds) for the primary comparisons HOMIL vs. ABMIL and HOMIL vs. w/o SOM. Report p-values.
+2. **Validate the DBSCAN cluster-size claim** empirically — show cluster-size distributions for at least one WSI per class, or plot cluster size vs. attention weight to show that small clusters receive higher attention.
+3. **Add a baseline that computes the per-cluster covariance without the complex vectorization** (e.g., flatten the upper triangle or use global mean-pooling of the rows) to demonstrate the necessity of the 1D-convolution design.
+4. **Revise the statistical framing in Section 3.2** to explicitly state that the method computes second-order statistics of *cluster centroids*, not of the original patch features, and explain why this is a reasonable approximation.
 
 ## Score and Decision
 
-**Calibration anchors (all retrieved from batch search):**
+**Calibration anchors used:**
 
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/xriGRsoAza.md` (avg 8.00) — MILLET: exceptionally clean idea with thorough evaluation across 85 datasets. HOMIL is weaker — narrower evaluation and more ad-hoc components.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/6xrDPHhwD3.md` (avg 6.00) — MFC: accepted but had confusing method descriptions and missing significance measures. HOMIL is comparably well-presented but also lacks significance testing.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/AZW3qlCGTe.md` (avg 5.67) — Set-level labels: accepted with theory + experiments, 13% gain on histopathology. HOMIL has weaker empirical gains but a cleaner contribution framing.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/lo9HMoGNwQ.md` (avg 4.50) — SMIL: rejected due to unclear clinical motivation and limited novelty. HOMIL is stronger — clearer motivation and more novel contribution.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/0yVP49SDg0.md` (avg 3.25) — Mamba-HMIL: rejected due to incremental novelty and poor writing. HOMIL is substantially stronger.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MOCEoNsjEx.md` (avg 3.00) — Pg-GAT: rejected for limited novelty and insufficient baselines. HOMIL has stronger novelty and more thorough evaluation.
-- `/home/wg25r/split_review/datasets/deepreview_13k_calibration/i4ouG6Kc8M.md` (avg 2.50) — Dual-Metric: rejected for simplistic methodology and insufficient baselines. HOMIL is clearly stronger.
+| Path | Avg Score | Comparison to HOMIL |
+|---|---|---|
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/0yVP49SDg0.md` (Mamba-HMIL) | 3.25 | Weaker — criticized as a straightforward combination of existing methods; HOMIL has clearer motivation and better results |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/6xrDPHhwD3.md` (MFC-MIL) | 6.00 | Similar level — both have modest gains and unclearly justified components; MFC has stronger theoretical framing (causality) but HOMIL has cleaner presentation |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/q1t0Lmvhty.md` (Covariance Pooling theory) | 6.00 | Stronger in theoretical depth but different contribution type; HOMIL is more applied |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/rFpZnn11gj.md` (PathGen-1.6M) | 7.50 | Stronger — large-scale dataset contribution with trained models; a different class of contribution |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/MrOefpTvev.md` (Texture Transformer) | 2.33 | Much weaker — poorly motivated, unclear methodology |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/KiK4MNkuiQ.md` (Clustering Geometric) | 5.00 | Different topic (clustering theory); comparable in overall quality |
+| `/home/wg25r/split_review/datasets/deepreview_13k_calibration/4mqt6QxSUO.md` (COVID CT detection) | 3.25 | Weaker — overclaimed theoretical framework, inconsistent methodology |
 
-The paper has a solid conceptual contribution (second-order moments in MIL), demonstrates the best accuracy across two benchmarks with dramatically better efficiency, and is clearly written. The main weaknesses are: (a) modest absolute gains without significance testing, (b) a minor terminological imprecision in the covariance formulation, (c) an unablated design choice in the vectorization, and (d) an unvalidated claim about DBSCAN's adaptive granularity. These are real but not fatal — they are addressable with targeted experiments and clarifications. Relative to the calibration anchors, HOMIL sits above the rejected papers (scores 2.5–4.5) and is comparable to the lower end of accepted papers (scores 5.67–6.0), but is not at the exceptional quality level of the 8.0 anchor.
+HOMIL has a clean, practical idea with consistently positive results across two datasets and an informative ablation study. Its main weaknesses are the lack of statistical significance testing, an unvalidated central claim about cluster behavior, and a missing natural baseline. These are addressable but real. The paper is positioned between the weaker rejected papers (~3.25) and the stronger accepted ones (~6.0) in this calibration set.
 
-MY FINAL SCORE: <score>5.5</score>
+MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Accept</decision>
