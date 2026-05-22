@@ -61,8 +61,10 @@ def _ensure_indexes():
         _bm25_db["score_index"] = pickle.load(f)
 
 
-def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
+def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False, exclude_basenames: set[str] | None = None):
     from claude_agent_sdk import create_sdk_mcp_server, tool
+
+    exclude_basenames = exclude_basenames or set()
 
     if not no_cal:
         _ensure_indexes()
@@ -128,7 +130,9 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
         vectors = _bm25_db["vectors"]
         filenames = _bm25_db["filenames"]
         allowed_mask = np.array([
-            low_score < score_index.get(fn, -1.0) < high_score for fn in filenames
+            low_score < score_index.get(fn, -1.0) < high_score
+            and fn.rsplit(".", 1)[0] not in exclude_basenames
+            for fn in filenames
         ])
         if not allowed_mask.any():
             return "No files in that score range."
@@ -208,7 +212,7 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
     )
 
 
-with open(_prompt_path("cal_with.md"), "r") as _f:
+with open(_prompt_path("cal_with_sdk.md"), "r") as _f:
     CAL_INSTRUCTION_WITH = _f.read()
 
 with open(_prompt_path("cal_without.md"), "r") as _f:

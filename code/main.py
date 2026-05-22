@@ -31,7 +31,7 @@ if "--position" in sys.argv:
 _POSITION_MODE = os.environ.get("POSITION_MODE", "").strip().lower() in ("1", "true", "yes")
 
 from paths import prompt_path, RESULTS_DIR
-from tools import CALIBRATION_REVIEW_DIR, read_file, read_file_full, grep_file, search_file, _search_file_impl  # glob_files removed (unused)
+from tools import CALIBRATION_REVIEW_DIR, read_paper, grep_paper, read_anchor, search_file, _search_file_impl, set_papers_dir
 import weave
 weave.init("openai-agents")
 
@@ -145,7 +145,7 @@ with open(prompt_path("timeline.md"), "r") as f:
 
 
 PAPER_ACCESS_INJECTION = "The full paper text is included in the user message. Use it to verify reviewer claims directly."
-PAPER_ACCESS_FILE = "The paper path is provided in the user message. Use read_file to read the paper (it reads the whole file by default — do not pass start_line/end_line unless you specifically need a slice) and verify reviewer claims directly."
+PAPER_ACCESS_FILE = "The paper id is provided in the user message. Use read_paper(paper_id) to read the full paper, or grep_paper(paper_id, pattern) to find specific lines, and verify reviewer claims directly."
 
 with open(prompt_path("cal_with.md"), "r") as _f:
     CAL_INSTRUCTION_WITH = _f.read()
@@ -176,7 +176,7 @@ def load_prompts(path, paper_access: str = PAPER_ACCESS_INJECTION, no_cal: bool 
 #     tools=[read_file_full],
 # )
 
-_tool_agents = [read_file, search_file, grep_file] 
+_tool_agents = [read_paper, search_file, grep_paper]
 # summarizer.as_tool(
     # tool_name="summarization", tool_description="Summarizing or answering questions about a specific file given **its absolute path** and question.",
 
@@ -217,7 +217,7 @@ if MERGER_MODEL.startswith("claude_sdk:"):
 else:
     _merger_instructions = load_prompts(_merger_prompt_file, paper_access=PAPER_ACCESS_FILE, no_cal=_NO_CAL)
     if _NO_CAL:
-        _merger_tools = [read_file, grep_file]
+        _merger_tools = [read_paper, grep_paper]
     else:
         class CalibrationQuery(BaseModel):
             query: str
@@ -253,7 +253,7 @@ else:
                 )
             return "\n\n".join(sections)
 
-        _merger_tools = [read_file, grep_file, calibration_search]
+        _merger_tools = [read_paper, grep_paper, read_anchor, calibration_search]
     merger = Agent(
         name="Merger",
         instructions=_merger_instructions,
@@ -271,7 +271,7 @@ REVIEW_PROMPT = """Review the following paper thoroughly.
 
 The paper was extracted from PDF by an automated parser. Treat formatting artifacts (broken equations, garbled tables, OCR errors) as parser issues, not paper flaws. The appendix and references were stripped by the parser; assume they exist in the original submission and don't flag them as missing.
 
-{paper_path}
+Paper id: {paper_id} — use read_paper(paper_id) to re-read the full text or grep_paper(paper_id, pattern) to find specific lines.
 --- PAPER CONTENT START ---
 {paper_content}
 --- PAPER CONTENT END (everything after references stripped by parser) ---"""
@@ -280,7 +280,7 @@ REVIEW_PROMPT_POSITION = """Review the following position paper thoroughly. This
 
 The paper was extracted from PDF by an automated parser. Treat formatting artifacts (broken equations, garbled tables, OCR errors) as parser issues, not paper flaws. The appendix and references were stripped by the parser; assume they exist in the original submission and don't flag them as missing.
 
-{paper_path}
+Paper id: {paper_id} — use read_paper(paper_id) to re-read the full text or grep_paper(paper_id, pattern) to find specific lines.
 --- PAPER CONTENT START ---
 {paper_content}
 --- PAPER CONTENT END (everything after references stripped by parser) ---"""
@@ -292,12 +292,13 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
     # time.sleep(random.uniform(10, 20))
     _or_cost_start = dict(_OR_COST_TOTAL)
     paper_path_abs = os.path.abspath(paper_path)
+    paper_id = Path(paper_path_abs).stem
     with open(paper_path, "r") as f:
         paper_content = f.read()
     paper_content = paper_content
 
     _review_template = REVIEW_PROMPT_POSITION if _POSITION_MODE else REVIEW_PROMPT
-    review_prompt = _review_template.format(paper_path=paper_path_abs, paper_content=paper_content)
+    review_prompt = _review_template.format(paper_id=paper_id, paper_content=paper_content)
 
     # Harsh Critic input: when running via Claude SDK, replace the inline paper
     # content with a directive to read it from disk (SDK has a CLI input length
@@ -363,16 +364,12 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
         agent_usages["Merger"] = None  # SDK usage tracked separately below
 
     else:
-        # OpenAI Agent SDK merger: grant read/grep access to the paper's dir and
-        # point the merger at the paper via path (not inline).
-        from tools import allow_path
-        allow_path(str(Path(paper_path_abs).parent))
+        # OpenAI Agent SDK merger: point the merger at the paper via id (not inline).
         start_time = time.monotonic()
         merger_prompt = (
             f"Here is the paper being reviewed (extracted from PDF — formatting "
             f"artifacts are parser issues, not paper problems).\n\n"
-            f"Paper path: {paper_path_abs} — use read_file (which reads the whole file by default; do not pass start_line/end_line unless you specifically need a slice) or grep_file to read it.\n\n"
-            f"Human reviews directory (for calibration): {HUMAN_REVIEW_DIR}\n\n"
+            f"Paper id: {paper_id} — use read_paper(paper_id) to read it or grep_paper(paper_id, pattern) to find specific lines.\n\n"
             f"Here are the inputs:\n\n{chr(10).join(labeled)}\n\n"
             f"Now produce the final consolidated review following your instructions. "
             f"Remember: many of the harsh critic's points may be nonsensical or overly "
@@ -539,6 +536,7 @@ def match_label(match: bool | None) -> str:
 
 async def process_papers(papers: list[dict], papers_dir: Path, skip_scoring: bool, callback, no_cal: bool = False):
     """Run pipeline on a list of papers with CONCURRENCY concurrent tasks."""
+    set_papers_dir(str(papers_dir))
     sem = asyncio.Semaphore(CONCURRENCY)
 
     async def process_one(i, paper_info):
@@ -720,6 +718,7 @@ async def run_single_paper(paper_path: str, no_cal: bool = False, accept_csv: st
         paper_path = str(md_path)
         print(f"Converted PDF to markdown: {paper_path}")
 
+    set_papers_dir(str(Path(paper_path).parent))
     result = await run_pipeline(paper_path, no_cal=no_cal)
     print(f"\n{'=' * 72}\nFINAL REVIEW\n{'=' * 72}\n{result['merged_review']}")
     score = result["scorer_output"]

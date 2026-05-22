@@ -41,7 +41,7 @@ else:
         "'deepreview', '2025', '2026', 'ai_cal' (or unset)."
     )
 
-ALLOWED_PATHS = [CALIBRATION_REVIEW_DIR]
+PAPERS_DIR = os.path.expanduser(os.environ["PAPERS_DIR"]) if os.environ.get("PAPERS_DIR") else None
 
 from rank_bm25 import BM25Okapi
 from openai import OpenAI
@@ -54,7 +54,7 @@ import time
 print(f"Indexing calibration corpus '{_calibration_set}' from {CALIBRATION_REVIEW_DIR} ...")
 start = time.time()
 database = {}
-for path in ALLOWED_PATHS:
+for path in [CALIBRATION_REVIEW_DIR]:
     all_files = []
     all_file_paths = []
     for root, dirs, files in os.walk(path):
@@ -89,70 +89,64 @@ with open(_score_index_path, "rb") as f:
 
 
 # ── Tools ────────────────────────────────────────────────────────────
-def allow_path(path: str):
-    """Extend ALLOWED_PATHS at runtime (e.g. to grant the merger access to the paper_dir)."""
-    resolved = os.path.abspath(path)
-    if resolved not in ALLOWED_PATHS:
-        ALLOWED_PATHS.append(resolved)
+_PAPERS_DIR_HOLDER = {"dir": PAPERS_DIR}
+
+
+def set_papers_dir(path: str):
+    """Set the directory holding {paper_id}.txt files (per-benchmark, runtime)."""
+    _PAPERS_DIR_HOLDER["dir"] = os.path.abspath(path)
+
+
+def _paper_path(paper_id: str) -> str:
+    papers_dir = _PAPERS_DIR_HOLDER["dir"]
+    if papers_dir is None:
+        raise RuntimeError("PAPERS_DIR not set (env PAPERS_DIR or set_papers_dir())")
+    for ext in (".txt", ".md"):
+        cand = os.path.join(papers_dir, f"{paper_id}{ext}")
+        if os.path.isfile(cand):
+            return cand
+    return os.path.join(papers_dir, f"{paper_id}.txt")
 
 
 @function_tool
-def read_file(abs_path: str, start_line: int = 1, end_line: int = 0) -> str:
-    """Read lines from a file. Returns lines numbered start_line to end_line (inclusive, 1-based).
-    By default (start_line=1, end_line=0), reads the entire file. Only pass start_line/end_line
-    when you specifically need a partial slice; the default is to read the whole file."""
-    resolved = os.path.abspath(abs_path)
-    print(f"  [read_file] Request to read '{resolved}' lines {start_line} to {end_line if end_line > 0 else 'EOF'}")
-    if not any(resolved.startswith(ap) for ap in ALLOWED_PATHS):
-        print(f"  [read_file] 🔥BLOCKED: '{resolved}' is not under any allowed directory.")
-        return f"ERROR: Access denied. Path '{resolved}' is not under any allowed directory."
-    with open(abs_path, "r") as f:
-        lines = f.readlines()
-    selected = lines[max(0, start_line - 1):end_line if end_line > 0 else len(lines)]
-    return "".join(f"{start_line + i}: {line}" for i, line in enumerate(selected))
-
-
-@function_tool
-def read_file_full(abs_path: str) -> str:
-    """Read an entire file."""
-    resolved = os.path.abspath(abs_path)
-    print(f"  [read_file_full] Request to read full file '{resolved}'")
-    if not any(resolved.startswith(ap) for ap in ALLOWED_PATHS + [str(DATASETS_DIR)]):
-        print(f"  [read_file_full] 🔥BLOCKED: '{resolved}' is not under any allowed directory.")
-        return f"ERROR: Access denied. Path '{resolved}' is not under any allowed directory."
-    print(abs_path)
-    with open(abs_path, "r") as f:
+def read_paper(paper_id: str) -> str:
+    """Read the full text of the paper under review, by its id (no path, no extension)."""
+    path = _paper_path(paper_id)
+    print(f"  [read_paper] {paper_id} -> {path}")
+    if not os.path.isfile(path):
+        return f"ERROR: paper '{paper_id}' not found at {path}"
+    with open(path, "r", errors="replace") as f:
         return f.read()
 
-# glob_files is unused — no agent has it in tools=[]; also had a bug (doubled directory in paths)
-# @function_tool
-# def glob_files(pattern: str, directory: str = ".") -> str:
-#     """Find files matching a glob pattern (e.g. '**/*.md', '*.txt') under a directory. Returns one path per line."""
-#     import glob as _glob
-#     matches = sorted(_glob.glob(pattern, root_dir=directory, recursive=True))
-#     return "\n".join(os.path.join(directory, m) for m in matches) if matches else "No files matched."
-
 
 @function_tool
-def grep_file(pattern: str, abs_path: str) -> str:
-    """Search a single file for a pattern. Returns matching lines with line numbers."""
+def grep_paper(paper_id: str, pattern: str) -> str:
+    """Search the paper under review (by id) for a regex pattern. Returns matching lines with line numbers."""
     import re
-    resolved = os.path.abspath(abs_path)
-    print(f"  [grep_file] Request to grep for pattern '{pattern}' in '{resolved}'")
-    if not any(resolved.startswith(ap) for ap in ALLOWED_PATHS):
-        print(f"  [grep_file] 🔥BLOCKED: '{resolved}' is not under any allowed directory.")
-        return f"ERROR: Access denied. Path '{resolved}' is not under any allowed directory."
-    if not os.path.isfile(resolved):
-        return f"ERROR: '{resolved}' is not a file."
+    path = _paper_path(paper_id)
+    print(f"  [grep_paper] {paper_id} pattern='{pattern}'")
+    if not os.path.isfile(path):
+        return f"ERROR: paper '{paper_id}' not found at {path}"
     matches = []
     try:
-        with open(resolved, "r", errors="replace") as fh:
+        with open(path, "r", errors="replace") as fh:
             for i, line in enumerate(fh, 1):
                 if re.search(pattern, line):
                     matches.append(f"{i}: {line.rstrip()}")
     except Exception as e:
         return f"ERROR: {e}"
     return "\n".join(matches) if matches else "No matches found."
+
+
+@function_tool
+def read_anchor(anchor_id: str) -> str:
+    """Read the full text of a human-review calibration anchor, by the id returned from search_file."""
+    path = os.path.join(CALIBRATION_REVIEW_DIR, f"{anchor_id}.md")
+    print(f"  [read_anchor] {anchor_id} -> {path}")
+    if not os.path.isfile(path):
+        return f"ERROR: anchor '{anchor_id}' not found at {path}"
+    with open(path, "r", errors="replace") as f:
+        return f.read()
 
 
 EXCLUDED_PAPER_IDS: set[str] = set()
@@ -189,6 +183,8 @@ def _search_file_impl(query: str, n: int, mode: str, low_score: float = -1.0, hi
     Filtering is applied FIRST by score range, THEN ranking (BM25/vector) runs
     over the filtered subset. Use this to anchor calibration to a specific
     score band (e.g. low_score=7, high_score=10 for strong papers).
+
+    Each result gives an `anchor_id`; pass it to read_anchor to read the full review.
     """
     print(f"  [search_file] query='{query}' mode='{mode}' n={n} score=({low_score}, {high_score})")
     if mode == "bm25":
@@ -207,11 +203,12 @@ def _search_file_impl(query: str, n: int, mode: str, low_score: float = -1.0, hi
         results = []
         for idx in allowed_sorted:
             file_path = os.path.abspath(files[idx])
+            anchor_id = os.path.basename(file_path).rsplit(".", 1)[0]
             rel = doc_scores[idx]
             avg = _score_index.get(os.path.basename(file_path), -1.0)
             with open(file_path, 'r', errors='replace') as f:
                 content = f.read()
-            results.append(f"{file_path}\navg_score: {avg:.2f}  bm25: {rel:.2f}\n first 1000 chars:\n{content[:1000]}\n")
+            results.append(f"anchor_id: {anchor_id}\navg_score: {avg:.2f}  bm25: {rel:.2f}\n first 1000 chars:\n{content[:1000]}\n")
         return "\n---\n".join(results) if results else "No relevant files found."
     elif mode == "vector":
         allowed_mask = np.array([
@@ -234,12 +231,13 @@ def _search_file_impl(query: str, n: int, mode: str, low_score: float = -1.0, hi
             if not np.isfinite(masked[idx]):
                 break
             fn = filenames[idx]
+            anchor_id = fn.rsplit(".", 1)[0]
             file_path = os.path.abspath(os.path.join(CALIBRATION_REVIEW_DIR, fn))
             rel = similarities[idx]
             avg = _score_index.get(fn, -1.0)
             with open(file_path, "r", errors="replace") as file_handle:
                 content = file_handle.read()
-            results.append(f"{file_path}\navg_score: {avg:.2f}  sim: {rel:.2f}\n first 1000 chars:\n{content[:1000]}\n")
+            results.append(f"anchor_id: {anchor_id}\navg_score: {avg:.2f}  sim: {rel:.2f}\n first 1000 chars:\n{content[:1000]}\n")
         return "\n---\n".join(results) if results else "No relevant files found."
     else:
         return "ERROR: Invalid search mode. Use 'bm25' or 'vector'."
@@ -259,5 +257,7 @@ def search_file(query: str, n: int, mode: str, low_score: float = -1.0, high_sco
     Filtering is applied FIRST by score range, THEN ranking (BM25/vector) runs
     over the filtered subset. Use this to anchor calibration to a specific
     score band (e.g. low_score=7, high_score=10 for strong papers).
+
+    Each result gives an `anchor_id`; pass it to read_anchor to read the full review.
     """
     return _search_file_impl(query, n, mode, low_score, high_score)
