@@ -47,7 +47,8 @@ Batch, benchmark, and one-shot experiment scripts must be written like research 
 - Do NOT use helper function unless you really need to
 - Keep code simple, short, and stupid.
 - If you were asked to do something and it is not working, do NOT find another path, stop and ask user
-
+- You should NEVER run code diff BEFORE you code
+- Always use library when possible, do not write your own code if you can use a library, do not assume it is not installed
 
 ## Comments
 

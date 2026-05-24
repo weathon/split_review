@@ -39,7 +39,7 @@ from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
 from agents.model_settings import ModelSettings
 
 # _MODEL_SETTINGS = ModelSettings(extra_body={})
-_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["deepseek"]}, "reasoning": {"enabled": True, "effort": "xhigh"}})
+_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["deepseek"]}, "reasoning": {"enabled": True, "effort": "xhigh"}, "usage": {"include": True}})
 import dotenv
 dotenv.load_dotenv()
 os.environ["OPENAI_DEFAULT_MODEL"] = os.getenv("OPENAI_DEFAULT_MODEL", "z-ai/glm-5.1")
@@ -54,7 +54,7 @@ FEATHERLESS_BASE_URL = os.environ.get("FEATHERLESS_BASE_URL", "https://api.feath
 from openai import AsyncOpenAI
 from agents import set_default_openai_client, set_tracing_export_api_key
 
-custom_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"))
+custom_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY_OURS"))
 
 # OpenRouter usage accounting — inject {"usage": {"include": true}} into every
 # chat completion and accumulate the per-response `cost` field returned by OR.
@@ -62,30 +62,46 @@ custom_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.
 _OR_COST_TOTAL = {"usd": 0.0, "calls": 0}
 
 
-def _install_openrouter_cost_hook(client: AsyncOpenAI) -> None:
-    orig_create = client.chat.completions.create
+def _extract_or_cost(resp, label: str) -> None:
+    try:
+        usage = getattr(resp, "usage", None)
+        cost = None
+        if usage is not None:
+            cost = getattr(usage, "cost", None)
+            if cost is None and hasattr(usage, "model_extra"):
+                cost = (usage.model_extra or {}).get("cost")
+        if cost is not None:
+            _OR_COST_TOTAL["usd"] += float(cost)
+            _OR_COST_TOTAL["calls"] += 1
+            print(f"  [openrouter:{label}] call cost=${float(cost):.6f} cumulative=${_OR_COST_TOTAL['usd']:.4f} (n={_OR_COST_TOTAL['calls']})")
+    except Exception as e:
+        print(f"  [openrouter:{label}] cost extraction failed: {e}")
 
-    async def create_with_usage(*args, **kwargs):
+
+def _install_openrouter_cost_hook(client: AsyncOpenAI) -> None:
+    orig_chat_create = client.chat.completions.create
+
+    async def chat_create_with_usage(*args, **kwargs):
         extra_body = dict(kwargs.get("extra_body") or {})
         extra_body.setdefault("usage", {"include": True})
         kwargs["extra_body"] = extra_body
-        resp = await orig_create(*args, **kwargs)
-        try:
-            usage = getattr(resp, "usage", None)
-            cost = None
-            if usage is not None:
-                cost = getattr(usage, "cost", None)
-                if cost is None and hasattr(usage, "model_extra"):
-                    cost = (usage.model_extra or {}).get("cost")
-            if cost is not None:
-                _OR_COST_TOTAL["usd"] += float(cost)
-                _OR_COST_TOTAL["calls"] += 1
-                print(f"  [openrouter] call cost=${float(cost):.6f} cumulative=${_OR_COST_TOTAL['usd']:.4f} (n={_OR_COST_TOTAL['calls']})")
-        except Exception as e:
-            print(f"  [openrouter] cost extraction failed: {e}")
+        resp = await orig_chat_create(*args, **kwargs)
+        _extract_or_cost(resp, "chat")
         return resp
 
-    client.chat.completions.create = create_with_usage  # type: ignore[assignment]
+    client.chat.completions.create = chat_create_with_usage  # type: ignore[assignment]
+
+    orig_resp_create = client.responses.create
+
+    async def resp_create_with_usage(*args, **kwargs):
+        extra_body = dict(kwargs.get("extra_body") or {})
+        extra_body.setdefault("usage", {"include": True})
+        kwargs["extra_body"] = extra_body
+        resp = await orig_resp_create(*args, **kwargs)
+        _extract_or_cost(resp, "responses")
+        return resp
+
+    client.responses.create = resp_create_with_usage  # type: ignore[assignment]
 
 
 _install_openrouter_cost_hook(custom_client)
@@ -566,6 +582,21 @@ async def run_benchmark(data_dir: str, n_samples: int = 10, seed: int = 42, bala
     data_path = Path(data_dir)
     gt_data, papers_dir = load_ground_truth(data_path)
     available = [r for r in gt_data if (papers_dir / f"{r['paper_id']}.txt").exists()]
+    seen_available = {}
+    deduped_available = []
+    duplicate_paper_ids = []
+    for row in available:
+        paper_id = row["paper_id"]
+        if paper_id in seen_available:
+            if row != seen_available[paper_id]:
+                raise ValueError(f"duplicate paper_id with different rating rows: {paper_id}")
+            duplicate_paper_ids.append(paper_id)
+            continue
+        seen_available[paper_id] = row
+        deduped_available.append(row)
+    if duplicate_paper_ids:
+        print(f"Skipped duplicate paper_id rows: {sorted(duplicate_paper_ids)}")
+    available = deduped_available
     print(f"Available papers: {len(available)}")
 
     if balanced:
