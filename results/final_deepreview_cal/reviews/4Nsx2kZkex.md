@@ -1,102 +1,119 @@
 Now I have all the evidence needed. Let me write the final consolidated review.
 
+---
+
 ## Summary
 
-This paper proposes integrating differentiable verification surrogates into the RL loop for code synthesis. The idea is to replace discrete formal verification checks (type safety, memory safety, termination) with differentiable approximations, enabling gradient-based policy learning that jointly optimizes functional correctness and safety guarantees. The framework uses feature functions over type consistency and program dependence graphs, a bilevel optimization to keep the surrogate aligned with ground-truth SMT verification, and periodic hard-constraint injection.
+This paper proposes DV-RL, a framework that integrates a differentiable verification surrogate into the reinforcement learning policy optimization loop for code synthesis. The key idea is to make formal verification constraints differentiable via a learned surrogate, enabling gradient-based joint optimization of functional correctness and safety property satisfaction. The framework includes bilevel optimization to align the surrogate with an SMT solver, a hierarchical policy for structured code generation, and periodic hard-constraint injection for calibration. On a benchmark of 100 programming tasks across three categories, DV-RL achieves 95.8% verification success rate and 74.6% functional correctness, outperforming Pure RL, RL+Post-hoc, Constrained RL, and Syntax-Guided baselines. An ablation study isolates the contribution of each component.
 
 ## Strengths
 
-- **Novel and well-motivated formulation.** Making verification differentiable to provide dense gradient signals during code generation is a genuinely interesting idea that addresses a real limitation of post-hoc verification in RL-based synthesis. The bilevel optimization (Eq. 8–9) and hard-constraint injection (Eq. 13) are principled mechanisms for keeping the surrogate grounded in formal semantics.
+- **Novel technical integration**: The paper presents a genuinely original combination of differentiable verification surrogates with RL policy optimization for code synthesis. Making formal verification constraints amenable to gradient-based learning is a non-trivial idea that addresses a real gap between discrete verification and continuous neural optimization. The bilevel optimization formulation (Eqs. 8–9) for jointly training the policy and surrogate is well-conceived.
 
-- **Comprehensive multi-metric evaluation with strong efficiency results.** Table 1 evaluates against four baselines across VSR, FC, VE, and SQ. DV-RL achieves a 5× speedup in verification efficiency over post-hoc methods (85 ms vs. 420 ms) while maintaining the highest functional correctness (74.6% FC) and competitive VSR (95.8%). The efficiency gain is the paper's strongest empirical result.
+- **Strong comparative results**: DV-RL achieves 95.8% verification success rate and 74.6% functional correctness (Table 1), substantially outperforming Pure RL (38.2% VSR), Constrained RL (75.3% VSR), and RL+Post-hoc (89.7% VSR) while maintaining higher functional correctness than Syntax-Guided Synthesis (63.2% FC). The 5× speedup in per-check verification time (85ms vs. 420ms, Table 1) is a practical benefit.
 
-- **Ablation studies isolate each component's contribution.** Table 2 quantifies the impact of each design choice: removing gradient injection drops VSR from 95.8% to 78.6% (a 17.2% absolute reduction), removing hierarchical verification drops to 83.4%, and removing bilevel optimization drops to 89.2%. This is concrete evidence that the components are individually impactful.
+- **Rigorous ablation study**: Table 2 cleanly isolates the contribution of each component. Removing gradient injection causes the largest drop (−17.2% VSR, −4.3% FC), removing hierarchical verification reduces VSR by 12.4%, and removing bilevel optimization costs 6.6% VSR. These results directly support the claim that each architectural component is necessary.
 
-- **Positive correlation between task completion and verification (r=0.82).** Figure 3 shows that DV-RL aligns the two objectives rather than trading them off, which is a central claim of the paper. The near-zero correlation for post-hoc methods confirms the problem the paper aims to solve.
-
-- **Case studies provide concrete behavioral evidence.** Section 5.4 reports specific learned behaviors (94% bounds-check insertion, 83% reduction in unsafe pointer arithmetic, 98% memory initialization), showing that the policy internalizes verification semantics at the code level.
+- **Evidence of joint optimization**: The strong positive correlation (r = 0.82) between task completion and verification scores for DV-RL, contrasted with near-zero correlation for post-hoc methods (Figure 3), provides evidence that the framework genuinely aligns safety and functionality rather than trading one for the other.
 
 ## Weaknesses
 
 ### Major
 
-- **How gradients flow through discrete program generation is not addressed.** Equation (7) includes a term λ∇_θ Ṽ(P, φ) that treats Ṽ as differentiable with respect to policy parameters θ. However, the policy generates discrete program tokens, and the paper never specifies how differentiation through this discrete generation is achieved (e.g., Gumbel-Softmax relaxation, straight-through estimator, or other reparameterization). Without this, the "direct gradient signal" claimed in Section 4.2 cannot be computed as stated. This is a central methodological gap, not a minor omission. The first term of Eq. 7 (standard policy gradient) would work, but the claimed direct gradient contribution lacks a mechanism.
+- **No systematic surrogate accuracy evaluation**: The paper's core contribution—that a differentiable surrogate can replace discrete verification to enable gradient flow—depends critically on the surrogate's fidelity to the real verifier. Yet the paper reports no standard surrogate quality metrics: precision, recall, F1, or calibration against the SMT solver's verdicts. The only mention of approximation quality is in Section 6.1, which states the feature set "captures only 78% of verifiable cases" for loop invariants, but this is neither systematic nor broken down by property type. A high downstream VSR (95.8%) could result from a permissive surrogate that happens to correlate with real verification on the current policy distribution, without faithfully approximating verification semantics. Without surrogate fidelity metrics, the paper's central mechanism remains unvalidated. This is the most significant gap in the evaluation.
 
-- **The verification feature functions are critically underspecified.** Equations (5) and the feature descriptions define f₁ via ‖TypeEnv(P) − ExpectedType(φ)‖₂, but "ExpectedType" is never defined — for a safety property φ, what is the expected type, and how is this grounded in formal semantics? f₂ uses "Attention(PDG(P), φ)" without specifying how the program dependence graph is embedded into a vector space, what attention mechanism is used, or how a scalar alignment score is produced. The paper provides no worked example mapping a concrete safety property (e.g., "no null-pointer dereference") to a differentiable computation graph. This makes the method impossible to reproduce or evaluate critically.
+- **No statistical reliability assessment**: Tables 1 and 2 present single-point percentages with no confidence intervals, standard deviations, or mention of multiple random seeds. The system involves bilevel optimization, hierarchical policies, gradient injection, and hard-constraint calibration—a complex training pipeline where run-to-run variance is a real concern. Differences of 6.6%–17.2% in the ablation (Table 2) are presented as conclusive, but without error bars the reader cannot assess whether these differences are statistically meaningful or artifacts of a single lucky/unlucky run. This is a standard expectation for quantitative ML evaluation.
 
-- **No confidence intervals, standard deviations, or significance tests.** Every reported result (Tables 1–2) is a single point. With 100 benchmark tasks spread across three categories, variance could be substantial. Given that DV-RL's VSR (95.8%) is within 1.7% of Syntax-Guided (97.5%), the lack of statistical grounding means the reader cannot assess whether this difference is meaningful or noise.
+- **Unclear gradient injection derivation**: Equation 7 adds a term λ∇_θ ṽ(P, φ) directly to the policy gradient, outside the expectation that governs the first term (𝔼_{P~π_θ}[∇_θ log π_θ(P) · R(P)]). It is unclear how this term is derived, whether it double-counts the verification signal already present in the reward R(P) via Equation 6, or how P is sampled for this term. The paper treats this as the critical mechanism by which "the policy can accommodate a change in generation according to safety violations before they completely appear in the reward" (Section 4.2), yet the justification is absent. Given that the ablation shows gradient injection provides the largest single benefit (+17.2% VSR), the reader needs to understand what it actually computes.
 
 ### Minor
 
-- **Figure 2 is presented as a stacked area chart with a "Total" column that sums to 191%.** The safety properties are non-exclusive (a program can satisfy both memory safety and termination), so the stacked presentation and summed "Total" are misleading if interpreted as parts of a whole. The individual trends (32%→94%, 41%→97%) are clear and informative; the figure should use separate curves or a non-stacked format with clear labeling that the categories are independent.
+- **Safety properties never formally specified**: The paper states it handles memory safety, termination, type safety, and data-race freedom, but never shows a single concrete property specification (e.g., a Hoare triple, temporal logic formula, or SMT-LIB encoding). The reader cannot assess whether the verified properties are trivially checkable by syntactic means or represent genuine verification challenges. This also harms reproducibility.
 
-- **Verification Efficiency (VE) definition may understate total overhead.** The paper reports 85 ms per verification check for DV-RL but does not state how often the SMT-based exact verifier is called during training (Eq. 13, periodic hard-constraint injection; Eq. 8, bilevel inner loop). If exact verification is called frequently, the amortized cost per step is higher than the surrogate evaluation time. The paper should report the frequency of exact verification calls and the total amortized cost.
+- **Insufficient baseline specification**: The RL+Post-hoc baseline is particularly unclear—is the post-hoc filter applied only at test time, or are filtered programs used for further training? The Syntax-Guided baseline achieves 97.5% VSR but only 63.2% FC, suggesting possible task definition differences or undertuning. Fair comparison requires more detail.
 
-- **The paper acknowledges complex properties with quantifiers or nonlinear arithmetic show "approximation gaps" (capturing only 78% of verifiable cases) but does not break down performance by property type.** A per-property-type analysis would reveal where the approach succeeds and where it falls short.
+- **Feature functions not enumerated**: Only f₁ (type consistency) and f₂ (control flow) are defined in Equations 5 and surrounding text. The full set of k features, how many are used in practice, and how they are selected is never disclosed, which limits both understanding of the surrogate and reproducibility.
+
+- **Bilevel optimization implementation unspecified**: No details are given on relative update frequencies between inner and outer loops, how the KL divergence in Equation 8 is estimated in practice, or what stability measures prevent the surrogate from drifting catastrophically during joint training.
+
+- **Figure 2 presentation issue**: The figure is labeled as showing "Proportion of Generated Code Snippets (%)" with the stacked area chart totaling 191% at epoch 17.5. Proportions cannot exceed 100%. This appears to be a stacked area chart where the two property categories are not mutually exclusive (a snippet can satisfy both properties simultaneously), but the labeling is misleading.
+
+- **Figure 3's y-axis undefined**: The "Verification Score" on the y-axis of Figure 3 includes negative values and is never defined in the text. It is unclear whether this is the surrogate score ṽ, the real verifier output V, or a normalized composite.
 
 ### Trivial
 
-- The abstract contains garbled phrasing: "handling right-of-way and correctness while generality and specificity" — this is not coherent English and should be corrected.
+- The abstract contains phrases like "ushered in consensus with rewards completing the tasks" and "handling right-of-way and correctness while generality and specificity" that obscure rather than clarify the technical contributions. The rest of the paper is generally more readable, but these issues in the abstract undermine the first impression.
 
 ## Nice-to-Haves
 
-- A comparison with a differentiable logic baseline (Ślusarz et al., 2022; Wu et al., 2024) would strengthen the claim that the proposed feature-based surrogate is superior to existing differentiable formalisms.
-- Sensitivity analysis for the reward balance α (set to 0.7, said to be "verified through ablation study" but no ablation shown).
-- The paper could clarify how the direct gradient term λ∇_θ Ṽ is implemented in practice (e.g., whether it uses a score-function estimator or a concrete relaxation).
+- Breaking down VSR and FC by property type (memory safety vs. termination vs. type safety) would let the reader see where the surrogate is most and least reliable.
+- A discussion of deployment safety: if the surrogate has approximation gaps, could unsafe code be falsely certified? This is important given the safety-critical framing.
+- Comparing the cost of the differentiable surrogate (15% training time overhead) against an approach that periodically queries the real SMT solver and uses discrete signals would contextualize the efficiency claim.
+- Independent evaluation of the hierarchical policy's AST skeleton generation to understand whether gains come from structure or from two-level verification.
 
 ## Removed Points
 
-These points are flagged by individual reviewers but were removed as invalid, unfair, or irrelevant; treat them with caution.
+These points are flagged to be removed; treat them with caution.
 
-- **Criticism about Syntax-Guided Synthesis outperforming DV-RL on VSR** (97.5% vs 95.8%): Removed. The paper's contribution is joint optimization of verification AND functional correctness. DV-RL achieves +11.4% FC over Syntax-Guided, 5× better VE, and better SQ. The paper frames the contribution around efficiency and joint optimization, not maximizing VSR alone. Selective reading by the reviewer.
+- **"Missing related works"**: The harsh critic suggested the paper should engage more with differentiable logic and program synthesis literature. Removed per hard rules—I cannot verify existence of specific missing references, and the paper does cite relevant work (Zhu et al., 2019; Ślusarz et al., 2022; Wang et al., 2023; Pandey, 2025).
 
-- **Criticism about the gradient in Eq. 7 being "with respect to w, not θ":** Removed. Ṽ depends on P (generated by π_θ), so ∇_θ Ṽ = ∂Ṽ/∂P · ∂P/∂θ is valid in principle. The real issue (which I retain above) is that P is discrete, so ∂P/∂θ requires a relaxation that the paper does not specify.
+- **"Grammar and terminology errors should be corrected"**: Partially kept as a trivial concern about clarity in the abstract, but the sweeping demand for a full language pass is a formatting/style critique and is removed per hard rules.
 
-- **"Missing related works" style criticism:** Removed per instructions — I cannot verify the existence or absence of citations without external knowledge.
+- **"The paper does not discuss computational trade-off in surrogate accuracy vs. training efficiency"**: The paper reports 15% training time increase over pure RL (Section 5.5). This is partially addressed. Moved to Nice-to-Haves as a deeper analysis request.
 
-- **Criticism that Pure RL has no VE in Table 1 (dash) making comparisons "apples-to-oranges":** Removed. Pure RL performs no verification, so a dash is correct. The comparison is between methods that do verification (DV-RL, RL+Post-hoc, Syntax-Guided) and those that don't. This is standard practice.
+- **"Hierarchical policy not evaluated independently"**: Genuine curiosity but not a flaw—the ablation already removes hierarchical verification. Moved to Nice-to-Haves.
 
-- **Formatting/typo nitpicks:** Removed per instructions — parser artifacts, not author errors.
+- **Strength Finder claim "Bilevel optimization aligns surrogate with formal semantics"**: The bilevel optimization is designed to do this, but without surrogate accuracy metrics, we cannot confirm it succeeds. This strength is not removed but is tempered by the major weakness about missing surrogate evaluation.
 
-- **Criticism about "Ślusarz et al., 2022" and "Pandey, 2025" not being in the reference list:** Removed. The parser truncated the reference section; these references exist in the original submission.
+- **"The paper addresses an important problem" / generic importance claims**: Removed as superficial—any paper can claim importance.
+
+- **"Could the metric be measuring a proxy?" type speculation**: Removed as generic concern-sweep without a concrete anchor in the paper.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The paper's bilevel formulation (inner loop minimizing KL divergence between exact and approximate verification, outer loop maximizing policy reward) is a clean mathematical device for jointly training a verification proxy and a generation policy. While bilevel optimization is not new, its application to this specific problem—where the inner loop's purpose is explicitly to maintain fidelity to a non-differentiable oracle—provides a template that could generalize to other domains where discrete correctness oracles need to be approximated for gradient-based training. The hard-constraint injection mechanism (Equation 13) is a simple but effective regularization that prevents the well-known problem of reward hacking on learned proxy objectives.
 
 ## Suggestions
 
-1. Clarify how the direct gradient λ∇_θ Ṽ(P, φ) in Eq. 7 is computed — is the discrete generation relaxed via Gumbel-Softmax, or is this term implemented differently in practice? Without this, the core methodological claim is not verifiable.
-2. Provide a concrete worked example mapping a specific safety property (e.g., "no buffer overflow") through the feature functions to a differentiable score.
-3. Define "ExpectedType(φ)" explicitly — what type does a safety property φ have, and how is this encoding grounded in formal semantics?
-4. Replace the stacked area chart in Figure 2 with separate curves or a non-stacked format, and clarify that the categories are independent.
-5. Report the frequency of exact verification calls during training and the amortized (rather than per-surrogate) verification time.
-6. Add confidence intervals or standard deviations across multiple training seeds for all metrics.
+- **Priority**: Report precision, recall, and F1 of the surrogate against the SMT solver on a held-out set of programs, and show how these evolve over training. This would single-handedly address the most significant weakness.
+- Run the full system and key ablations with ≥3 random seeds and report mean ± std. Even a small number of seeds would substantially increase result credibility.
+- Derive or justify the gradient injection term in Equation 7 explicitly, explaining why it does not double-count the verification signal.
+- Include 2–3 concrete safety property specifications in the main text or appendix so readers can assess the verification difficulty.
+- Fix Figure 2 to clarify that the two safety dimensions are not mutually exclusive, or relabel the y-axis appropriately.
 
 ## Score and Decision
 
-| Anchor ID | Avg Score | Round | Comparison to This Paper |
-|-----------|-----------|-------|--------------------------|
-| 4fbFKO4a2W | 2.50 | 1 (bracket) | Much weaker — tiny experiments (2 programs), no baselines, vague method |
-| N18Z2MkMEa | 3.00 | 1 (bracket) | Weaker — less coherent contribution, less rigorous evaluation |
-| Pjkes5MdKI | 2.50 | 1 (bracket) | Much weaker — limited scope, vague claims |
-| DCg9r2DKKe | 2.50 | 1 (bracket) | Much weaker — different domain (driving), less rigorous evaluation |
-| wN3KaUXA5X | 7.20 | 1 (bracket) | Stronger — diffusion on syntax trees, clear method, strong results |
-| vLqkCvjHRD | 4.75 | 1 (bracket) | Comparable — similar setting (RL + code feedback), better method clarity but less novel |
-| UTLv72uDlS | 4.25 | 1 (bracket) | Comparable — similar approach (differentiable temporal logic + RL), similar strength of evaluation |
-| ig2wk7kK9J | 6.75 | 1 (bracket) | Stronger — diffusion + safety guarantees, rigorous theory |
-| 9pW2J49flQ | 8.00 | 1 (bracket) | Much stronger — LTL + RL, complete theory, strong evaluation |
-| KsUh8MMFKQ | 8.00 | 1 (bracket) | Much stronger — different domain, complete system |
-| kBybSUskz7 | 4.80 | 2 (narrow) | Comparable — RL for constrained codes, similar experimental depth, better method clarity |
-| x3cFAoorct | 4.40 | 2 (narrow) | Slightly weaker — differentiable logic learning, less comprehensive evaluation |
-| KCTHM2Ffh3 | 6.33 | 2 (narrow) | Stronger — real-robot evaluation, theoretical guarantees, more complete system |
-| lvDHfy169r | 5.75 | 2 (narrow) | Stronger — LLM reward generation, 20× efficiency claim well-supported, clear method |
+**Round 1 bracket**: The paper sits between the weak anchors (2.50–3.40, e.g., sketch-based program induction, Bender's decomposition oracles) and the strong anchors (7.20+, e.g., Diffusion on Syntax Trees). Initial bracket: approximately 4.5–6.5.
 
-**Round 1 bracket:** The paper sits between the weak anchors (~2.5–3.0) and the strong anchors (~7.2–8.0). The most informative comparisons are in the middle bracket: the 4.25, 4.75, and 4.80 anchors.
+**Round 2 narrowing**: The most directly comparable anchors are:
+- **vLqkCvjHRD (4.75)**: Coarse-tuning models of code with RL + compiler feedback. DV-RL is stronger—more novel framework, better results, more comprehensive experiments and ablation.
+- **vf8iou7FNF (5.75)**: RLSF—RL via symbolic feedback for LLM fine-tuning. RLSF has more comprehensive evaluation across 5 domains and clearly reported metrics, but DV-RL has higher technical novelty (differentiable surrogate, bilevel optimization). DV-RL is comparable but slightly weaker due to evaluation gaps.
+- **JlSyXwCEIQ (5.75)**: CodeIt—iterative policy-guided program synthesis on ARC. Similar technical depth but better evaluation clarity. DV-RL comparable in quality.
+- **kBybSUskz7 (4.80)**: RL for hardware-efficient constrained code design. DV-RL is stronger in both contribution and results.
 
-**Round 2 narrowing:** The paper is comparable to the 4.25 (Scaling Safe Learning-based Control) and 4.75 (Coarse-Tuning with RL Feedback) anchors, with a similar profile: interesting idea, moderate evaluation breadth, but significant gaps in method specification. The paper is slightly weaker than the 4.75 anchor on method clarity and slightly stronger than the 4.25 anchor on experimental completeness. It is clearly weaker than the 6.33 anchor (Runtime Learning Machine) which had real-robot validation.
+DV-RL has genuine novelty and strong results but is held back by significant evaluation gaps—particularly the absence of surrogate accuracy metrics (which undermine the central claim) and lack of statistical rigor. These are not minor omissions; they prevent the reader from fully assessing the paper's core contribution. The paper is stronger than the 4.75 anchor (vLqkCvjHRD) but falls short of the 5.75 anchors (RLSF, CodeIt) due to weaker evaluation discipline. **Score: 5.0.**
 
-**Final score rationale:** The central methodological gap (how gradients flow through discrete program tokens) and the underspecified feature functions are genuine barriers to acceptance at a top venue. The paper's strongest assets are the novelty of the idea, the efficiency result, and the ablation evidence. Placed at 4.5 — below the acceptance threshold but not fatally flawed; substantial revision (clarifying the gradient mechanism, specifying the feature functions, adding statistical rigor, and fixing Figure 2) could make the paper competitive.
+**All anchors retrieved across rounds:**
 
-MY FINAL SCORE: <score>4.5</score>
+| Anchor ID | Avg Score | Round | Comparison |
+|-----------|-----------|-------|------------|
+| N18Z2MkMEa | 3.00 | R1 | Weaker—simpler RL coding optimization, less novelty |
+| Pjkes5MdKI | 2.50 | R1 | Weaker—more limited program synthesis approach |
+| 4fbFKO4a2W | 2.50 | R1 | Weaker—sketch-based induction, less sophisticated |
+| RAdBtquPiI | 3.40 | R1 | Weaker—Bender's decomposition, different domain |
+| vLqkCvjHRD | 4.75 | R1,R2 | Similar domain, DV-RL is more novel and comprehensive |
+| kBybSUskz7 | 4.80 | R2 | Less related domain, DV-RL stronger contribution |
+| JlSyXwCEIQ | 5.75 | R1,R2 | Similar quality tier, DV-RL has weaker evaluation |
+| vf8iou7FNF | 5.75 | R2 | Most comparable; DV-RL more novel but worse evaluation |
+| KCTHM2Ffh3 | 6.33 | R2 | Stronger—safety-critical RL with clearer evaluation |
+| tsE5HLYtYg | 6.50 | R2 | Stronger—SafeDreamer, more rigorous safe RL |
+| aKRADWBJ1I | 6.75 | R2 | Stronger—ActSafe, better evaluation discipline |
+| ig2wk7kK9J | 6.75 | R2 | Stronger—SafeDiffuser, better validated |
+| wN3KaUXA5X | 7.20 | R1 | Stronger—accepted, clearly more polished |
+| KsUh8MMFKQ | 8.00 | R1 | Much stronger, different domain |
+| 9pW2J49flQ | 8.00 | R1 | Much stronger, different domain |
+| stUKwWBuBm | 8.00 | R1 | Much stronger, different domain |
+| 6PbvbLyqT6 | 8.00 | R1 | Much stronger, different domain |
+
+MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

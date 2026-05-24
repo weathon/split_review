@@ -1,97 +1,111 @@
-Now I have a clear calibration picture. Let me produce the final consolidated review.
+Now I have a clear picture of the paper and the calibration landscape. Let me write the consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a hierarchical attention model (CodeTransformer-GAT) that processes code at token, function, and module levels for reinforcement learning state representations. The method combines a transformer encoder for tokens with graph attention networks operating on abstract syntax trees and code dependency graphs, with the representation trained end-to-end via policy gradient. Experiments are reported across code completion, program repair, and algorithmic problem-solving tasks.
-
----
+This paper proposes a hierarchical code embedding architecture (CodeTransformer-GAT) that combines token-level, function-level, and module-level attention with a Code Dependency Graph (CDG) to produce state representations for reinforcement learning on code-related tasks. The method is evaluated on code completion, program repair, and algorithmic problem solving, where it reports improvements over flat transformer, tree-LSTM, CodeBERT, GNN-CDG, and Flat-GAT baselines.
 
 ## Strengths
 
-- **Multi-level attention formalization with ablation.** The paper provides equations for token-level (Eq. 1), function-level (Eq. 2), and module-level (Eq. 3) attention, and includes an ablation study (Table 2) showing performance degradation when each level is removed, with the largest drop (−6.2%) from removing token-level attention. This provides some evidence that each level contributes.
+- **Plausible and well-motivated architecture**: The paper proposes a coherent design that integrates multi-level attention mechanisms (transformer at token level, GAT at function and module levels) with a CDG for structural dependencies. The idea that code should be represented hierarchically and optimized end-to-end for RL objectives is sensible and distinct from prior work that treats code embeddings in isolation from RL.
 
-- **Consistent improvement across three tasks in Table 1.** The reported results show the proposed model outperforming all five baselines on code completion (72.9 BLEU vs. 68.4 for CodeBERT), program repair (54.3% vs. 48.6%), and algorithmic problem solving (67.5% vs. 61.3%), with a gap that is consistent across tasks.
+- **Attention pattern analysis shows task-adaptive specialization**: Section 6.3 reports that module-level attention mean distance varies by task — 2.1 edges for code completion versus 3.8 edges for program repair — suggesting the hierarchy adapts to task-specific information needs (e.g., tracking bug propagation paths in repair). This is a concrete, interpretable finding.
 
----
+- **Ablation study confirms each component contributes**: Table 2 shows that removing token-level attention drops program repair success by 6.2%, function-level by 3.6%, module-level by 2.4%, and flattening the hierarchy drops it by 4.5%. Each hierarchical component carries weight, supporting the architectural design.
+
+- **Directionally consistent results across three diverse tasks**: Table 1 reports improvements over all five baselines on code completion, program repair, and algorithmic problem solving — three tasks requiring different types of code understanding.
 
 ## Weaknesses
 
 ### Fatal
 
-- **Dataset citations are factually wrong, undermining experimental verifiability.** The paper states: "We used the PY150 dataset (Lu et al., 2021)" — but PY150 is from Raychev et al., 2016, and the cited reference (Lu et al., 2021, arXiv:2107.03374) is actually the Codex paper by Chen et al. For the algorithmic problem-solving task, the paper says "We used the APPS benchmark (Cui, 2024)," but APPS is from Hendrycks et al., 2021. The reference list itself contains both the correct Hendrycks et al. 2021 citation and a separate "Cui, 2024" paper (Webapp1k), suggesting the authors may not know which dataset was actually used. This is not a minor citation slip — it makes every experimental result unverifiable. If the actual datasets differ from what is claimed, all performance comparisons are meaningless.
-
-- **Incoherent writing throughout the paper suggests insufficient human oversight.** Multiple sentences are semantically nonsensical and cannot be attributed to formatting artifacts. Examples include: "Recent progress is being made in code representation learning to demonstrate exciting results with Neural Investigations"; "Word2Vec-style embeddings … have been adapted for code Sequential or Tele-centric analysis yet, usually these techniques are restricted to either sequential or structural aspects Peps by itself"; and "The hierarchical cherry-picking of the code embedding system with multi-level attention Research into mechanisms provides major breakthrough in reinforcement learning state representation for code related task." The paper self-discloses in Section 9 that "We use LLM polish writing based on our original paper," but the quality of the prose goes far beyond what "polishing" would produce. The presence of these errors combined with the dataset misattributions raises fundamental concerns about whether the reported experiments were actually conducted and whether any of the numbers in the tables can be trusted.
+None identified from the paper as written that would completely invalidate the core contribution beyond repair. The architecture is reasonable and the direction of results is promising.
 
 ### Major
 
-- **Undefined baselines in the scalability analysis.** Figure 3 plots "Prediction Error" vs. "Code Complexity" and compares "Our Model" against "Baseline 1" and "Baseline 2," but neither baseline is defined anywhere in the paper. The task to which this figure refers is also unspecified, and the error metric is not defined. A figure with anonymous baselines and an unlabeled evaluation setup provides no evidence whatsoever.
+- **No variance reporting anywhere in the paper**: The paper states that statistical significance was tested via paired t-tests (p < 0.01), yet Table 1, Table 2, Figure 2, and Figure 3 contain no standard deviations, confidence intervals, error bars, or exact p-values. The reported gains over the best baselines are modest in absolute terms (+4.5 BLEU for code completion, +5.7% repair success rate, +6.2% pass rate). Without any quantification of variability, a reader cannot judge whether these differences reflect genuine improvement or run-to-run noise from different random seeds, data splits, or implementation choices. This makes the central performance claims unverifiable as presented.
 
-- **The method description is incomplete — the flow between attention levels is not specified.** Equation (2) computes attention weights β_{uv} over AST nodes, but the paper never explains how these weights aggregate token representations into function embeddings (e.g., a weighted sum with some readout function). Similarly, Equation (3) computes γ_i using a metadata vector c_i (call frequency, complexity metrics), but where these metadata come from and how they are integrated is not described. Without this information, the architecture cannot be reproduced.
+- **No hierarchical code representation baseline**: The paper explicitly distinguishes itself from SG-Trans (Gao et al., 2023) — a hierarchical attention model for code summarization — by claiming the contribution is RL-specific optimization. Yet the experimental baselines include no model that uses hierarchical code representations. The compared methods (flat transformer, Tree-LSTM, CodeBERT, GNN-CDG, Flat-GAT) are all either flat or tree-only. Without a hierarchical baseline trained under comparable conditions, the experiments cannot demonstrate that the proposed RL-optimized hierarchical design improves over existing hierarchical representations. The gains could be entirely attributable to the multi-level structure itself, independent of any RL-specific modeling.
 
-- **The ablation study does not define replacement architectures for removed components.** Table 2 reports "w/o Token-Level Attention," "w/o Function-Level Attention," etc., but never specifies what replaces the removed attention mechanism. If token-level attention is removed entirely, what processes the tokens? Without defining the replacement, the ablation measures a broken architecture rather than a controlled comparison, making the contribution claims uninterpretable.
+- **RL contribution not isolated**: All methods undergo 10k steps of supervised pre-training on demonstration trajectories before the RL phase. No variant of the proposed architecture is trained purely with supervised learning (without RL), so there is no way to determine whether the RL phase provides any benefit beyond what the supervised pre-training plus the hierarchical architecture would achieve. The paper's central narrative — that end-to-end RL optimization of hierarchical code embeddings yields superior state representations — is therefore unexamined.
 
-- **t-SNE and nearest-neighbor analyses are claimed but no results are shown.** Section 6.4 states "t-SNE visualizations of the learned state representations are shown here" and "Nearest neighbor analysis shows that our model's embeddings are better maintain functional similarity," but no figures, tables, or numeric results appear. These are empty claims.
-
-- **No confidence intervals or variance estimates are reported.** Table 1 reports single-point numbers for all five baselines and the proposed method across three tasks, with no standard deviations, error bars, or confidence intervals. The paper claims statistical significance via paired t-tests (p < 0.01), but without variance estimates these claims are unsubstantiated.
+- **Scalability experiment is uninterpretable**: Section 6.6 and Figure 3 report "Prediction Error (%)" as a function of code complexity, but never define what prediction error means (which task? which metric? BLEU? accuracy? loss?), nor do they specify what "Baseline 1" and "Baseline 2" refer to. The accompanying data table and figure are effectively orphan data; no scalability conclusions can be drawn from them.
 
 ### Minor
 
-- **The action space and MDP formulation are vague.** The paper describes actions as "token-level edits (insert/replace/delete) and (complexity raising functions, name changes of variables) depending on the task," which does not specify how an RL agent would produce such structured actions. No MDP formulation is given, and the source of "demonstration trajectories" used for warm-up is not described.
+- **Metrics listed in Section 5.4 but never reported**: CodeBLEU and AST edit distance are listed as evaluation metrics but appear nowhere in the results. This creates the appearance of an incomplete evaluation.
 
-- **The novelty relative to prior hierarchical code representations is overstated.** The related work cites Gao et al. (2023) and Zhou et al. (2022) as proposing hierarchical code representations, but the paper does not isolate what specifically enables the claimed RL-specific advantages. The policy gradient in Equation (6) is the standard objective, and the "end-to-end" claim is trivial given that the entire model is differentiable.
+- **Ablation study conducted on only one task**: Table 2 ablates components only for program repair. Whether the relative importance of each hierarchical level generalizes across tasks is unknown.
 
----
+- **Representation space analysis is entirely qualitative**: Section 6.4 mentions t-SNE visualizations and nearest-neighbor analysis but provides no figures or quantitative results in the paper to support the stated observations about clustering and functional similarity.
+
+- **Reproducibility gaps in task specification**: The reward functions for each task, the source of demonstration trajectories, and the concrete action spaces are underspecified, making exact reproduction difficult. The paper mentions "token-level edits (insert/replace/delete)" but does not provide the full MDP specification per task.
+
+### Trivial
+
+- The paper's Equation (8) for dynamic edge feature learning is presented as a contribution when it describes standard message-passing edge updates; this overclaims slightly but does not affect the core architecture.
 
 ## Nice-to-Haves
 
-- A direct experimental comparison against prior hierarchical code embedding methods (e.g., Gao et al. 2023) would strengthen the novelty case.
-- Measuring memory usage empirically (as stated in the text) rather than just asserting linear scaling would substantiate the scalability claim.
-- Standard deviations across multiple seeds (at least 3) and explicitly stated p-values would improve statistical rigor.
-
----
+- Adding a supervised-only training variant of the proposed architecture to quantify what the RL fine-tuning contributes.
+- Including SG-Trans or a comparable hierarchical baseline trained on the same warm-up data to isolate the RL contribution from the architectural benefit.
+- Reporting the unfulfilled metrics (CodeBLEU, AST edit distance) for completeness.
+- Extending the ablation study to all three tasks rather than only program repair.
+- Reporting computational cost and training time comparisons, given the architectural complexity relative to flat baselines.
 
 ## Removed Points
 
-These points were excluded per the review guidelines; they should be treated with caution and not considered as valid criticisms.
+These points are flagged to be removed; treat them with caution.
 
-1. **"Several cited works are missing from the reference list."** — The parser explicitly notes references and appendices are removed. This is a known artifact of the review process, not an author error.
-2. **"Missing PPO implementation details (clip parameter, value loss coefficient, entropy coefficient)."** — Removed per the rule against reproducibility nitpicks about hyperparameters.
-3. **"Missing formatting/style issues."** — Parser artifacts are not author errors.
-
----
+- *"The framing overstates novelty"* — REMOVED. The paper does acknowledge SG-Trans and Zhou et al. in related work and explicitly distinguishes its contribution (RL optimization vs. summarization). This is adequate.
+- *"The architectural description is high-level and lacks enough detail"* — REMOVED as a standalone weakness. The paper provides equations (1)-(8) and architecture specifications with layer counts and hidden sizes. While not exhaustive, it gives reasonable implementation detail for a conference submission.
+- *"No appendix material / missing proofs"* — REMOVED per instructions; the parser strips appendix sections.
+- *"Ethical considerations section is superficial"* — REMOVED. This is a generic criticism that doesn't engage with a specific problem in the paper.
+- *"Dynamic edge feature learning (Equation 8) is standard message-passing and is over-credited"* — MOVED to Trivial, as it's a minor overclaim not affecting the core contribution.
+- *"The paper does not discuss computational cost, training time, or memory usage"* — MOVED to Nice-to-Haves, as this is desirable but not a core flaw.
+- *"Missing comparisons with methods like RLTF, CodeRL"* — REMOVED. These are from a different domain (LLM fine-tuning for code generation, not RL state representation learning for code-related tasks); the paper's scope is different.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The combination of transformer and GAT in a hierarchy for code RL is not conceptually new (prior work on hierarchical code representations and graph-attention combinations exists), and the execution is too flawed to extract reliable insights.
-
----
+The attention pattern analysis (Section 6.3) — showing that the same hierarchical architecture learns qualitatively different attention spreads depending on the RL task (narrow 2.1-edge focus for code completion vs. broader 3.8-edge spread for program repair) — is a genuinely interesting finding. If substantiated with proper statistical reporting, this demonstrates that hierarchical attention mechanisms can adapt their effective receptive fields based on the reward structure of the task, going beyond simple performance benchmarking to offer mechanistic insight.
 
 ## Suggestions
 
-1. **Verify and correct every dataset citation.** Authors must confirm which datasets were actually used and cite the correct source papers. If the APPS and PY150 datasets were indeed used, cite Hendrycks et al. 2021 and Raychev et al. 2016 respectively, not the incorrect references currently in the paper.
-2. **Specify the full forward pass.** Define how token representations are aggregated into function embeddings (e.g., weighted sum of node features using β_{uv}) and how function embeddings are aggregated into module embeddings.
-3. **Define all baselines in every figure and table.** "Baseline 1" and "Baseline 2" must be identified by name.
-4. **Replace the "w/o X" ablation variants with controlled replacements.** For example, replace token-level attention with a learned average pooling of token embeddings rather than dropping it entirely.
-5. **Report standard deviations** across at least 3 random seeds for all main results.
-6. **Either provide the t-SNE and nearest-neighbor results or remove the claims.**
-7. The writing needs a thorough human revision. The current text contains multiple semantically broken sentences that go beyond what an LLM polish pass can fix — a knowledgeable human must rewrite the paper from scratch.
+- The single most impactful improvement would be to re-run experiments with multiple seeds (≥5) and report means with standard deviations and confidence intervals throughout. This alone would transform the credibility of the empirical claims.
+- Define "Prediction Error" and identify "Baseline 1" and "Baseline 2" in the scalability experiment, or remove Section 6.6 entirely if these cannot be clarified.
+- Add either a supervised-only variant or a hierarchical non-RL baseline (e.g., SG-Trans adapted for these tasks with the same warm-up data) to isolate the RL contribution from the architecture.
 
 ---
 
 ## Score and Decision
 
-**Calibration report.**
+**Round 1 bracket**: The paper sits between 4.0 and 5.5 based on the initial bracketing pass. The low-band anchors (~3.0) are papers with fundamental theoretical or methodological flaws; this paper does not reach that level of brokenness. The mid-band (4.5-6.33) includes papers with real but addressable experimental gaps. The high band (7.75-8.0) includes papers with comprehensive, well-supported experiments.
 
-*Round 1 — Bracketing.* Three queries on "hierarchical code embedding reinforcement learning" with bands (avg < 3.5), (3.5–7.5), (>7.5). Weak-band anchors averaged 2.5–3.0 (rejected); mid-band averaged 4.0–4.75 (rejected); strong-band averaged 7.75–8.0 (accepted). Initial bracket: 1.0–3.0.
+**Round 2 narrowing**: Against the closest topical anchors:
+- **vLqkCvjHRD (4.75)**: RL + compiler feedback for code — clearer methodology, defined metrics, but limited scope. Our paper has a more novel architecture but worse experimental rigor.
+- **4ytRL3HJrq (5.60)**: Hierarchical attention for assembly code — substantially more rigorous experiments with detailed ablations across tasks. Our paper's experimental gaps are more severe.
+- **vfzRRjumpX (5.75)**: Code representation learning at scale — comprehensive, well-ablated, clearly presented. Considerably stronger than our paper.
 
-*Round 2 — Narrowing.* Two queries on code representation/RL topics with scores (0–2.5) and (0–3.0). Anchors retrieved:
-- **dsALpkd1OU** (D2Coder, avg 1.67): coherent writing, real dataset (SWE-bench), clear baselines. This paper is *worse* than D2Coder — the dataset misattributions and incoherent text are more severe issues.
-- **OXIIFZqiiN** (IGCP, avg 1.50): suspected LLM generation, nonsensical content. Comparable to the current paper, though IGCP does not have dataset misattribution.
-- **hCfhfwSfCg** (LanGoal, avg 2.00): plagiarism concerns but has a coherent method description. The current paper is *worse* — at least LanGoal's writing is coherent.
-- **N581Nje6fH** (avg 1.50): incoherent writing, missing details. Comparable quality.
-- **NlY3XppPt3** (avg 2.00): some structure but limited contribution. Borderline better than the current paper.
+The paper under review is weaker than all three round-2 anchors in experimental rigor. It has a more interesting architectural idea than the 4.75 anchor but cannot support its claims with the evidence provided. I place it at **4.5**.
 
-The paper under review sits at or below the worst of these anchors: it has the dataset misattribution problem that the IGCP paper does not, and the incoherent writing that the D2Coder paper does not. Final score anchored at 1.5.
+### Anchor summary
 
-MY FINAL SCORE: <score>1.5</score>
+| Anchor | Path | Avg Score | Round | Comparison |
+|--------|------|-----------|-------|------------|
+| FALCON | N18Z2MkMEa | 3.00 | 1 | Weaker — fundamental methodological issues; our paper has a more coherent architecture |
+| EReLELA | 7ienVkNf83 | 3.00 | 1 | Weaker — different domain; our paper has more concrete task evaluation |
+| Comp. World Models | EHmjRIA4l2 | 3.00 | 1 | Weaker — more theoretical; our paper has empirical results (albeit poorly reported) |
+| Parsing Language of Expr. | FwjEZZ3j91 | 3.00 | 1 | Not comparable — different domain |
+| IHAC (LLM+HRL) | 6y00rooi7i | 4.75 | 1 | Comparable quality — similar experimental gaps, our architecture is more novel |
+| PcLast | NlBuWEJCug | 4.50 | 1 | Similar quality — representation learning for RL, comparable gaps |
+| STAR (HRL) | odY3PkI5VB | 6.33 | 1 | Stronger — theoretical contributions + better experiments |
+| Hier. Empowerment | mYp2KwjCWx | 4.75 | 1 | Comparable — novel idea, experimental gaps |
+| MaestroMotif | or8mMhmyRV | 7.75 | 1 | Much stronger — comprehensive, well-supported |
+| DeepLTL | 9pW2J49flQ | 8.00 | 1 | Much stronger — theoretical + empirical |
+| RLCF (code+RL) | vLqkCvjHRD | 4.75 | 2 | Comparable — our architecture more novel but experiments less rigorous |
+| Nova (hier. attn) | 4ytRL3HJrq | 5.60 | 2 | Stronger — similar topic, much more rigorous experiments |
+| CodeSage | vfzRRjumpX | 5.75 | 2 | Stronger — comprehensive, well-ablated, clear presentation |
+
+MY FINAL SCORE: <score>4.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,90 +1,105 @@
-Now I have all the information needed. Let me write the consolidated review.
+---
 
 ## Summary
 
-Blueprint-Bench proposes a benchmark for evaluating spatial intelligence in AI models through the task of converting apartment photographs into 2D floor plans. It tests a diverse set of models (LLMs, image generation models, and agent systems) on 50 apartments with ~20 interior images each, using a composite similarity score based on connectivity graphs and size rankings. The results reveal a large gap between human performance (~0.547) and the best AI models (~0.42), with most models performing near or below a "random" no-input baseline (~0.279), suggesting a genuine blind spot in current AI spatial reasoning.
+Blueprint-Bench introduces a benchmark that evaluates spatial reasoning by asking AI systems to reconstruct 2D floor plans from apartment interior photographs. The task is inherently cross-modal: models must infer room layouts, connectivity, and relative sizes from visual inputs and produce standardized floor plan images. The authors evaluate 12 model configurations spanning LLMs, image-generation models, and agent scaffolds across 50 apartments, using a rule-based computer-vision pipeline to extract room connectivity graphs and compute similarity against ground truth. A human baseline (one person, 12 apartments) substantially outperforms all models, and the benchmark is open-sourced with a public leaderboard.
 
 ## Strengths
 
-1. **Novel and well-motivated task**: The photo-to-floor-plan task is genuinely creative — it requires spatial inference that is distinct from standard VQA, embodied navigation, or 3D reconstruction benchmarks. The framing as an "in-distribution input, out-of-distribution task" parallel to ARC is apt and clearly communicated.
+- **Novel, well-scoped task design.** The benchmark requires genuine spatial reasoning — inferring room connectivity and size ranking from photographs — through a concrete, measurable output format. Unlike standard VQA or multiple-choice benchmarks, models must produce a structured spatial representation (Section 2.1, Figure 1).
 
-2. **Cross-architecture comparison on a unified metric**: The paper evaluates LLMs (via SVG code generation), image generation models (direct image output), and agent scaffolds (Codex CLI, Claude Code) on the same task and scoring pipeline. This is the first benchmark to numerically compare these different model families on the same spatial reasoning task, which is a genuine contribution.
+- **Broad model evaluation across architectures.** The paper evaluates LLMs (GPT-5, Claude Opus 4.1, Gemini 2.5 Pro, Grok-4, etc.), image-generation models (GPT Image, NanoBanana, GPT-4o), and agent scaffolds (Codex CLI, Claude Code) on the same task, enabling cross-architecture comparison that is rare in current benchmarks (Section 3, Figures 5 and 7).
 
-3. **Clear evidence of a capability gap**: The results convincingly show that, with few exceptions (GPT-5, Gemini 2.5 Pro, GPT-5-mini, Grok 4), current models score near or below a no-input baseline, while humans substantially outperform all models. The agent experiments further demonstrate that iterative refinement does not close this gap. These findings are meaningful and actionable for the community.
+- **Qualitative failure analysis provides concrete insight.** Figure 6 documents specific instruction-following failures in image models (GPT-4o omits red dots; NanoBanana adds furniture), and Figure 8 shows an agent iteratively refining but still producing incorrect output while claiming correctness. These examples deepen the evidence beyond aggregate scores (Section 3).
 
-4. **Transparent documentation of limitations**: Section 2.4 honestly discusses the size-ranking/connectivity conflation, the failure of LLM-based extraction, and the tradeoff between strict formatting rules and expressiveness. This candor strengthens the paper's credibility.
+- **Open-source release with leaderboard.** The evaluation and generation code is publicly released, a sample dataset is provided, and a leaderboard accepts community submissions, enabling reproducibility and progress tracking (Section 2.2, Section 4).
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The paper's core claims are partially supported, and no single error invalidates them entirely. The weaknesses below collectively reduce confidence but do not render the contribution unsalvageable.
 
 ### Major
 
-1. **Unvalidated composite metric with arbitrary component weights.** The scoring function (50% edge overlap, 20% degree correlation, 10% density, 10% room count, 5% door count, 5% door orientation — Section 2.3) is presented without any justification, ablation, or sensitivity analysis. For a benchmark paper, the metric is the central contribution. Without evidence that these weights produce stable rankings or correlate with human judgments of floor plan quality, the numerical scores that drive every conclusion in the paper are ungrounded. A trivial perturbation of the weights could potentially reorder model rankings. This undermines the quantitative claims (which model is "best," which performs "significantly better than random").
+- **The scoring metric conflates instruction-following with spatial reasoning, and the paper acknowledges this without resolving it.** The extraction algorithm requires strict compliance with nine formatting rules (black walls, green doors, red dots of specific size, pure colors, etc.). The paper states "if a generated floor plan does not follow the stated rules, the scoring algorithm might not score it as the model intended" and notes "Blueprint-Bench should test spatial intelligence, not instruction following" (Section 2.4). For models like NanoBanana (score 0.18) and GPT-4o (score 0.15), the paper itself attributes low scores primarily to instruction-following failures rather than spatial errors (Section 3, Figure 6). This means the benchmark cannot cleanly separate spatial ability from format compliance, and for poorly performing models the score is uninterpretable on the dimension the benchmark claims to measure. The paper defends this as a tradeoff, but does not quantify how much of the score variance across models is attributable to format compliance vs. spatial reasoning.
 
-2. **Misleading "random" baseline.** The so-called "random baseline" (score 0.279) is described in Section 2.2 as "generating typical floor plans using LLMs and image generation models without any image input." This is not a null distribution — it measures the models' *prior* about what a plausible floor plan looks like, not random chance. A true random baseline (e.g., shuffled ground-truth graphs, or random wall placements) would likely score near zero. The paper's own description calls it "worst-case" initially, then relabels it "random" throughout the figures and results. This mislabeling inflates the apparent performance of models that cluster near 0.28–0.32, when they may simply be reproducing a shared architectural prior.
+- **The human baseline is statistically inadequate.** A single human participant on only 12 of 50 apartments cannot support the claim that "human performance remains substantially superior" (Abstract, Section 3). The paper reports a human score of 0.547 vs. the best model at 0.45, but with n=1 there is no measure of inter-human variance, no confidence interval, and no ability to distinguish this particular human's aptitude from the population mean. The paper itself notes the human always got connectivity correct but was penalized on size ranking (Section 3, Figure 7 discussion), suggesting the metric may be misaligned with what humans do well, further weakening the comparison.
+
+- **No empirical validation of the extraction algorithm is reported.** The paper describes the CV pipeline (HSV filtering, flood-fill segmentation, connectivity detection from green door pixels) in detail (Section 2.3), but provides no evidence that it correctly recovers the connectivity graph and size ranking from the ground-truth floor plans. No sanity checks are reported — e.g., perturbing a ground-truth plan slightly and verifying smooth score degradation, or measuring extraction accuracy on manually annotated plans. The claim that "two floor plans (that follow the rules) will always have a higher score if they are indeed similar" (Section 2.4) is asserted without experimental calibration.
 
 ### Minor
 
-3. **Metric conflates connectivity and size ranking in a way that penalizes reasonable outputs.** The paper acknowledges this (Section 2.4): rooms are identified by size rank rather than type, so a floor plan with perfect connectivity but a wrong size ordering is doubly penalized. The human results (perfect connectivity, mean score 0.547) illustrate this directly. While acknowledged, this design choice weakens the metric's interpretability as a measure of "spatial intelligence" — it conflates two distinct abilities.
+- **The "random" baseline is imprecisely named and its construction varies across subsets.** The baseline is generated by asking models to produce typical floor plans _without_ seeing apartment photographs (Section 2.2). This is a blind-prior baseline, not a random/chance baseline. Calling it "random" in figures and text overstates how low a truly random baseline would be. The value differs between the full 50-apartment dataset (0.279, Figure 5) and the 12-apartment human subset (0.322, Figure 7), which is expected given different subsets but is not explained in the text.
 
-4. **Dataset construction is opaque.** The paper describes 50 apartments with ~20 images each but provides no information about: how apartments were selected, what range of layouts they cover (studio vs. multi-bedroom, open-plan vs. cellular), whether images cover every room, or how the ground truth was verified against actual layouts. Listing floor plans are acknowledged to be adapted from official plans, but no independent verification is described. This makes it difficult to assess the benchmark's coverage or potential biases.
+- **Scoring weights are unmotivated.** The composite score uses fixed weights of 50-20-10-10-5-5 across six components (Section 2.3). No ablation or sensitivity analysis is reported to justify these choices, and no discussion addresses how rankings would change under different weighting schemes — particularly since the size-ranking component is known to penalize the human (Section 3).
 
-5. **No statistical significance testing reported.** The paper claims some models "statistically perform better" than the random baseline (Section 3) but reports no statistical test, p-values, or confidence intervals for any comparison. Given the small N (50 apartments) and large variance, a proper test (e.g., paired bootstrap with multiple comparison correction) is essential to support the claimed distinctions between models.
+- **Inconsistency in model labeling between Figure 5 and Figure 7.** Figure 5 labels the Codex agent as "CodeX (GPT-6)" while Figure 7 labels it "Codex (GPT-5)" and the text refers to a "GPT-5 agent" (Section 3). Additionally, the "Category" column in Figure 5's table mislabels LLMs (GPT-5, Gemini 2.5 Pro, Grok-4, etc.) as "Image model."
 
-6. **Instruction-following confound not controlled.** The paper acknowledges (Section 2.4) that models failing to follow the strict formatting rules cannot be scored properly, meaning low scores may reflect poor instruction-following rather than poor spatial reasoning. Yet no analysis separates these failure modes. For example, GPT-4o and NanoBanana's very low scores (0.15, 0.18) are attributed to rule violations, but this is qualitative rather than quantified.
+- **The agent analysis is superficial.** The paper observes that the Claude Code agent iteratively refined while the Codex agent did not (Section 3), but performs no controlled comparison — e.g., testing the same backbone model with and without the agent scaffold. Claude Opus 4.1 is the only model tested both as an LLM and inside an agent, and the agent shows a modest improvement (0.32 → 0.38). The claim that agent-based approaches "show no meaningful improvement over single-pass generation" (Section 4) is not tested systematically across backbones.
 
-7. **Agent conclusions rely on only two scaffolds.** The finding that "iterative refinement shows no meaningful improvement" is based on exactly two agent configurations (Codex CLI with GPT-6, Claude Code with Opus 4.1), one of which (Codex) never iterated. This is too narrow a basis for a general claim about agent-based spatial reasoning.
+- **Appendix models not mentioned in main text.** The appendix bar charts show results for "Claude 3.5 Sonnet," "Claude 3.5 Haiku," "Claude 3.5 Opus," "Claude 3.5 Turbo," "Claude 3.5 Flash," and "Claude Code (Claude 4.5)" — none of which appear in the main results or discussion, creating confusion about what was evaluated.
 
 ### Trivial
 
-8. **Appendix contains inconsistent model names.** The per-apartment bar charts (Fig. A.1, A.2) list models like "Claude Code (Claude 4.5)" and "Claude 3.5 Sonnet," which do not match the model names used in the main paper (e.g., Claude Opus 4.1, Claude Sonnet 4). This appears to be a copy-paste or versioning error.
+- The "Category" column in Figure 5's table mislabels nearly all models as "Image model."
 
 ## Nice-to-Haves
 
-- **Validate the metric** via human agreement study (do human raters' quality judgments correlate with metric scores?) and weight ablation (are model rankings stable under reasonable weight perturbations?).
-- **Decouple connectivity accuracy from size-ranking accuracy** as separate reported metrics, rather than conflating them in a single score.
-- **Provide a per-error breakdown** for each model (connectivity errors vs. size-ranking errors vs. instruction-following violations).
-- **Report confidence intervals and significance tests** for all pairwise model comparisons.
+- Collecting data from 5–10 human participants on a larger subset of apartments would transform the qualitative human comparison into a credible quantitative baseline.
+- A controlled experiment isolating the effect of iterative refinement (same backbone model, with and without the agent scaffold) would strengthen the agent analysis.
+- Reporting per-apartment difficulty stratification or variance analysis would help readers interpret which types of layouts challenge models most.
+- Ablating the scoring weights and reporting model rankings under alternative schemes (especially connectivity-only scoring) would justify the chosen metric.
+- A simple perturbation experiment on ground-truth plans (adding noise, slightly shifting walls) that verifies smooth degradation of the similarity score would validate the extraction pipeline.
 
 ## Removed Points
 
-- **Figure 7 human/model subset mismatch (removed)**: The harsh critic claimed the paper doesn't clarify whether model bars in Fig. 7 use the same 12-apartment subset or the full 50. In fact, the figure title says "apartments with human baseline only" and the caption states "This data is from a subset of Blueprint-Bench (12 instead of 50)." The paper does clarify. This criticism is factually wrong.
-- **Claim about overstated novelty (removed)**: The critic argued the "first numerical framework" claim is overstated. The claim is specifically about comparing spatial intelligence *across different model architectures* (LLMs, image gen models, agents) on the same task — this IS novel. Not removed.
-- **Pure formatting/style nitpicks** have been excluded per instructions.
-- **Speculative concerns about CV pipeline robustness** (flood-fill leakage, dot placement) are not grounded in evidence from the paper and have been demoted to at most a minor concern, then removed as too speculative without demonstration of actual failure cases.
-- **Strength Finder generic strengths** about the "importance of the problem" have been removed as generic/superficial.
+These points are flagged to be removed, treat them with caution.
+
+- **"Random baseline is misrepresented and the construction undermines headline comparisons"** — REMOVED as a standalone fatal criticism. The paper explicitly describes the baseline construction in Section 2.2 ("we created a worst-case baseline by generating typical floor plans using LLMs and image generation models without any image input"). The naming in figures is imprecise but the construction is fully disclosed. The variation between subsets (0.279 vs 0.322) reflects different apartment compositions, not instability. Retained as a minor naming issue.
+
+- **"The open-source release includes only a dataset sample; most data is kept private — impossible to verify results"** — REMOVED. The paper states the full dataset is private to prevent overfitting for the leaderboard, which is standard practice for many benchmarks. The code is open-sourced, and a sample is provided. This is a design choice, not a flaw.
+
+- **"The ARC analogy in the introduction is weak"** — REMOVED. This is a framing disagreement, not a verifiable error. The paper uses ARC as an illustrative example of out-of-distribution evaluation, not as a direct methodological comparison.
+
+- **"Missing inter-apartment variance analysis and difficulty stratification"** — Moved to Nice-to-Haves. This is a useful addition, not a weakness.
+
+- **"No ablation of scoring metric components"** — Retained as Minor but softened since this is a nice-to-have for most benchmark papers at submission stage, not a core requirement.
+
+- **"GPT-4o and NanoBanana low scores are evidence of poor spatial ability" claim** — REMOVED as an alleged contradiction. The paper explicitly states these models' low scores "can be attributed to poor instruction following" (Section 3), not poor spatial ability. The harsh critic's claim that the paper "treats low scores as evidence of poor spatial ability" is contradicted by the text.
+
+- **"The extraction algorithm may produce empty/garbled JSON for non-compliant outputs"** — REMOVED as a separate fatal criticism. This is the same conflation concern already captured in Major weakness 1, and the paper discusses it in Section 2.4.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key finding — that most frontier models perform at or below a no-input baseline on photo-to-floor-plan reasoning — is well-supported by the data (modulo the metric concerns above) and is the paper's most striking contribution.
+None beyond the paper's own contributions. The review process did not surface observations that the paper itself does not already make or discuss.
 
 ## Suggestions
 
-1. **Validate the metric.** The single highest-impact change would be an ablation study showing that model rankings are stable across a range of plausible weight configurations, plus a human agreement study correlating metric scores with human quality ratings of the same floor plans.
-2. **Fix the "random" baseline.** Relabel this as "no-input prior" or "model prior" and add a proper null baseline (e.g., shuffled connectivity graphs or uniform random room placements) to contextualize scores.
-3. **Report separate connectivity and size-ranking metrics.** At minimum, decouple these two components so readers can see what each model fails at.
-4. **Provide dataset curation details.** Describe the selection criteria, layout-type distribution, and ground-truth verification process.
-5. **Add statistical testing.** Report confidence intervals and significance tests (e.g., bootstrapped pairwise comparisons with correction) to support claims about which models outperform which.
-6. **Fix appendix model names** to be consistent with the main paper.
+- The most impactful improvement would be to **decouple format compliance from spatial scoring**, either by making the CV pipeline robust to common rendering variations (e.g., slight color deviations, anti-aliasing) or by training a learned graph extractor that handles format variation while preserving spatial content. This would directly address the benchmark's most significant limitation.
+
+- **Expand the human baseline** to at least 5 participants on the full 50 apartments and report inter-annotator agreement. This single change would transform the paper's headline claim from suggestive to credible.
+
+- **Add a validation section** showing that the extraction algorithm correctly recovers connectivity graphs and size rankings from the ground-truth plans, with a perturbation experiment demonstrating smooth degradation under controlled distortions.
+
+- **Rename the "random baseline"** to "blind prior baseline" or "no-image baseline" in all figures and text to accurately reflect its construction.
 
 ## Score and Decision
 
-### Calibration Report
+**Calibration summary:**
 
-**Round 1 (bracketing):**
-- *Weak anchors (<3.5)*: JQbqaQjV7D (3.0, traffic incidents), BVACdtrPsh (3.0, MCTBench), koza5fePTs (2.0, planning), gNoqEdT2wO (2.33, continual learning). All clearly weaker — different domains, more fundamental flaws.
-- *Mid anchors (3.5–7.5)*: uBhqll8pw1 (4.0, 3D VLM reasoning), WK6K1FMEQ1 (6.75, SPACE spatial cognition), sMFqEror1b (4.75, MMToM-QA), toqQYz2N2X (4.0, TAG-EQA). SPACE is clearly stronger; the 4.0–4.75 papers are comparable.
-- *Strong anchors (>7.5)*: Q6a9W6kzv5 (8.0, PhysBench), WyEdX2R4er (8.0, visual data-type), HnhNRrLPwm (8.0, MMIE), 3i13Gev2hV (8.0, compositional entailment). All clearly stronger — larger scale, validated metrics, rigorous evaluation.
+| Anchor | Avg Score | Decision | Round | Comparison |
+|---|---|---|---|---|
+| SPACE (WK6K1FMEQ1) | 6.75 | Accept | R1 | Stronger: more tasks, cognitive science grounding, better human baselines |
+| VisualAgentBench (2snKOc7TVp) | 5.75 | Accept | R2 | Stronger: more comprehensive, training trajectories, SFT experiments |
+| MuirBench (TrVYEZtSQH) | 5.20 | Accept | R2 | Comparable in scope; MuirBench has better validation, less novelty in task |
+| MMToM-QA (sMFqEror1b) | 4.75 | Reject | R2 | Blueprint-Bench slightly stronger: real data, more concrete task |
+| FoREST (9Y6QWwQhF3) | 4.25 | Reject | R1 | Blueprint-Bench clearly stronger: real data vs. synthetic templates |
+| Indoor Scene Layout (uBhqll8pw1) | 4.00 | Reject | R1 | Blueprint-Bench clearly stronger: cleaner evaluation, actual generation task |
 
-**Initial bracket:** 4.0–6.0
+**Round 1 bracket:** Between 4.0 and 6.75.  
+**Round 2 narrowed:** Between 4.75 (MMToM-QA) and 5.75 (VisualAgentBench).  
+**Final placement:** 5.0 — comparable to MuirBench (5.20) but slightly weaker due to unvalidated extraction pipeline, thin human baseline, and conflated scoring. The novel task design and multi-architecture comparison are genuine contributions that the community will find useful, but the benchmark's reliability as a spatial-intelligence measurement instrument is not yet adequately demonstrated. The weaknesses are addressable in a revision.
 
-**Round 2 (narrowing):**
-- *4.0–5.5*: inpLTODeA6 (4.25, ING-VP games), sMFqEror1b (4.75, MMToM-QA), UiLtbLsiPU (4.50, ET-Plan-Bench), 9Y6QWwQhF3 (4.25, FoREST). All rejected; our paper is comparable but slightly stronger than ING-VP and FoREST due to a more novel task and broader model coverage.
-- *5.5–7.0*: WK6K1FMEQ1 (6.75, SPACE) — accepted, clearly more comprehensive; WsgEWL8i0K (6.00, MMIU) — accepted, much larger scale; B0wJ5oCPdB (6.00, Chain-of-Symbol) — rejected but proposes a method not a benchmark; XYdstv3ySl (6.50, M3) — accepted, validated system. Our paper is notably weaker than all of these.
-
-**Final position:** Comparable to MMToM-QA (4.75) — both have interesting tasks but unvalidated evaluation frameworks. Slightly better than ING-VP (4.25) due to more novel and general task design. Clearly below SPACE (6.75) and MMIU (6.00) which are more comprehensive and carefully validated. Score 4.5.
-
-MY FINAL SCORE: <score>4.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

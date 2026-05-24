@@ -1,90 +1,83 @@
-Now I have sufficient anchors for calibration. Let me synthesize the final review.
+Now I have all the information needed. Let me synthesize the review.
 
-**Round-1 bracket**: I placed the paper between roughly 5.0 and 7.0 based on the bracketing pass — clearly stronger than the weak 3.0–3.4 anchors (rejected papers with poor novelty/presentation), comparable to the middle anchors (4–6.5), but not as strong as the top-tier 7.5+ papers which tend to be more mature or address a significantly harder problem.
-
-**Round-2 narrowing**: Comparing against TIPS (6.50, accepted), SPA (6.50, accepted), Refining CLIP's Spatial Awareness (6.00, accepted), and RODIN (6.25, rejected), I see SpatialBoost as having stronger methodological novelty than most of these but with a more prominent documentation gap (the ScanNet data disjointness issue). Its evaluation breadth matches or exceeds these peers. The score should sit near the lower end of this peer band.
+---
 
 ## Summary
 
-This paper proposes SpatialBoost, a framework that injects 3D spatial knowledge into pre-trained vision encoders by converting dense geometric information (depth, segmentation, 3D point clouds) into linguistic QA expressions, then fine-tuning the encoder through an LLM using multi-turn Chain-of-Thought reasoning. A dual-channel attention mechanism prevents catastrophic forgetting. The method is evaluated on 4 vision encoder backbones across depth estimation, semantic segmentation, 3D scene understanding, robot learning, image classification, and image retrieval — showing consistent improvements on all tasks.
+SpatialBoost proposes a framework to inject 3D spatial understanding into pre-trained vision encoders by converting geometric information (depth, segmentation, 3D reconstruction) into linguistic multi-turn Chain-of-Thought QA pairs (pixel→object→scene), then fine-tuning the encoder using an LLM decoder with a dual-channel attention mechanism that preserves original representations. Evaluated across four encoder families (OpenCLIP, SigLIPv2, DINOv2, DINOv3) on depth estimation, semantic segmentation, 3D scene understanding, robot learning, image classification, and retrieval, the method shows consistent performance gains.
 
 ## Strengths
 
-- **Novel and well-motivated paradigm**: Converting dense 3D spatial information into hierarchical multi-turn language reasoning (pixel → object → scene) and using an LLM decoder to fine-tune a vision encoder is genuinely novel. The paper makes a clear case for why language is a natural medium for structured spatial knowledge transfer, and the three-stage pipeline (feature alignment → instruction tuning → encoder fine-tuning with dual-channel attention) is logically constructed.
+- **Broad, consistent empirical gains across diverse tasks.** SpatialBoost improves all four encoders on depth estimation (e.g., DINOv3 NYUd RMSE 0.31→0.25), semantic segmentation (DINOv3 ADE20K mIoU 55.9→59.7), 3D-centric tasks (DINOv3 SQA3D 51.4→54.9), robot learning (DINOv3 average 72.8→80.8), and image classification/retrieval (DINOv3 ImageNet linear 88.4→90.2). Gains on non-spatial tasks demonstrate the method does not overfit to spatial features. Tables 1–5 provide clear, well-organized evidence.
 
-- **Dual-channel attention effectively preserves pre-trained knowledge**: Figure 6 provides concrete evidence: DINOv2-ViT-L/14 with dual-channel attention achieves 87.6% classification accuracy vs. 79.5% for full fine-tuning and 83.7% for LoRA, while improving segmentation. This isolates the contribution of the attention design and validates that the method does not suffer from catastrophic forgetting.
+- **Validated contribution of hierarchical language-guided reasoning.** Table 7 shows that the forward multi-turn CoT ordering (pixel→object→scene) outperforms both random and reversed orders on classification, segmentation, and depth estimation. The combination of single-view and multi-view data yields the best results, confirming their complementary nature.
 
-- **Remarkably broad and consistent evaluation**: Across 4 backbones (OpenCLIP, SigLIPv2, DINOv2, DINOv3), 4 dense prediction benchmarks, 6 3D-centric tasks, 4 robot learning domains, and 5 classification/retrieval benchmarks, SpatialBoost *improves every single metric*. This breadth rules out cherry-picking and shows the injected spatial knowledge is beneficial even for non-spatial tasks like ImageNet classification (DINOv3: 88.4 → 90.2).
+- **Dual-channel attention effectively prevents catastrophic forgetting.** Figure 6 shows that dual-channel attention preserves and even improves classification accuracy (86.3%→87.6%), while full fine-tuning collapses to 79.5% and LoRA drops to 83.7%. This directly supports the paper's design choice for retaining pre-trained knowledge while learning spatial representations.
 
-- **Ablations are informative and well-designed**: Table 7 cleanly shows that forward multi-turn ordering outperforms reverse and random, that single-view and multi-view data are complementary, and that both are needed for best results. Table 8 shows that naive post-training (Simple FT) is ineffective while SpatialBoost works, ruling out data quantity as the driver of gains. Figure 5 shows monotonic scaling with dataset size.
+- **Architecture-agnostic and scalable.** The method is validated across four distinct encoder families (OpenCLIP, SigLIPv2, DINOv2, DINOv3) with consistent improvements. Figure 5 demonstrates monotonic gains when scaling the reasoning dataset from 50K to 300K samples.
 
 ## Weaknesses
 
 ### Major
 
-- **Unaddressed potential data leakage between training and 3D evaluation benchmarks**: The multi-view training data (Section 4.1) includes "3D dataset (Dai et al., 2017)" — i.e., ScanNet — while the 3D-centric evaluation in Table 3 evaluates on ScanNet-based benchmarks (ScanQA, SQA3D, ScanRefer). The paper provides **no statement** that training and evaluation scenes are disjoint. While the critic's claim that this is a "textbook case" of leakage overstates the case — the consistent improvements on non-ScanNet tasks (NYUd, KITTI, ADE20K, ImageNet, CortexBench) strongly argue against a pure leakage explanation — the omission is a significant documentation gap. Standard practice is to explicitly state scene-level split separation; its absence weakens the credibility of Table 3 results. The authors should clarify the split protocol or evaluate on a held-out 3D dataset.
+- **ScanNet domain overlap between training data and 3D-centric evaluation.** The paper constructs its multi-view training data in part from ScanNet (Dai et al., 2017; Section 4.1), and the Lexicon3D benchmark used for 3D-centric evaluation (Table 3) is also built on ScanNet scenes (ScanQA, SQA3D, ScanRefer). The paper does not discuss whether training and test scenes are disjoint, nor does it include a fully out-of-domain 3D benchmark. While results on depth estimation (NYUd, KITTI), segmentation (ADE20K, Pascal VOC), robot learning (CortexBench), and classification/retrieval are on entirely different datasets and remain convincing, the 3D-centric claims in Table 3 cannot be attributed solely to spatial reasoning improvements — domain adaptation to the ScanNet distribution is a confound. This primarily affects confidence in the 3D-specific results rather than the overall contribution.
+
+- **Under-controlled comparison between LLM-based and pixel-level supervision (Table 6).** The ablation that claims LLM-based supervision is superior to pixel-level alternatives (linear heads, SAM decoder, VGGT decoder) does not control for the difference in training data and task richness. The LLM variant is trained on the rich multi-turn spatial reasoning data, while the pixel-level methods appear to be trained on standard depth or segmentation objectives. The advantage of the LLM pathway may stem from richer training signals rather than the decoder architecture itself. While the ablation still supports the broader point that language-guided spatial reasoning is effective, the specific claim that "LLM-based supervision is superior" needs qualification. Details of the pixel-level training setup are deferred to a stripped appendix, further limiting assessment.
 
 ### Minor
 
-- **Missing error bars on dense prediction results**: Tables 1, 2, and 5 report only point estimates. While single-run linear probing is common in the vision literature, many of the gains are modest (e.g., DINOv3 NYUd depth RMSE 0.25→0.21 with DPT, ADE20K mIoU 55.9→59.7) and the absence of variance estimates makes it impossible to assess statistical significance. The robot learning results (Table 4) include standard deviations, setting a reasonable expectation that the other tables should too.
+- **"Simple FT" baseline in Table 8 is insufficiently described.** The paper states this baseline "fine-tunes vision encoders with their original pre-training objectives" without specifying what data, objective, or hyperparameters are used. Given that this baseline is the primary comparison for whether the SpatialBoost paradigm offers benefits over naïve continued pre-training, more detail is needed.
 
-- **LLM decoder ablation (Table 6) does not fully isolate language modality**: The comparison pits LLM decoder (trained on spatial QA) against pixel-level decoders (trained on depth/segmentation targets). While the critics' claim that the baselines use "different supervision signals" actually describes the intended experiment — testing language modality vs. pixel modality using the same spatial information — the comparison could be strengthened by also including a control where the LLM is trained on non-spatial QA data (e.g., captions) to disentangle the contribution of spatial content from the LLM framework itself.
-
-- **Simple FT baseline (Table 8) lacks precise specification**: The paper states the encoder is fine-tuned "with its original pre-training objectives" but does not specify which objectives were used for each backbone, the exact hyperparameter search, or whether the same 300K images were used. A weak baseline here modestly inflates the relative gain of SpatialBoost.
-
-- **No analysis of what the encoder learns**: The paper claims the encoder learns "spatial representations" but provides no probing analysis (attention maps, PCA, spatial vs. semantic axis decomposition) to characterize what changed in the learned features. This evidence would strengthen the central claim.
+- **Role of general scene captions not ablated.** The multi-turn reasoning data appends general scene captions after spatial reasoning turns (Section 3.2). It is unclear how much of the gains on non-spatial tasks (classification, retrieval) come from these captions versus the spatial QA. An ablation isolating the caption contribution would strengthen the attribution of gains to spatial reasoning specifically.
 
 ### Trivial
 
-- None beyond standard formatting issues (already handled).
+- None of substance beyond formatting issues that are parser artifacts.
 
 ## Nice-to-Haves
 
-- A discussion of failure cases or tasks where SpatialBoost might hurt performance (e.g., highly texture-rich tasks).
-- An estimate of computational cost (GPU-hours) for the three-stage pipeline.
-- Comparison with alternative spatial injection methods (e.g., explicit 3D coordinate regression, direct 3D point cloud features) under similar data budgets.
+- Adding an out-of-domain 3D benchmark (e.g., ARKitScenes, Replica, or a held-out outdoor dataset) would substantially strengthen the evidence for generalizable spatial awareness.
+- A controlled LLM-vs-pixel comparison holding training data constant (e.g., using the same spatial annotations but decoding them through different heads) would sharpen the decoder-ablation claim.
+- Clarifying the training sources for the Stage 3 multi-turn reasoning dataset separately from the Stage 2 multi-view VQA dataset, and reporting the distribution across sources, would aid reproducibility.
 
 ## Removed Points
 
-- **Criticism that data leakage "likely invalidates all 3D-centric results" (from Harsh Critic, point 1)**: This overstates the evidence. The paper does not confirm leakage; it merely fails to rule it out. The consistent improvements on non-ScanNet tasks (depth, segmentation, ImageNet, robot learning) demonstrate genuine generalization, inconsistent with pure test-set memorization. Demoted from Fatal to Major.
-- **Criticism that Table 6 baselines are "unfair" (Harsh Critic, point 2)**: The ablation tests language modality vs. pixel modality using the same spatial information — a valid experiment design for the stated claim. The missing control (non-spatial LLM) is a minor gap, not unfairness. Demoted from major methodological gap to Minor.
-- **"The claim that models 'face a fundamental challenge in acquiring 3D spatial awareness' is misleading because DINOv2/DINOv3 encode depth" (Harsh Critic, Section-by-Section)**: This is a matter of degree. DINOv2/DINOv3 do encode some geometry, but the paper's own baselines show they still benefit substantially from SpatialBoost. The claim is defensible and not misleading.
-- **Strength finder's claim about "importantly also ImageNet-1K linear probing (88.4→90.2)" showing the method doesn't harm general vision**: This is valid and retained. No removal needed.
-- **Strength finder's generic praise about "addressing an important problem"**: Removed as generic.
+These points are flagged to be removed, treat them with caution:
+
+- **Harsh critic's claim that the introduction is "misleading" because the paper uses pre-trained specialist models.** The paper's motivation is that standard vision encoders lack 3D spatial awareness because they are trained on 2D images — this is accurate. The fact that SpatialBoost distills knowledge from specialist models (depth, segmentation, 3D reconstruction) is the method, not a contradiction. The harsh critic's framing of this as misleading is itself a misreading.
+
+- **Harsh critic's concern about "data contamination" being fatal.** While the ScanNet overlap is a real issue (retained as Major), the harsh critic's implication that it invalidates the entire paper's contribution is excessive. The depth estimation, segmentation, robot learning, and classification/retrieval results are on completely different datasets and show consistent gains. The overlap specifically affects the 3D-centric evaluation in Table 3, not the whole paper.
+
+- **Strength Finder's generic strengths about "important problem" or "interesting question."** Removed as superficial.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The paper's use of language as an *intermediate representation* for transferring dense 3D geometric knowledge into vision encoders is a genuinely novel synthesis. Rather than directly predicting 3D quantities (a regression problem that can conflict with pre-trained representations) or using multi-view contrastive objectives (which require curated multi-view data), SpatialBoost converts 3D structure into structured linguistic QA and leverages an LLM's autoregressive loss to guide the encoder. The hierarchical CoT design (pixel→object→scene) is particularly interesting because it mirrors how spatial reasoning might be scaffolded: from local geometry to object relations to scene-level understanding. The dual-channel attention mechanism, while adapted from prior work (Hong et al., 2023a), is deployed in a way that cleanly solves the tension between learning new spatial knowledge and retaining pre-trained capabilities — the α-mixture with zero-initialized bias is an elegant initialization choice that ensures the model starts from the frozen state.
 
 ## Suggestions
 
-1. Add a clear statement of scene-level split separation between ScanNet training data and ScanNet evaluation benchmarks, or evaluate on a held-out 3D dataset (e.g., Matterport3D) to definitively address the data leakage concern.
-2. Add error bars (at least 3 seeds) to Tables 1, 2, and 5.
-3. Include a probing analysis (attention maps, PCA of features) to characterize what spatial properties the fine-tuned encoder actually learns.
-4. Clarify the Simple FT hyperparameter setup and confirm identical data was used.
+- The authors should explicitly state whether the ScanNet-derived training images and the Lexicon3D test scenes are disjoint. If they are not, the authors should either (a) re-run the 3D-centric evaluation excluding any overlapping scenes, or (b) add a fully out-of-domain 3D benchmark. This is the highest-impact revision.
+- For Table 6, specify what data and objectives were used for the linear, SAM, and VGGT decoder variants. A fair comparison would use the same images and spatial annotations but decode them through different heads.
+- The "Simple FT" baseline needs a clear description of what data and pre-training objective were used.
 
 ## Score and Decision
 
-**Calibration anchor list (all rounds):**
+### Calibration Anchors
 
-| Anchor ID | Avg Score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| V73W8MXnNW | 3.00 | R1 | Much weaker — poor presentation, limited novelty. SpatialBoost is clearly stronger. |
-| KBSHR4h8XV | 3.33 | R1 | Much weaker — limited scope, unclear contribution. |
-| Akccupz2pP | 3.40 | R1 | Weaker — narrow gaze detection task, limited generality. |
-| 6RmZ0V8Vwk | 4.20 | R1 | Weaker — outdated setting, limited novelty. SpatialBoost is more novel and broader. |
-| 38No4B8sx6 | 6.00 | R1 | Comparable — both address spatial awareness in vision encoders. SpatialBoost has broader scope. |
-| DzxaRFVsgC | 5.50 | R1, R2 | Comparable — SpatialBoost has stronger methodological novelty. |
-| wFAyp2CUnq | 4.00 | R1 | Weaker — focuses only on attention analysis, no method for improvement. |
-| bSq0XGS3kW | 5.00 | R2 | Weaker — narrower scope (object-centric representation). |
-| hLIlN0f4ix | 5.00 | R2 | Comparable but different focus (LLMs' vision understanding). |
-| Pt3lfU1NqC | 6.25 | R2 | Comparable — both inject 2D/3D knowledge. SpatialBoost has more novel paradigm. |
-| 6TLdqAZgzn | 6.50 | R2 | Comparable — SPA uses neural rendering for 3D awareness; SpatialBoost broader but less deep in embodied AI. |
-| DaA0wAcTY7 | 6.50 | R2 | Comparable — TIPS uses synthetic captions+MIM; SpatialBoost has more novel language-guided reasoning approach. |
-| FlvtjAB0gl | 6.25 | R2 | Comparable — unified vision-language pretraining. Different approach. |
+**Round 1 (Bracketing):**
+- JIlIYIHMuv (2.50) — continual learning for VLMs; clearly weaker than SpatialBoost in scope and contribution.
+- JzLcKWtGnl (4.33) — Spatial 3D-LLM for 3D vision-language; similar domain but narrower scope, less convincing evaluation.
+- or9OfAC3kb (5.25) — 3DGraphLLM for 3D grounding; narrower task, modest gains; SpatialBoost is stronger.
+- QQBPWtvtcn (7.67) — LVSM view synthesis; very strong paper with clear contribution; SpatialBoost is somewhat below this.
+- Initial bracket: **5.5–7.5**.
 
-**Round-1 bracket**: 5.0 – 7.0  
-**Round-2 narrowing**: Paper is comparable to the 6.0–6.5 anchors (Refining CLIP's Spatial Awareness at 6.00, TIPS at 6.50, SPA at 6.50) but with a more significant documentation gap (ScanNet leakage concern) that prevents reaching the 7+ tier. It is clearly stronger than the 3–5 anchors.
+**Round 2 (Narrowing):**
+- CNO4rbSV6v (6.00) — Multiview Equivariance for 3D understanding; simpler method, narrower evaluation; SpatialBoost is stronger.
+- 6TLdqAZgzn (6.50) — SPA: 3D spatial awareness for embodied representation; very similar goal, broad evaluation (268 tasks); comparable quality. SpatialBoost's language-guided approach is more conceptually novel, but SPA's evaluation is more comprehensive in task count. Both have some methodological concerns. SpatialBoost is at roughly the same level or slightly above.
+- 84pDoCD4lH (7.40) — Spatial frame-of-reference evaluation for VLMs; different type of paper (benchmark/evaluation); SpatialBoost is below this in terms of contribution clarity.
+- WK6K1FMEQ1 (6.75) — SPACE benchmark for spatial cognition; different type of paper; SpatialBoost is methodologically more ambitious but has the domain-overlap issue.
 
-MY FINAL SCORE: <score>6.0</score>
+**Final comparison:** SpatialBoost is comparable to SPA (6.50) in quality — both enhance vision encoders with spatial awareness, show broad evaluation, and have some methodological concerns. SpatialBoost's language-guided reasoning is more innovative than SPA's rendering-based approach, and its dual-channel attention mechanism is a cleaner architectural solution. The ScanNet overlap issue tempers the 3D-specific claims but does not undermine the overall contribution. Score: **6.5**.
+
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

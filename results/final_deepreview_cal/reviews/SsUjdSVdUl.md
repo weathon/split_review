@@ -1,26 +1,20 @@
-Now I have all the information I need. Let me compile the final consolidated review.
-
-**Round 1 bracket:** Initial assessment places this paper between 5.5 and 7.0. It is clearly above the weak-anchor band (2-3, papers with fundamental flaws) and substantially stronger than Critic-CoT (5.75, Reject). It is comparable to SuperCorrect (6.50, Accept) and RLC (6.00, Accept) in overall quality.
-
-**Round 2 narrowing:** Compared to SuperCorrect (6.50) — Critique-RL has similar two-stage structure but does not require a stronger teacher model, a meaningful advantage. Compared to CRITIC (6.50) — different paradigm (training-based vs prompting) but both are well-executed. The confounded ablation and missing β₂ are genuine but minor issues; no fatal or major flaws. The paper's diagnostic finding (Section 4.1) is itself a contribution. Score: **6.5**.
+Now I have a thorough understanding of the paper and its calibration anchors. Let me synthesize everything into the final review.
 
 ---
 
 ## Summary
 
-This paper proposes Critique-RL, a two-stage online RL approach for training language models to critique and provide feedback on other models' outputs, without requiring stronger human or model supervision. The key insight—confirmed by diagnostic experiments in Section 4.1—is that single-stage RL with indirect refinement-based rewards improves helpfulness but fails to optimize the critic's *discriminability* (ability to judge whether a response is correct). Stage I directly optimizes discriminability via a correctness-matching reward; Stage II optimizes helpfulness via refinement rewards while using a KL regularization to preserve discriminability. Experiments on Qwen2.5-3B/7B across MATH, GSM8K, AQuA, plus OOD tasks (SVAMP, TheoremQA) show consistent and substantial gains over SFT, STaR, Retroformer, and CTRL baselines, with additional results on iterative training, oracle-verifier analysis, and test-time compute scaling.
+Critique-RL proposes a two-stage reinforcement learning method for training critic language models without relying on stronger supervision. The key insight is that existing RL approaches using indirect reward signals (based on actor refinement outcomes) improve helpfulness but degrade discriminability — the critic's ability to judge response correctness. The paper diagnoses this failure mode empirically (Figure 3), then addresses it with: Stage I, which directly optimizes discriminability via a rule-based reward \(r_{\mathrm{dis}}\), and Stage II, which optimizes helpfulness via \(r_{\mathrm{refine}}\) while regularizing against the Stage I model to preserve discriminability. Experiments on math reasoning tasks with Qwen2.5-3B/7B show consistent and substantial improvements over SFT, STaR, Retroformer, and CTRL baselines.
 
 ## Strengths
 
-- **Diagnostic finding (Section 4.1, Figure 3) empirically identifies the root failure mode.** The paper shows that indirect rewards (r_refine, r_correction, r_Δ) produce critics that are either overly conservative or overly aggressive, and that their discriminability plateaus or degrades during RL. This explicit diagnosis provides a clear, well-supported motivation for the two-stage design. It is a genuine contribution in itself.
+- **Compelling empirical diagnosis of a real failure mode**: Figure 3 and Section 4.1 provide a clear, quantitative demonstration that RL with indirect rewards (\(r_{\mathrm{refine}}\), \(r_\Delta\), \(r_{\mathrm{correction}}\)) improves helpfulness metrics but systematically degrades discriminability (Acc@Dis), leading to either overly conservative or overly aggressive critic behavior. This directly and convincingly motivates the method.
 
-- **Consistent and substantial improvements over strong RL-based baselines.** Table 1 shows Critique-RL outperforms CTRL (the best prior RL baseline) on Qwen2.5-7B MATH by +4.54 Acc points (58.40 vs 53.86), on GSM8K by +6.37 points, and on AQuA by +0.79 points. Gains in discriminability (Acc@Dis) are even larger (e.g., MATH: 85.20 vs 71.42 for CTRL). These improvements hold across model scales (3B, 7B) and tasks.
+- **Well-motivated two-stage design with strong ablations**: Stage I targets discriminability through a direct rule-based reward; Stage II targets helpfulness while preserving discriminability through the retained \(r_{\mathrm{dis}}\) reward and KL regularization against the Stage I model. The ablation study (Table 3) systematically validates that removing Stage I, removing Stage II, or removing the discrimination-preserving terms in Stage II all cause performance drops in both Acc@Refine and Acc@Dis.
 
-- **No reliance on stronger supervisors.** The SFT critique data is obtained by prompting Qwen2.5-3B-Instruct (same model family, not GPT-4 or other stronger models). The two-stage RL further improves without external annotations. This strengthens the claim that the method is practical for scalable oversight.
+- **Consistent and substantial empirical gains across models, tasks, and baselines**: On Qwen2.5-3B and 7B, Critique-RL outperforms all compared methods (SFT, STaR, Retroformer, CTRL) on three in-domain math benchmarks (Table 1). For Qwen2.5-7B on MATH, it achieves 58.40% refinement accuracy (vs. 54.06% for STaR) and 85.20% discrimination accuracy (vs. 71.42% for CTRL). Gains are robust across both model scales.
 
-- **Ablation study (Table 3) validates both stages and the discrimination-preservation mechanism.** Removing Stage I drops MATH Acc@Refine from 48.6→47.6 and Acc@Dis from 82.8→79.7. Removing Stage II drops Acc@Refine to 45.9. The "Stage II w/o discrimination" row shows that removing the discrimination-preservation components degrades Acc@Dis to 77.7, confirming their importance.
-
-- **Generalization to out-of-domain tasks (Table 4) and test-time compute scaling (Figure 1).** SVAMP Acc for 7B reaches 89.7 vs 85.1 (CTRL), a 4.6-point gain. Figure 1 shows Critique-RL achieves higher accuracy with 3× fewer samples than parallel sampling baselines, demonstrating practical compute efficiency.
+- **Multiple supporting analyses strengthen the contribution**: The paper demonstrates iterative training improvements (Table 2), iterative refinement gains (Figure 4), out-of-domain generalization to SVAMP and TheoremQA (Table 4), test-time compute scaling advantages (Figure 1), and an oracle-verifier analysis showing that discriminability training also incidentally improves helpfulness (Figure 5). These analyses go beyond standard benchmarking and provide deeper insight into the method.
 
 ## Weaknesses
 
@@ -30,69 +24,70 @@ None.
 
 ### Major
 
-None.
+None. The core claims are well-supported by the experiments presented.
 
 ### Minor
 
-- **No variance reporting or error bars.** Table 1 reports all main results as point estimates with no standard deviations, confidence intervals, or multi-seed averages. RL training—especially with policy gradients—is known to be seed-sensitive. While the gains are large and consistent across settings, the absence of variance estimates weakens the strength of the evidence. The paper should report mean ± std over at least 3 random seeds for the primary comparison table.
+- **Experimental domain is limited to mathematical reasoning.** All reported main-text experiments are on math benchmarks (MATH, GSM8K, AQUA, SVAMP, TheoremQA). The paper mentions summarization experiments on CNN/DailyMail in Appendix G — which would address the generalizability concern — but these results are deferred to the appendix and not visible in the submission body. The claims about "scalable oversight" and "generalization to unseen tasks" should be tempered to reflect the currently visible evidence, which covers diverse math tasks but not qualitatively different domains. If the summarization results exist and are positive, briefly noting the takeaway in the main text would meaningfully strengthen the paper.
 
-- **The "Stage II w/o discrimination" ablation is confounded.** This condition removes *both* the direct discrimination reward r_dis *and* the KL regularization KL(π_Stage-I || π_Stage-II) simultaneously (Table 3 caption). The resulting drop (Acc@Dis: 82.8→77.7 on MATH) shows that the combined mechanism matters, but it does not allow the reader to assess the individual contribution of each component. A proper ablation would include separate "w/o r_dis" and "w/o KL regularization" conditions. This is a methodological gap in the internal analysis, though it does not invalidate the overall conclusion that discriminability preservation is important in Stage II.
+- **The extraction function \(f\) for discriminability reward is not defined in the main text.** Equation 7 defines \(r_{\mathrm{dis}}(x, y, c) = \mathbb{1}(f(x, y, c) = r_{\mathrm{oracle}}(x, y))\) but \(f\) — which extracts the critic's correctness judgment from the structured critique output — is only mentioned in Algorithm 1's input description. A concise definition of how the judgment is parsed (and its reliability) is needed for full reproducibility.
 
-- **Missing hyperparameter: β₂ in Eq (9).** The paper states β₁ = 0.2 and reports a general "KL coefficient" of 0.01 for the base RL baselines, but the value of β₂—the coefficient for the Stage-I→Stage-II KL regularization in Eq (9)—is never explicitly stated. This omission hurts reproducibility. It is very likely that β₂ = 0.01 (matching the general setting), but the paper should state this explicitly.
+- **The discriminability reward in Stage I does not directly supervise per-step reasoning quality.** \(r_{\mathrm{dis}}\) is a binary indicator of final-answer judgment correctness. While the KL penalty mitigates reward hacking and the Stage II refinement reward indirectly incentivizes quality feedback, the paper does not analyze what fraction of Stage I gains come from genuine understanding versus surface-level label accuracy. The oracle-verifier analysis (Figure 5) partially addresses this by showing that Critique-RL still outperforms baselines when discriminability is bypassed, suggesting genuine helpfulness gains. A brief discussion of this concern would strengthen the paper.
 
 ### Trivial
 
-None.
+- **Notation:** The \(\Delta^{c \rightarrow i}\) / \(\Delta^{i \rightarrow c}\) notation (change rate from correct→incorrect / incorrect→correct) uses arrow direction that some readers may find counterintuitive. Not a substantive issue.
 
 ## Nice-to-Haves
 
-- **Isolate the contribution of the reward scheme from the RL algorithm choice.** Critique-RL uses RLOO while Retroformer uses PPO and CTRL uses GRPO. An ablation applying the same two-stage reward scheme with a different base RL algorithm (e.g., PPO) would disentangle the contribution of the reward design from the algorithm choice. If this is computationally infeasible, stating the limitation explicitly would be sufficient.
+- A direct comparison of Critique-RL against a single-stage RL baseline that jointly optimizes \(r_{\mathrm{refine}} + \lambda r_{\mathrm{dis}}\) from SFT (without the two-stage scheduling) would more definitively isolate the value of the two-stage design. The existing "w/o Stage I" ablation (Table 3) approximates this but uses the Stage II KL penalty against SFT rather than a purpose-tuned joint objective.
 
-- **Add separate "w/o r_dis" and "w/o KL regularization" rows to Table 3** to disentangle the confounded ablation as noted above.
+- Clarifying the implementation details of Retroformer and CTRL baselines (exact reward functions used, advantage estimation, algorithm choice of PPO/GRPO vs. RLOO) would improve reproducibility and confidence in the comparisons.
 
 ## Removed Points
 
-- Criticism about "how f extracts the critic's judgment" in Algorithm 1: The paper's Figure 2 and the structured output format (including "Correctness of the final answer") make this clear. Removed.
-- Request for separate helpfulness metrics in test set results: Already provided via the oracle-verifier analysis (Figure 5), which isolates helpfulness. Removed.
-- SFT bias concern about filtering: Speculative; not a substantive weakness. Removed.
-- Limitation about rule-based verifier: The paper acknowledges this implicitly (tasks where correctness can be verified), and includes a summarization experiment in Appendix G. Removed as not a genuine flaw.
-- Generic strengths ("this paper addresses an important problem"): Removed. Only concrete, evidenced strengths retained.
-- "Strengthening the Paper on Its Own Terms" section: Moved to Nice-to-Haves.
+These points were flagged by the harsh critic but removed after verification against the paper:
+
+- **"Missing single-stage joint-reward baseline" (claimed as major evidential gap):** The paper includes a "w/o Stage I" ablation in Table 3, which removes Stage I and runs Stage II training directly from SFT, combining \(r_{\mathrm{refine}} + \beta_1 r_{\mathrm{dis}}\) with KL regularization. This is functionally a joint optimization baseline. The two-stage design outperforms it (48.6 vs 47.6 Acc@Refine on MATH). The harsh critic's claim that no such comparison exists is incorrect; I've demoted this to a Nice-to-Have about a more precisely controlled variant.
+
+- **"Reward hacking is a fatal concern":** The paper uses KL regularization against SFT in Stage I and against the Stage I model in Stage II, which constrains policy drift. The Stage II refinement reward (\(r_{\mathrm{refine}}\)) depends on the full critique text (not just the binary label), indirectly penalizing uninformative critiques. Figure 5 further shows the critic provides genuinely helpful feedback. This is a genuine minor concern (retained above) but not a structural flaw.
+
+- **"The comparison with no-critic baseline is unfair for efficiency claims":** The compute-scaling experiment (Figure 1 right) compares against a no-critic baseline to show that Critique-RL is more compute-efficient than scaling parallel response generation. This is a valid demonstration of the method's practical value, not an unfair comparison.
+
+- **"Single KL coefficient and fixed number of steps may not be robust":** This is a generic methodological concern without evidence that the specific hyperparameters chosen are problematic. The paper reports strong results under these settings. Removed as speculative.
+
+- **"AQUA negative Δ values not discussed":** The paper does discuss this: "It is worth noting that on AQuA, fine-tuning-based SFT and STaR may lead to negative impact on performance, while our method provides significant positive improvements."
+
+- **Formatting/style nitpicks and typo concerns:** These are parser artifacts, not author errors.
 
 ## Novel Insights
 
-The key insight that emerges across the reviews but goes beyond the paper's own claims is that *discriminability and helpfulness in critique models are not simply independent dimensions that can be traded off, but are structurally coupled through the RL optimization dynamics*. The paper's Figure 3 shows that improving one without the other leads to collapse (either conservative or aggressive critics), and Figure 5 shows that even when an oracle verifier provides perfect discrimination, Critique-RL still wins—confirming that discriminability optimization *feeds into* helpfulness. This suggests a deeper principle: in multi-agent LLM settings where one model critiques another, the critic must solve a joint inference problem (is this response correct? if not, why?) that benefits from explicit supervision on the discrimination subproblem, even when the ultimate metric is only refinement accuracy.
+The paper's most novel empirical insight is that discriminability and helpfulness in critic training are not merely distinct objectives — they exhibit a training conflict under naive RL. Figure 3 shows that optimizing for helpfulness via any of the three indirect reward functions (\(r_{\mathrm{refine}}\), \(r_\Delta\), \(r_{\mathrm{correction}}\)) systematically degrades discriminability, but in asymmetric ways: \(r_{\mathrm{refine}}\) makes critics conservative (improving judgment on correct responses while worsening on incorrect ones) while \(r_{\mathrm{correction}}\) makes them aggressive (the reverse pattern). This asymmetry reveals that the conflict is not a simple accuracy tradeoff but a behavioral distortion that depends on the reward structure. The two-stage design with explicit discriminability pre-training and KL-based regularization is a simple but effective response to this specific diagnosis.
 
 ## Suggestions
 
-1. Report mean ± std over at least 3 random seeds for Table 1 (main results).
-2. Disentangle the Stage II ablation by adding separate "w/o r_dis" and "w/o KL regularization" conditions to Table 3.
-3. Explicitly state the value of β₂ in Eq (9).
-4. Consider adding an ablation that uses the same base RL algorithm (e.g., RLOO) across all methods to isolate reward design from algorithm choice.
+- Add a one-sentence summary of the CNN/DailyMail summarization results to the main text (e.g., in Section 6) to strengthen the generalization claims without waiting for readers to reach the appendix.
+- Define the extraction function \(f\) explicitly in Section 4.2, even in a footnote, describing how the correctness judgment is parsed from the structured critique output.
+- Consider adding a brief discussion of the relationship between the binary discriminability reward and the quality of per-step critiques, acknowledging that Stage I optimizes for label-level accuracy and that the KL penalty and Stage II refinement reward provide indirect pressure toward feedback quality.
 
-## Score and Decision
+---
 
-**Calibration Report:**
+Now, to report my calibration process:
 
-| Anchor ID | Avg Score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| 9LAqIWi3QG (R3HF) | 3.00 | 1 (weak) | Much weaker; different topic (reward redistribution in RLHF) |
-| zEhTnQZB3D (Continual RL) | 2.33 | 1 (weak) | Much weaker; different topic |
-| FaOeBrlPst (Explainable Rewards) | 3.00 | 1 (weak) | Much weaker |
-| uMxiGoczX1 (Data-Driven Creativity) | 2.50 | 1 (weak) | Much weaker |
-| 50P9TDPEsh (Critique Ability LLMs) | 4.67 | 1 (middle) | Weaker; benchmark/analysis paper, no training method |
-| 38E4yUbrgr (RLC Self-improvement) | 6.00 | 1 (middle) | Slightly weaker; similar self-improvement, less comprehensive eval |
-| JEehcb48Vp (Critic-CoT) | 5.75 | 1 (middle) | Weaker; relies on stronger model (GPT-4), marginal gains, less evaluation |
-| tcdbBbHHPo (Quality-Aware Self-Refinement) | 4.33 | 1 (middle) | Weaker |
-| Sx038qxjek (CRITIC) | 6.50 | 2 (narrow) | Comparable quality; different paradigm (prompting vs training) |
-| PyjZO7oSw2 (SuperCorrect) | 6.50 | 2 (narrow) | Comparable quality; similar two-stage, but relies on stronger teacher model |
-| Ze4aPP0tIn (Twisted SMC) | 6.60 | 2 (narrow) | Different topic (verification via SMC) |
-| JtGPIZpOrz (Multiagent Finetuning) | 6.67 | 2 (narrow) | Different topic |
-| e3odKmatZr (Critique-out-Loud RM) | 5.25 | 2 (narrow) | Weaker; reward model training, not critique model training |
-| vf8iou7FNF (RLSF) | 5.75 | 2 (narrow) | Slightly weaker |
+**Round 1 (bracketing):**
+- Weak band: anchors at 2.50-3.00 (irrelevant/superficial papers) — our paper is clearly above these.
+- Middle band: Critique-out-Loud (5.25), Critique Ability of LLMs (4.67) — our paper is clearly stronger than both, with more thorough methodology, better ablations, and clearer motivation.
+- Strong band: Curiosity-driven Red-teaming (8.00), Trust or Escalate (8.00), Booster (8.00), RM-Bench (8.00) — our paper is below these, which have broader applicability or more fundamental contributions.
 
-**Round 1 bracket:** 5.5 – 7.0  
-**Round 2 narrowing:** Compared to SuperCorrect (6.50, requires stronger teacher) and CRITIC (6.50, different paradigm), Critique-RL holds its own with cleaner self-supervision and more evaluation axes. It is clearly stronger than Critic-CoT (5.75). The weaknesses are minor and addressable. **Final score: 6.5.**
+**Bracket after Round 1:** 5.5 – 7.5.
+
+**Round 2 (narrowing):**
+- Lower half (5.0-6.5): Critic-CoT (5.75), VerifierQ (5.25), On Designing Effective RL Reward (5.17), Self-Proving Models (5.75) — our paper is clearly above these, with more principled methodology and stronger experiments.
+- Upper half (6.0-7.5): UltraFeedback (6.25), Iterative Label Refinement (7.25), CRITIC (6.50), Multiagent Finetuning (6.67).
+
+Direct comparison: Our paper is weaker than ILR (7.25, which has broader task coverage and a conceptually deeper insight about redirecting feedback toward data improvement). Our paper is comparable to or slightly better than CRITIC (6.50, which had divided reviewer opinions on novelty) and Multiagent Finetuning (6.67, which also focused narrowly on math and had experimental design concerns). Our paper has stronger ablation and more systematic methodology than either.
+
+**Final score:** 6.5. The paper makes a clear, well-supported contribution with thorough experiments and analysis. The domain limitation to math (in the main text) and some missing implementation details keep it from the 7+ range, but it is a solid accept that meaningfully advances the understanding of how to train critic models without stronger supervision.
 
 MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

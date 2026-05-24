@@ -1,108 +1,88 @@
-Now I have sufficient calibration. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper and calibration anchors. Let me write the final consolidated review.
 
-**Round 1 bracket**: After reviewing the anchors, I place this paper between strong 6 and strong 7 (6.5–7.5). The paper is clearly stronger than the GPTBIAS (4.00) and T2IEthics (4.40) papers in the middle band, and notably stronger than "Are Models Biased" (5.50) and "Justice or Prejudice" (6.75) — it has a more novel contribution, more thorough empirical evaluation (20 models, 3 tasks), and a clearer practical impact. It is somewhat less comprehensive than CEB (7.50) but has a more specific, well-motivated technical contribution.
-
-**Final score**: **7.0** — between Justice or Prejudice (6.75) and CEB (7.50), closer to CEB in quality of contribution and thoroughness.
-
-Now I'll write the full review.
+---
 
 ## Summary
-This paper proposes a guardrail-agnostic method for evaluating societal bias in Large Vision-Language Models. The key idea is to replace attribute-inferring prompts (which trigger refusals from safety-guarded models) with person-irrelevant prompts (e.g., "Write a fictional story") while providing the image only as provisional user context. This achieves zero refusals across all 20 evaluated models (including strongly guardrailed proprietary models like GPT-5 and Claude 3.7 Sonnet). The framework is instantiated across three tasks (story generation, term explanation, exam-style QA) and produces several findings: all models exhibit bias, proprietary models show less bias than open-source ones, bias is task-specific (weak cross-task correlations), and model size/performance do not reliably explain bias.
+
+This paper proposes a guardrail-agnostic evaluation framework for measuring societal bias in large vision-language models (LVLMs). The key insight is that existing bias benchmarks rely on attribute-inferring prompts (e.g., "Is this person a CEO or a secretary?") that modern safety-guarded models frequently refuse, making evaluation unreliable. The authors solve this by decoupling the task from the depicted person: they use *person-irrelevant* prompts (e.g., "Write a fictional story about an imaginary person") while attaching the user's image as contextual demographic information, then measure output disparities across demographic groups using Total Variation Distance. Instantiated across three tasks—story generation, term explanation, and exam-style QA—the method achieves zero refusals across all 20 tested LVLMs (Table 1) while revealing significant gender and racial bias in every model, including heavily guardrailed proprietary systems like GPT-5 and Claude 3.7 Sonnet (Table 2).
 
 ## Strengths
 
-1. **Zero refusals across all 20 evaluated LVLMs, including strongly guardrailed proprietary models.** Table 1 reports a 0% refusal rate for every model under the proposed method, while prior benchmarks (SBBench, ModScan, VLA-gender, Pairs) show refusal rates as high as 100%. This is the paper's central empirical contribution: it demonstrates a concrete, reproducible way to evaluate bias where existing benchmarks break — and this problem is growing as open-source models also adopt guardrails.
+- **Zero refusal rate validates the core premise convincingly.** Table 1 shows that refusal rates drop to 0% for all 20 models on the proposed method, while prior benchmarks suffer refusal rates up to 100% (e.g., Claude 3.7 Sonnet on SBBench). This cleanly demonstrates that decoupling the task from the depicted person circumvents safety guardrails as intended.
 
-2. **The person-irrelevant prompt + image-as-context paradigm is principled, not ad hoc.** Section 3.1 formalizes the shift from attribute-inferring prompts to person-irrelevant prompts (e.g., "Write a fictional story about an imaginary person") and repositions the image as provisional user information. The paper instantiates this across three qualitatively different tasks (story generation, term explanation, exam-style QA), showing the paradigm generalizes beyond a single prompt style.
+- **Detects bias even in the most safety-aligned proprietary models.** Table 2 reports nonzero bias scores for every model, including GPT-5 (gender bias 14.53, race bias 16.80 in story generation) and Claude 3.7 Sonnet (gender 21.57, race 17.67). This fulfills the framework's core promise of enabling bias measurement where prior benchmarks cannot.
 
-3. **First systematic, head-to-head bias comparison of 16 open-source and 4 proprietary LVLMs under a single, refusal-free protocol.** Table 2 reports gender and racial TVD scores for all 20 models across three tasks. The finding that proprietary models (GPT-5, Claude 3.5 Sonnet) consistently exhibit lower but nonzero bias than open-source models is a measurable empirical finding previously unobtainable. The paper further shows low cross-task correlation (Observation 2.3), demonstrating that bias is task-specific — a non-obvious insight made possible by the multi-task design.
+- **Large-scale, multi-model evaluation establishes generality.** The experiments span 20 recent LVLMs—16 open-source (7B–38B) and 4 proprietary—across diverse model families (LLaVA, Qwen, Gemma, InternVL, Claude, GPT). The consistent presence of bias across all models (Table 2) provides strong evidence that the method works robustly across architectures and scales.
 
-4. **Rigorous control for confounders.** Section 4.1 explicitly states that when analyzing gender bias, the distributions of race and age are aligned between groups, and vice versa. This addresses a known weakness of prior work where non-target demographic variables could drive apparent bias.
+- **Rich analytical findings beyond raw bias scores.** The paper demonstrates that bias increases with task open-endedness (story > term > exam; Section 4.3), that gender and racial biases are strongly correlated within tasks (Fig. 3, r = 0.49–0.93), and that bias does not monotonically decrease with model size or performance (Fig. 4, Observation 2.5). These findings give the framework genuine diagnostic value beyond a single aggregate number.
 
-5. **The analysis linking bias to deployment practices moves beyond "train better models."** Section 5 argues that continuous monitoring and iterative refinement may be a more important bias-reduction factor than one-time safety alignment. This is supported by the observation that Gemma3, which reports safety training, still shows high bias (e.g., 42.66 gender bias in story generation, Table 2).
+- **Practical and extensible deployment framing.** Section 5 outlines how the framework can assess bias both before and after deployment on any person-irrelevant task, offering a concrete pathway for continuous fairness monitoring that practitioners can adopt.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The core contribution—a guardrail-agnostic bias evaluation method—is well-motivated, cleanly validated, and supported by thorough experiments.
 
 ### Major
-None.
+
+None. The paper's main claims are well-supported by the evidence presented.
 
 ### Minor
 
-1. **Figure 3 caption is confusing and appears to show asymmetric Pearson correlations.** The caption lists bidirectional values for the same pair of variables (e.g., Story Gen. to Exam QA: r = -0.11 vs. Exam QA to Story Gen.: r = 0.11 for gender bias). Since Pearson correlation is symmetric, these should be identical. The likely explanation is that the caption conflates task-wise correlations (solid lines) with gender-race correlations (dotted lines), but the caption text does not make this distinction clear. The observations (2.3 and 2.4) are based on the correct values, but the presentation must be clarified to avoid confusion about whether a computational error occurred. This is a presentational issue, not a computational one, but it needs fixing.
+- **The independence-based fairness criterion is treated as self-evident without discussion of scope.** Hypothesis 1 states that an unbiased model's outputs should be statistically independent of user demographics for person-irrelevant prompts. While this is reasonable for the tasks chosen (where demographics genuinely should not affect, e.g., what occupation an imaginary character has), the paper does not discuss edge cases where some form of demographic conditioning might be benign (e.g., stylistic adaptation of explanations without stereotyping). A brief acknowledgment of what the scores do and do not capture would strengthen interpretability. This does not undermine the framework's validity, as the tasks are deliberately designed to surface undesirable stereotyping.
 
-2. **Potential confounds from uncontrolled visual attributes in user images.** The paper controls for non-target demographic distributions (race/age when analyzing gender, etc.), but face images in FairFace vary along other dimensions (expression, hairstyle, makeup, lighting, background) that may correlate with demographics. If these features differ systematically across groups in the subsample, measured "bias" could partly reflect responses to appearance-correlated attributes rather than demographics per se. This is a common limitation in face-image bias studies and does not undermine the core finding that models produce different outputs across demographic groups (which is still undesirable regardless of the specific causal channel). However, the paper's claim that "any group-wise disparities indicate that the model uses user demographics in its predictions" could be slightly overstated. A brief acknowledgment of this limitation would strengthen scientific honesty.
-
-3. **No ablation of the "I've attached my photo" prefix.** The paper does not test how much this explicit prefix matters versus simply providing the image as context. An ablation varying the prefix (or omitting it) would clarify the mechanism and help practitioners adapt the method.
-
-4. **No statistical significance or confidence intervals on bias scores.** The paper reports TVD values but does not provide confidence intervals or tests for whether a given score is significantly different from zero. Given the large sample sizes, significance is likely, but reporting it would strengthen the claims.
+- **The discussion's causal claim about continuous monitoring is speculative.** Section 5 argues that "continuous monitoring and iterative refinement can be a critical factor" behind proprietary models' lower bias. While the paper uses hedging language ("can be," "a plausible explanation"), this hypothesis is not tested experimentally—the observed gap could equally be attributed to differences in training data scale, curation, or RLHF quality. The conclusion (Section 6) appropriately softens this to "may play a key role," but the discussion should more clearly flag this as conjecture rather than a finding of the study.
 
 ### Trivial
 
-None.
+- The handling of LLaVA-1.6 variants excluded from exam-style QA (due to near-random accuracies) is mentioned in a table caption but could benefit from a one-sentence elaboration in the main text quantifying the effect on overall conclusions.
 
 ## Nice-to-Haves
 
-- Adding statistical significance testing or confidence intervals on the TVD scores would strengthen the quantitative claims.
-- An ablation study of the "I've attached my photo" prefix would clarify the mechanism and aid practitioners.
-- The paper could explicitly acknowledge the limitation that uncontrolled visual attributes in FairFace images may correlate with demographics (as discussed above).
+- A control condition using neutral or scrambled-face images would sharpen interpretation by separating the model's default stereotypical priors from user-conditional bias. This is not essential for the paper's claims—the per-group differences already demonstrate demographic conditioning—but would add analytical rigor.
+- A sensitivity analysis using a different LLM assistant (or reporting inter-assistant agreement beyond the human validation in Appendix D) would further strengthen confidence in the bias measurements, though the existing human-validation reference provides reasonable assurance.
 
 ## Removed Points
 
-The following points from the inputs were removed with justification:
+These points are flagged to be removed, treat them with caution:
 
-- **"Attack on captioning-style prompts" (Harsh Critic):** The critic claimed the paper presents the proposed method as "strictly superior." The paper actually says its method *reduces* (not eliminates) contextual confounds, which is a fair claim. This is not a valid weakness.
-- **LLM-based attribute extraction validation (Harsh Critic):** The critic complained that human alignment validation is in the inaccessible appendix. Per instructions, this criticism is removed because the parser strips appendix content.
-- **Missing related works (Harsh Critic/implied):** Per instructions, I cannot comment on missing related works without external verification.
-- **Various formatting/style nitpicks:** Removed per instructions.
-- **Strength Finder generic strengths:** Removed strengths that were generic or superficial (e.g., "addressed an important problem") that lacked concrete evidence or conflicted with verified weaknesses.
+- *"Missing discussion of prior work on persona-conditioned generation"* — The paper explicitly cites Salewski et al. (2023) and Cheng et al. (2023) in Section 3.1 as inspiration for treating images as user information. This criticism is factually incorrect.
+
+- *"Abstract framing suggests prior benchmarks are broken"* — The abstract accurately states that high refusal rates make evaluations "unreliable," which is a fair characterization given Table 1's 100% refusal rate for Claude 3.7 Sonnet on SBBench. This is not overclaiming.
+
+- *"No control condition makes results uninterpretable"* — While a control would be nice (moved to Nice-to-Haves), the paper's demonstration of zero refusals and clear demographic conditioning is sufficient to support its claims. Per-group output distributions differing systematically with user demographics is itself evidence of conditioning.
+
+- *"LLM assistant bias invalidates results"* — The paper explicitly references Appendix D for human-judge alignment validation, and the assistant (Qwen3-32B) is used only for post-hoc attribute extraction and judgment, not for generating the model outputs under test. Without access to the stripped appendix, this concern is speculative.
 
 ## Novel Insights
 
-The most striking finding enabled by this paper is that **bias is task-specific even within the same model** — the weak cross-task correlations (Observation 2.3) demonstrate that "biasedness" is not a monolithic model property. This has practical implications: a model that appears fair on multiple-choice QA can still show strong bias in open-ended generation, meaning single-task bias evaluations are insufficient for deployment decisions. The paper also provides the first clean evidence that continuous monitoring (rather than one-time safety alignment) may be the key differentiator between proprietary and open-source model bias, a hypothesis that is actionable for the open-source community.
+The paper's most striking insight—well-supported by the refusal-rate data in Table 1—is that safety guardrails have created a regime where prior bias benchmarks systematically fail on the very models most likely to be deployed, without anyone having clearly articulated this as a structural problem for fairness evaluation. The finding that *all* 20 models exhibit nonzero bias under person-irrelevant prompts, including the most heavily safety-aligned proprietary systems, powerfully demonstrates that guardrails suppress *explicit* attribute inference without addressing *implicit* demographic conditioning. This distinction between explicit and implicit bias leakage is a genuinely useful conceptual contribution to the fairness evaluation literature.
 
 ## Suggestions
 
-1. **Fix Figure 3's caption.** Clearly distinguish the task-wise correlations (solid lines) from gender-race correlations (dotted lines). Present the values in a proper symmetric correlation matrix or state explicitly which values correspond to which correlation type. The current caption text is ambiguous and risks being misinterpreted as a computational error.
-
-2. **Add a brief discussion of uncontrolled visual confounds** in the main text (not just a deferred appendix mention). Even a sentence acknowledging that the measured effect could partly reflect responses to appearance-correlated attributes would strengthen scientific honesty.
-
-3. **Consider adding confidence intervals** for the TVD scores, especially given the controlled sampling procedure, to allow readers to assess whether a given bias score is meaningfully different from zero.
-
-## Calibration Report
-
-All anchors retrieved across all rounds, with comparison to this paper:
-
-| Anchor ID | Avg Score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| JIlIYIHMuv | 2.50 | 1 (weak) | Much weaker — different topic (LVLM continual learning) |
-| J6nKxekCCo | 3.00 | 1 (weak) | Much weaker — narrower scope, fewer models |
-| BVACdtrPsh | 3.00 | 1 (weak) | Much weaker — different topic (text-rich scenes cognition) |
-| KLUDshUx2V | 3.40 | 1 (weak) | Much weaker — about concept banks, not bias |
-| u1EPPYkbgA | 4.00 | 1 (mid) | Weaker — GPTBIAS framework with less thorough evaluation and over-reliance on GPT-4 |
-| 57xboRTbwI | 4.25 | 1 (mid) | Weaker — bias in unconditional image gen, less comprehensive |
-| s3rjenIOfx | 3.67 | 1 (mid) | Weaker — conceptual framework without empirical evaluation |
-| kIboeK0Wzs | 4.40 | 1 (mid) | Weaker — T2IEthics benchmark with ethical concerns, less rigorous evaluation |
-| uAFHCZRmXk | 8.00 | 1 (strong) | Stronger — foundational VLM analysis paper (modality gap) |
-| WyEdX2R4er | 8.00 | 1 (strong) | Stronger — foundational VLM capabilities study |
-| HnhNRrLPwm | 8.00 | 1 (strong) | Stronger — larger-scale multimodal benchmark |
-| z8sxoCYgmd | 8.00 | 1 (strong) | Stronger — broader scope synthetic data detection benchmark |
-| 3GTtZFiajM | 6.75 | 2 (narrow) | Slightly weaker — bias quantification in LLM-as-a-judge; accepted but contribution questioned as "toolkit paper" |
-| 72nCh5JtLQ | 5.75 | 2 (narrow) | Weaker — LVLM performance prediction, less direct contribution |
-| w1JanwReU6 | 5.50 | 2 (narrow) | Weaker — gender bias in LLMs without multimodal; accepted with modest scores |
-| QQt0MwXA81 | 6.20 | 2 (narrow) | Weaker — human-like biases in LLMs for survey design; rejected |
-| IUmj2dw5se | 7.50 | 3 (narrow) | Slightly stronger — CEB fairness benchmark, very well-received, more comprehensive in scope but less novel technically |
-| HQHnhVQznF | 6.25 | 3 (narrow) | Slightly weaker — bias certification framework, accepted but with significant criticism |
-
-**Round 1 bracket**: 6.5 – 7.5. The paper is clearly above the middle-band papers (3.67–4.40) and below the top-tier foundational papers (8.0).  
-**Round 2 narrowing**: Compared to Justice or Prejudice (6.75, accepted), the current paper has a more novel contribution and more thorough evaluation. Compared to Are Models Biased (5.50, accepted), it has broader scope and stronger empirical validation.  
-**Round 3**: Compared to CEB (7.50, accepted with strong reviews), the current paper is somewhat less comprehensive in taxonomic scope but has a more specific, well-motivated technical contribution with a clever solution to a concrete problem.  
-
-**Final score: 7.0**
+- Add a brief paragraph in Section 3.1 discussing the scope of Hypothesis 1: acknowledge that the framework treats any demographic dependence as bias, and clarify that the chosen tasks are designed to make such dependence unambiguously undesirable.
+- In Section 5, reframe the continuous-monitoring claim explicitly as a hypothesis that the framework *could be used to test*, rather than a conclusion drawn from the current experiments.
+- Briefly summarize the human-validation agreement level from Appendix D in the main text (e.g., one sentence in Section 4.1) to give readers immediate confidence in the LLM assistant's reliability.
 
 ## Score and Decision
+
+**Calibration comparison:**
+
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| xx05gm7oQw (CVLD) | 5.00 | R1 | Our paper has broader evaluation, more novel problem framing, and cleaner validation |
+| Xbl6t6zxZs (Cultural Bias) | 6.00 | R1 | Our paper has larger scale (20 vs. fewer models) and a more actionable contribution |
+| HQHnhVQznF (Bias Certification) | 6.25 | R2 | Our paper has a more novel core idea and more practical deployment framing |
+| 3GTtZFiajM (LLM-as-Judge Bias) | 6.75 | R2 | Comparable structure; our paper's decoupling approach is more novel; similar evaluation breadth |
+| iVMcYxTiVM (Shape/Texture Bias) | 7.00 | R2 | Our paper addresses a more pressing problem (guardrail evasion) with comparable analytical depth |
+| X1OfiRYCLn (Dynamic Eval) | 7.50 | R2 | Slightly stronger than ours in technical sophistication; ours is stronger in practical applicability |
+
+**Round-1 bracket:** [5.0, 7.5] based on comparison with weak (2.33–3.00), middle (4.67–6.50), and strong (8.00) anchors.
+
+**Round-2 narrowing:** The paper sits above 3GTtZFiajM (6.75) given its more novel problem framing and stronger actionability, comparable to iVMcYxTiVM (7.00), and slightly below X1OfiRYCLn (7.50) which offers deeper technical novelty. Final placement: **7.0**.
+
+The paper makes a clear, well-validated contribution to a pressing problem in fairness evaluation. The weaknesses are real but bounded—they affect presentation and interpretation rather than invalidating the core contribution. The scale of evaluation (20 models, 3 tasks, 2 demographic axes) and the richness of findings (bias structure, task-wise correlations, size/performance relationships) place this paper comfortably in the accept range.
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

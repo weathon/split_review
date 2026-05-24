@@ -1,76 +1,89 @@
-Now I have a thorough understanding of both the paper and the calibration anchors. Let me compose the final review.
+Now I have all the information needed. Let me synthesize the final review.
+
+---
 
 ## Summary
-
-The paper proposes CrowdFM, a GNN-based foundation model for zero-shot crowdsourced label aggregation. It uses a bipartite graph neural network pretrained on domain-randomized synthetic data (generated via a 3PL item-response model) to learn transferable aggregation principles. On 22 real-world datasets, CrowdFM matches the best per-dataset methods (83.41% vs EBCC's 84.08%, not statistically different) while requiring no dataset-specific training, and outperforms majority voting on 21/22 datasets.
+The paper proposes CrowdFM, a foundation model for crowdsourced label aggregation. It pretrains a bipartite GNN on domain-randomized synthetic crowdsourcing data, enabling zero-shot inference on unseen datasets without per-dataset retraining. The model achieves competitive accuracy with SOTA per-dataset methods across 22 real-world benchmarks while being significantly faster, and its learned representations transfer to downstream tasks like worker assessment and task assignment.
 
 ## Strengths
-
-- **First foundation model for crowdsourced label aggregation that works zero-shot across heterogeneous datasets.** The paper tackles a real gap: prior work either requires per-dataset parameter estimation (DS, EBCC, GLAD, etc.) or uses a model designed for programmatic weak supervision (HyperLM) that fails on human-annotated data. CrowdFM is the first approach to demonstrate a single fixed model achieving accuracy competitive with the best per-dataset methods across 22 diverse real-world benchmarks without any retraining. This is a genuine advance for the field.
-
-- **Size-invariant initialization is a clean and principled design choice.** Worker and task nodes start from shared learnable vectors (Eq. 4), so the model can accept arbitrarily-sized datasets without dataset-specific features. Option embeddings are randomly initialized from a fixed Gaussian. This elegantly sidesteps the need for dataset-specific node features, which is a real obstacle for cross-dataset generalization. The ablation (w/o AT, w/o SG) cleanly shows that both attention-based message passing and the domain-randomized synthetic generator contribute significantly to performance (Figure 6a).
-
-- **Extensive evaluation on 22 real-world datasets with rigorous statistical testing.** The paper compares against 13 baselines spanning generative models (DS, IBCC, EBCC), deep learning methods (LAA, TiReMGE, GOVERN), and the prior cross-dataset work (HyperLM). Wilcoxon signed-ranks tests show CrowdFM is significantly better than MV, PM, LAA, TiReMGE, and HyperLM. The ablation studies (Figures 6b, 6c) provide useful sensitivity analysis on GNN depth and embedding dimension.
-
-- **Downstream adaptation demonstrates learned representations transfer beyond label aggregation.** Using the frozen encoder with lightweight heads, CrowdFM achieves meaningful correlations on real-world worker ability (Pearson=0.449) and task difficulty (Pearson=0.606) prediction, and compatibility-based task assignment improves aggregation accuracy over random assignment (Figure 5). This is evidence that the pretrained representations encode useful structural properties of crowdsourcing data, going beyond a narrow label-aggregation capability.
+- **Strong zero-shot generalization across 22 real-world datasets**: Table 1 shows CrowdFM outperforms majority voting on 21/22 benchmarks (avg accuracy 83.41%), is statistically indistinguishable from the top per-dataset method EBCC (84.08%, p=0.90), and runs 5× faster (0.53s vs 2.95s). The Wilcoxon test confirms significant improvement over MV, PM, LAA, TiReMGE, and HyperLM.
+- **Well-designed synthetic data generator is critical for sim-to-real transfer**: The ablation in Figure 6a shows replacing the domain-randomized generator with a uniform random generator ("w/o SG") drops accuracy from ~83% to ~78.5%, confirming that realistic behavioral heterogeneity and assignment patterns are essential for learning transferable aggregation.
+- **Attention mechanism properly models annotation heterogeneity**: Removing attention-based aggregation ("w/o AT") causes the largest accuracy drop (~83% → ~72.5%), confirming that the model captures diverse worker–task interaction patterns rather than relying on simple pooling.
+- **Learned representations transfer meaningfully to downstream tasks**: Lightweight heads trained once on synthetic data predict worker ability and task difficulty with strong correlations on synthetic data (Pearson 0.72–0.75) and meaningful correlations on real data (Web dataset: worker accuracy 0.45, task error rate 0.61). Figure 5 shows compatibility-based assignment using these embeddings substantially outperforms random assignment.
+- **Size-invariant initialization elegantly handles arbitrary dataset dimensions**: Shared learnable vectors for all workers/tasks with random option embeddings (Eq. 4) allow the model to process datasets of any size without dataset-specific biases — a clean solution to the cross-dataset generalization challenge.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
-
-- **The synthetic data generator's realism is not adequately validated in the main paper.** The entire approach rests on the assumption that the 3PL-based generator (Eq. 3) produces synthetic datasets whose structural properties (error correlations, worker specialization patterns, label bias distributions) resemble real crowdsourcing data. While the paper references a quantitative comparison in Appendix F (stripped from the parsed version), the main text provides no validation on measurable dimensions like distribution of worker accuracy, annotation correlation structure, or sparsity patterns. The ablation (w/o SG) only compares against a trivial uniform generator, so it does not test whether the *specific parametric choices* of the generator are necessary or sufficient. The 3PL model assumes one-parameter discrimination, symmetric error structure, etc., and cannot represent spamming, collusion, or learning effects. The paper's claim of learning "universal principles of collective intelligence" is weakened without evidence that the synthetic data captures real-world annotation patterns. The authors should show 2-3 concrete structural comparisons between synthetic and real datasets, or run a sensitivity analysis varying generator parameters, to strengthen this link.
-
-- **The framing of the win-count metric and downstream correlations overstates the evidence.** The "Win ↑" column in Table 1 reports the number of datasets where each method *outperforms MV*, not head-to-head wins against CrowdFM. CrowdFM's win count of 21 (beating MV on 21/22 datasets) is then used to claim "consistent superiority" over EBCC and BWA, but EBCC actually has higher average accuracy (84.08% vs 83.41%) and the difference is not statistically significant (p=0.90). The paper is transparent about the accuracy and p-values, but the repeated emphasis on win counts creates an inflated impression of dominance. Separately, the worker ability correlation of Pearson r=0.449 on the Web dataset is described as "strong positive correlation" — in social-science and crowdsourcing contexts this is moderate at best. These are framing issues, not fatal errors, but they need correction.
+- **Missing per-dataset training of the same GNN architecture**: The paper never trains the proposed GNN from scratch on each real dataset and compares against the pretrained version. Without this ablation, we cannot determine whether the pretraining provides a genuine benefit or whether the architecture itself (bipartite attention, size-invariant initialization) is the primary driver of performance. A per-dataset variant could plausibly match or exceed the pretrained model's accuracy. While the paper competes against many SOTA per-dataset methods, those use fundamentally different architectures and modeling assumptions. Demonstrating that pretraining adds value over training the *same architecture* per dataset would substantially strengthen the central "foundation model" claim.
 
 ### Minor
-
-- **The synthetic data generator's parameter ranges and the heavy-tailed distribution for worker capacity are not specified in the main text.** The paper does not state which heavy-tailed distribution is used (Pareto? log-normal? power-law with what exponent?) or the ranges for the 3PL parameters (μθ, σθ, μβ, σβ, α_min, α_max, c_upper). This makes it difficult to assess the diversity of the pretraining data or to reproduce the generator. While Appendix B (stripped) is referenced, the main paper should summarize key parameter choices.
-
-- **It is unclear whether the option embeddings (z_ok^{(0)} ∼ N(0, I_d)) are learnable parameters or frozen after initialization.** The paper says "random initialization" but does not specify whether they are updated during training or fixed. This is relevant to understanding whether option representations are adaptive or purely noise-based.
-
-- **The task assignment experiment (Figure 5) shows results for only one dataset (Web) and lacks error bars or confidence intervals.** The claim that "CrowdFM maintains stable performance while MV declines" in later rounds is interesting but rests on a single trajectory without variance estimates. Providing standard deviations across multiple seeds or train/test splits would strengthen this result.
-
-- **Pretraining cost (GPU hours, number of synthetic datasets, model scale) is not reported.** The paper highlights 0.53s per-dataset inference but does not report the computational cost of training the foundation model itself, which is relevant for reproducibility and practical adoption.
-
-- **The ablation on GNN depth and embedding dimension (Figures 6b, 6c) shows monotonic improvement without saturation** at the tested range. This raises the question of whether the reported configuration (10 layers, 32 dimensions) is truly optimal or simply the largest tested. Reporting whether larger values were tried and whether performance plateaued or continued to improve would clarify this.
+- **Downstream worker/task assessment validated on only one real dataset**: The worker ability and task difficulty predictions are evaluated on real data using only the Web dataset (Figure 4). While correlations are non-trivial (0.45–0.61), a single dataset cannot support the claim that learned representations "successfully generalize to real-world data" broadly. The main contribution is label aggregation, so this does not threaten the core contribution, but the downstream claims would benefit from evaluation on additional real datasets.
+- **No comparison against established worker-quality estimators for the downstream assessment tasks**: The paper trains regression heads on synthetic data but does not compare their quality estimates against classical methods like DS, GLAD, or EBCC on the same real data. Such a comparison would contextualize the quality of the learned embeddings.
+- **Task assignment evaluation uses only the Web dataset**: While the retraining-free deployment of the compatibility head is valid (heads are trained on synthetic data where ground truth exists, then applied zero-shot), the evaluation on a single dataset limits the generality of the task assignment results.
 
 ### Trivial
-
-- The paper uses "Win ↑" and frames the result as "CrowdFM achieves the highest number of wins over MV." Consider re-labeling this column or adding a head-to-head win column against the best per-dataset method for clarity.
+- **The "#Win" metric in Table 1 is somewhat opaque**: Counting wins over MV is a coarse-grained metric; per-dataset head-to-head accuracy comparisons (available in Appendix E) would be more informative directly in the main table. The average accuracy and Wilcoxon test partially compensate for this.
+- **Pretraining computational cost not reported**: For a foundation model paper, the total compute budget (wall-clock time, number of synthetic datasets, training steps) would be useful context.
+- **The Senti dataset performance drop (–0.08 pp vs MV) is acknowledged but not analyzed**: Understanding what kind of distribution shift caused this lone failure case would strengthen the robustness claims. The paper references Appendix F for distribution analysis but the main text offers no insight.
 
 ## Nice-to-Haves
-
-- A compact per-dataset accuracy table (or dot plot) showing CrowdFM vs the top 2-3 baselines for each of the 22 datasets would let readers assess consistency without relying on aggregate metrics alone.
-- Comparing against a fine-tuned version of CrowdFM (fine-tuned on a small subset of real data) would bound how much of the gap to EBCC could be closed by minimal adaptation, and would strengthen the "foundation model" framing.
+- Training the same GNN architecture from scratch on each real dataset as an additional baseline would cleanly separate the contribution of pretraining from that of the architecture.
+- Broader evaluation of downstream assessment and task assignment across more real datasets would strengthen the versatility claims.
+- Comparison of worker/task assessment quality against classical estimators (DS, GLAD) would contextualize the learned embeddings.
+- Testing the model on datasets with more than 6–10 label categories would validate the claimed scalability to arbitrary K.
+- Reporting pretraining computational cost (total synthetic datasets, wall-clock time, training steps) would follow foundation-model norms.
+- Discussing the synthetic generator's assumptions (e.g., conditional independence of annotations, no systematic worker biases toward specific classes) would help readers assess potential sim-to-real limitations.
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution.
 
-- **Runtime comparison exaggerated**: The harsh critic claimed the runtime comparison against EBCC (0.53s vs 2.95s) is negligible. A 5.6× speed difference is not negligible for repeated use across many datasets, and the paper correctly notes the deeper advantage is the retraining-free property. The critic's characterization is overstated. — REMOVED (factually disputable claim about the significance of the runtime difference).
-
-- **HyperLM comparison unfair**: The critic said comparing against HyperLM is unfair since it was designed for programmatic weak supervision. The paper acknowledges this explicitly ("HyperLM... designed for programmatic weak supervision, fails to adapt to crowdsourcing settings") and the comparison is properly contextualized. — REMOVED (paper already addresses this).
-
-- **Missing related works and appendix content**: Several criticisms about missing appendix content, references, and reproducibility concerns about unreleased models. These are either parser-stripped content that exists in the original submission or concerns that violate the hard rules about challenging cited references. — REMOVED per hard rules.
+- **"Task assignment evaluation is based on an unrealistic setup" (Harsh Critic)**: REMOVED. This criticism misreads the paper. Section 4.3 states that all downstream heads "are trained once and can be directly deployed on new datasets without further adaptation." The compatibility head in Eq. 14 is trained on synthetic data (where ground truth `y_j` is available by construction from the generator, as is the case for Eq. 13 which explicitly says "supervised by the ground-truth from the synthetic data generator"). The evaluation on Web uses 50% of observed annotations as historical data to predict compatibilities for remaining pairs — no real ground truth is used at deployment time. This is a valid zero-shot deployment, not a methodological flaw.
+- **"Abstract overstates performance" (Harsh Critic)**: WEAKENED and demoted to trivial. The paper explicitly reports EBCC's higher average accuracy (84.08% vs 83.41%) and the non-significant p-value (0.90). The phrase "consistently matches or surpasses" is accurate when considering the full picture (statistically tied with the best, significantly better than most).
+- **"Option embeddings interaction with cross-dataset generalization not discussed" (Harsh Critic)**: REMOVED. The paper does discuss this: random initialization of option embeddings "ensures sufficient diversity to distinguish among candidate labels regardless of the number of options" (Section 3.2), and Eq. 9 handles variable K.
+- **"Runtime values for baselines appear extreme" (Harsh Critic)**: REMOVED as speculation. The paper states some methods failed on large datasets and reports results for successful runs. Without evidence that these numbers are incorrect, this is not a valid criticism.
+- **"Ablation w/o SG unclear whether difference stems from realism or variability" (Harsh Critic)**: REMOVED. This is speculative — the ablation shows the generator matters, and the paper provides Appendix F comparing synthetic and real distributions to support the realism claim. Demanding a further micro-ablation of generator sub-components goes beyond standard evaluation expectations.
 
 ## Novel Insights
-
-The most interesting finding in the paper is that a GNN pretrained solely on 3PL-generated synthetic data can match the accuracy of per-dataset methods like EBCC on real crowdsourcing data without any retraining. This suggests that the core statistical structure of crowdsourced annotation — heterogeneous worker ability, varying task difficulty, annotation sparsity — is sufficiently captured by the 3PL model to enable cross-dataset transfer, at least on the 22 datasets tested. The fact that the model learns representations that generalize to worker ability and task difficulty prediction (even with modest real-world correlations) further suggests the GNN encoder internalizes something like the latent variables of the generative process, despite never being explicitly trained on them. However, this claim would be much stronger with direct structural validation of the synthetic data.
+The paper's core insight — that a single GNN pretrained on domain-randomized synthetic crowdsourcing data can perform label aggregation zero-shot across diverse real datasets — is genuinely novel in the crowdsourcing literature. Prior work split into either simple retraining-free MV or complex per-dataset estimation; CrowdFM demonstrates a viable third path. The size-invariant initialization (shared vectors for all workers/tasks, differentiated only through relational message passing) is an elegant design pattern that could inform other domains where entity identities are meaningless without interaction context.
 
 ## Suggestions
-
-1. Replace or supplement the win-count metric with head-to-head comparisons (CrowdFM wins/losses/ties vs each baseline) and the average accuracy difference across datasets. This would give a more accurate picture of relative performance.
-2. Add a direct validation of the synthetic data generator: pick 2-3 structural properties (e.g., distribution of worker accuracies, correlation structure of annotations, task difficulty distribution) and plot the synthetic generator's output against real datasets. Alternatively, show the quantitative comparison from Appendix F more prominently.
-3. Add error bars or confidence bands to Figure 5 and report standard deviations across multiple random seeds for all main results.
-4. Report the pretraining cost (number of synthetic datasets, GPU hours, model parameters) for reproducibility.
-5. Clarify whether option embeddings are learnable or frozen.
-6. Tone down the "strong positive correlation" language for the real-world assessment results (Pearson r=0.449, 0.606) to "moderate-to-strong" or "meaningful positive correlation."
+- The most impactful addition would be the per-dataset same-architecture baseline. Even a subset of datasets (e.g., 5–6 diverse ones) would help disentangle architecture from pretraining effects.
+- Consider moving the Senti failure-case analysis from Appendix F into the main paper (even a brief paragraph) — understanding when and why a foundation model fails is as informative as knowing when it succeeds.
+- The paper would benefit from a concise limitations paragraph in the main text, covering: (a) the synthetic generator's modeling assumptions and their potential mismatch with real data, (b) the untested scalability to many label classes, and (c) the scope of downstream evaluation.
 
 ## Score and Decision
 
-**Round 1 bracketing:** I compared against three bands of anchors. The weak band (2.5–3.4) included rejected papers with limited novelty or unconvincing evaluation (GraphFM at 3.40, "Are Synthetic Time-series Data" at 2.50). The mid band (4.2–7.5) included mixed papers (AnyGraph at 4.20, LLM-GNN at 6.50, Specialized Foundation Models at 6.50). The strong band (8.0+) included papers with very clear, well-supported contributions. CrowdFM clearly sits above the weak band and does not reach the strong band; its plausible range was 4.5–6.5.
+### Calibration Anchors
+| Anchor ID | Avg Score | Round | Comparison |
+|-----------|-----------|-------|------------|
+| `nh5tSrqTpe` | 3.00 | 1 (weak) | Different topic (distillation); much weaker than CrowdFM |
+| `nA9SCxGy2M` | 2.50 | 1 (weak) | Different topic; much weaker than CrowdFM |
+| `8TbqoP3Rjg` | 2.00 | 1 (weak) | Different topic; much weaker than CrowdFM |
+| `TbOcySs6g8` | 2.50 | 1 (weak) | Different topic; much weaker than CrowdFM |
+| `RjYKTQ0L0W` | 5.33 | 1 (mid) | Synthetic data generation; CrowdFM has broader evaluation, similar quality |
+| `oClr2P7V0T` | 4.25 | 1 (mid) | Synthetic classifiers analysis; CrowdFM is stronger with more comprehensive eval |
+| `rawj2PdHBq` | 6.00 | 1 (mid) | Most comparable: synthetic pretraining for zero-shot medical VLP. CrowdFM has broader domain coverage (22 datasets vs. one domain) but a similar gap (missing per-dataset baseline). Comparable quality. |
+| `oqsQbn4XfT` | 5.80 | 1 (mid) | Synthetic data diversity for LLMs; CrowdFM has more direct practical utility, similar evaluation thoroughness |
+| `07yvxWDSla` | 8.00 | 1 (strong) | Synthetic continued pretraining; clearly stronger than CrowdFM in novelty and evaluation rigor |
+| `et5l9qPUhm` | 8.00 | 1 (strong) | Theoretical model collapse paper; much stronger contribution, not comparable |
+| `UHPnqSTBPO` | 8.00 | 1 (strong) | LLM judges with guarantees; much stronger, not comparable |
+| `z8sxoCYgmd` | 8.00 | 1 (strong) | Synthetic data detection benchmark; stronger contribution |
+| `t7vXubuady` | 5.50 | 2 (narrow) | GNN active learning; CrowdFM is slightly stronger in evaluation breadth |
+| `uuXPWRtwvK` | 4.75 | 2 (narrow) | Graph-based confidence calibration; CrowdFM is stronger |
+| `KQe9tHd0k8` | 5.80 | 2 (narrow) | Label proportions learning; CrowdFM similar quality, different domain |
+| `EVuANndPlX` | 5.60 | 2 (narrow) | GNN-RAG; different topic, CrowdFM more focused contribution |
+| `rkc79rOJu8` | 4.67 | 2 (narrow) | Transfer learning source selection; CrowdFM stronger |
+| `JB3lbDtsFS` | 5.50 | 2 (narrow) | Human annotator simulation; CrowdFM has broader evaluation, stronger results |
+| `26XphugOcS` | 7.00 | 2 (narrow) | Zero-shot prompt transfer; stronger than CrowdFM in contribution clarity |
+| `5T46w5X3Go` | 4.75 | 2 (narrow) | Transfer learning theory; different style, CrowdFM stronger empirically |
 
-**Round 2 narrowing:** I retrieved anchors in the 4.5–6.0 and 6.0–7.5 ranges. LLM-GNN (6.50, accepted) is a reasonable comparison point: it has a clear motivation, well-paced experiments, but limited technical depth. CrowdFM has stronger technical contribution (the generator + GNN architecture) but weaker clarity in evidence presentation (win-count framing, unvalidated generator). Compared to Specialized Foundation Models (6.50, accepted), CrowdFM is weaker in rigorous benchmarking but stronger in novel methodology. Compared to the 5.5-level rejected papers (STAGE at 5.50, HAS at 5.50), CrowdFM has broader scope, more datasets, and clearer practical contributions. The paper is a solid contribution with real strengths and addressable weaknesses, placing it at 6.0.
+**Round 1 bracket**: 5.5–7.0 (between `JB3lbDtsFS` at 5.50 and `26XphugOcS` at 7.00).
 
-**Final anchors consulted:** GraphFM (3.40, R1), AnyGraph (4.20, R1), LLM-GNN (6.50, R1/R2), GNN-RAG (5.60, R1), STAGE (5.50, R2), HAS Annotator (5.50, R2), Specialized FM (6.50, R2).
+**Round 2 narrowing**: The most comparable anchors are `rawj2PdHBq` (6.00) and `KQe9tHd0k8` (5.80). CrowdFM is comparable to or slightly stronger than `rawj2PdHBq` — both use synthetic pretraining for zero-shot transfer, both have comprehensive evaluation, both have some evaluation gaps (missing baselines, narrow domain assessments). CrowdFM edges ahead with broader domain coverage (22 diverse datasets vs. medical only) and more downstream tasks. Compared to `KQe9tHd0k8` (5.80), CrowdFM's results are similarly competitive with SOTA and its evaluation is comparably thorough. CrowdFM is clearly weaker than `26XphugOcS` (7.00) which had stronger novelty and cleaner experimental validation. **Final score: 6.0**.
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

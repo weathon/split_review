@@ -19,16 +19,35 @@ This is research code, NOT a production system. Optimize for **iteration speed a
 - When in doubt, do the simplest thing that works for the next experiment, not the thing that would survive a code review at a SaaS company.
 - Do not use ("","","") to concat string, use """xyz"""
 - Do not make ANY assumptions, ask the user for any decisions
+- When calling OpenAI (or other models) API, if JSON is needed, use client.chat.completions.parse(model=..., messages=..., response_format=PydanticModel) instead of forcing the model to output JSON by prompt. 
+- Do NOT use helper function unless you really need to
+- Keep code simple, short, and stupid.
+- Do NOT use underscore-started function naming
+
+## Benchmark / batch scripts
+
+Batch, benchmark, and one-shot experiment scripts must be written like research scripts, not reusable libraries.
+
+- Prefer top-level code with a single obvious worker function only when concurrency requires it.
+- Do NOT create layers of helper functions for argument parsing, env setup, result formatting, manifest writing, or discovery unless the script genuinely becomes unreadable without them.
+- Do NOT use underscore-prefixed helper names in these scripts. Use plain names like `run_pdf`.
+- Do NOT add broad `try/except` wrappers to keep a benchmark running after hidden failures. If one sample fails, let the worker fail loudly unless the user explicitly asked for skip/resume behavior.
+- Do NOT silently continue after missing parsed files, missing PDFs, malformed rows, empty outputs, or failed jobs. Raise with the concrete path/job id.
+- Hard-code the dataset path, worker count, and output path when the user gave a concrete benchmark request. Do not turn it into a generic reusable CLI unless asked.
+- Print JSONL progress rows for `batch_start`, `sample_start`, `sample_done`, and `batch_done`; keep the row fields concrete and minimal.
+
 
 ## Scope discipline
 
 - Don't add features, refactor, or introduce abstractions beyond what the task requires. A bug fix doesn't need surrounding cleanup; a one-shot script doesn't need a helper module. Don't design for hypothetical future requirements.
-- Don't add error handling, fallbacks, or validation for scenarios that can't happen. Trust internal code and framework guarantees. Only validate at system boundaries (user input, external APIs).
-- Don't add feature flags or backwards-compatibility shims when you can just change the code. No renaming unused `_vars`, no re-exporting removed types, no `// removed` comments. If something is unused, delete it.
+- Don't add error handling, fallbacks, or validation for scenarios that can't happen. Trust internal code and framework guarantees. Only validate at system boundaries (user input, external APIs). For example, do not use .get, use [key], do not use (x or 0) use x.
+- Don't add feature flags or backwards-compatibility shims when you can just change the code.
 - Prefer editing existing files to creating new ones.
 - No half-finished implementations. Either do the thing or say you didn't.
 - Do NOT use helper function unless you really need to
 - Keep code simple, short, and stupid.
+- If you were asked to do something and it is not working, do NOT find another path, stop and ask user
+
 
 ## Comments
 
@@ -94,4 +113,5 @@ If you're orchestrating a multi-stage pipeline:
 
 
 ## Cost
-Each paper review with DeepSeek API is about 0.05 USD, with GPT is about 1 USD, each CSPaper call is about 5 USD. Think and verify before you run your code. 
+- Each paper review with DeepSeek API is about 0.05 USD, with GPT is about 1 USD, each CSPaper call is about 5 USD. Think and verify before you run your code. 
+- Do NOT do short polling or "keep an eye on" a running task, set a passive trigger and do NOT read stdout in full. Polling costs money (everytime you are waked up and read/output, it costs money). 

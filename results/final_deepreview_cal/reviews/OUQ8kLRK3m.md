@@ -1,88 +1,93 @@
-Now I have all the evidence needed. Let me produce the final consolidated review.
+Now I have everything I need. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-DRE-Bench is a benchmark for evaluating LLMs' fluid intelligence through abstract reasoning tasks organized in a four-level cognitive hierarchy (Attribute, Spatial, Sequential, Conceptual) adapted from Primi (2001). Its core technical contribution is a code-based generator–solver pipeline (Section 3.2, Figure 3) that produces unlimited verifiable task variants with tunable complexity, aiming to resist data contamination. The paper evaluates 11 LLMs and reports accuracy, complexity curves, variance analyses, and ablations. Key findings — that reasoning LLMs outperform general LLMs, that performance collapses at planning depth >2, and that all models fail at physical-concept tasks — are broadly consistent with community expectations and interesting.
+DRE-Bench proposes a dynamic benchmark for evaluating fluid intelligence in LLMs through abstract reasoning tasks on colored grids. The benchmark organizes 36 tasks across four cognitive levels (Attribute, Spatial, Sequential, Conceptual) inspired by a psychological hierarchy from Primi (2001), uses a code-based generator–solver pipeline to produce ~4K dynamic task variants with controllable complexity, and reports that all tested LLMs struggle at higher cognitive levels while humans maintain moderate performance. The paper's core contributions are the dynamic generation framework, the cognition-aligned task organization, and a comprehensive multi-model evaluation with diagnostic analyses.
 
 ## Strengths
 
-- **Cognition-aligned task hierarchy grounded in psychology**: The four-level framework is explicitly derived from Primi (2001) and partially validated by a human study (40 annotators, ~400 samples) showing human accuracy also decreases with level (Table 1, Section 3.1). This provides interpretability that prior benchmarks like ARC-AGI lack, as the paper explicitly compares against in Figure 1(b).
+- **Dynamic, code-verified generation with controllable complexity**: The generator–solver pipeline (Figure 3) produces multiple variants per task with tunable complexity parameters, directly addressing static-benchmark contamination. Figure 4 demonstrates that model accuracy drops sharply as task complexity (step count) increases, particularly at higher cognitive levels. The code-based approach ensures ground-truth correctness of generated samples, which is a clear advantage over LLM-regeneration approaches that can introduce errors.
 
-- **Code-based generator–solver pipeline for dynamic variant generation**: The pipeline described in Section 3.2 and Figure 3 enables verifiable generation of task variants with controllable complexity. Unlike static benchmarks prone to data contamination (Section 2.2), this design allows unbounded generation of test cases through tunable variables (e.g., planning steps, rotation angles, movement distance), and the generator–solver pairs are code-verifiable with 100% correctness.
+- **Comprehensive multi-model evaluation with clear capability boundaries**: Testing 11 LLMs across all four levels (Table 1) reveals a systematic performance gradient: reasoning models (o1, DeepSeek-R1) outperform general models (GPT-4o, Qwen), yet all models collapse on Level-4 Conceptual tasks (model average 2.17% vs. human 47.33%). This gap provides strong quantitative evidence for the benchmark's difficulty and the models' limitations.
 
-- **Fine-grained analysis across multiple dimensions (complexity, variance, orientation)**: Beyond reporting a single accuracy number, the paper provides per-task accuracy vs. complexity curves (Figure 4), accuracy–variance scatter plots (Figure 5), and directional bias analyses (Table 3). These reveal non-trivial insights: most models collapse at planning depth >2 (Section 4.3), and models exhibit asymmetric spatial performance on vertical vs. horizontal movement (Section 4.5) — findings that static benchmarks cannot capture.
+- **Diagnostic analyses that go beyond aggregate scores**: The spatial orientation analysis (Table 3) reveals systematic asymmetries in model performance (e.g., vertical movement easier than horizontal, horizontal symmetry easier than vertical) that are not predicted by overall accuracy alone. The visual-information ablation (Table 2) shows the counterintuitive finding that adding visual inputs does not improve and sometimes degrades performance. The inference-time analysis (Figure 7) shows that longer reasoning does not rescue performance on high-level tasks. These analyses demonstrate the benchmark's diagnostic value.
 
-- **Inference-time scaling analysis revealing limitations at high cognitive levels**: Figure 7 documents a surprising finding — o1's inference time grows with complexity at both Level-1 and Level-3, but accuracy holds only at Level-1; at Level-3, accuracy collapses despite increased computation (Section 4.4). This is a concrete counterexample to the assumption that test-time compute scaling is always beneficial.
-
-- **Human baseline with statistical testing**: The paper conducts a human study (40 annotators, paid $30/hour) and performs an independent t-test (Appendix Table 9) showing statistically significant differences between human and model distributions, strengthening the claim that current LLMs underperform humans on high-level cognition.
+- **Human study provides a reference baseline**: 40 professional annotators evaluated on ~400 samples, showing a clear accuracy decline across levels (77.51% → 70.38% → 65.05% → 47.33%) that qualitatively aligns with the cognitive hierarchy and provides a meaningful comparison point for model performance.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Table 1 contains a clear data presentation error and unexplained averaging methodology**: Two rows are labeled "o3-mini" with entirely different numerical results (lines 260–261 of the paper). For example, the first o3-mini row reports Avg-2=91.78 for Level-2 Spatial with sub-scores (63.04, 32.10, 0.00) whose simple average is ~31.7, while the second o3-mini row reports Avg-2=23.13 with different sub-scores. The paper lists 11 evaluated models (Section 4.1) yet the table effectively contains 10 distinct model names with one duplicated. Additionally, the Avg values for individual model rows do not consistently match simple arithmetic averages of the listed sub-scores (e.g., DeepSeek-R1 Level-1: simple average of (60.83, 60.42, 8.33) ≈ 43.19, but reported Avg-1=37.86; o1 Level-2: simple average of (93.08, 69.60, 6.67) ≈ 56.45, but reported Avg-2=58.88), and the paper never explains the averaging methodology. This is the primary evidence table — all comparisons and conclusions in Sections 4.2–4.3 rely on it — and the errors and lack of documentation undermine trust in the experimental backbone.
-
-- **No variance or statistical significance reported for the main accuracy results**: The paper states results are averaged over three trials (Section 4.1: "all presented results of models are average results over three trials"), but reports no standard deviations, confidence intervals, or per-trial numbers for the primary accuracy metrics in Table 1. Given that reasoning LLMs can exhibit high variance across runs, readers cannot assess whether observed differences between models (e.g., o1 vs. DeepSeek-R1 on Level-2) are meaningful or noise. The variance analysis in Figure 5 uses a different notion of variance (across tasks within a level, not across runs), which serves a different purpose.
+- **The mapping between tasks and the Primi (2001) cognitive hierarchy is asserted rather than demonstrated**: The paper claims that its four levels instantiate Primi's rule-type taxonomy, but Section 3.1 assigns tasks to levels based on intuitive labels (e.g., "Size" = Attribute, "Gravity" = Conceptual) without showing how these map onto Primi's specific rule categories (unary, relational, higher-order operations, etc.). The human study confirms that higher levels are harder, but any difficulty gradient would produce this pattern — it does not validate that the levels capture qualitatively distinct cognitive processes as a psychological hierarchy would require. This weakens the paper's central interpretability claim that DRE-Bench enables "mapping model behavior to specific cognitive capabilities." The benchmark remains useful as a difficulty-sorted collection of ARC-style tasks, but the paper overstates the psychological grounding.
 
 ### Minor
 
-- **Cognitive hierarchy validation is thin**: The human study uses ~400 samples across 40 annotators (~10 per person) with no reported inter-annotator agreement or per-level reliability metrics. The paper relies on a single psychological source (Primi, 2001) and a brief human accuracy trend to validate the hierarchy. For a benchmark whose core novelty is cognitive alignment, more rigorous psychological validation would strengthen the claims.
+- **Exact-match metric may overstate model failures**: The primary metric requires pixel-perfect grid match. As the error case analysis (Figure 8) acknowledges, Level-1 and Level-2 errors involve subtle deviations while Level-3 and Level-4 errors show complete rule misunderstanding — yet exact match treats both identically as zero. The paper notes auxiliary metrics (grid size precision, grid matching percentage) exist in Appendix E.2, but the main narrative (including the claim that models "have yet to internalize even the most fundamental principles" of intuitive physics) relies on exact match. Adopting a partial-credit metric in the main results would give a more faithful picture of whether models partially internalize rules versus fail completely.
 
-- **The "dynamic" contamination-resistance claim is asserted but not directly demonstrated**: The paper generates variants using random seeds but evaluates on fixed generated sets. To truly demonstrate that the dynamic property protects against memorization, the evaluation should sample new independent random seeds at test time and show consistent rankings across different samples. The variance analysis in Figure 5 is across different tasks within a level, not across different random seeds of the same task. The paper therefore claims robustness to contamination based on a design property rather than empirical demonstration.
+- **Table 1 contains apparent formatting issues**: Two rows are both labeled "o3-mini" with substantially different performance profiles, and the first row's Avg-2 of 91.78 is arithmetically incompatible with its component scores (63.04, 32.10, 0.00). These may be parser artifacts but the authors should verify and correct the table.
+
+- **Human accuracy is far from ceiling even at Level 1**: Human annotators achieve 77.51% on Level-1 Attribute tasks and only 47.33% on Level-4. While this validates that the tasks are non-trivial, the substantial failure rate at the lowest level raises the possibility that grid-manipulation difficulty (rather than pure reasoning) contributes meaningfully to measured performance, potentially confounding the benchmark as a clean measure of fluid intelligence.
 
 ### Trivial
-None.
+
+- The paper does not quantify how many iterations the human-agent pipeline required per task (how often generated code was initially incorrect), which would aid reproducibility assessment.
 
 ## Nice-to-Haves
 
-- Compare performance on DRE-Bench against ARC-AGI on the same set of models to directly show how DRE-Bench fills a gap.
-- Report the number of test cases per complexity level for each task to give readers a clear sense of statistical power for the fine-grained curves (Figure 4).
-- Provide a systematic analysis of failure modes at Level-4 (e.g., do models produce random grids, attempt partial solutions, or ignore the physics rule entirely?).
-- Include per-run results or standard deviations for the main accuracy numbers in an appendix.
+- Grounding each task explicitly in Primi's rule taxonomy (e.g., showing Level-1 tasks involve unary transformations, Level-2 relational operations) would substantially strengthen the cognitive framing.
+- A discussion of what aspects of fluid intelligence are not captured by grid-based abstract reasoning (e.g., verbal analogical reasoning, dynamic decision-making) would appropriately scope the claims.
+- Adopting a partial-credit metric (e.g., cell-wise accuracy or Jaccard index) as a primary or co-primary metric would provide a more nuanced view of model capabilities.
 
 ## Removed Points
 
-The following criticisms from the reviewer inputs were removed with justification:
+These points are flagged to be removed; treat them with caution:
 
-- **"Figure 7 'o1-Agentness' labeling error"**: The term "Agentness" only appears in the extracted figure caption and nowhere else in the paper. The text discusses "high-level tasks (i.e., planning)" and the right plot is "o1-Count." This is a parser/OCR artifact from the figure image, not a paper error.
-- **"No comparison with ARC-AGI or ARC-AGI-2"**: The paper cites ARC extensively and establishes its relationship to prior work in Section 2.1. Demanding a cross-benchmark comparison is scope creep for the present paper.
-- **"The benchmark size (~4K cases) is modest"**: 4K cases with fine-grained controls over 36 tasks is reasonable for this type of abstract reasoning evaluation. The critic does not establish a concrete standard for what "sufficient" means.
-- **"No analysis of computational cost"**: The paper reports inference time (Figure 7), which is the relevant cost metric for the scientific question. API cost is an implementation detail, not a scientific weakness.
-- **"The generative pipeline is only lightly described"**: The pipeline is described in Section 3.2 with Figure 3, and prompt templates are deferred to Appendix D. This is standard practice for benchmark papers.
-- Various formatting/style nitpicks removed per instructions.
-- Criticisms about "missing appendix content" or "missing proofs in appendix" — the appendix exists in the original submission but was stripped by the parser.
+- **"Human-agent pipeline is fairly standard practice"**: The paper does not claim this pipeline as a major theoretical innovation. It is presented as a practical engineering approach to ensure correctness and scalability, which is appropriate.
+- **"The benchmark omits comparisons with similar ARC-like procedural generation work"**: The paper cites relevant dynamic evaluation work (DyVal, NPHardEval, MPA) and positions itself relative to ARC. The reviewer's claim about missing comparisons with specific ARC-procedural-generation papers could not be verified from the paper.
+- **"The generator logic must be open-sourced and only an anonymized link is provided"**: The paper provides an anonymous GitHub link with all generator-solver code. This is standard for ICLR submissions.
+- **"The paper lacks discussion of limitations of grid-based reasoning"**: The paper is explicitly scoped to ARC-style grid reasoning. Scope limitations are inherent to the format and not a flaw.
+- **"Human study details are in appendix only"**: The main paper reports sample size, annotator count, age range, and compensation rate. Additional details in the appendix are standard practice.
 
 ## Novel Insights
 
-The most interesting finding that emerges from the reviews is the **asymmetric spatial reasoning pattern** (Table 3): models perform systematically better on vertical movement (up/down) than horizontal (left/right), and on horizontal symmetry than vertical symmetry. This is striking because humans perceive these as equivalent, suggesting the asymmetry stems from training data biases (e.g., language corpora may use "up/down" language more frequently or with clearer positional semantics) rather than from genuine spatial reasoning differences. This observation, which the paper notes but does not deeply explain, points toward a productive research direction in understanding how language priors shape LLMs' "intelligence" in ways that diverge from human cognition.
+The spatial orientation analysis (Table 3) reveals a genuinely non-obvious finding: LLMs exhibit systematic anisotropy in spatial reasoning that diverges from human cognition (e.g., consistently higher accuracy for vertical vs. horizontal movement, and stronger horizontal than vertical symmetry). This pattern is unlikely to be an artifact of training data alone, and points to a structural difference in how LLMs represent spatial relations — a finding that could inform both model architecture and training data design.
 
 ## Suggestions
 
-1. **Fix the duplicate o3-mini rows and explain the averaging methodology in Table 1.** This is the most critical issue. Clarify whether there are two distinct o3-mini configurations tested (if so, label them distinctively, e.g., "o3-mini (v1)" and "o3-mini (v2)"), and document how the Avg values are computed (weighted by sub-task sample sizes? different aggregation per level?). Ideally also correct one row if it's a typo.
+- Reframe the cognitive hierarchy as a theoretically-motivated difficulty gradient rather than claiming full instantiation of Primi's taxonomy, unless stronger evidence of alignment can be provided
+- Report a partial-credit metric alongside exact match in the main results table to distinguish near-miss errors from complete failures
+- Correct the Table 1 formatting and verify all averages are arithmetically consistent
 
-2. **Provide per-run standard deviations or per-trial numbers for the main accuracy results.** Even reporting them in an appendix would substantially improve trust in the comparisons.
-
-3. **Demonstrate cross-seed consistency for at least a subset of tasks** by generating two independent random-seed sets and showing model rankings are preserved. This would directly support the dynamic-evaluation claim.
-
-4. **Report inter-annotator agreement** (e.g., Fleiss' kappa) for the human study to strengthen the cognitive hierarchy validation.
+---
 
 ## Score and Decision
 
-### Calibration
+**Round-1 bracket**: 5.33–7.00, based on comparison with "LLMs Are Not Strong Abstract Reasoners" (5.33, Reject) and MathGAP (7.00, Accept).
 
-**Round 1 bracket:** Between ~3.5 and ~6.5. Below DyVal (6.50, accepted dynamic evaluation benchmark), above TurtleBench (3.80, rejected benchmark with dataset limitations).
+**Round-2 narrowing**: DRE-Bench is clearly stronger than GridAgent (5.67, Reject) — it has a cleaner dynamic generation framework, better model coverage, and richer diagnostics. It is comparable to ProverGen (6.25, Accept) — both use LLM-assisted data generation with verifiable correctness, but DRE-Bench has broader scope and more diagnostic depth. It is slightly below DyVal (6.50, Accept) — DyVal has a cleaner, more general evaluation framework, while DRE-Bench's cognitive hierarchy claim is not fully substantiated. It is clearly below MathGAP (7.00, Accept) and ActionReasoningBench (6.75, Accept), which have more rigorous formal frameworks and deeper diagnostic dimensions.
 
-**Round 2 anchors used for narrowing:**
-- *"LLMs Are Not Strong Abstract Reasoners"* (5.33, rejected) — abstract reasoning benchmark. DRE-Bench has more ambitious design (dynamic generation, cognitive hierarchy) but worse execution (Table 1 errors). Slightly below.
-- *CogMath* (4.33, rejected) — cognitive-perspective LLM evaluation benchmark. DRE-Bench is stronger in scope, task design, and analysis depth. Above CogMath.
-- *DyVal* (6.50, accepted) — dynamic evaluation protocol. DRE-Bench has more interesting cognitive design but substantially less clean execution. Clearly below DyVal.
+**All anchors for reference**:
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| koza5fePTs | 2.00 | 1 | Much weaker — planning benchmark with limited novelty |
+| NlY3XppPt3 | 2.00 | 1 | Much weaker — unrelated computational models |
+| jOuHjFw71C | 3.00 | 1 | Weaker — planning eval of o1 only |
+| YGDWW6rzYX | 3.00 | 1 | Weaker — competition-based eval, less diagnostic |
+| 28gMnEAgl9 | 5.33 | 1 | Weaker — static benchmark, less novelty |
+| jpypMKAsO6 | 5.67 | 2 | Weaker — grid-based but less rigorous evaluation |
+| C25SgeXWjE | 6.25 | 2 | Comparable — LLM+prover generation, narrower scope |
+| vJ0axKTh7t | 6.25 | 2 | Slightly weaker — association benchmark, less diagnostic |
+| gjfOL9z5Xr | 6.50 | 1,2 | Comparable — cleaner framework, less diagnostic depth |
+| NUD03NBDOE | 6.75 | 1 | Stronger — more dimensions, better formal grounding |
+| 5ck9PIrTpH | 7.00 | 2 | Stronger — more rigorous complexity characterization |
+| m2nmp8P5in | 8.00 | 1 | Much stronger — equation discovery, different genre |
+| Q6a9W6kzv5 | 8.00 | 1 | Much stronger — PhysBench, larger scale |
+| GGlpykXDCa | 8.00 | 1 | Much stronger — multi-table QA, different genre |
+| 3bq3jsvcQ1 | 8.00 | 1 | Much stronger — prompting method, different genre |
 
-**Other anchors referenced:** TurtleBench (3.80), "To the Cutoff... and Beyond?" (6.75), MMIE (8.00).
+**Final score**: The paper is a solid contribution — the dynamic generation pipeline is well-executed, the evaluation is comprehensive, and the diagnostic analyses (spatial biases, visual ablation, inference-time scaling) yield genuine insights. The Primi mapping weakness is real but does not invalidate the benchmark; the tasks are still well-organized and the difficulty gradient is validated by human results. The paper lands between ProverGen (6.25) and DyVal (6.50), comparable to both but with the cognitive-grounding issue pulling it toward the lower end of that range. Score: **6.0**.
 
-**Final score rationale:** The paper's contributions (cognitive hierarchy, dynamic generation pipeline, multi-dimensional analysis) are genuine and interesting. However, the Table 1 data presentation errors — particularly the duplicate o3-mini rows and unexplained averaging methodology — undermine trust in the primary experimental evidence. These are fixable issues, but in the current form the paper cannot be accepted. The score reflects a paper with real substance held back by execution problems that require major revision.
-
-MY FINAL SCORE: <score>4.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

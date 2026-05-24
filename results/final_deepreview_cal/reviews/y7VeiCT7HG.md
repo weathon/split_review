@@ -1,100 +1,99 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have a solid calibration. Let me synthesize the final review.
+
+---
 
 ## Summary
 
-The paper proposes qEHVI-SF, a batch multi-objective Bayesian optimization method that multiplies the standard qEHVI acquisition function by a space-filling penalty (the minimum L₂ distance among batch points and to previously sampled points). The authors motivate this through a "Probability of Matching" framework that factorizes the likelihood of a batch matching the true Pareto set into a quality component and a coverage component. Experiments on two synthetic benchmarks and a multi-property alloy design task show qEHVI-SF consistently outperforms qEHVI and QSVGD in hypervolume, a new design-space coverage metric (EMD), and rediscovery rates, with modest computational overhead.
+The paper proposes qEHVI-SF, a batch multi-objective Bayesian optimization (MOBO) acquisition function that balances solution quality and diversity by combining expected hypervolume improvement (qEHVI) with a space-filling minimum-distance term. The authors motivate this through a "Probability of Matching" framework that factorizes the probability that a batch matches the true Pareto set into a quality term P(X ⊆ X*) and a coverage term P(X* ⊆ X | X ⊆ X*). Empirically, qEHVI-SF demonstrates consistent improvements over qEHVI and QSVGD on synthetic benchmarks (GM, RE4-7-1) and a real-world alloy inverse-design task across multiple batch sizes and objective counts, with modest computational overhead. The paper also introduces Expected Minimum Distance (EMD), a design-space coverage metric.
 
 ## Strengths
 
-- **Simple, computationally cheap, and empirically effective method.** The acquisition function in Eq. (8) adds only Θ(q(n+q)d) per iteration over qEHVI, and the wall-clock times in Table 1 confirm the overhead is modest. Across 2 synthetic benchmarks and 6 real-world alloy design configurations, qEHVI-SF consistently achieves higher hypervolume and better design-space coverage than the two baselines, with smaller variance in many settings.
+- **Principled conceptual factorization (Eq. 7)**: The decomposition of Pareto set matching into a quality term and a coverage term provides a clean conceptual framework for thinking about batch diversity in MOBO. This framing usefully exposes why methods like qEHVI that focus solely on P(X ⊆ X*) can bias toward extreme solutions.
 
-- **Thoughtful design-space coverage metric (EMD).** Eq. (9) defines Expected Minimum Distance in the design space, which is stricter than objective-space IGD (coverage of the Pareto front does not imply coverage of the Pareto set in design space). This is a clean methodological contribution for evaluating MOBO methods and is well-motivated by the paper's focus on design-space diversity.
+- **Consistent empirical gains across diverse settings**: On both synthetic benchmarks (Figure 1) and the alloy inverse-design case study (Figure 2, six tasks with 2–6 objectives), qEHVI-SF consistently achieves higher hypervolume, lower EMD, and higher Pareto-optimal rediscovery ratios than qEHVI and QSVGD. The performance is especially robust at small batch sizes, where coverage is hardest to achieve.
 
-- **Thorough real-world validation on alloy design.** The paper evaluates on six MOBO tasks (bi-objective, tri-objective, and six-objective) derived from a materials design problem, with varying batch sizes and multiple metrics. The rediscovery ratio (how many true Pareto-optimal compositions are found) directly measures practical utility. qEHVI-SF consistently achieves the highest rediscovery ratios across settings.
+- **Introduction of EMD as a design-space coverage metric**: The Expected Minimum Distance (Eq. 9) operates in the input space rather than the objective space, making it stricter than IGD for evaluating whether the full Pareto optimal set (not just the front) has been covered. This is a useful complement to standard hypervolume comparisons.
 
-- **Motivated avoidance of current Pareto set for coverage estimation.** The paper correctly notes (Section 3.2) that using the current Pareto set approximation Xₙ* for coverage estimation would condition on X ⊆ Xₙ* rather than X ⊆ X*, leading to local oversampling. Using the full history of queried points is a principled choice that distinguishes the method from naive diversity heuristics.
+- **Minimal computational overhead**: The space-filling distance computation adds only O(q(n+q)d) per iteration (Section 3.3), and wall-clock measurements (Table 1) confirm that qEHVI-SF runs within a factor of ~1.2 of qEHVI on average, with the overhead becoming negligible as the number of objectives grows.
+
+- **Well-motivated real-world application**: The alloy inverse-design case study with six interlocking material properties (SFE, C11, HC, TC, SR, RTD) provides a compelling demonstration of practical utility, where qEHVI-SF recovers more Pareto-optimal compositions under a constrained evaluation budget.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **The "Probability of Matching" framework does not support the claimed theoretical novelty.** The paper claims to derive a principled acquisition function from a probabilistic framework. In reality: (a) Eq. (7) defines P(X = X*) where X* is a continuous Pareto optimal set and X is a finite batch—the probability is exactly zero without additional structure. The paper then replaces this with a ball-covering surrogate (A_X^r) in Section 3.2, which is reasonable as a heuristic motivation but undermines the claim of a "well-defined probability" being optimized. (b) The paper states "we first use normalized qEHVI to approximate P(X ⊆ X*)" but never explains how qEHVI values (hypervolume improvements in objective space) are normalized to probabilities in the design space. This gap means the bridge from the probability framework to the actual acquisition function in Eq. (8) is asserted, not derived. The paper would be more honest framed as a penalized qEHVI with heuristic diversity promotion, as the conclusion section itself partially acknowledges. The overclaiming in Sections 1, 3.1, and the abstract is the paper's most significant weakness.
-
-2. **Insufficient baselines to support "state-of-the-art" claims.** The abstract claims qEHVI-SF "consistently outperforms state-of-the-art baselines," but only two baselines are compared: qEHVI and a single-objective QSVGD adapted to MOBO. Many established batch MOBO methods are absent: random scalarization with qEI/qParEGO (Knowles, 2006; Paria et al., 2020), Thompson sampling with random scalarizations (which is a standard and strong baseline), and NSGA-II-based approaches for batch selection. The claim in the abstract is not supported by the evidence presented.
-
-3. **The radius r used in the theoretical motivation (Section 3.2, ball-covering argument) does not appear in the final acquisition function.** The paper motivates coverage via balls of radius r, argues that minimizing overlap between balls maximizes covered volume, then transitions to maximizing minimum distance. The radius r (which would determine how "min distance" relates to coverage) is never specified, tuned, or discussed in the actual method. The acquisition function in Eq. (8) drops r entirely. This makes the connection between the theoretical coverage argument and the implemented method incomplete.
+- **Gap between probabilistic framing and heuristic implementation**: The paper's title, abstract, and theoretical exposition center on "Probability of Matching" — claiming the method "explicitly captures the likelihood," "quantifies the likelihood," and optimizes P(X = X*). However, the actual acquisition function (Eq. 8) multiplies the raw expected hypervolume improvement (not a probability, and not normalized) by a minimum-distance heuristic. No derivation connects these terms to the factorized probabilities in Eq. 7, and the "normalized qEHVI" mentioned in Section 3.2 is never defined. The acquisition function is a sensible diversity-aware heuristic product, but the paper's central probabilistic claim is not substantiated by the technical content. The authors acknowledge this gap in the conclusion ("the precise relationship between pairwise distance and true coverage probability remains unclear"), but the abstract and introduction do not reflect this caveat. This misalignment between framing and method is a significant weakness that a reader would expect to be either closed with genuine probability estimates or honestly reframed as a heuristic. *This is the primary issue weighing on the score.*
 
 ### Minor
 
-1. **The claim of no hyperparameter tuning is overstated.** The multiplicative form in Eq. (8) has no explicit η coefficient, so in that narrow sense there is no trade-off parameter to tune. However, the relative balance between qEHVI and the distance penalty depends implicitly on the scaling of the design space, the number of objectives, and the iteration. Without normalization or analysis of how the distance term's magnitude compares to qEHVI values, it is not guaranteed that this balance generalizes across problems. The paper should at least discuss when the distance term might dominate or be dominated.
+- **No visualization of variance in synthetic benchmarks (Figure 1)**: The paper claims that "results by qEHVI-SF have smaller standard deviation values across trials," but Figure 1 shows single mean curves without error bars, confidence bands, or any indication of variability. For the alloy experiments (Figure 2), the caption indicates 20 trials, but no trial count is stated for the synthetic experiments. This weakens the variance-reduction claim.
 
-2. **The connection between the coverage probability P(X* ⊆ A_X^r | X ⊆ X*) and the minimum-distance penalty is heuristic, not derived.** The argument that "maximizing minimum distance reduces overlap" is geometrically sound but relates to the *volume* of A_X^r, not to the *conditional probability* that X* is covered by the balls. The paper's conclusion (Section 5) honestly states "the precise relationship between pairwise distance and true coverage probability remains unclear," which is at odds with the stronger theoretical claims in Sections 1 and 3.1.
-
-3. **No explanation of how the acquisition function is optimized.** Eq. (8) involves an expectation of a product. The paper does not explain how this is optimized — whether via sample-average approximation with shared MC samples, how the min-distance term interacts with gradient-based optimization, or whether the product form creates optimization difficulties near existing points (where min-distance → 0 and the acquisition → 0).
-
-4. **QSVGD baseline comparison is not fully controlled.** The paper notes that QSVGD's performance depends on a decaying schedule for η (details in appendix, which is stripped). Since η controls the quality-diversity trade-off and was likely tuned per problem, this creates a comparison asymmetry: qEHVI-SF's fixed multiplicative form is compared against a tuned QSVGD, but the paper does not discuss whether qEHVI-SF would benefit from tuning too.
+- **EMD reference set for RE4-7-1 not described**: The paper states that RE4-7-1 has "an unknown Pareto optimal set" (Tanabe & Ishibuchi, 2020), yet EMD is computed against a reference X*. How this reference set was obtained (exhaustive grid search, literature values, surrogate approximation) is not explained, which affects reproducibility for that benchmark.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- Compare against additional standard baselines (random scalarization with qEI, ParEGO, random search).
-- Add an ablation comparing the multiplicative form (Eq. 8) with an additive form qEHVI + η·min_distance over a range of η values, to test whether the product form offers a genuine advantage or the penalty itself is what matters.
-- Discuss or analyze the sensitivity of the method to design-space scaling/normalization, since the min-distance term's magnitude depends on it.
+- An analysis of EMD's properties (sensitivity to Pareto-set geometry, relationship to hypervolume) would strengthen the case for adopting it as a standard metric.
+- A discussion of how the balance between qEHVI and the distance term changes across problem scales and what normalization (if any) is applied would aid practitioners.
+- The exposition in Section 3.2 could more explicitly flag the minimum-distance maximization as a heuristic surrogate for coverage probability, rather than presenting it as a logical consequence, to better manage reader expectations.
 
 ## Removed Points
 
-These points were raised by reviewers but removed after verification against the paper:
+These points were flagged by reviewers but do not survive verification against the paper:
 
-1. **"Figure 1 caption is corrupted with text from another paper (BOILS, BOILS+LBO)."** — REMOVED. This is a PDF parser artifact, not an author error. The paper text correctly describes the figure as comparing qEHVI, QSVGD, and qEHVI-SF.
+- **"Expectation of product is not product of expectations" (re Eq. 8)**: The distance term min{Δ(X, X), Δ(X, X_n)} depends only on input locations X, not on the random function values y. It is therefore deterministic with respect to the expectation over y and can be legitimately factored out. This criticism reflects a misreading of the acquisition function.
 
-2. **"No numerical standard deviation values reported for benchmark results."** — REMOVED. The paper states "qEHVI-SF has smaller standard deviation values across trials" qualitatively, which is a summary. Detailed numerical values in figures are common in BO papers, and the parser strips fine detail from figures.
+- **QSVGD hyperparameter schedule not in main text**: The paper states that details are in Appendix A.1. The parser strips appendices; this is not an author error.
 
-3. **"Missing related work on design-space diversity methods."** — REMOVED per instructions. Cannot verify existence of missing references without external knowledge.
+- **Figure layout description mismatch**: The parser-generated description of Figure 1 contains garbled text (BOILS, LBO, etc.) that does not match the paper's actual figure. This is a parser artifact, not an author problem.
 
-4. **"The complexity analysis includes combinatorial term suggesting exhaustive search which is not how these methods are optimized."** — REMOVED. The paper includes the combinatorial term for per-evaluation complexity, which is standard in the qEHVI literature (Daulton et al., 2020). It does not claim exhaustive search is performed.
+- **Missing related works / missing references**: We cannot verify the existence of unspecified related work from external sources and will not invent missing citations.
 
-5. **"QSVGD's decaying schedule details are in the appendix which is inaccessible."** — REMOVED. The appendix is stripped by the parser; it exists in the original submission.
+- **Formatting, typos, or grammar issues**: All such nitpicks are parser artifacts; the original submission does not have these issues.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The main insight—that multiplying qEHVI by a minimum-distance penalty yields improved design-space coverage—is simple and directly stated by the authors. The reviews surface no new interpretation of why this works beyond what the paper already discusses.
+Beyond the paper's own contributions: The review process highlights a broader tension in heuristic BO method design — namely, the gap between probabilistic aspiration and deterministic implementation. The qEHVI-SF case illustrates that a method can be empirically effective while its theoretical framing lags behind. The distinction between "this is what we optimize" and "this is a heuristic inspired by what we would like to optimize" matters for how the community evaluates and builds upon the work. The paper's EMD metric is a genuinely useful innovation that deserves adoption beyond this paper.
 
 ## Suggestions
 
-1. Reframe the paper as a heuristically motivated diversity penalty for qEHVI rather than claiming a novel probabilistic acquisition function derived from first principles. The Probability of Matching framework can remain as motivation/justification but should not be presented as a rigorous derivation.
-2. Add at least two more baselines (e.g., random scalarization with qEI and ParEGO) to support the "state-of-the-art" language.
-3. Explain how "normalized qEHVI" approximates P(X ⊆ X*) — specifically, what normalization is applied and why it yields a probability.
-4. Discuss how the acquisition function in Eq. (8) is optimized in practice (sample-average approximation, gradient computation with the min term, etc.).
+- **Primary**: Either (a) develop genuine probability estimates for the two terms in Eq. 7 (e.g., posterior probability of non-dominance for P(X ⊆ X*), coverage probability from posterior draws for P(X* ⊆ X | X ⊆ X*)), or (b) honestly reframe the paper as a diversity-guided batch MOBO heuristic that multiplies qEHVI by a space-filling term, with the probabilistic factorization retained as conceptual motivation rather than the claimed optimization objective. Option (b) is straightforward and would close the credibility gap without changing the method.
+- Add error bars or confidence bands to Figure 1 and report the number of independent trials for the synthetic benchmarks.
+- Clearly document how the reference Pareto set X* was obtained for the RE4-7-1 benchmark.
+- Specify any normalization applied to qEHVI within Eq. 8, or explicitly state that none is used.
 
-## Calibration
+## Calibration Anchors Compared
 
-**Round 1 bracket:** 3.5–7.5 (exclusive bounds). Anchors retrieved: BOtied (4.25), MoSH (4.00), W3T9rql5eo (4.25), r8J7Pw7hpj (3.75) in the middle band; nTZOIlf8YH (2.33), ILtA2ebLYR (3.00) in the weak band; ZCOwwRAaEl (8.00), JDud6zbpFv (8.00), OOxotBmGol (8.00) in the strong band.
+| Anchor | Path | Avg Score | Round | Comparison |
+|--------|------|-----------|-------|------------|
+| fzJtylzsKO | Batched BO with correlated candidate uncertainties | 4.00 | R1 | Our paper has stronger empirical scope (synthetic + real-world vs. molecular only), better clarity, and introduces a new metric. Clearly better. |
+| pK7V0glCdj | BOtied: MOBO with tied multivariate ranks | 4.25 | R2 | BOtied has experimental results sometimes worse than random and less clear presentation. Our paper is clearly stronger. |
+| Q8cVivO5k5 | Large-Batch, Iteration-Efficient Neural Bayesian Design Optimization | 5.50 | R1/R2 | Comparable real-world evaluation scope. Our paper has a more novel conceptual framework but suffers from a framing-implementation gap that Q8cVivO5k5 avoids. Slightly below this anchor. |
+| fDGPIuCdGi | Efficient Discovery of Pareto Front for MORL | 5.50 | R2 | Different domain (RL vs. BO) but comparable empirical thoroughness. Our paper's framing gap is a differentiator pulling it slightly lower. |
+| ZCOwwRAaEl | Latent Bayesian Optimization via Autoregressive Normalizing Flows | 8.00 | R1 | Significantly stronger — tight framing-implementation alignment, clear theoretical contributions. Our paper is clearly below this tier. |
 
-**Round 1 bracket stated:** between 4 and 5.5.
+Round-1 bracket: 4.0–5.5. Round-2 narrowed to 4.5–5.5. The paper is stronger than the 4.0–4.25 anchors but the framing-implementation gap places it below the 5.50 anchors. Final score: **5.0**.
 
-**Round 2 narrowing:** Retrieved fzJtylzsKO/qPO (4.00), Large-Batch BO (5.50), 3QR230r11w (5.50), xiyzCfXTS6 (5.50). Read qPO (4.00, Reject) and Large-Batch BO (5.50, Reject). Compared to Large-Batch BO (which had similar overclaiming and baseline issues but was rejected 5.50): the present paper has a cleaner empirical story but weaker baselines and a more overclaimed theoretical contribution.
+## Score and Decision
 
-**Final score:** 4.5. The paper is solidly in the reject range. It has a simple, practical method with consistent empirical results, but the core weakness is a significant mismatch between the claimed theoretical contribution (novel probabilistic framework) and what is actually presented (a heuristic penalty). The limited baseline set further undermines the "state-of-the-art" claims, and several methodological gaps (normalization of qEHVI to probability, optimization of the product acquisition, role of radius r) are unexplained.
+Originality: The probabilistic factorization for Pareto set matching is a fresh perspective on batch MOBO diversity. The space-filling implementation is a sensible but not deeply novel combination of existing ideas (qEHVI + minimum-distance).
 
-**Anchors used:**
+Importance of research question: Batch MOBO with diversity is a well-motivated and practically important problem, and the alloy design case study demonstrates real-world relevance.
 
-| Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| nTZOIlf8YH | 2.33 | 1 | Much weaker — poorly executed paper |
-| ILtA2ebLYR | 3.00 | 1 | Weaker — lacks clear contribution |
-| MoSH (lpt4ADbacU) | 4.00 | 1 | Similar — interesting problem framing but overclaimed novelty and limited baselines; comparable quality |
-| BOtied (pK7V0glCdj) | 4.25 | 1 | Similar — new MOBO acquisition with unclear rationale; stronger theory claim but weaker empirics than present paper |
-| W3T9rql5eo | 4.25 | 1 | Similar quality — MOO uniformity approach |
-| r8J7Pw7hpj | 3.75 | 1 | Weaker — MOO RL with less rigorous evaluation |
-| qPO (fzJtylzsKO) | 4.00 | 2 | Similar — batch acquisition with overclaimed novelty and baseline concerns |
-| Large-Batch BO (Q8cVivO5k5) | 5.50 | 2 | Slightly stronger — better real-world validation but similar overclaiming issues |
-| 3QR230r11w | 5.50 | 2 | Stronger — multi-fidelity active learning with clearer contribution |
-| ZCOwwRAaEl | 8.00 | 1 | Much stronger — accepted paper with rigorous theory and validation |
+Claims well-supported: The empirical claims are generally well-supported, but the central probabilistic claim ("Probability of Matching") is not substantiated by the acquisition function as written — the paper overclaims relative to what it actually implements.
 
-MY FINAL SCORE: <score>4.5</score>
+Soundness of experiments: The experiments are thorough in scope (synthetic + real-world, multiple batch sizes, multiple objectives) but lack variance visualization for synthetic benchmarks and clarity on reference set sourcing.
+
+Clarity of writing: The paper is generally well-written and well-structured, with clear motivation and background. Section 3.2 is the weakest link — the transition from probability to heuristic product is under-explained.
+
+Value to the research community: The EMD metric and the empirical demonstration that space-filling improves batch MOBO are useful contributions. The probabilistic factorization provides a helpful conceptual lens even if the implementation doesn't fully realize it.
+
+MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

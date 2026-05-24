@@ -1,114 +1,95 @@
-Now I have all the calibration data I need. Let me write the consolidated review.
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes STNAdam, a stochastic optimizer for "nonconvex + weakly-convex" composite optimization problems. The key algorithmic novelty is a "two-track iteration framework" that maintains an extrapolation trajectory alongside a regular update trajectory, combining Nesterov momentum with Adam-style adaptive conditioning. The authors provide a convergence analysis under the Kurdyka-Łojasiewicz property with dynamic hyper-parameters, and present empirical results on low-light image enhancement (LIE).
+This paper proposes STNAdam, a stochastic two-track Nesterov-accelerated Adam variant for "nonconvex + weakly-convex" composite optimization. The key novelty is a coupled iteration framework with an extrapolation track and a regular update track, driven by Nesterov momentum and Adam-style adaptive conditioning. The algorithm accommodates arbitrary variance-reduced gradient estimators (SGD, SAGA, SARAH). The authors provide a convergence analysis under the Kurdyka-Łojasiewicz property, establishing convergence in expectation with explicit rates depending on the KL exponent. Empirical results on low-light image enhancement (LOL dataset) show STNAdam variants outperforming several baselines.
 
 ## Strengths
 
-1. **Genuinely novel algorithmic design (two-track framework).** The two-track iteration idea — maintaining separate extrapolation and regular update sequences driven by momentum and adaptivity — is a clear departure from existing single-track accelerated Adam variants (NAdam, SNAdam). Algorithm 1 and the trajectory comparison in Figure 1(d) make this distinction explicit. The paper integrates this design with three concrete gradient estimators (SGD, SAGA, SARAH) and provides specific update formulas for each.
+- **Novel two-track iteration framework**: The coupled extrapolation/update trajectory design (Algorithm 1, Figure 1(d)) is a genuine architectural contribution not present in existing Adam variants. The algorithm specification is concrete and complete.
 
-2. **General almost-sure convergence theory under KL property with flexible estimator support.** Theorem 1 establishes that the sequence converges almost surely to a stationary point, and the analysis accommodates any variance-reduced gradient estimator (SVRG, SAGA, SARAH, SPIDER) through the conditions in Lemma 1. Theorem 2 gives explicit rates for three regimes of the KL exponent ($\vartheta \in (0,\frac12]$, $(\frac12,1)$, and $=0$), which is a more detailed rate characterization than is common for adaptive stochastic methods with momentum.
+- **Flexible variance-reduced gradient estimation**: The algorithm and analysis accommodate arbitrary variance-reduced estimators satisfying the conditions of Lemma 1. The paper instantiates SGD, SAGA, and SARAH versions and demonstrates empirically that variance reduction (SAGA, SARAH) substantially improves performance over the SGD variant (Tables 2–3).
 
-3. **Empirical advantage of STNAdam over single-track baselines on LIE.** In Table 2, STNAdam-SARAH (PSNR 22.26) substantially outperforms the single-track SNAdam (PSNR 17.14) on the LOL dataset when all are applied to the same optimization problem (14). STNAdam-SAGA (PSNR 21.05) and STNAdam-SGD (PSNR 18.06) also outperform SNAdam. This provides evidence that the two-track design yields better optimization outcomes than single-track counterparts on this task.
+- **Substantial convergence analysis framework**: The proof structure — expected descent lemma (Lemma 2), subgradient bound (Lemma 3), accumulation point properties (Lemma 4), KL-based finite-length property (Theorem 1), and convergence rates (Theorem 2) — provides a reasonably complete theoretical backbone.
+
+- **Strong empirical results on the evaluated task**: STNAdam-SARAH achieves the best PSNR (22.26), SSIM (0.9062), and LPIPS (0.0501) among eleven compared methods on the LOL dataset (Table 2), with visible improvements in illumination and edge preservation (Figures 2–3).
 
 ## Weaknesses
 
 ### Major
 
-1. **Unexplained timing measurements that undermine credibility.** The "Time(s)" column in Tables 2 and 3 reports values like 2.64×10⁻⁵ s (~26 microseconds) per sample for processing an entire image through an optimization algorithm with proximal gradient steps. The paper provides no explanation of what this timing measures (per-image? per-iteration? per-patch?), on what hardware, or how many runs were averaged. Even a single forward-backward pass through a small neural network or a proximal gradient iteration on a 600×400 image would take orders of magnitude longer than 26 μs. Without clarification, these numbers suggest either a reporting error or evaluation at an unrealistically small scale, which casts doubt on all quantitative results.
+- **Abstract overstates the theoretical results**: The abstract claims that the sequence "almost surely converges to a stationary point … at an explicit rate," but the formal theorems (Theorem 1(ii) and Theorem 2) establish convergence **in expectation**, not almost surely. Lemma 4 shows some almost-sure properties for the auxiliary pair {x̄^k, x^k}, but these do not extend to an almost-sure convergence statement for the algorithm's output. The concluding remarks (Section 5) correctly state "in expectation," confirming the abstract is an overstatement. This misrepresents the theoretical contribution.
 
-2. **Reference inconsistencies for key baselines.** The paper uses the name "SAdam" inconsistently: the Related Work section attributes SAdam to Le-Duc et al. (2024) and Wang et al. (2019), but the table heading and contribution section cite it as "(Kingma & Ba, 2014)" — Kingma & Ba is the plain Adam paper. Similarly, the Related Work states that Reddi et al. (2019) named SNAdam, while the table and contribution section cite SNAdam as "(Xie et al., 2024)" — but the text says Xie et al. proposed "SAdan," not SNAdam. These inconsistencies make it unclear which algorithms were actually used as baselines, which is a serious concern for a paper claiming empirical superiority.
-
-3. **No ablation or sensitivity analysis for the claimed advantages.** The experimental section reports only final metric values. There are no convergence curves, no ablation studies isolating the effect of the two-track design from the variance reduction or momentum components, no sensitivity analysis for the randomly-selected parameters ($\gamma_{k+1}, \lambda_{k+1}, \alpha_{k+1}$), and no multiple-seed trials with error bars. Without these, it is impossible to attribute the empirical gains to the two-track mechanism specifically rather than to hyperparameter choices or other implementation details.
-
-4. **The claim "removing hand-tuning" is misleading.** The hyper-parameter intervals in (6)–(8) depend on global constants $L$ (Lipschitz modulus of $\nabla f$), $\tau$ (weak convexity modulus), and estimator-dependent constants $V_1, V_T, \rho$ that are unknown in practice. The user must still estimate or bound these constants to define the intervals. This replaces one set of hand-tuned hyperparameters with another set of opaque problem-dependent constants, not "removes" hand-tuning.
+- **Theorem 2 assumes convergence of the output sequence**: Theorem 2 begins with "Let {x̃^k} → x̃^*" — the convergence of the output sequence is taken as a premise rather than proved. Theorem 1 establishes convergence (in expectation) of {x̄^k}, but the main text does not demonstrate that convergence of the extrapolation track implies convergence of the output {x̃^k}. Since x̃^{k+1} = P_g(x̄^{k+1}, …), one could plausibly bridge this gap, but as presented in the main text, the central rate result rests on an unverified premise. This weakens the theoretical contribution.
 
 ### Minor
 
-5. **Missing Step 4 in the analysis.** Section 3 jumps from "Step 3" (Lemma 5, Theorem 1) directly to "Step 5" (Theorem 2). While this is likely a formatting artifact from rearranged content, it suggests the theoretical narrative was assembled from fragments and reduces confidence in the presentation.
+- **Narrow experimental scope**: The empirical evaluation is confined to a single task (low-light image enhancement) on a single dataset (LOL). The optimizer baselines are limited to SGD, Adam (labeled "SAdam"), and SNAdam. No comparisons are made with other relevant adaptive methods (e.g., RAdam, AdaBelief) or with standalone variance-reduced optimizers (SVRG, SAGA, SARAH) solving the same objective — which would directly test the claimed benefit of the two-track design over simpler variance-reduced schemes.
 
-6. **Lemma 1 conditions are stated but not verified for any concrete estimator.** Lemma 1 defines abstract conditions (MSE bound, geometric decay, convergence) for a "variance-reduced gradient estimator," and the paper claims these hold for SVRG, SAGA, SARAH, SPIDER. But it provides no verification — not even a sketch or a citation showing why any specific estimator satisfies (3)–(5). The theoretical results that build on Lemma 1 are therefore conditional on unverified assumptions.
+- **Implausible timing measurements**: The reported times (~2–5 × 10⁻⁵ seconds per image) are not explained. For full-image processing through the Retinex-Net training framework, these values are orders of magnitude too small. It is unclear whether these represent per-iteration timings or per-image timings, and no computational setup is described.
 
-7. **The two-track motivation is imprecise.** The paper explains the two-track design as aiming to "promote the formation of a larger update neighborhood, while exploring a better iteration direction continuously." This intuition is not made precise — the paper never formalizes what "larger update neighborhood" means or why two tracks achieve it while single-track extrapolation (as in NAG or NAdam) does not. Figure 1 is a cartoon with undefined notation (e.g., arrows labeled $\hat{m}^{k+1}, \tilde{m}^{k+1}$) that does not cleanly map to Algorithm 1.
-
-8. **Joint denoising experiment (Table 3) is too narrow.** It tests only 2 images against 3 baselines. This is insufficient to support any general claim about denoising performance.
+- **Practical hyperparameter guidance is overstated**: The parameter intervals (equations 6–8) depend on problem-dependent constants (s, V₁, V_T, ρ, smoothness moduli L, τ) that are not available in practice. The claim that these intervals "remove hand-tuning" (Section 1.2) is not supported — the lower bounds cannot be computed without oracle knowledge of the problem constants.
 
 ### Trivial
 
-9. The analysis mentions SVRG and SPIDER as supported estimators but only evaluates SGD, SAGA, and SARAH.
-10. The proximal gradient operator notation $\mathcal{P}_g(x, y, t)$ is nonstandard — the usual proximal operator takes a step size, not a separate linear term and step size — though the definition is provided in Remark 1(i).
+- **Naming inconsistency**: "SAdam" in Section 4 refers to Adam (Kingma & Ba, 2014), but the related work section uses "SAdam" to refer to a different algorithm (Le-Duc et al., 2024). This creates unnecessary confusion for the reader.
 
 ## Nice-to-Haves
 
-- Compare against a broader set of adaptive first-order optimizers (AdamW, AMSGrad, AdaBelief) to better contextualize performance.
-- Add a controlled synthetic experiment where the ground-truth optimum is known, to isolate the effect of the two-track mechanism from model-specific factors.
-- Include convergence curves (objective value vs. iterations) alongside final metric tables.
+- Clarify the motivation for the two-track design: the geometric intuition ("larger update neighborhood") is informal. Connecting the two-track structure analytically to improved conditioning or larger admissible step sizes would strengthen the algorithmic contribution.
+- Include an ablation comparing the two-track STNAdam against a single-track variant using the same variance-reduced estimator and similar hyperparameters, to isolate the benefit of the two-track mechanism.
+- Provide a heuristic or default parameter set that does not rely on unknown problem constants and demonstrate that performance remains strong.
 
 ## Removed Points
 
-These points were flagged during review but are removed with justification:
+These points are flagged to be removed; treat them with caution.
 
-- **"Experimental comparison is fundamentally invalid (mixing LIE methods with optimizers)"** — The harsh critic called this "apples-to-oranges" and said the comparison is uninformative. However, the paper clearly separates its claims: Contribution (iii) says "favorable practical performance" against both single-track optimizers *and* customized LIE methods. The paper includes a valid optimizer comparison (SGD, SAdam, SNAdam vs. STNAdam variants on the same problem (14)) *alongside* a practical comparison against LIE-specific methods. The latter is a standard way to show a full-pipeline advantage in applied optimization papers. It does not invalidate the optimizer comparison. The weakness is softened to a suggestion for clearer separation in presentation, not a fundamental flaw.
+- **"Insufficient experimental validation" criticisms about missing comparisons with RAdam, AdaBelief, SVRG, SARAH-only** (from Harsh Critic): These are valid observations but the critic frames them as "fatal" — they are properly categorized as Minor above. The paper does compare against 11 methods, which provides some baseline evidence. The missing comparisons are a scope limitation, not a fatal flaw.
 
-- **"Time(s) orders of magnitude too fast for neural network processing"** — The paper states it "adopts the training framework of Retinex-Net" and references the appendix for details. The appendix (removed from this review) may specify that the timing is per-patch or per-iteration on a small subproblem. The criticism of "implausible" timing is valid as a *presentation* issue (the main text should explain the timing) but is not a proof of error. Retained as a major weakness in modified form.
+- **"The derivation of the subgradient bound in Lemma 3 appears plausible, but the proof is not fully spelled out"** (from Harsh Critic): The harsh critic speculates about gaps in the appendix without being able to verify them. The appendix is stripped. The main text presents Lemma 3 with an explicit bound (equation 11). This speculation is removed.
 
-- **"The analysis cannot be assessed for correctness"** — This is true of most papers that defer proofs to an appendix; it is not a specific weakness.
+- **"Discrepancy between abstract and theorems" classified as "structural" and "fatal"** (from Harsh Critic): The overstatement is real and retained as Major, but it is a presentation error — the rest of the paper (formal theorems, concluding remarks) consistently says "in expectation." It does not invalidate the mathematical content, so it is not fatal.
 
-- **"Not enough baselines like AdamW, NAdam, AMSGrad"** — This is a generic nice-to-have, not a weakness.
+- **Strength about "Rigorous global convergence"** (from Strength Finder): Partially removed. The convergence framework is substantial, but calling it a strength without qualification is misleading given the Theorem 2 gap and the abstract overstatement. Retained in qualified form.
 
-- **"The LIE problem-specific constants make the intervals impractical"** — This overlaps with weakness #4 above and is merged there.
+- **"Iterate-dependent parameter scheduling with theoretical guarantees" as a strength** (from Strength Finder): The intervals exist but depend on unknown constants. The claimed practical benefit is undermined by the Minor weakness noted above. Demoted from a standalone strength.
 
-- All pure formatting/style nitpicks.
+- **"Compelling empirical performance"** (from Strength Finder): Retained but the experimental scope limitation is noted. The results on the LOL dataset are positive, but "compelling" overstates given the narrow evaluation.
 
-- All reproducibility nitpicks about undisclosed hyperparameters or trivial implementation details.
+- **Demand for confidence intervals / larger-scale benchmarks**: This is scope creep for a theory-leaning paper. Removed.
+
+- **Criticism that the paper lacks a discussion of limitations**: This is an organizational preference, not a substantive weakness. The assumptions (coercivity, KL property) are stated explicitly. Removed.
+
+- **Criticism that specialized LIE methods "solve different optimization problems"**: The paper explicitly maps the LIE model (14) to problem (1), so all methods are applied to the same reconstruction objective through the Retinex-Net framework. This criticism misunderstands the setup. Removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The main insight — that coupling two intertwined iteration trajectories (one extrapolation, one regular update) with adaptive momentum can yield better optimization than single-track variants — is the paper's own claim, not something that emerged from the reviews.
+None beyond the paper's own contributions. The two-track coupling of Nesterov extrapolation with Adam-style adaptive conditioning is the paper's distinctive idea, and the convergence analysis under the KL property — while following established proof patterns — applies this framework to a novel algorithm class.
 
 ## Suggestions
 
-1. **Clarify what "Time(s)" measures.** Specify: per-image, per-iteration, or per-patch timing; on what hardware; averaged over how many runs. If the timing is for a small patch, state this explicitly in the main text.
-
-2. **Fix the reference inconsistencies.** Ensure SAdam and SNAdam are attributed to the correct papers. Clarify which "SAdam" is used — the stochastic Adam from Kingma & Ba, or the strongly-convex variant from Le-Duc et al.
-
-3. **Add convergence curves and an ablation study.** Show objective value vs. iterations for at least STNAdam-SARAH vs. SNAdam vs. SGD. Run an ablation that disables the two-track mechanism (reverting to single-track NAdam-style updates) to isolate the contribution of the two-track design.
-
-4. **Soften the "removing hand-tuning" claim.** Acknowledge that the parameter intervals depend on problem-dependent constants ($L, \tau$) and estimator-specific constants ($V_1, V_T, \rho$), and describe how a practitioner might estimate or bound these in practice.
-
-5. **Verify Lemma 1 conditions for at least one estimator (e.g., SARAH).** Even a brief sketch in the main text or a reference to an existing proof would substantially strengthen the theoretical contribution.
-
-6. **Fix the Step 3 → Step 5 jump.** Either renumber or add a (possibly empty) Step 4.
-
-## Calibration
-
-**Round 1 bracket**: [4.0, 5.5]. The paper is clearly stronger than rejected anchors below 3.5 (thin contributions) but notably weaker than accepted anchors around 6.0–6.75 (which have clearer motivation, convincing experiments, and polished presentation).
-
-**Round 2 narrowing**: The rejected paper at avg 4.25 (*Adam under Non-uniform Smoothness*) had proof gaps and "no substantial contribution" criticism; STNAdam has more algorithmic novelty. The rejected paper at avg 5.0 (*SGDM Bounds*) was criticized for marginal improvement and outdated methods; STNAdam has a more original algorithm but worse experimental validation. The accepted paper at avg 6.0 (*Double Momentum SGD*) had strong theory and clear experiments. STNAdam falls below this level due to unexplained timing data, reference inconsistencies, and lack of ablation evidence.
-
-**Final score**: 4.5. The algorithmic idea is genuinely novel and the theory is broad, but the experimental validation has credibility issues (timing numbers) and the presentation has multiple inconsistencies that prevent acceptance in the current form.
-
-### Anchor Papers Retrieved
-
-| anchor_id | avg_score | round | comparison |
-|-----------|-----------|-------|------------|
-| 5nldnvvHfw | 2.50 | Bracket | Much weaker — thin contribution, rejected |
-| cya3eEczAx | 1.67 | Bracket | Much weaker — thin contribution, rejected |
-| 1NYhrZynvC | 2.50 | Bracket | Much weaker — thin contribution, rejected |
-| Og7ZZd7hDm | 3.25 | Bracket | Weaker — novelty concerns, rejected |
-| mEBSeSk49H | 4.25 | Bracket & Narrow | Comparable — STNAdam has more algorithmic novelty but worse experiments |
-| n3TkrH7fEr | 6.25 | Bracket | Stronger — tighter analysis, accepted |
-| YwJkv2YqBq | 6.75 | Bracket & Narrow | Stronger — clearer motivation and presentation, accepted |
-| Fj6Yv5rPRe | 4.25 | Bracket & Narrow | Comparable — STNAdam has more algorithmic novelty |
-| x45vUUY4nT | 5.00 | Narrow | Marginally stronger — better writing but also rejected |
-| gBT6rAEqvx | 3.80 | Narrow | Weaker — rejected |
-| CIqjp9yTDq | 6.25 | Narrow | Stronger — clearer experiments, accepted |
-| zCZnEXF3bN | 6.00 | Narrow | Stronger — better theory-practice match, accepted |
+- Correct the abstract to state "converges in expectation" rather than "almost surely converges" to match the formal theorems.
+- Either prove in the main text that convergence of {x̄^k} implies convergence of {x̃^k}, or restructure Theorem 2 to not assume convergence of the output sequence.
+- Expand the optimizer baselines to include at least one other adaptive method (e.g., RAdam or AdaBelief) and one standalone variance-reduced optimizer (e.g., SAGA or SARAH with fixed learning rate) applied to the same objective.
+- Clarify the timing measurements — specify whether they are per-iteration, per-image, or wall-clock total, and describe the hardware used.
+- Provide a practical default parameter configuration that does not require unknown problem constants, and demonstrate its effectiveness.
 
 ## Score and Decision
 
-MY FINAL SCORE: <score>4.5</score>
+**Round-1 bracket**: Based on comparison with anchors across score bands, the paper sits in the middle band (3.5–7.5). The weak-band anchors (2.5–3.25) are clearly below this paper; the strong-band anchors (8.0) are clearly above.
+
+**Round-2 narrowing**: Comparison with anchors in the 4–6 range:
+
+| Anchor | Score | Comparison |
+|---|---|---|
+| mEBSeSk49H (Adam/SGDM, non-uniform smoothness) | 4.25 | STNAdam is stronger: more novel algorithm, more coherent theory (mEBSeSk49H has incomplete proofs, degenerate lower bounds) |
+| DIAaRdL2Ra (Adafactor convergence) | 5.00 | STNAdam is comparable: similar structure (first analysis of a variant, theoretical contribution with assumptions, limited experiments). STNAdam has a more novel algorithm but similar experimental limitations |
+| Nh1ZH61OqF (AdaFM, adaptive variance-reduced) | 5.00 | STNAdam is comparable: both propose new adaptive variance-reduced algorithms with convergence theory. AdaFM's experiments are stronger; STNAdam's KL-based convergence framework is more complete |
+| YwJkv2YqBq (Nesterov in benign non-convexity) | 6.75 | STNAdam is weaker: less rigorous theory, no honest limitations discussion, weaker experiments |
+
+STNAdam has genuine algorithmic novelty and a substantial theoretical framework, but the abstract overstatement, the Theorem 2 gap, and narrow experimental validation prevent it from rising above the 5.0 range. It sits comparably to DIAaRdL2Ra and Nh1ZH61OqF.
+
+MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

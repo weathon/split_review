@@ -1,92 +1,87 @@
-Excellent. Now I have enough calibration context. Let me synthesize the final review.
-
-## Summary of Bracketing and Calibration
-
-**Round 1 bracket**: Based on initial search, I placed this paper between the weak anchors (~3) and strong anchors (~8), establishing a plausible range of 4–7.
-
-**Round 2 narrowing**: I compared against ReNovo (6.50, Accept), RankNovo (5.50, Reject), DenoiseVAE (7.00, Accept), and RoCA (6.67, Accept) — all from proteomics or causal ML. CausalNovo is clearly stronger than RankNovo (better improvements, more thorough evaluation). It is comparable to ReNovo (both are de novo sequencing papers with good empirical results but some missing controls). It is slightly weaker than DenoiseVAE and RoCA due to the theoretical murkiness around the purification objective.
-
-**Final score**: 6.5 — the paper is solid and above the acceptance threshold, slightly below the strongest anchors due to one murky theoretical component and one missing ablation control, but with stronger empirical breadth than its closest comparator ReNovo.
-
-Now writing the review.
-
----
-
 ## Summary
 
-CausalNovo introduces a model-agnostic framework for *de novo* peptide sequencing that learns causal representations (signal fragment ions) disentangled from non-causal noise peaks. It formalizes the task via a Structural Causal Model, derives independence and sufficiency principles, and implements them through a Causality Extraction Module (CEM) with contrastive and information-theoretic objectives. Experiments across three benchmark datasets and three strong baselines show consistent, substantial improvements (up to 12% in amino acid precision, up to 15.1% in PTM precision), supported by vulnerability analyses, NSR generalization studies, and attention interpretability evidence.
+CausalNovo proposes a model-agnostic framework for improving noise robustness in deep learning-based *de novo* peptide sequencing. The method formalizes the problem through a Structural Causal Model, derives two principles (independence and sufficiency) for causal representations, and implements them via a Causality Extraction Module with contrastive learning and label-guided data augmentation. Applied to three strong baselines (CasaNovo, AdaNovo, π‑HelixNovo) across three standard benchmarks, CausalNovo yields consistent improvements of up to 10% in amino-acid, peptide, and PTM-level metrics, with particularly strong gains under high-noise conditions and across species.
 
 ## Strengths
 
-1. **Principled causal formulation grounded in the SCM framework.** The paper formalizes peptide sequencing using Reichenbach's Common Cause Principle, deriving two clear properties (independence and sufficiency) that directly motivate the CEM design and learning objectives. This goes well beyond ad-hoc robustness tricks and provides a reusable conceptual foundation for causal reasoning in proteomics.
+- **Comprehensive empirical benchmarking**: Tables 1–2 report amino-acid, peptide, and PTM-level performance across three public datasets (Nine-species, Seven-species, HC‑PT) for all three integrated baselines. CausalNovo improves every baseline on essentially every metric — e.g., lifting π‑HelixNovo's PTM precision by +15.1% on Seven-species (Table 2). This exhaustive evidence shows the gains are not isolated or metric-specific.
 
-2. **Consistent and substantial empirical gains across diverse settings.** CausalNovo improves all three baseline models (CasaNovo, AdaNovo, π-HelixNovo) across all three datasets, at amino acid, peptide, and PTM levels, with gains reaching +12.0% (amino acid precision on Seven-species) and +15.1% (PTM precision on Seven-species). The improvements are large, consistent, and observed without changing the underlying model architecture.
+- **Convincing vulnerability and robustness analyses**: Figure 1 (preliminary experiment) and Figure 3 (HC‑PT) demonstrate that baseline models degrade progressively as noise peaks are perturbed, while CausalNovo substantially mitigates this degradation, achieving relative improvements up to 28.5% (Table 6, threshold=1). Figure 4 further shows CausalNovo maintains higher precision than baselines across the entire Noise Signal Ratio range for all three architectures, confirming architecture-independent noise resilience.
 
-3. **Multiple converging lines of evidence for the claimed mechanism.** Beyond raw performance numbers, the paper provides vulnerability analyses (Figures 1, 3) showing CausalNovo-enhanced models degrade less under noise peak perturbation, NSR generalization (Figure 4) showing improved robustness at all noise levels, attention analysis (Table 7) showing the model actually attends to causal peaks more, and cross-species validation (Table 3) showing improved generalization. This multi-evidence approach convincingly supports the causal interpretation.
+- **Granular ablation studies**: Tables 4 and 5 isolate the contribution of each component (independence objective, purification loss, symmetric contrastive training, replace-based perturbation, causality enhancement), showing additive benefits from each and ruling out simpler alternatives (e.g., random drop does not help).
 
-4. **Clean ablation study confirming each component's contribution.** Table 4 decomposes the full system and shows that independence, purification, and symmetric training each add measurable value. This counters the concern that performance gains are merely from added parameters.
+- **Mechanistic validation via attention analysis**: Table 7 quantifies how CausalNovo shifts model attention toward causal peaks — the fraction of predictions attending to all three causal peaks rises from 19.26% to 32.87%, and zero-causal-peak predictions drop from 12.73% to 10.76%. This directly links performance gains to the intended mechanism.
+
+- **Cross-species generalization**: Table 3's leave-one-out validation across eight held-out species shows consistent +2.6% average peptide precision improvement, demonstrating the learned representations transfer across biological contexts.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
-- **The purification objective (maximizing I(z_s; Y)) lacks a fully coherent theoretical justification.** The paper states that this objective "can indirectly lead to the purification of z_c" because optimizing I(z_c; Y) alone could allow non-causal information to leak into z_c while reducing I(z_s; Y). The proposed response — maximizing I(z_s; Y) — would create competition between the two streams for predictive information. This is a plausible mechanism, but the paper's explanation is too brief and appears to contradict standard disentanglement practice where non-causal representations are *discouraged* from predicting the label. The authors either need to (a) provide a clearer theoretical argument (e.g., grounded in information bottleneck or redundancy reduction), (b) cite a formal result from Chen et al. (2022) that justifies this, or (c) honestly reframe this objective as a heuristic regularizer that helps empirically. The ablation shows it works, but the causal framing of this specific objective is not yet earned.
+
+None.
 
 ### Minor
-- **No explicit control for the added parameters of the CEM.** The CEM adds 3 Transformer layers + an MLP to the baseline encoder's 9 layers. The ablation study (Table 4) compares "Baseline" (no CEM) against "Independence only" (CEM + contrastive loss), but does not test a control condition where a module of equivalent capacity is added *without* any causal objectives (e.g., trained with standard cross-entropy only). Without this control, some of the observed gains could in principle come from increased model capacity rather than the causal intervention. The vulnerability and attention analyses partially address this concern, but a clean capacity-control experiment would strengthen the paper significantly. (Note: This is a real gap but not fatal — the ablation shows that adding causal objectives on top of the CEM progressively improves performance, suggesting the causal intervention itself matters.)
 
-- **No statistical significance or variance reporting.** The main results (Tables 1, 2) report single-run numbers without confidence intervals or standard deviations. Given the improvements are large and consistent across 3 baselines × 3 datasets, this is less concerning than it would be for marginal gains, but it remains a gap in reporting rigor.
+- **Unexplained figure legend variants**: Figures 1 and 3 include legend entries for "Baseline +", "CausalNovo (Duo)", and "CausalNovo (Duo) +" whose meanings are never defined in the main text. The perturbation protocol for the vulnerability evaluation is described at a high level (noise peaks are replaced based on m/z proximity to the theoretical spectrum), but specific details — what replacement values are used, whether all or a fraction of non-causal peaks are replaced, and how the "+" and "Duo" variants differ — are absent. This weakens the interpretability and reproducibility of the vulnerability argument.
+
+- **Missing hyperparameter values for α and γ in the main text**: The replace fraction α and tolerance threshold γ that control the causal intervention are introduced conceptually (Section 3.4.1, Eq. 4) but their concrete numeric values are not stated in the main paper. Practitioners cannot reproduce the intervention without these. (These may appear in the stripped appendix.)
 
 ### Trivial
-- The explanation "However, it can reduce I(z_s; Y)" (Section 3.3) is grammatically ambiguous — it is unclear what "it" refers to.
-- The increased training time (2.3×) is noted but a brief breakdown of which component causes the overhead would help.
+
+- **Causal framing is partly rhetorical**: The method is more accurately described as label-guided data augmentation with a contrastive invariance objective. The paper acknowledges that the "intervention" is simulated using ground-truth labels to identify noise peaks (Section 3.4.1), and the contrastive objective approximates mutual information (Section 3.4.2). The empirical gains do not require a strong causal interpretation. A short paragraph clarifying the boundary between the causal ideal and the practical approximation would improve intellectual precision without weakening the contribution.
+
+- **The x_intervene = x_replace ∪ x_theory union is a strong signal**: Appending the full theoretical spectrum during training provides the model with a near-ideal copy of the signal. While the contrastive objective mitigates the risk of the encoder ignoring the original spectrum, a brief remark on this architectural choice would help readers.
 
 ## Nice-to-Haves
-- A brief hyperparameter sensitivity analysis (temperature τ, replacement fraction α) would demonstrate robustness.
-- Extending the framework to additional baseline architectures (e.g., InstaNovo, SearchNovo) would strengthen claims of model-agnosticity.
-- Reporting results with the more realistic evaluation protocol (training on large external corpora, as used by ContraNovo/RankNovo) would increase real-world relevance.
+
+- A comparison against a simpler augmentation baseline that *only* adds theoretical peaks (without noise-peak replacement and without the contrastive loss) would more cleanly isolate the source of improvement.
+- A sensitivity analysis for α and γ to confirm the method's gains are not fragile to these choices.
+- An explicit confirmation in the main text that inference uses only the original spectrum (no theoretical spectrum or peak identification step at test time), to complement the existing statement about negligible inference overhead.
 
 ## Removed Points
-- **"The experimental design lacks a control for increased model capacity"** — kept but demoted to Minor. The reviewer's concern about a "structural gap" is overstated; the ablation already shows progressive improvements as causal objectives are added to the CEM, and the vulnerability/attention analyses provide direct causal evidence that extra capacity alone cannot explain.
-- **"Missing error bars"** — kept but placed as Minor.
-- Points about missing appendix content, missing related work references, and formatting issues — all removed per hard rules (parser artifacts, not verifiable).
-- Strength Finder's generic claims about problem importance — removed as too generic.
+
+These points were flagged for removal from the main review. Treat them with caution.
+
+- **Harsh Critic claim that the vulnerability evaluation is under-specified to the point of being an evidential gap**: Retained as a minor weakness, but downgraded from "critical" because the perturbation strategy is described (proximity to theoretical spectrum with m/z tolerance), the concept is clear, and the appendix (stripped) likely contains full details. Not a gap that threatens core claims.
+
+- **Harsh Critic claim that "RCCP in its classic form does not directly imply C ⟂ S unconditionally"**: Removed. The paper asserts C ⟂ S as a structural assumption in Eq. (2) based on the SCM, not as a derived consequence of RCCP. This is a valid modeling choice, and the reviewer's concern reflects a misreading.
+
+- **Strength Finder's generic strength about "the paper addresses an important problem"**: Removed — purely generic praise with no concrete anchor.
+
+- **Harsh Critic's suggestion to "tone down the causal narrative" as a weakness**: Downgraded to Trivial. The paper is honest about using labels to simulate interventions, and the method's effectiveness is demonstrated regardless.
+
+- **Harsh Critic's concern about "no comparison with simpler data-augmentation baselines"**: Moved to Nice-to-Haves. The paper ablates replace-only, replace+enhance, and drop (Table 5), which covers the space reasonably well, though the specific "add theoretical peaks only" baseline is indeed absent.
 
 ## Novel Insights
-None beyond the paper's own contributions. The strength of this paper is in its systematic application of a causal framework to *de novo* peptide sequencing rather than in a fundamentally new conceptual insight about causality or representation learning.
+
+The paper's combination of vulnerability perturbation analysis with attention-based mechanistic validation is genuinely informative. By showing that baseline models degrade under systematic noise-peak replacement *and* that CausalNovo's attention patterns shift measurably toward causal ions, the paper provides a rare two-pronged validation: the method improves numbers, and the numbers improve for the hypothesized reason. This pattern of evidence — perturbation studies plus attention analysis — could serve as a template for evaluating robustness interventions in other spectroscopy domains.
 
 ## Suggestions
-1. **Clarify the purification objective.** Either provide a formal information-theoretic argument for why maximizing I(z_s; Y) "purifies" z_c (e.g., via a redundancy reduction or competition mechanism), or reframe it as a practical heuristic regularizer that empirically helps rather than claiming it follows directly from causal principles.
-2. **Add a model capacity control experiment.** Include a baseline where the CEM architecture is added but trained only with standard cross-entropy (no independence or purification objectives). If this does not achieve the same gains, the case for causality is substantially stronger.
-3. **Report variance across multiple runs** (at least 3 seeds) for the main tables to improve statistical credibility.
+
+- Move the definitions of the "+" and "Duo" variants from the appendix into the main text or into the figure captions of Figures 1 and 3.
+- State the numeric values of α and γ explicitly in Section 3.4.1 or Section 4.2.
+- Add one paragraph in the discussion or methodology section acknowledging that the causal intervention is label-guided and that the empirical gains demonstrate noise-robust learning rather than full causal identification.
 
 ## Score and Decision
 
-**Anchors retrieved (all rounds):**
-- yIRtu2FJvY: 3.00 (round 1) — weak paper on VAE for variant effect prediction; clearly below this paper.
-- qi5dkmEE91: 3.00 (round 1) — weak paper on motif explanations; below this paper.
-- AvXrppAS2o: 3.00 (round 1) — weak paper on causal structure learning; below this paper.
-- doBof19Ia4: 2.60 (round 1) — weak paper on RNA design; below this paper.
-- ym7pr83XQr: 7.00 (round 1) — DenoiseVAE, strong paper on molecular pre-training; slightly above this paper due to cleaner theory.
-- Z756zcjNcC: 4.50 (round 1) — Denoising Diffusion Causal Discovery; below this paper.
-- 9htTvHkUhh: 6.33 (round 1) — RNA property prediction with geometric context; comparable but CausalNovo has stronger novelty.
-- ZDaI3aSDTF: 3.67 (round 1) — weak RNA SSP paper; below this paper.
-- zMPHKOmQNb: 8.00 (round 1) — very strong protein generation paper; above this paper.
-- PdaPky8MUn: 8.00 (round 1) — strong paper on sequence models; above this paper.
-- 0ctvBgKFgc: 8.00 (round 1) — strong protein structure generation; above this paper.
-- 3cuJwmPxXj: 8.00 (round 1) — strong identifiable representation learning; above this paper.
-- uQnvYP7yX9: 6.50 (round 2) — ReNovo, retrieval-based de novo sequencing; comparable but CausalNovo has broader experiments.
-- 87B3zDRMjv: 5.50 (round 2) — RankNovo, reranking for de novo sequencing; below this paper.
-- I2ZYngkRW6: 4.25 (round 2) — knowledge distillation for de novo sequencing; below this paper.
-- 78tc3EiUrN: 6.00 (round 2) — MADGEN, MS-based molecular generation; comparable.
-- Q0s6kgrUMr: 6.67 (round 2) — RoCA, causal/anticausal discovery; slightly above due to cleaner theory.
-- lWXedJyLuL: 5.67 (round 2) — SIT, causal view of instruction tuning; below this paper.
-- 1iuaxjssVp: 7.25 (round 2) — InvMSAFold, inverse folding; above this paper.
+**Round 1 bracket**: The paper sits between ReNovo (retrieval-based de novo sequencing, 6.50) and InvMSAFold (inverse folding, 7.25), placing the plausible range at [6.5, 7.5].
 
-**Round 1 bracket:** 4–7 (plausible range after bracketing with weak ~3, middle ~4-7, strong ~8 anchors).
+**Round 2 narrowing**: Compared to ReNovo (6.50), CausalNovo offers broader evaluation (3 baselines × 3 datasets vs. narrower comparison), more thorough ablation, and stronger mechanistic validation (attention analysis). Compared to InvMSAFold (7.25), CausalNovo is comparably rigorous but has slightly more presentation gaps (unexplained figure variants, unspecified hyperparameters). It lands squarely in between — stronger than the 6.50 anchor papers in its domain but short of the 7.25 anchor. Compared to IDEA (6.25), CausalNovo is clearly more thorough and better executed within its own domain. I place it at 7.0.
 
-**Round 2 narrowing:** Compared against ReNovo (6.50) — CausalNovo has broader and more convincing experiments but similar weaknesses; RankNovo (5.50) — CausalNovo is clearly stronger; DenoiseVAE (7.00) and RoCA (6.67) — slightly stronger due to cleaner theoretical framing. This places CausalNovo at the upper end of the bracket.
+### Anchors reviewed:
+| Anchor | Avg Score | Round | Comparison |
+|---|---|---|---|
+| ReNovo (uQnvYP7yX9) | 6.50 | 1,2 | Direct peer; CausalNovo is more thorough |
+| RankNovo (87B3zDRMjv) | 5.50 | 1 | Clearer contribution and stronger gains |
+| Distilling NAT (I2ZYngkRW6) | 4.25 | 1 | CausalNovo substantially stronger |
+| IDEA (FPpLTTvzR0) | 6.25 | 2 | Similar causal framing; CausalNovo better executed |
+| InvMSAFold (1iuaxjssVp) | 7.25 | 2 | Comparable rigor; CausalNovo slightly below |
+| Causal Rep. Bio (hjROBHstZ3) | 5.80 | 2 | Not directly comparable domain |
+| DenoiseVAE (ym7pr83XQr) | 7.00 | 1 | Similar quality tier |
 
-**Final score:** 6.5
-
-MY FINAL SCORE: <score>6.5</score>
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

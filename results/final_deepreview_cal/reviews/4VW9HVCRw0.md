@@ -1,95 +1,102 @@
-Now I have sufficient information to write the consolidated review. Let me synthesize everything.
-
-## Calibration Report
-
-**Round 1 - Bracketing:**
-- Weak anchors (≤3.5): KWo4w1UXs8 (3.00, Rejected), RFJGFrMvYj (1.50, Rejected), lvgsPjRtLM (2.50, Rejected), 15lk4nBXYb (3.00, Rejected) — all significantly weaker than TOUCH
-- Middle anchors (3.5-7.5): 96jZFqM5E0 (6.67, Accepted), 80faVLl6ji (6.00, Rejected), Zp8NOZo0rA (5.80, Rejected), SLDqCpHPuP (5.00, Rejected)
-- Strong anchors (≥7.5): 8enWnd6Gp3 (7.60, Accepted), u1cQYxRI1H (10.00, Accepted), CRmiX0v16e (7.80, Accepted), LbEWwJOufy (8.50, Accepted) — all stronger or different domain
-
-**Bracket:** 5.0–6.5
-
-**Round 2 - Narrowing:**
-- nTNElfN4O5 (5.50, Rejected) — IHDiff for interacting hands. TOUCH is slightly stronger (more contributions: task + dataset + method vs. just a prior)
-- ZYwLfi50GI (5.25, Rejected) — HOI-Diff for text-driven HOI. TOUCH is clearly stronger (hand-level focus vs. coarse body-level)
-- OWIk5E4lJs (5.20, Rejected) — Interactive-action image generation. Different domain.
-- ktG8Tun1Cy (6.75, Accepted) — Text-to-3D with classifier score distillation. Different technique, stronger execution.
-- TEkoMEjf7E (6.20, Accepted) — Phidias 3D generation. Different domain.
-
-**Anchor comparisons for final score:**
-- TOUCH is clearly stronger than HOI-Diff (5.25) and IHDiff (5.50)
-- TOUCH is comparable to ControlMM (5.80) and Kinematic Phrases (6.00) — similar profile of real contributions with notable limitations
-- The structured-text requirement and dataset limitations prevent TOUCH from reaching the 6.5+ level
-
-**Final score: 6.0** — The paper has genuine contributions (new task, dataset, method with strong results) but structural limitations in input flexibility and dataset validation keep it from being a clear strong accept.
+Now I have all the information I need. Let me carefully synthesize the review, verifying every claim against the actual paper.
 
 ---
 
 ## Summary
 
-This paper introduces the task of free-form hand-object interaction (HOI) generation, moving beyond the grasp-centric paradigm to include diverse everyday actions like pushing, poking, and rotating. The authors contribute (1) WildO2, a dataset of 4,414 3D HOI samples from internet videos spanning 92 intents and 610 object categories with multi-level semantic annotations, and (2) TOUCH, a three-stage framework that combines contact map prediction via CVAEs, multi-level conditioned diffusion with coarse-to-fine text conditioning, and a physical refinement module with cycle-consistency loss. Experiments show clear quantitative improvements over adapted baselines (ContactGen, Text2HOI) across contact accuracy, physical plausibility, diversity, and semantic consistency metrics.
+The paper introduces the task of **Free-Form Hand-Object Interaction (HOI) Generation**, extending beyond grasp-centric paradigms to include diverse non-grasping actions (pushing, poking, rotating). The authors construct **WildO2**, the first large-scale in-the-wild 3D HOI dataset (4,414 samples, 92 intents, 610 object categories) via an automated O2HOI pipeline from internet videos, and propose **TOUCH**, a three-stage framework combining contact map prediction, multi-level conditioned diffusion, and physical refinement. Experiments demonstrate strong performance across contact accuracy, physical plausibility, and semantic consistency metrics, with notable out-of-domain generalization and emergent understanding of force-related semantics.
 
 ## Strengths
 
-1. **Novel task formulation and dataset.** The paper identifies a genuine gap in HOI generation — the over-emphasis on grasping at the expense of the broader range of daily hand interactions — and constructs WildO2 as the first large-scale 3D dataset targeting this space. The O2HOI frame pairing strategy and automated reconstruction pipeline are clever engineering contributions that enable scaling beyond lab-collected data. The dataset covers 92 intents and 610 object categories, providing a valuable resource for future research.
+- **Novel and well-motivated dataset (WildO2)**: The O2HOI pipeline produces the first large-scale in-the-wild 3D HOI dataset with non-grasping interactions, filling a critical gap. The mask-transfer strategy (dense matching to avoid diffusion inpainting artifacts) is a sensible and scalable design choice. The dataset covers 92 intents and 610 object categories with 17-part hand segmentation and multi-level semantic annotations (SSCs and DSCs), providing a resource beyond what lab-based datasets offer. (Sec. 3.1–3.3, Fig. 3)
 
-2. **Strong quantitative results against adapted baselines.** Table 1 shows TOUCH substantially outperforming both ContactGen and Text2HOI across nearly all metrics, with particularly notable gains in contact accuracy (P-IoU 0.776 vs. 0.620/0.711) and physical plausibility (MPVPE 2.97 vs. 5.46/4.69). These results are on a held-out test split and demonstrate that the three-stage design delivers on its central promise.
+- **Strong generative performance**: TOUCH substantially outperforms ContactGen and Text2HOI baselines on all major metrics — P-IoU 0.776 vs. 0.620/0.711, penetration volume 2.67 vs. 7.37/4.93, and notably better semantic consistency (VLM score 7.1 vs. 4.8/6.5, perceptual score 8.8 vs. 6.3/7.5). The ablation study (Table 2) cleanly isolates the contribution of each component. (Sec. 5.2–5.3)
 
-3. **Well-motivated architectural design with thorough ablation.** The coarse-to-fine conditioning mechanism (Eq. 4–5) that injects SSC + global geometry early and DSC + contact features into later Transformer blocks is a principled design. Table 2 validates each component's contribution: removing multi-level conditioning drops P-IoU from 0.728 to 0.525, and removing contact prediction drops it to 0.492. The authors' argument that PD/PV alone can be misleading without contact (the "✗ refiner" variant has low PV but poor contact) is insightful and correctly interpreted.
+- **Well-designed multi-level coarse-to-fine conditioning**: The hierarchical injection of global conditions (SSCs, global geometry) in early diffusion blocks and local conditions (DSCs, contact-point features) in later blocks (Eqs. 4–5) is a principled design. The ablation ("✗ mul.") drops P-IoU from 0.728 to 0.525, confirming the multi-level structure is essential. (Sec. 4.2, Table 2)
 
-4. **Semantic controllability beyond direct supervision.** The finding that the model learns to associate "firmly" vs. "gently" with larger vs. sparser contact areas (Section 5.4.3, Fig. 9) without explicit force supervision is a nice emergent property that demonstrates the framework's capacity to capture nuanced semantics from text.
+- **Semantic understanding of force expressions without explicit physics supervision**: The model learns to map "firmly"/"gently" to contact geometry, producing 22–25% larger average contact area for firm prompts. This is a genuinely interesting finding demonstrating semantic-to-geometry mapping. (Sec. 5.4.3, Fig. 9)
+
+- **Comprehensive multi-faceted evaluation**: The paper evaluates across contact accuracy (P-IoU, P-F1), physical plausibility (MPVPE, PD, PV), diversity (entropy, cluster size), and semantic consistency (P-FID, VLM, user perceptual score), offering a holistic picture of generation quality. (Sec. 5.1)
 
 ## Weaknesses
 
-### Major
-
-1. **Fine-grained control requires explicit hand-part labels in structured text, limiting practical applicability.** The DSC prompts must explicitly name hand contact parts (e.g., "Apply [thumb, index, middle, ring pad] to grasp the [end] of rod"). The key step of "hand-part mask initialized from the fine-grained text T_{DSC}" (Section 4.1) is underspecified — the paper does not explain how text-parsed part labels are converted to a point-level mask on the canonical hand mesh. While the paper delivers on its claim of fine-grained control, the interface is brittle: a user cannot say "push the bottle" and get finger-appropriate poses without also knowing and specifying which hand parts to use. The paper should acknowledge this as a current limitation and discuss directions for inferring contact parts from less structured language (e.g., learning a mapping from action verbs to contact distributions).
-
-2. **Dataset limitations raise concerns about generalization and evaluation validity.** WildO2 has a 55% pipeline success rate (31% pose estimation failure), is derived from a single source (Something-Something V2, a tabletop action dataset), and contains only 4,414 samples. The 45% failure cases may systematically exclude harder interactions (heavy occlusion, small objects), creating a selection bias that the paper does not analyze. Evaluation is conducted entirely on a held-out split of the same reconstruction pipeline's outputs — metrics like MPVPE and P-IoU measure consistency with the dataset's reconstructed poses, not ground-truth physical interactions. The out-of-domain experiments (Fig. 7, Objaverse) are purely qualitative. The "22-25% larger contact area" for firm/gentle prompts is stated without a supporting table or statistical test.
-
-### Minor
-
-3. **Baseline comparison fairness is partially unclear.** ContactGen and Text2HOI are repurposed from different tasks and augmented with post-processing. The paper does not ablate the effect of this post-processing on baseline performance, making it hard to assess whether the gains come from TOUCH's design or from the baselines being poorly adapted.
-
-4. **Evaluation details are sparse in places.** The VLM-assisted evaluation (which VLM? prompting protocol?) is not described. The perceptual score from 10 users is very small for reliable conclusions. A small human study on action correctness (does "push" look like a push?) would significantly strengthen claims about semantic consistency.
-
-5. **The static single-frame scope is narrower than "interaction" implies.** The paper acknowledges this in the limitations section, which is good. But the title and framing ("generation of free-form hand-object interactions") suggests dynamic processes, while the output is a single pose. This is a presentational overreach that should be calibrated.
-
-### Trivial
+### Fatal
 
 None.
 
+### Major
+
+None.
+
+### Minor
+
+- **Overlap between data pipeline and refinement objectives**: The ground-truth reconstructions in WildO2 are produced by an optimization that includes physical constraints (`L_phy` in Eq. 2: contact, penetration, anatomy), and TOUCH's refinement module uses the same `L_phy` (Eq. 7). While the diffusion model is trained via standard supervised learning (not `L_phy`) and physical constraints are universally desirable properties, the paper does not discuss whether the reconstruction optimization introduces systematic biases into the ground truth (e.g., over-smoothed contacts, idealized poses) that could inflate metrics for any method that also optimizes these same terms at test time. A brief acknowledgment of this relationship and its implications for metric interpretation would strengthen the paper. (Sec. 3.2 Stage 3, Sec. 4.3)
+
+- **Baseline post-processing not fully described**: The paper states baselines are "augmented with an optimization-based post-processing module to correct hand poses" (Sec. 5.2), but does not specify whether this module is identical to TOUCH's refinement, a generic optimizer, or something else. Since both baselines suffer from hand drift absent this module, readers cannot fully assess the fairness of the comparison without knowing what optimization was applied and with what hyperparameters.
+
+- **Selection bias from the 55% reconstruction success rate not discussed**: 45% of clips fail reconstruction (31% pose estimation failure, Fig. 3a). The paper does not analyze whether certain interaction types, object categories, or occlusion patterns are systematically lost, which could affect the representativeness of the final dataset and the trained model's behavior. (Sec. 3.2, Fig. 3a)
+
+- **Out-of-domain generalization is only qualitative**: The Objaverse results (Fig. 7) are promising but limited to four examples with no quantitative metrics reported. A quantitative evaluation (even on a small set) would substantiate the generalization claim. (Sec. 5.4.2)
+
+### Trivial
+
+- The manual inspection stage mentioned at the end of Sec. 3.2 lacks details on scale (how many samples were inspected/modified) and criteria, which would aid reproducibility.
+
 ## Nice-to-Haves
 
-- A mechanism to infer hand-contact part distributions from action-only descriptions (e.g., a learned mapping from "push" to likely contact regions) would make the framework more practical.
-- A quantitative out-of-domain evaluation (e.g., contact accuracy or human ratings on Objaverse samples) would strengthen generalization claims.
-- Statistical significance (confidence intervals or bootstrap) for key comparisons in Tables 1 and 2.
-- Ablation showing the effect of the optimization-based post-processing on baseline methods.
+- An explicit experiment evaluating TOUCH against a small set of real 3D captures (from an existing lab dataset) or a human study comparing generated poses to original video frames rather than reconstructed ground truth could help calibrate the ground truth's reliability.
+- Reporting per-verb or per-interaction-type performance breakdowns would reveal whether the model exhibits systematic failures on underrepresented actions.
+- A "no refinement" comparison against baselines (i.e., raw output from all methods without any post-processing) would let readers judge intrinsic generation quality independently of the refinement module.
 
 ## Removed Points
 
-The following points from the harsh critic review were removed after verification:
+These points were raised in the inputs but are removed from the final review, with justification:
 
-- **"The claim of free-form HOI generation is partially undermined by the static single-frame nature"** — The paper explicitly acknowledges this in Section 6 (Limitations), scoping the work to static HOI snapshots. This is a known limitation, not a flaw.
-- **"The introduction does not define 'free-form'"** — The paper does define it contextually: interactions beyond force-closure grasps, including non-grasping actions like pushing, poking, rotating.
-- **"45% failure rate = selection bias concerns"** — Retained in weakened form above but the critic's phrasing ("serious doubts about whether the model learns robust, generalizable free-form interactions") overstates what can be concluded from the 55% success rate alone.
-- **"Missing comparison to CHA or other text-to-pose methods"** — The paper uses Text2HOI (Cha et al., 2024) as a baseline and explains why it was adapted.
-- **"No ablation comparing Qwen-7B to other VLMs like GPT-4V"** — The paper ablated CLIP, BERT, and MPNet as text encoders; requesting GPT-4V specifically is scope creep.
-- **"Could end-to-end training improve consistency?"** — Speculative, not a weakness.
+- **"Circularity fundamentally limits confidence in claims" (from Harsh Critic, framed as fatal)**: The harsh critic argued that using `L_phy` in both data creation and refinement is a fatal circularity. On closer reading, the diffusion model is trained with supervised L2 loss against ground-truth poses (Eq. 6), not with `L_phy`. The refinement is a separate test-time optimization. Physical constraints are universal (contact should exist, penetration should not) — applying them in both reconstruction and refinement is consistent, not circular. The paper would benefit from discussing this relationship (kept as Minor), but it does not invalidate the core claims.
+
+- **"Contact map quality for non-grasping contacts is never examined" (from Harsh Critic, implied as major gap)**: The contact maps are computed from reconstructed meshes using distance thresholds (Sec. 3.3). Their quality depends on mesh quality, which is evaluated through the physical plausibility metrics. This is a natural consequence of the reconstruction pipeline, not a separate unexamined failure mode. Removed as a standalone weakness; subsumed under the data pipeline discussion in Minor.
+
+- **"The refiner may be ill-suited to baseline distributions" and speculation about unfairness (from Harsh Critic)**: The paper says the post-processing is "optimization-based" (not learned), which would make it equally applicable to any method's output. If it were the learned `f_refiner`, applying it to different generators would indeed be questionable, but the paper's language suggests otherwise. This is a clarity issue (kept as Minor) rather than a demonstrable fairness violation.
+
+- **"Force expression analysis would benefit from clear description of how contact area is measured and over how many samples" (from Harsh Critic)**: The paper states "22-25% larger average contact area" (Sec. 5.4.3), which is a quantitative finding. While more methodological detail would be nice, the criticism reads as a nitpick rather than a substantive weakness. Removed.
+
+- **Strength Finder: "Comprehensive evaluation protocol" framed as unqualified strength**: Kept as a strength but tempered — the evaluation is indeed multi-faceted, which is a genuine strength, even though the metrics are computed against reconstructed (not directly captured) ground truth.
+
+- **Strength Finder: "Scalable reconstruction pipeline with O2HOI pairing"**: Kept as a supporting point under the dataset strength rather than a separate claim.
 
 ## Novel Insights
 
-The most interesting observation not fully surfaced by the individual reviews is the tension between the paper's two core contributions: the contact-as-intermediate-representation design is elegant and empirically validated, but it is also what necessitates the structured text format, creating a dependency that limits the kind of semantic flexibility the paper claims. The paper could be significantly strengthened by treating this as a feature rather than an oversight — explicitly designing a module that maps from free-form action descriptions to contact part distributions would make the framework more complete and would be a natural extension of the dataset's multi-level annotations.
+Beyond the paper's own contributions, the dataset and framework together reveal an interesting phenomenon: textual force descriptors ("firmly" vs. "gently") can be mapped to contact geometry without explicit force modeling or physics simulation. The finding that models trained purely on geometric and semantic supervision learn to associate lexical force semantics with contact area (22–25% difference) suggests that language-conditioned HOI generation can internalize physically meaningful relationships from data alone — a result with implications for broader text-to-motion and embodied AI research.
 
 ## Suggestions
 
-1. Clarify in the paper that the DSC format is an interface choice for fine-grained control, and more explicitly discuss how the framework could be extended to support coarser or free-form language (e.g., via a learned contact-part predictor).
-2. Provide a statistical table for the firm/gentle contact area claim (Section 5.4.3) with sample sizes and confidence intervals.
-3. Add details on the VLM evaluation protocol (model name, prompting template, aggregation method) and either expand the perceptual user study or report confidence intervals.
-4. Analyze what types of interactions fail in the 31% "Pose Estimation Failure" cases to assess potential dataset bias.
-5. Tighten the framing: "free-form hand-object contact pose generation" is more precise than "free-form HOI generation" for the current scope.
+- Add a brief subsection in the limitations or discussion that explicitly characterizes the relationship between the reconstruction pipeline's optimization objectives and the refinement module, and discuss what this means for interpreting the reported metrics.
+- Disclose the nature and hyperparameters of the baseline post-processing module (is it identical to TOUCH's TTA, a simplified version, or something else?), and ideally report raw (no-refinement) results for all methods.
+- Include a short analysis of what types of interactions are lost in the 45% of failed reconstructions to help users understand the dataset's coverage and potential biases.
+- For the out-of-domain generalization, add even a small quantitative evaluation (e.g., user study or contact metrics) on a set of Objaverse objects to complement the qualitative examples.
 
 ## Score and Decision
 
-MY FINAL SCORE: <score>6.0</score>
+**Round 1 bracket**: The paper clearly sits above the weak anchors (2.50–3.40) and the closest middle anchors HOI-Diff (5.25) and IHDiff (5.50), while falling below the strong anchors TANGO (8.50) and Data Scaling Laws (8.00). Initial bracket: **5.5–7.5**.
+
+**Round 2 narrowing**: Compared against InterDance (5.60, Reject), TOUCH is clearly stronger in dataset novelty, method sophistication, and evaluation rigor. Compared against HandsOnVLM (6.33, Reject), TOUCH has a more substantial dataset contribution and more comprehensive evaluation. Compared against the accepted anchors TapMo (6.50) and OmniPhysGS (6.40), TOUCH is comparable or slightly stronger — the WildO2 dataset is a more significant contribution than what those papers offer, and the multi-level conditioning design is well-executed. TOUCH does not reach the level of TANGO (8.50), which has stronger evaluation and fewer methodological concerns.
+
+**Final score**: 6.5. The minor concerns (data pipeline/refinement overlap, baseline post-processing clarity, selection bias, qualitative-only OOD evaluation) are real but addressable and do not undermine the core contributions. The paper makes a genuine advance in HOI generation with a novel dataset and well-designed framework.
+
+**Anchor comparison summary**:
+| Anchor | Path | Avg Score | Round | Comparison |
+|---|---|---|---|---|
+| GUNet | KWo4w1UXs8 | 3.00 | 1 | TOUCH much stronger — larger contribution, more rigorous |
+| HOI-Diff | ZYwLfi50GI | 5.25 | 1 | TOUCH stronger — better hand-object contact modeling, more comprehensive eval |
+| IHDiff | nTNElfN4O5 | 5.50 | 1 | TOUCH stronger — more substantial dataset, better evaluation |
+| InterDance | KfkmwYQXWh | 5.60 | 2 | TOUCH stronger — more novel dataset, more convincing results |
+| Motion-Agent | AvOhBgsE5R | 6.20 | 2 | TOUCH comparable — different domain but similar contribution level |
+| HandsOnVLM | AJQuTFd9es | 6.33 | 2 | TOUCH slightly stronger — larger dataset contribution |
+| OmniPhysGS | 9HZtP6I5lv | 6.40 | 2 | TOUCH comparable — different focus, similar quality |
+| TapMo | OeH6Fdhv7q | 6.50 | 2 | TOUCH comparable — slightly stronger dataset contribution |
+| CyberHost | vaEPihQsAA | 7.60 | 1 | TOUCH weaker — less mature evaluation |
+| Data Scaling Laws | pISLZG7ktL | 8.00 | 1 | TOUCH weaker — less rigorous empirical validation |
+| TANGO | LbEWwJOufy | 8.50 | 1 | TOUCH weaker — fewer contributions, less comprehensive |
+
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

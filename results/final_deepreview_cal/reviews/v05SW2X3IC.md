@@ -1,75 +1,96 @@
-Now I have enough information to write the consolidated review. Let me produce it.
+Now I have thorough calibration data. Let me synthesize the final review.
+
+**Bracket from Round 1:** The paper sits between x33vSZUg0A (5.33, multi-task compression) and CxXGvKRDnL (8.00, diffusion compression). 
+
+**Narrowing from Round 2:** Comparing against L0evcuybH5 (6.75, information bottleneck analysis) — our paper has similar information-theoretic ambition but less tight theory-experiment coupling. Against yVGGtsOgc7 (5.80, disentangled representations via multi-task learning) — our paper is more practically grounded. Against x33vSZUg0A (5.33) — our paper is clearly stronger in theoretical motivation and experimental systematics.
+
+The paper lands at approximately **6.0** — above the multi-task compression anchor (5.33), below the tighter info-theoretic analysis anchor (6.75), and well below the genuinely novel diffusion compression work (8.00).
+
+Now I'll write the final review.
+
+---
 
 ## Summary
-This paper proposes a learnable three-channel codec inspired by the Gray-Wyner network that disentangles common and task-specific information between two vision tasks. The authors present theoretical extensions of lossy common information bounds (Theorem 1 linking Gács–Körner and Wyner's lossy common information via interaction information) and a Lagrangian optimization objective (Theorem 2) that parameterizes the transmit–receive rate tradeoff through a single hyperparameter β. Experiments on synthetic data, colored MNIST, Cityscapes, and COCO show that the proposed architecture can span the gap between Joint and Independent coding baselines.
+
+This paper proposes a learnable three-channel codec grounded in Gray–Wyner information theory that separates common and task-specific information between two vision tasks. The authors develop lossy common information bounds (Theorem 1), derive a learnable Lagrangian objective with a single hyperparameter β controlling the transmit–receive rate tradeoff (Theorem 2), and design a "Shared" encoder architecture with an auxiliary alignment loss. Experiments span synthetic data, colored MNIST edge-cases, and real vision tasks (Cityscapes segmentation+depth, COCO detection+keypoints), where the method consistently outperforms independent single-task coding and approaches joint coding.
 
 ## Strengths
-- **Theoretical framing of lossy common information.** Theorem 1 extends lossless common-information bounds (Wyner, 1975) to the lossy setting, bounding Gács–Körner and Wyner's lossy common information by interaction information. This provides a principled lens for understanding when and why the transmit–receive tradeoff exists, and is a genuine theoretical contribution beyond prior work on lossy common information.
-- **Operational objective bridging theory to practice.** Theorem 2 translates the Gray–Wyner network's theoretical rate-distortion characterization (Eq. 9) into a tractable entropy-based Lagrangian (Eq. 12) under deterministic encoders. The derivation cleanly connects β to the transmit–receive tradeoff (β=1 → minimize R_t, β=2 → minimize R_r, β=3/2 → equal weight on both), giving practitioners a clear handle on the tradeoff.
-- **Empirical validation of transmit–receive control.** The synthetic experiment (Fig. 3a) shows that varying β from 1 to 2 predictably shifts the common-channel rate above or below the empirical mutual information, directly demonstrating that the objective controls common-information separation as intended.
-- **Edge-case robustness on colored MNIST.** The experiment with Dependent, Independent, and Mixture PMFs (Fig. 4) shows the method adapts to extreme levels of mutual information between tasks, with the Dependent case achieving lower transmit rate and the Independent case achieving lower receive rate.
-- **Substantial gains over Independent coding on vision benchmarks.** On Cityscapes and COCO (Fig. 5), the proposed method achieves large BD-rate savings over the Independent baseline (e.g., −23.32% transmit rate on Cityscapes segmentation+depth, −81.58% average across experiments), demonstrating practical value over per-task coding.
+
+- **Rigorous theoretical foundation linking classical information theory to neural architectures:** Theorem 1 extends lossless common information bounds to the lossy setting via interaction information, providing a precise condition for when Wyner’s and Gács–Körner common information coincide. Theorem 2 transforms the Gray–Wyner optimization into a form suitable for neural training with entropy models (Eqs. 10–12). These results are grounded in the literature and give the proposed codec a principled optimization objective.
+
+- **Systematic architecture ablation validating the Shared design:** On synthetic data, the Shared architecture is compared against Separated (independent analysis per channel) and Combined (single analysis transform with split output) alternatives across multiple β settings (Fig. 3). The Shared design consistently yields lower rate-distortion, with β = 3/2 providing a balanced transmit–receive operating point.
+
+- **Edge-case validation showing adaptation to mutual information structure:** The colored MNIST experiments (Section 4.2, Fig. 4) demonstrate that the codec adapts appropriately to three distinct PMFs — placing most information on the common channel when tasks are fully dependent, minimizing common-channel rate when independent, and handling a partially-separable mixture case. This directly tests the core claim that the architecture responds to the underlying common information between tasks.
+
+- **Consistent improvement over independent coding on real vision tasks:** On Cityscapes and COCO (Fig. 5), the proposed method substantially outperforms independent single-task codecs in BD-rate terms (e.g., –81.58% average transmit-rate advantage), while approaching joint coding performance.
 
 ## Weaknesses
 
 ### Major
-- **No evidence that the common channel actually carries common information.** The paper never analyzes what Y0 encodes. There are no mutual information estimates between Y0 and the task targets, no visualizations of common-channel reconstructions, and no diagnostic showing that Y0 captures semantically shared content rather than a training artifact. Given that the paper's central claim is isolating common information, this omission is significant.
-- **Hard-matching mechanism (Eq. 14) is ad-hoc and under-ablated.** The common representation is formed by exact-equality hard thresholding: elements are kept only if they match exactly between the two branches, otherwise zeroed. Gradients flow only through averaged matching elements. The paper notes that small γ prevents matching and large γ causes degeneracy, sets γ=1 and then adjusts β to compensate — but provides **no ablation on γ whatsoever**, and no comparison against alternatives such as learned gating or soft attention. The mechanism's sensitivity and whether it genuinely captures common information versus producing a trivial matching artifact is unclear.
-- **No comparison against any prior multi-task codec.** The related work discusses Chamain et al. (2021), Feng et al. (2022), Guo et al. (2024), and the coding-for-humans-and-machines line (Choi & Bajić 2022, Foroutan et al. 2023), but none are used as experimental baselines. The paper compares only against Joint and Independent — which are information-theoretic extremes, not practical multi-task codecs. The claimed advantages cannot be assessed without situating the method in the existing landscape.
-- **Single random seed, no variance reporting.** All results appear to come from a single training run with no confidence intervals, error bars, or seed variation. This is a significant concern given the reported sensitivity of the method to the training setup (γ/β interaction).
+
+- **Baseline capacity not controlled or reported:** The Independent baseline uses separate codecs per task (no common channel) and the Joint baseline uses a single codec for both tasks. Neither parameter counts, FLOPs, nor architectural details are provided for these baselines relative to the proposed method. While the Independent baseline likely has *more* parameters (which would make the comparison conservative), the absence of this information prevents the reader from attributing gains confidently to the Gray–Wyner structure rather than to parameter allocation differences. At minimum, model size accounting is needed.
+
+- **No variability estimates in real-task experiments:** The Cityscapes and COCO evaluations (Section 4.3, Fig. 5) use single training runs with one hyperparameter set. No error bars, multiple restarts, or cross-validation are reported. Rate–accuracy curves can shift materially with training noise, and the reported BD-rate advantages lack any quantification of uncertainty, weakening the quantitative claims.
 
 ### Minor
-- **Large gap between theoretical and empirical rates not explained.** The paper acknowledges that empirical rates are "considerably higher than theoretical values" but offers no analysis of whether this gap is structural (e.g., suboptimal entropy models, mismatch between the learned and true distributions) or could be closed. This weakens the claimed connection between the theory and the practical system.
-- **Limited sweep of β for vision tasks.** The paper reports only β=1 and the implicit β from the "receive rate" operating point for the Cityscapes/COCO experiments, with no coverage of intermediate β values like β=3/2 to show the tradeoff. For a paper whose central claim is enabling a transmit–receive tradeoff, showing this tradeoff on real vision data with multiple β values would substantially strengthen the contribution.
-- **No hyperparameter details for λ₁, λ₂.** The paper does not describe how the Lagrange multipliers for task distortions are chosen or whether they are tuned separately per experiment. This makes the optimization procedure difficult to reproduce or assess.
+
+- **Combined Cityscapes metric obscures individual task behavior:** The Cityscapes evaluation combines mIoU and a rescaled depth RMSE into a single combined metric (Fig. 5a). The rescaling of depth RMSE to match the mIoU scale is uninterpretable, and raw per-task rate–accuracy curves are not shown in the main paper. Reporting individual task metrics would make the results more transparent.
+
+- **Lagrangian β-parameterization is asserted rather than rigorously derived:** Section 3.2 maps β = 1 to transmit-rate optimization and β = 2 to receive-rate optimization, claiming intermediate β explores the Gray–Wyner contour. The original Gray–Wyner Lagrangian (Eq. 9) operates over (α₁, α₂), and while the proposed weighted sum is a sensible Lagrangian relaxation, the paper does not establish formally that intermediate β values correspond to points on the Pareto frontier. The synthetic experiments (Fig. 3) provide empirical validation, but the theoretical claim should be tempered.
+
+- **Architecture justification deferred to appendix:** The Shared encoder design (Eq. 14, masked averaging) is motivated by a theoretical claim about reducing learning complexity, but the justification is relegated to Appendix C. In the main text, the design choice appears somewhat ad hoc, weakening the narrative flow from theory to architecture.
 
 ### Trivial
-- The interaction information notation I(X₁, X₂; Ẑ₁; Ẑ₂) in Theorem 1 uses commas and semicolons interchangeably; standard notation uses semicolons throughout for variable separation (I(X₁; X₂; Ẑ₁; Ẑ₂)). This is a minor notational inconsistency.
+
+- The conclusion states "between the three computer vision experiments" but only two real-vision experiments (Cityscapes, COCO) are presented in Section 4.3; the count may include the synthetic or MNIST experiments, but this should be clarified.
+- The distortion functions used for Cityscapes and COCO tasks are not explicitly specified in the main text.
 
 ## Nice-to-Haves
-- An ablation removing the conditional entropy model (not conditioning private entropy models on Y₀) would clarify whether the conditioning itself, or some other architectural choice, drives the gains.
-- Reporting receive-rate curves alongside transmit-rate curves for the vision experiments with multiple β values would give a complete picture of the tradeoff.
-- A limitations section discussing scalability to more than two tasks, sensitivity to γ, and computational cost would improve the paper's self-awareness.
+
+- Visualizing what information each channel carries (e.g., decoding each channel independently and measuring per-task performance) would directly confirm that the common channel captures shared information and private channels do not. This would strongly bolster the central claim of information separation.
+- Reporting the full set of operating points for intermediate β values on the real vision tasks would substantiate the transmit–receive tradeoff claim beyond the synthetic setting.
+- Including the Independent and Joint baselines on the colored MNIST PMFs (Section 4.2) would ground the edge-case claims more clearly.
 
 ## Removed Points
-These points from the inputs were removed or demoted:
-- **"Misleading framing of outperformance claims."** — The paper claims to outperform *independent coding*, which is supported by the data. It does not claim to outperform Joint. The harsh critic's charge of misleading framing is unsupported.
-- **"β=3/2 does not equally weight R_t and R_r."** — The critic's math shows that β=3/2 gives 1.5r₀+r₁+r₂ = (R_t+R_r)/2, which is exactly equal weighting. This criticism is incorrect.
-- **"No receive-rate curves in Figure 5."** — The caption states both transmit and receive rates are included. This claim is factually wrong.
-- **"Missing comparison to related work as a weakness."** — This is a valid criticism and is kept above. However, the human reviewer's version of this was slightly different in framing.
-- **"Connection between theory and practice is loose."** — Demoted from major to minor. This is a generic criticism applicable to most learned compression work and is partially acknowledged by the paper itself.
-- **"Reliance on optimal rate-distortion encoders in theory."** — The paper openly acknowledges these as theoretical constructs; this is standard in information-theoretic work and not a weakness of the paper.
-- **Strength Finder's generic strengths** (e.g., "addressed an important problem") are dropped.
+
+These points are flagged to be removed; treat them with caution:
+
+- **"Heuristic mapping of Lagrangian is a fatal theoretical gap"** — Removed. The paper explicitly presents this as a Lagrangian relaxation (a standard technique for non-convex optimization) and validates it empirically. The concern was framed as a rigorous derivation gap, but the paper never claims an exact derivation; it proposes a practical heuristic grounded in the Gray–Wyner objective. Demoted to Minor.
+
+- **"Section 4.3 receive-rate curve higher than Independent is not discussed"** — Removed. The paper *does* discuss this implicitly in stating that the receive-rate curve suggests "the rate of the common channel is lower than the empirical mutual information between these tasks" (Section 4.3), which aligns with the paper's thesis.
+
+- **"The paper needs more precise statement of what the proposed method adds relative to prior multi-task codecs"** — Demoted to Nice-to-Have. The paper adequately distinguishes itself through the private channels and transmit–receive tradeoff, which are both clearly stated.
+
+- **"Should comment on what part of the gap between empirical and theoretical rates is due to training vs. architecture"** — Removed. This is speculative; the paper acknowledges the gap and cites it as common in practice.
 
 ## Novel Insights
-None beyond the paper's own contributions. The harsh critic's framing of the method as providing an intermediate operating point rather than outperforming both baselines is a useful clarification that the paper could more prominently acknowledge, but this is not a novel observation.
+
+The paper's synthesis of lossy common information bounds (Theorem 1) with a Lagrangian training objective (Theorem 2) and a concrete neural architecture provides a rare bridge between classical multi-terminal information theory and modern learned compression. The insight that interaction information between optimal rate-distortion representations bounds the gap between Wyner’s and Gács–Körner common information (and thus determines whether the transmit–receive tradeoff is worth exploring) gives practitioners a diagnostic tool for deciding when a three-channel Gray–Wyner codec is warranted versus simpler alternatives.
 
 ## Suggestions
-- Provide direct analysis of the common channel Y₀: visualize decoded content from Y₀ alone (using an auxiliary decoder), estimate I(Y₀; Z₁) and I(Y₀; Z₂), or show that removing Y₀ degrades both tasks asymmetrically.
-- Ablate γ systematically across at least 3–4 orders of magnitude and report the effect on common-channel utilization and final task distortion.
-- Compare experimentally against at least one prior multi-task codec (e.g., Chamain et al. 2021 or a coding-for-humans-and-machines method).
-- Report results with 3+ random seeds and include error bars or confidence intervals on all BD-rate numbers.
-- Show the transmit–receive tradeoff on Cityscapes and COCO by plotting both R_t and R_r curves for at least β∈{1, 1.5, 2}.
+
+- Report parameter counts, FLOPs, or total model sizes for the Independent, Joint, and proposed architectures to enable fair comparison.
+- Run the main Cityscapes and COCO experiments with at least 2–3 random seeds and report standard deviations on the BD-rate metrics.
+- Show individual task metrics (mIoU alone, depth RMSE alone) alongside the combined metric for Cityscapes.
+- Clarify whether the "three computer vision experiments" in the conclusion refer to synthetic + MNIST + real tasks or if a third real-vision experiment was intended.
 
 ## Score and Decision
 
-### Calibration
+**Round-1 bracket:** between 5.33 (x33vSZUg0A, multi-task compression) and 8.00 (CxXGvKRDnL, diffusion compression).  
+**Round-2 narrowing:** compared against L0evcuybH5 (6.75, tighter info-theoretic analysis), yVGGtsOgc7 (5.80, less practically grounded), and foKwWau15m (6.00, benchmark paper).  
+**Anchor comparison summary:**
+- x33vSZUg0A (5.33): weaker theory, less systematic experiments — our paper is stronger
+- aQ7qYnY2nF (4.00): limited novelty — our paper is clearly stronger
+- foKwWau15m (6.00): different type (benchmark), not directly comparable
+- yVGGtsOgc7 (5.80): stronger theory but weaker practical application — our paper is slightly stronger
+- L0evcuybH5 (6.75): cleaner theory-experiment coupling — our paper is weaker
+- CxXGvKRDnL (8.00): genuinely novel theoretical insight with strong results — our paper is clearly weaker
+- ulIW7Frjpn (4.75): LLMs as entropy models — not directly comparable
+- jznbgiynus (6.00): language modeling as compression — not directly comparable
+- IQZicPtADC (5.83): representation transfer for imitation learning — not directly comparable
+- 1jbh2e0b2K (6.00): multi-task finetuning — not directly comparable
 
-**Round 1 — Bracketing.** Searched for papers on learned compression / multi-task coding / Gray-Wyner topics:
-- Weak band (<3.5): gIrVoQEDQv (3.40, NCA compression — weak paper rejected), DsMxVELk3K (3.00, text compression — rejected), 6j0GH40mFt (3.40, attention for LIC — rejected), hrXt6Fdl2P (2.60, FVV compression — rejected)
-- Middle band (3.5–7.5): x33vSZUg0A (5.33, Taskonomy multi-task compression — accepted), aQ7qYnY2nF (4.00, RL rate control — rejected), Tv36j85SqR (7.20, Lattice transform coding — accepted), ulIW7Frjpn (4.75, LLM entropy model — rejected)
-- Strong band (>7.5): CxXGvKRDnL (8.00, diffusion compression — accepted), hrqNOxpItr (8.00, cross-entropy + ICA — accepted), j7b4mm7Ec9 (7.60, watermarking — rejected), bH6T0Jjw5y (8.00, information bottleneck — accepted)
+The paper has solid theoretical contributions and systematic experiments, but the experimental gaps (capacity control, error bars, combined metrics) prevent it from reaching the 6.75+ tier. It sits clearly above 5.33 and slightly above 5.80, landing at **6.0**.
 
-**Round-1 bracket: [4.5, 6.0].** The paper is clearly stronger than the weak-band reject-level papers (3.0–3.4) which either lacked novelty or had fatal flaws. It is weaker than the strong-band papers (7.2–8.0) which have polished, comprehensive evaluations. Among middle-band papers, it sits above the RL rate control paper (4.00, limited novelty) and the LLM entropy model paper (4.75, practical complexity concerns), but below the Taskonomy multi-task compression paper (5.33, more thorough evaluation and accepted) and far below the lattice transform coding paper (7.20).
-
-**Round 2 — Narrowing.** Searched inside [4.5, 6.5] and [5.5, 7.5]:
-- x33vSZUg0A (5.33, Taskonomy multi-task compression): This accepted paper has a clearer practical pipeline, more comprehensive baselines, and more tasks, but lacks the theoretical grounding of the current paper. The current paper is slightly weaker in experimental execution (single seed, no variance, fewer baselines) but has stronger theoretical novelty. **Comparison: slightly worse overall.**
-- Pe3AxLq6Wf (6.25, multimodal contrastive learning): Sharper theoretical contribution and cleaner experiments. **The current paper is weaker.**
-- Piod76RSrx (5.50, MI generalization bounds — rejected): Despite interesting theory, this paper had computational tractability issues. **Current paper is roughly comparable but for different genres.**
-- ulIW7Frjpn (4.75, LLM entropy model — rejected): Novelty concerns and impractical complexity. **Current paper is stronger (clearer novelty, less extreme practicality gap).**
-- cbv0sBIZh9 (5.75, diffusion multi-task — accepted), yVGGtsOgc7 (5.80, disentanglement via multi-task — accepted), GSUNPIw7Ad (6.00, MLLM compression — accepted), bsnRUkVn63 (6.00, test-time adaptation compression — accepted): These accepted papers at 5.75–6.00 have more thorough experimental evaluations (multiple seeds, proper baselines, ablations) than the current paper. **Current paper is noticeably weaker on experimental rigor.**
-
-**Final score: 5.0.** The paper has genuine theoretical novelty and a compelling framework, but lags behind accepted papers at similar scores in experimental thoroughness (single seed, no variance, missing ablations, no comparison to prior multi-task codecs, no analysis of what the common channel encodes). These are not fatal flaws — the core idea and theoretical framing are sound — but they prevent it from reaching the 5.5–6.0 range where accepted papers tend to sit.
-
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

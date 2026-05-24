@@ -1,78 +1,98 @@
+Now I have a comprehensive picture from the anchors. Let me synthesize my final review.
+
+**Bracket assessment:** Round 1 placed this paper between ~5.5 and ~7.5. Round 2 anchors (5.33–7.00) confirm the paper sits above the 5.0–6.0 tier (clearer novelty than gT5hALch9z at 6.00 or hXA8wqRdyV at 6.14) and is comparable to sULAwlAWc1 (7.00) — a solid novel attack paper with some presentation gaps. It is below Bo62NeU6VF (8.00, novel defense with clean method) and well below 6Mxhg9PtDE (9.50, landmark unifying insight). 
+
+**Final score:** 6.5.
+
+---
+
 ## Summary
 
-This paper investigates whether activation steering — an inference-time technique that injects vectors into a model's hidden states to control behavior — can inadvertently compromise LLM safety. Through experiments across multiple model families (Llama-3, Qwen2.5, Falcon-3) and a standard 100-prompt harmfulness benchmark, the authors find that even steering in a *random direction* reliably produces harmful compliance (2–27% depending on the model), and that SAE feature vectors (the standard interpretable steering source) are comparably dangerous. They further construct a "universal attack" by averaging 20 vectors that individually jailbreak a single prompt, achieving up to 4× the compliance rate of random steering on unseen prompts.
+This paper systematically demonstrates that activation steering — a widely used technique for interpretable LLM control — inadvertently compromises safety alignment. Even steering with random Gaussian noise produces non-zero jailbreak rates (2–27%) across multiple model families, with middle layers being most vulnerable. Steering using benign, interpretable SAE features shows comparable danger, and averaging just 20 random vectors that jailbreak a single prompt yields a universal attack that generalizes to unseen harmful requests (4× boost over random steering, reaching 50.4% on Llama3-70B). A case study using the public Goodfire API confirms practical exploitability. The core message — that precise control over model internals does not guarantee safe outcomes — is compelling and well-supported.
 
 ## Strengths
 
-- **Demonstrates that random (non-adversarial) steering systematically undermines safety across multiple model families.** Figure 2a shows that merely injecting a random unit-normal vector raises harmful compliance from 0% to non-zero rates for Llama3-8B, Qwen2.5-7B, and Falcon3-7B, and Figure 3 confirms this at scale (17% overall CR for Llama3-8B on JailbreakBench). This is a genuinely surprising finding that challenges the prevailing assumption that benign steering is harmless.
+- **Random steering reliably breaks safety across diverse model families and scales.** Figure 2a shows non-zero compliance rates for all tested models (Llama3-8B, Qwen2.5-7B, Falcon3-7B) under random steering, with overall compliance reaching 17% on Llama3-8B across the full JailbreakBench dataset (Fig. 3). This directly supports the central claim that activation steering systematically undermines alignment, not just in adversarial settings.
 
-- **Proves that SAE features — intentionally benign and interpretable directions — are comparably dangerous to random noise.** Figure 2c directly compares random vs. SAE steering on the same model (Llama3.1-8B), showing SAE features yield 2–4% higher compliance. Crucially, the most dangerous features correspond to semantically benign concepts like "brand identity" (Figure 4a), making them indistinguishable from legitimate control vectors. The case study (Section 4.3) grounds this in a real API deployment with concrete harmful outputs.
+- **Universal attack from only 20 single-prompt jailbreak vectors.** Section 4.4 demonstrates that averaging 20 random vectors that each jailbreak a single prompt (bomb-making) produces a universal attack achieving 4× the compliance rate of random steering on unseen prompts — e.g., 50.4% on Llama3-70B and 63.4% on Falcon3-7B (Fig. 6). The attack requires no model weights, gradients, logits, or harmful training data, and the construction is repeated 20 times per model for robustness.
 
-- **Constructs a universal attack requiring minimal resources.** Section 4.4 shows that averaging 20 vectors that jailbreak a single prompt produces a universal vector that generalizes to most unseen JailbreakBench prompts, achieving up to 63.4% compliance on Falcon3-7B (vs. 5.7% for random steering). The attack is zero-shot, requires no model weights, gradients, or logits, and works across eight models of varying sizes.
+- **SAE features expose a monitoring blind spot.** The analysis of 1000 SAE features (Sec. 4.2) reveals that 668/1000 jailbreak at least 5 prompts (Fig. 4a), yet their semantic interpretations are benign (e.g., "brand identity," "physical positioning") and cross-category generalization is poor (Fig. 4b). This concretely demonstrates that interpretability does not confer safety and makes comprehensive feature screening infeasible.
 
-- **Systematic layer and coefficient analysis.** The single-prompt sweep (Figure 2a,b) provides actionable findings: middle layers are most vulnerable, the effect is non-monotonic, and optimal coefficients vary across models — all of which inform both attack construction and potential defense design.
+- **Real-world API case study validates practical exploitability.** Section 4.3 uses the public Goodfire SAE steering API to jailbreak Llama3.1-8B with a "brand identity" feature, producing disclaimer-then-compliance and fictional-framing failure modes (Fig. 5). This grounds the threat in a deployed system, not just a lab setting.
 
 ## Weaknesses
 
-### Major
+### Fatal
+None.
 
-None. The issues raised by reviewers do not threaten the paper's core claims.
+### Major
+None.
 
 ### Minor
+- **Conclusion overstates SAE danger relative to evidence.** The conclusion states "SAE-based steering proves even more dangerous" (achieving 11% compliance), but the only head-to-head comparison on the same model (Fig. 2c, single prompt) shows a 2–4 percentage-point edge without reported variance, and the full-dataset comparison is across different models (SAE on Llama3.1-8B vs. random on Llama3-8B). The body text correctly uses "comparable potential" — the conclusion should match this more measured framing.
 
-- **The universal attack experiment lacks a control for averaging random vectors not filtered for jailbreak success.** The paper averages 20 vectors individually verified to jailbreak the bomb prompt, then compares against a *single* random vector. The missing control is averaging 20 random vectors drawn from the same distribution *without* verifying jailbreak effectiveness. If the unfiltered average also produces high compliance, then the mechanism is averaging per se rather than selective aggregation of effective vectors. This does not undermine the practical finding — the attack works — but it weakens the mechanistic claim that "localized vulnerabilities can be scaled into universal attacks" via targeted selection. The authors should add this control.
-
-- **The full-dataset evaluation (Figure 3) does not include a direct random-vs-SAE comparison on the same model at scale.** SAE features are tested on Llama3.1-8B, while random steering is tested on Llama3-8B and Qwen2.5-7B — different model families with different baseline refusal strengths. The single-prompt comparison (Figure 2c) does directly compare random vs. SAE on Llama3.1-8B, mitigating this concern, but the cross-model comparison in the main evaluation makes the headline claim ("SAE features demonstrate comparable potential to random noise") rely partly on cross-model inference. Including a random-on-Llama3.1-8B condition in the full evaluation would strengthen this claim.
-
-- **The full-dataset evaluation uses fixed steering coefficients per model without ablation.** The single-prompt sweep shows optimal coefficients vary by model and layer (Figure 2a,b), yet the full evaluation uses fixed coefficients (2.0 for Llama3-8B, 1.5 for Qwen2.5-7B, 2.0 for Llama3.1-8B SAE). Showing that the qualitative pattern (non-zero compliance across categories) holds across a range of coefficients would increase confidence.
+- **No uncertainty quantification on compliance rates.** Figures 2, 3, and 6 report only point estimates (means over 1000 vectors or 20 universal vectors). While the sample sizes are large enough that patterns are likely stable, reporting standard deviations or confidence intervals would strengthen the quantitative claims, particularly for the small SAE-vs-random differences in Fig. 2c.
 
 ### Trivial
+- **Minor numerical inconsistency:** Section 4.2 reports 11% overall SAE compliance on Llama3.1-8B, but the corresponding Fig. 3 table entry reads 10%. This should be reconciled.
 
-- The paper asserts "for all models and prompts, the baseline compliance rate without any steering is 0%" (Section 3.4) without a dedicated summary table. While Figure 2 implicitly confirms this at coefficient 0.0, a brief explicit verification table would be cleaner.
+- **Heatmap computation (Fig. 4b) could be more precisely specified.** The caption defines the conditional probability adequately, but a one-sentence formal definition in the main text would eliminate any ambiguity about what "a feature jailbreaking any source-category prompt" entails (does it require at least one success in that category? The current phrasing implies yes but does not state it explicitly).
 
 ## Nice-to-Haves
-
-- The universal attack is tested only on JailbreakBench. Testing on a separate harmful-prompt dataset (e.g., AdvBench subset) would strengthen the generality claim.
-- The SAE analysis is limited to one model (Llama3.1-8B) and one layer (layer 19). The authors acknowledge this, but the limitation is worth emphasizing: the claim that "SAE features are dangerous" may not generalize to other SAEs (e.g., Gemma Scope) or other layers.
-- A brief discussion of *why* steering breaks safety (beyond the deferred Appendix E) would deepen the paper. Speculative mechanisms mentioned elsewhere (interference with refusal direction, stochastic degradation of refusal circuitry) could be discussed in the main text.
+- Running random steering on Llama3.1-8B (the same model used for SAE experiments) on the full JailbreakBench dataset would enable a head-to-head comparison strengthening the SAE-vs-random claim.
+- Analyzing the cosine similarity between the universal attack vector and known refusal-suppression directions (e.g., from Arditi et al.) would add mechanistic insight.
+- A brief discussion of potential mitigation directions (clipping, monitoring activation shifts, adversarial training against steering perturbations) would round out the paper's constructive contribution.
+- Testing the universal attack construction with a different starting prompt would further validate the universality claim.
 
 ## Removed Points
+These points are flagged to be removed; they were either factually wrong, speculative, or violated hard rules. Treat them with caution.
 
-These points were raised by reviewers but are excluded for the following reasons:
+- **LLM-as-judge validation concern:** The harsh critic flagged insufficient validation of the Qwen3-8B judge. The paper explicitly states that quality assessment against human annotations is in Appx. B. Per hard rules, criticisms about missing/stripped appendix content are removed — the validation exists in the original submission.
 
-- *"0% baseline is asserted without evidence"* — **Removed.** The paper's Figure 2 shows 0% compliance at coefficient 0.0 for all models, which is an implicit demonstration of the baseline. The claim is also standard for aligned models on harmful prompts.
-- *"LLM-as-judge is unvalidated"* — **Removed per instructions.** The paper references Appendix B for human annotation validation, which was stripped by the parser. The original submission contains this evidence.
-- Various formatting and style nitpicks — **Removed per instructions** as they reflect parser artifacts, not author errors.
+- **Universal attack outlier-domination concern:** The critic worried the averaged universal vector might be dominated by outliers. The paper already mitigates this by repeating the full procedure 20 times per model and reporting average performance. The critic acknowledged this is "less a flaw and more a suggestion." Removed as a weakness.
+
+- **Special-token steering justification:** The critic noted the paper doesn't discuss whether steering only prompt tokens vs. all tokens affects results. The paper cites Lin (2023) and states the approach "improved generation coherence" — this is sufficient context. Removed.
+
+- **Heatmap irregularity needing discussion:** The critic suggested discussing off-diagonal patterns in Fig. 4b. The paper already interprets the key finding (poor generalization, features capable of breaking hard categories slightly more likely to break easier ones). Additional discussion is a nice-to-have, not a weakness.
+
+- **Steering parameters for Goodfire API:** The paper states API proprietary defaults were used. This is sufficient for a case study demonstrating practical exploitability. Removed.
+
+- **Strength Finder strengths removed:** None — all identified strengths were concrete, well-supported by the paper, and did not conflict with verified weaknesses.
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+Beyond the paper's own contributions, the reviews surface a noteworthy tension: the paper's strongest contribution is arguably the *random steering* finding (which requires no SAE, no interpretability, and demonstrates a fundamental structural vulnerability), yet the paper expends considerable effort on SAE-based comparisons that somewhat dilute this cleaner message. The random-steering result alone — that additive Gaussian noise in the residual stream breaks refusal mechanisms — is a striking and parsimonious finding that could stand as the paper's central contribution without the SAE apparatus. The universal attack (averaging successful random vectors) emerges directly from this simpler finding and is arguably the paper's most practically significant result.
 
 ## Suggestions
-
-1. **Add the missing control to the universal attack experiment (Section 4.4):** Compare the average of 20 random vectors (unfiltered) against the average of 20 jailbreak-verified vectors. This distinguishes between averaging as a general phenomenon and selection as the active mechanism.
-2. **Add random-on-Llama3.1-8B to Figure 3** to enable a same-model comparison between random and SAE steering at scale.
-3. **Include a coefficient-ablation panel for the full-dataset evaluation** showing whether the qualitative findings hold at weaker/stronger steering strengths.
+- Tone down the conclusion's SAE claim from "even more dangerous" to "comparably dangerous" or "at least as dangerous," matching the body text.
+- Add standard deviation bands or confidence intervals to the key figures (especially Fig. 2c) — even a footnote reporting the range would help.
+- Reconcile the 10% vs. 11% SAE overall rate between Fig. 3 and the body text.
+- Consider re-centering the narrative around the random-steering finding, which is the paper's cleanest and most surprising result; the SAE experiments could be framed as showing that the standard "safe" source of steering vectors offers no protection against this underlying vulnerability.
 
 ## Score and Decision
 
-### Calibration report
+**Anchor comparison:**
 
-**Round 1 (bracketing):** Searched three bands on activation steering, safety alignment, and jailbreak topics.
-- Weak band (<3.5): 4 anchors, avg scores 2.5–3.0 (all Reject) — papers with limited scope or flawed execution. This paper is clearly above them.
-- Middle band (3.5–7.5): 4 anchors including "Understanding Jailbreak Success" (4.75, Reject), "Steering Language Models with Activation Engineering" (5.00, Reject), "Improving Instruction-Following through Activation Steering" (7.00, Accept), and "Programming Refusal with CAST" (7.33, Accept).
-- Strong band (>7.5): 4 anchors including "Safety Alignment Should Be More Than Just a Few Tokens Deep" (9.50, Accept), "Backtracking Improves Generation Safety" (8.00, Accept) — very strong accepted papers with clean novel methods.
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| 5kMwiMnUip | 1.40 | R1 | Much weaker — thin jailbreak study |
+| BeOEmnmyFu | 2.50 | R1 | Much weaker — prompting tricks |
+| z1yI8uoVU3 | 3.00 | R1 | Weaker — narrower steering evaluation |
+| KyKTjRtyNG | 3.00 | R1 | Weaker — incremental jailbreak method |
+| HuNoNfiQqH | 4.75 | R1 | Weaker — narrower latent space study |
+| zf53vmj6k4 | 4.25 | R1 | Weaker — less systematic |
+| YzxMu1asQi | 6.50 | R1 | Comparable — more theoretical, narrower scope |
+| vQ0zFYJaMo | 5.33 | R2 | Weaker — fine-tuning degradation study |
+| gT5hALch9z | 6.00 | R2 | Weaker — known finding, less novel |
+| kUH1yPMAn7 | 6.00 | R2 | Weaker — safety layers, narrower |
+| NIouO0C0ex | 5.67 | R2 | Weaker — reverse alignment |
+| wvFnqVVUhN | 6.25 | R2 | Comparable — solid negative result |
+| hXA8wqRdyV | 6.14 | R2 | Slightly stronger — more novel finding |
+| aSy2nYwiZ2 | 6.67 | R2 | Comparable — good attack paper |
+| sULAwlAWc1 | 7.00 | R2 | Comparable — novel attack with some gaps |
+| Bo62NeU6VF | 8.00 | R1 | Stronger — novel defense, cleaner method |
+| 6Mxhg9PtDE | 9.50 | R1 | Much stronger — landmark unifying insight |
 
-**Initial bracket:** 4.5–7.5.
-
-**Round 2 (narrowing):** Searched within (5.5, 7.5) on activation steering safety and universal jailbreak topics.
-- "Safety-Tuned LLaMAs" (6.00, Accept) — less novel (known safety-helpfulness tradeoff); current paper has more surprising findings.
-- "Programming Refusal with CAST" (7.33, Accept) — proposes a new method; current paper is comparably well-executed but documents a vulnerability rather than proposing a method.
-- "Injecting Universal Jailbreak Backdoors" (6.67, Accept) — similar threat model.
-- "Scaling Laws for Adversarial Attacks on LM Activations" (6.50, Accept) — strong empirical study; comparable in execution quality.
-- "Failures to Find Transferable Image Jailbreaks" (6.25, Accept) — solid empirical work.
-
-**Final score determination:** This paper is stronger than Safety-Tuned LLaMAs (6.00) due to greater novelty and surprise value. It is comparable to the scaling laws and jailbreak backdoor papers (6.50–6.67) in execution and significance. It is slightly below CAST (7.33), which benefits from proposing a practical new method. The paper's main weaknesses (missing control for universal attack, cross-model comparison in Figure 3) are bounded and addressable. **Score: 6.5.**
+**Round 1 bracket:** 5.5–7.5. **Round 2 narrowing:** The paper sits above the 6.0 anchors (clearer novelty, more surprising finding) and comparable to sULAwlAWc1 at 7.00 (novel attack, some presentation gaps). It is below the 8.00+ tier. The absence of error bars and the slight conclusion overclaim pull it just below 7.0.
 
 MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

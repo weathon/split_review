@@ -1,65 +1,97 @@
-Now I have a clear calibration picture. Let me write the consolidated review.
+Now I have a thorough understanding of the paper and its calibration anchors. Let me compile the final review.
+
+---
 
 ## Summary
-This paper introduces a framework for studying how transformer language models learn context-free grammars (CFGs) through the lens of *subgrammar structure*. It defines inner and outer subgrammars, proves that the KL divergence between the true PCFG distribution and a language model decomposes recursively over subgrammars (Theorems 4.3, 4.6), and presents experiments on small transformers showing: (1) the decomposition holds empirically throughout training, (2) all subgrammars are learned in parallel, (3) pretraining on a subgrammar can improve final loss and shape internal representations (measured via CKA), and (4) depth of recursion — not sequence length — is the primary difficulty for generalization.
+
+This paper proposes studying how language models learn context-free grammars (CFGs) through the lens of "subgrammars" — compositional substructures of CFGs. The authors define inner and outer subgrammars, prove that the autoregressive KL divergence decomposes recursively over subgrammar structure, and conduct small-scale experiments with transformers on synthetic PCFGs. Key empirical findings include: (1) the loss decomposition matches theory across training, (2) subgrammars appear to be learned in parallel (unlike child language acquisition), (3) subgrammar pretraining yields modest representational alignment benefits for small models, and (4) recursion depth rather than sequence length is the primary obstacle to generalization.
 
 ## Strengths
-- **Novel theoretical connection between KL divergence and CFG substructure (Theorem 4.3, Corollary 4.4, Theorem 4.6).** The recursive decomposition of language-modeling loss over subgrammars is a genuinely new result. It establishes a formal relationship between the loss of an autoregressive model and the grammar's hierarchical decomposition that did not previously exist, and it provides a clean mathematical vocabulary for analyzing learning dynamics.
-- **Empirical validation of the decomposition (Figure 1).** The paper demonstrates that throughout training, the total KL divergence equals the sum of subgrammar-level divergences — both for deterministic and probabilistic rule distributions. This directly confirms the recurrence relation in a concrete experimental setting and is the strongest evidence in the paper.
-- **The depth vs. length generalization finding (Section 6, Figure 3).** The controlled experiment cleanly separates the effects of context length and recursive depth, showing that prediction error stays near zero for linearly extended contexts but grows significantly with depth. The informal GPT-5.1 test, while anecdotal, is presented with appropriate caveats and illustrates the broader relevance.
+
+- **Clean conceptual framework (Sections 3–4):** The definitions of inner and outer subgrammars (Defs 3.3, 3.5) and the KL decomposition theorems (Thm 4.3, Cor 4.5, Thm 4.6) provide a principled lens for studying how autoregressive LM training interacts with grammar substructure. The decomposition to leaves of the subgrammar DAG (Cor A.1) is a useful organizing principle.
+
+- **Empirical validation of the loss decomposition (Figure 1):** The paper demonstrates that the total KL loss matches the sum of per-subgrammar divergences plus overhead throughout training — even when subgrammar probabilities are unequal. This anchors the theoretical framework in observable training dynamics.
+
+- **Depth vs. length disentanglement (Figure 3, Section 6):** The finding that model error stays flat when context is lengthened without increasing recursion depth, but grows sharply with recursion depth, is a clear and well-controlled result. It isolates recursion depth as the primary difficulty and connects naturally to Theorem 4.6.
+
+- **Representational alignment evidence (Table 1):** CKA analysis across 30 seeds shows that subgrammar pretraining produces higher inter-model alignment in attention layers (+8–22%), suggesting that pretraining steers models into a shared representational regime aligned with grammar substructure. The effect is modest but measurable and consistently observed.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
-- **Missing experimental details in the main text.** The paper refers to "small transformers" without stating the number of layers (beyond "2-layer" and "4-layer" named in passing), hidden dimension, number of attention heads, vocabulary size, optimizer, learning rate, training steps, or batch size. The actual grammar definitions (production rules, probabilities, subgrammar structure) are all in the appendix, which was stripped by the PDF parser. This makes the experiments impossible to evaluate or reproduce from the main text alone. For an empirical paper, this is a structural deficiency. The authors should include at least one complete grammar example and key hyperparameters in the main body.
 
-- **The "parallel learning" claim is interesting but undersubstantiated.** The observation that all subgrammar KL divergences decrease concurrently (Figures 1–2) is genuinely surprising and worth reporting. However, Corollary 4.7 — offered as a theoretical condition — essentially restates the definition of parallel optimization ("if gradients for one subgrammar don't hurt others, then all are learned in parallel") without providing testable predictions or empirical verification that this condition holds for the trained models. The paper's existing evidence (loss curves starting at different values and converging together) is compatible with the model learning simpler subgrammars faster and is not a formal test of "parallelism." A quantitative measure (e.g., convergence time ratios, or an empirical check of gradient orthogonality) would be needed to substantiate the claim.
-
-- **Overclaiming in the abstract ("definitively").** The abstract states that CKA analysis "show[s] definitively that such pre-training results in internal representations that are more aligned with the grammar's substructure." The evidence is a single table (Table 1) showing CKA differences of ~0.02–0.05 on a 0–1 scale (percentage changes of +8.9% to +21.7%). CKA measures representational similarity *between models*, not alignment with any ground-truth grammatical representation. The paper does not report confidence intervals, standard deviations across seeds, or any null-distribution comparison. This claim should be substantially softened.
+- **"Parallel learning" claim exceeds the evidence (Section 4, Figures 1–2, abstract):** The abstract and Section 4 assert that "small transformers learn subgrammars in parallel," but the evidence is purely visual — all per-subgrammar loss curves decrease concurrently. This does not rule out interdependent progress on a shared representation, nor does it establish independence of subgrammar optimization. Corollary 4.7 offers a sufficient condition for parallel learning, but the paper explicitly states it does not verify whether the experimental setup satisfies this condition (line 225: "An immediate future direction would be to study whether the small transformers... satisfy the independence condition"). The claim needs either stronger evidence (e.g., intervention experiments freezing one subgrammar) or substantially softened framing.
 
 ### Minor
-- **No confidence intervals or statistical tests.** The CKA results (Table 1), the loss improvements from pretraining, and the depth generalization experiment are reported without variance estimates, despite the paper stating experiments were run "across 30 random seeds." Standard deviations or significance tests are essential for assessing whether the observed differences are reliable.
 
-- **Theorem 4.6's domain condition is not checked for experimental grammars.** The formula for KL divergence with expected recursion contains $1-\mathbb{E}[R]$ in the denominator, and requires $\mathbb{E}[R] < 1$ for finite KL. The paper does not explicitly verify this consistency condition for the PCFGs used in the experiments. Since $\mathbb{E}[R] \ge 1$ would mean the grammar generates infinite strings with probability 1, this is a basic sanity check that should be reported.
+- **Abstract overstates the LLM recursion finding (abstract, Section 6):** The abstract claims models struggle with deeper recursion as "a limitation even of large language models." The actual LLM evidence is 5 prompted examples on GPT-5.1 Instant, which the paper itself labels "purely anecdotal and should not be interpreted as direct evidence" (footnote 3). The controlled small-transformer result (Figure 3) stands on its own; the LLM gesture adds rhetorical weight without evidential support.
 
-- **Definition 4.2 (restricted KL divergence) is presented in a way that is hard to follow.** The notation uses $D_{\text{KL}}(P_G \parallel Q | \neg s)$ which appears to be a parser artifact (the intent is likely a conditional KL divergence). The summation indices are ambiguous ($a$ appears in the sum but not in the summed term). While the surrounding text explains the concept, the formal definition as printed is not self-consistent and needs cleanup.
+- **Definition 3.3 may lack closure:** An inner subgrammar is defined via rules whose LHS non-terminal belongs to N', but there is no explicit requirement that RHS non-terminals also belong to N'. If a rule A → αBβ with A ∈ N' but B ∉ N' is included, the subgrammar cannot expand B and is not a well-formed standalone PCFG. The decomposition theorems likely assume closure; the definition should state it.
 
-- **The "context-insensitivity" assumption in Corollary 4.5 is acknowledged to be strong but is only tested informally.** The paper states that "varying the prefix did not result in qualitatively different results" — but this is a qualitative check, not a quantitative test. Since this assumption is central to the simplified decomposition and to Theorem 4.6, it deserves a more rigorous empirical examination (e.g., measuring the actual variation of $Q_\theta(A_i|s)$ across contexts $s$).
+- **Narrow experimental scope limits generality (Sections 5–6):** Experiments use 2-layer and 4-layer transformers on a small set of hand-crafted PCFGs. The curriculum pretraining benefit on final loss disappears with 4-layer models. CKA effects are concentrated in attention layers with near-zero change in MLP layers (Table 1). The depth-vs-length result (Figure 3) uses a single grammar. These are reasonable choices for an exploratory study, but the paper occasionally draws broader conclusions than the setup supports.
+
+- **Theoretical contributions are organizational rather than deep (Section 4):** The decomposition theorems correctly apply the chain rule and the factorization induced by the PCFG. While the framing as a recurrence over subgrammars is a useful conceptual contribution, the paper's language ("fundamental theorems," "the most important contribution") overstates the mathematical depth.
+
+- **No variance reporting for main loss curves:** Figures 1 and 2 show loss curves without error bars or confidence intervals, making it difficult to assess the reliability of the per-subgrammar decomposition across seeds. CKA results use 30 seeds, but loss curves appear to be single runs.
 
 ### Trivial
-- The paper says the KL divergence "obeys a recurrence" — equation (4) in the extracted text appears garbled (showing ratios of logs rather than differences). This is a parser artifact from the PDF extraction, but in any case the main text's derivation from equations (1)–(3) to the intended conclusion is clear enough conceptually.
+
+- **Definition 4.2 notation is difficult to parse:** The "restricted KL divergence" definition contains garbled notation (e.g., "D_KL(P_G || Q | ¬s)") that makes the conditioning structure unclear. The surrounding prose explains the concept, but the formal definition needs cleanup.
 
 ## Nice-to-Haves
-- The curriculum learning experiments show that *larger* models (4-layer transformers) do not benefit from subgrammar pretraining — an interesting negative result that is mentioned in passing but not discussed in depth. This could be a meaningful finding about model-size-dependent inductive biases.
-- The paper could strengthen the depth generalization experiment by probing whether hidden states fail to encode recursion depth, connecting to the "lost in the middle" phenomenon.
-- A discussion of whether the PCFGs studied are consistent (i.e., sum to 1 over all derivations) would add rigor, especially given Theorem 4.6's $\mathbb{E}[R] < 1$ condition.
+
+- A comparison of subgrammar pretraining against other curriculum baselines (e.g., training first on shorter sequences or lower-entropy subsets) would strengthen the claim that the benefit is specifically due to subgrammar structure rather than any form of gradual learning.
+- Expanding the depth-vs-length analysis to additional grammar families would test whether the finding generalizes beyond Nested Parentheses.
+- A systematic check of the "context-insensitivity" condition (Corollary 4.5) across subgrammars and training checkpoints would bridge the theory-experiment gap more rigorously.
 
 ## Removed Points
-- **Equation (4) being "ratios of logs":** This is a PDF-extraction artifact; the original submission likely had proper formatting. The conceptual derivation is understandable. *Reason: pure formatting/parser artifact.*
-- **Criticism that the paper does not state number of layers:** The paper explicitly mentions "2-layer transformer" (Figure 1 caption) and "4-layer transformer" (Section 5.2). *Reason: factually wrong.*
-- **Criticism that "overhead" is undefined:** It is defined in Figure 1 caption: "Overhead refers to constant strings in between subgrammar roots." *Reason: factually wrong.*
-- **Claim that Corollary 4.7 is a "tautology":** The corollary is explicitly stated as informal, and the paper acknowledges it as a preliminary step. The reviewer's characterization is too dismissive of what is presented as an opening direction. *Reason: strawman — the paper does not claim this is a deep theorem.*
-- **Claim that parallel learning interpretation contradicts the data because subgrammars start at different KL values:** The paper's claim is that all subgrammar losses decrease *concurrently from the start*, not that they have identical values. Different starting KL values are expected because subgrammars have different complexities/natural entropies. *Reason: misreads the claim.*
-- **Claims about missing appendix, proofs, and supplementary material:** These are stripped by the parser, not absent in the original submission. *Reason: parser artifact.*
+
+These points are flagged to be removed; treat them with caution.
+
+- **Harsh Critic claim that theoretical results are "largely restatements of the chain rule and provide limited new insight":** While the mathematical steps are straightforward, the framing as a recurrence over subgrammars is a genuine organizational contribution. Demoted from "Critical Issue" to Minor.
+- **Harsh Critic claim about missing baseline for curriculum pretraining:** The paper compares against training from scratch, which is the most relevant baseline. Other curriculum forms would be nice but are not essential. Moved to Nice-to-Haves.
+- **Harsh Critic claim about "missing appendix" and "definitions deferred to appendix":** The parser strips appendix sections. The original submission presumably contains these. REMOVED per hard rules.
+- **Harsh Critic criticism that Corollary 4.5's context-insensitivity condition "is not assessed":** The paper does address this: "varying the prefix did not result in qualitatively different results, suggesting these models are largely context-insensitive" (line 211). The check is informal but present. Demoted.
+- **Strength Finder's claim about "rigorous loss decomposition theorem":** The decomposition is correct but not mathematically deep. Kept with softened framing.
+- **Strength Finder's claim about "quite definitively" showing representational alignment:** The CKA effects are modest (+8–22% in attention, near-zero in MLP). The word "definitively" overstates. Kept with caveat.
 
 ## Novel Insights
-The most genuinely novel observation that emerges from this paper — beyond its explicit contributions — is that the recursive structure of CFGs provides a natural additive decomposition of the language-modeling loss, and that this decomposition holds *dynamically* throughout training, not just at convergence. This suggests that the loss landscape for grammar learning has an inherent modular structure that gradient descent can exploit. The paper also surfaces an intriguing tension: models can achieve low training loss without internalizing recursion depth, which is reminiscent of the known phenomenon that transformers can fit complex functions while failing at out-of-distribution compositional generalization, but here given a precise formal framing through the subgrammar lens. The specific finding that subgrammar pretraining helps 2-layer but not 4-layer transformers is also worth further investigation — it suggests there is a "sweet spot" of model capacity where curriculum structure matters.
+
+The paper's most distinctive insight is the recursive decomposition of autoregressive KL loss over the subgrammar DAG of a PCFG (Theorem 4.3 → Corollary A.1). While the decomposition itself follows from the chain rule, the observation that it yields a clean recurrence over grammatical substructure — and that this recurrence is empirically visible throughout training — opens a principled way to study how compositional structure interacts with optimization. The depth-vs-length dissociation (Figure 3), where flattening the recursion hierarchy eliminates error while deepening it causes degradation, gives empirical teeth to the theoretical expectation from Theorem 4.6 and suggests that recursion depth is the "hard axis" for gradient-based learners on CFGs.
 
 ## Suggestions
-1. Move at least one complete grammar definition (rules, probabilities, subgrammar decomposition) and the key hyperparameters (hidden dimension, heads, optimizer, learning rate) to the main text so the experiments are self-contained.
-2. Add confidence intervals or standard deviations to all reported quantitative results (Table 1, Figure 3, loss values).
-3. Replace or remove the word "definitively" in the abstract. Calibrate the CKA claims to what the method actually measures (representational similarity between models, not alignment with grammar structure).
-4. Provide a quantitative test of the "parallel learning" claim — e.g., a convergence-time ratio, or an empirical measure of gradient interference between subgrammars.
-5. Clean up Definition 4.2 so it is self-consistent and the notation is unambiguous. If the garbled equation (4) is indeed a parser artifact, ensure the submitted version is correct.
-6. Verify and report $\mathbb{E}[R] < 1$ for each experimental PCFG (required for Theorem 4.6 to apply with finite KL).
 
-## Overall Assessment
+- **Soften "parallel learning" to "co-occurring learning"** unless stronger evidence (e.g., intervention experiments) can be provided. The current phrasing promises more than the visual evidence delivers.
+- **Add the closure condition to Definition 3.3** (RHS non-terminals must be in N') or explain why it is unnecessary for the intended use.
+- **Report variance across seeds for the main loss decomposition curves** (Figures 1–2), not just for CKA.
+- **Remove or drastically downweight the GPT-5.1 anecdote**, or reframe it as a speculative remark rather than a finding. The controlled small-model result in Figure 3 is sufficient to motivate the recursion-depth concern.
 
-This paper proposes a genuinely novel framework for studying language model learning through the subgrammar structure of CFGs. The theoretical decomposition of KL divergence over subgrammars is the paper's strongest contribution and is empirically validated. The experimental findings (parallel learning, depth vs. length difficulty, subgrammar pretraining effects) are interesting and suggestive.
+## Score and Decision
 
-However, the paper has significant presentation and rigor deficits: key experimental details are absent from the main text, central claims (especially the "definitive" CKA claim) outstrip the evidence, no statistical testing is reported, and some theoretical definitions are unclear as presented. These issues are fixable but substantial.
+**Round 1 bracket:** The paper falls between 4.5 and 6.5 based on comparison with anchors on formal language learning, synthetic grammar experiments, and transformer training dynamics.
 
-The paper makes a genuine contribution that should be of interest to the community studying how neural networks acquire formal structure. With a major revision addressing the missing details, toning down the overclaims, and adding statistical rigor, it could be a solid publication.
+**Round 2 narrowing:** Compared against the closest anchors:
+- "How transformers learn structured data: insights from hierarchical filtering" (5.00, Reject): Our paper is stronger — more diverse experiments, cleaner theoretical framework, better writing.
+- "Sudden Drops in the Loss: Syntax Acquisition, Phase Transitions, and Simplicity Bias in MLMs" (5.50, Accept): Our paper is comparable in quality but uses synthetic-only data versus real language, and has less thorough experimental validation (no causal interventions).
+- "Geometric Signatures of Compositionality Across a Language Model's Lifetime" (5.40, Reject): Similar quality tier, synthetic/controlled analysis of compositionality.
+- "Training Neural Networks as Recognizers of Formal Languages" (6.25, Accept): Our paper is clearly weaker — narrower scope, less systematic evaluation.
+
+The paper sits between the 5.00 and 5.50 anchors. It has a clean conceptual contribution, correct theory, and some genuine empirical insights (depth-vs-length), but the evidence for its strongest claims (parallel learning) is thin and the experimental scope is narrow. Score: **5.5**.
+
+### Anchor comparison summary
+
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| F0Zd3knG9j — How transformers learn structured data | 5.00 | R2 | Our paper is stronger: more diverse experiments, clearer framework |
+| MO5PiKHELW — Sudden Drops in the Loss | 5.50 | R2 | Comparable; ours is synthetic-only, lacks causal interventions |
+| q5lJxCXjiY — Geometric Signatures of Compositionality | 5.40 | R2 | Similar quality tier; both study compositionality in controlled settings |
+| fp77Ln5Hcc — Depth Extrapolation of Decoders | 4.50 | R1 | Our paper is stronger: better theory, clearer writing, more experiments |
+| 0pLCDJVVRD — Percolation Model of Emergence | 7.00 | R1 | Our paper is clearly weaker: less thorough, synthetic-only, weaker evidence |
+| aWLQTbfFgV — Training NNs as Recognizers of Formal Languages | 6.25 | R1 | Our paper is weaker: narrower scope, less systematic evaluation |
 
 MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

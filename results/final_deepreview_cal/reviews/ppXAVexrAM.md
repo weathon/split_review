@@ -1,119 +1,100 @@
-Now I have a comprehensive view of the paper, the reviews, and the calibration anchors. Let me synthesize the final review.
-
-## Summary of Calibration
-
-**Round 1 bracket**: The paper falls between the weak band (scores ~2.6–3.4, weakly related) and the strong band (7.67+, top papers like LVSM). The middle band contains papers scoring 5.00–6.50.
-
-**Round 2 narrowing**: I read full reviews of AR-1-to-3 (5.00, Reject), GST (6.25, Accept), Zero-shot NVS (6.00, Accept), 4DiM (6.50, Accept), CamTrol (5.80, Accept), and Training-free Camera Control (5.80, Accept).
-
-**Positioning**: ARSS is clearly stronger than AR-1-to-3 (5.00) — more datasets, stronger ablations, more novel architecture. It is comparable to Training-free Camera Control (5.80) and Zero-shot NVS (6.00) but has methodological gaps (camera autoencoder not validated) that keep it from reaching the level of GST (6.25) or 4DiM (6.50). **Final score: 5.5** — borderline, needs substantial revision.
-
-Now let me write the review.
+I have now thoroughly read the paper, cross-checked all reviewer claims, and calibrated against human-reviewed anchors. Here is the consolidated review.
 
 ---
 
-# Final Consolidated Review
-
 ## Summary
-ARSS proposes the first decoder-only autoregressive transformer (GPT-style) for novel view synthesis from a single image, conditioned on a camera trajectory. The method uses a video tokenizer for temporally consistent discrete tokens, a camera autoencoder that converts Plücker raymaps into 3D positional guidance tokens, and a hybrid token permutation strategy (spatial-only shuffle preserving temporal order). Experiments on RealEstate10K, ACID, and zero-shot DL3DV show competitive results against diffusion-based NVS methods.
+
+ARSS introduces the first decoder-only autoregressive (AR) transformer framework for novel view synthesis from a single image conditioned on a camera trajectory. The method combines three components: a causal video tokenizer for temporal consistency, a camera autoencoder that compresses Plücker raymaps into 3D positional guidance tokens, and a spatially shuffled (but temporally ordered) token permutation strategy that lets the causal transformer exploit bidirectional image context within each frame. Experiments on RealEstate10K, ACID, and zero-shot DL3DV show the AR approach is competitive with SOTA diffusion-based NVS methods.
 
 ## Strengths
 
-- **Novel architecture for causal NVS.** ARSS is the first to apply a decoder-only causal autoregressive model to novel view synthesis with explicit camera control (lines 111–113). This is a genuine architectural contribution that opens a new direction in NVS beyond the dominant diffusion paradigm. The results in Table 1 confirm that this approach can compete with established diffusion-based methods.
+- **Novel AR formulation for scene-level NVS**: This is the first work to adapt a causal, decoder-only GPT-style transformer to novel view synthesis with explicit camera trajectory control. The integration of camera tokens as interleaved positional instructions within the AR sequence is a clean design that opens a new direction beyond diffusion-based NVS.
 
-- **Hybrid token permutation strategy is well-motivated and validated.** The spatial-only shuffle (preserving temporal order) is cleanly motivated and ablated in Table 2 and Figure 7. It significantly outperforms both raster-order (PSNR 19.22 vs 16.29) and full-permutation (19.22 vs 18.76). The visual evidence in Figure 7 confirms the geometric distortions that the other strategies introduce.
+- **Well-validated spatial-only token permutation**: The proposed hybrid ordering—shuffling spatial tokens within each frame while preserving temporal order across frames—is clearly motivated (uni-directional attention vs. bi-directional images) and rigorously ablated. Table 2 shows it improves PSNR by +2.93 dB over raster-scan ordering, and Figure 7 provides compelling qualitative evidence that both "raster" and "full perm." alternatives degrade in distinct and interpretable ways.
 
-- **Error-accumulation analysis demonstrates a genuine advantage of the causal AR structure.** Figure 6 shows that ARSS maintains consistently higher PSNR/SSIM and lower LPIPS across 16-frame trajectories, with flatter degradation slopes than all baselines. This directly supports the paper's motivation that causal generation is beneficial for long-horizon view synthesis.
+- **Video tokenizer ablation is convincing**: Replacing a per-frame VQ image tokenizer with a causal video tokenizer yields a 62% FVD reduction (52.56 vs. 137.68, Table 3), directly quantifying the importance of temporal modeling in the tokenization stage.
 
-- **Clean ablations.** The paper provides thorough ablations on both the token permutation strategy (Table 2) and the tokenizer choice (Table 3), clearly isolating the contribution of each design decision.
+- **Solid quantitative and generalization results**: The method achieves the best PSNR (19.02 on Re10K, 21.93 on ACID) and lowest LPIPS among all compared methods. Zero-shot results on DL3DV (Table 1) and on out-of-distribution AI-generated images (Figure 5) demonstrate genuine generalization beyond the training distribution.
+
+- **Per-frame quality analysis**: Figure 6 shows that ARSS maintains the highest per-frame PSNR/SSIM and lowest LPIPS across a 17-frame trajectory with a visibly flatter degradation slope than all baselines.
 
 ## Weaknesses
 
 ### Major
 
-1. **Camera autoencoder is central to the contribution but its reconstruction quality is never validated.** The camera tokens are a core claimed contribution — they provide "3D positional guidance" that enables spatial permutation and camera control. However, the paper reports no metrics on the camera autoencoder's reconstruction accuracy (e.g., mean angular error of ray directions, depth error, whether the unit-norm and orthogonality constraints are satisfied after reconstruction). Without this validation, it is unclear whether the camera tokens actually encode useful 3D geometry, or whether the model relies primarily on temporal ordering and visual context. An ablation that **replaces camera tokens with learnable positional embeddings** (indexed by frame number and spatial position) would directly test this, and its absence is a significant methodological gap.
-
-2. **Baseline comparisons have fairness concerns that are not fully addressed.** LVSM (designed for 2–3 input views), RayZer (designed for multiple posed images), and ViewCrafter (typically uses multiple conditioning frames) are tested with a single input view, which is a setting their architectures were not designed for. The paper does not describe how these baselines were adapted. While SEVA and Genwarp are directly comparable (same task), the inclusion of methods tested out-of-regime inflates the appearance of superiority. The paper's main claim — "consistently outperforms most of the baselines" — would be more reliably supported if the comparison focused on methods designed for the same single-view setting or described the adaptation procedure in detail.
-
-3. **Unexplained discrepancy between Table 1 and Table 2.** The "Ours" row in Table 1 reports PSNR 19.02, SSIM 0.624 on RealEstate10K, while the "ours" row in Table 2 reports PSNR 19.22, SSIM 0.565 (the same dataset, same method). The SSIM gap (0.624 vs 0.565) is substantial. The paper does not explain whether these come from different evaluation splits, different random seeds, or different settings. This needs clarification because it affects the reliability of the reported numbers.
+- **The core motivation is not empirically demonstrated**: The introduction motivates AR by arguing that diffusion models cannot easily "impose a strictly causal structure" or "incrementally extend and reuse existing generations when the trajectory changes" (line 17). The abstract echoes this framing. Yet all experiments generate fixed-length 17-frame trajectories in a single pass—exactly the static-condition setting where joint-generation diffusion methods are known to work well. There is no experiment showing that ARSS can (a) generate beyond the training trajectory length, (b) condition on previously generated views to extend a trajectory, or (c) update partial trajectories without full recomputation. The per-frame analysis (Figure 6) shows quality degrades more slowly, which is evidence of good long-horizon behavior, but not of the incremental-extension capability that is the paper's stated *raison d'être* for an AR approach. Without such evidence, the paper demonstrates that AR *can* do NVS, not that it offers distinct advantages over diffusion.
 
 ### Minor
 
-1. **Sampling / decoding strategy not specified.** The paper mentions "iteratively sample the target tokens using a next-token prediction manner" (line 375) and "parallel decoding" (line 262), but does not specify the sampling strategy: temperature, top-k, top-p, or greedy decoding. This affects both reproducibility and quality. Autoregressive model behavior is highly sensitive to sampling parameters.
+- **Camera autoencoder is under-ablated**: Section 3.2.2 describes the camera autoencoder architecture only in general terms (stacked 3D convolutional encoder-decoder with geometric losses in Eq. 5). No comparison is provided against a simpler baseline such as feeding normalized Plücker coordinates directly through an MLP, or using them as raw positional encodings without learned compression. The architecture dimensions, compression factors, pre-training data, and whether the autoencoder is frozen during AR training (line 100 says "pre-train" but no details follow) are unspecified, making the contribution opaque.
 
-2. **Camera autoencoder loss notation is sloppy.** In Eq. 5, the paper writes "$\mathbf{d}$ is the momentum term formulated as $\mathbf{m} = \mathbf{o} \times \mathbf{d}$" — the same symbol $\mathbf{d}$ is used for both the direction and, incorrectly, the momentum. It should read "$\mathbf{m}$ is the momentum term." This is a minor but distracting error in a key equation.
+- **Overstated performance claims**: The introduction (line 114) and discussion (line 490) claim the method "out-performs current state-of-the-art methods," while the abstract more accurately says "comparable to state-of-the-art." The data in Table 1 support the latter: ARSS leads on PSNR and LPIPS, but SEVA achieves better SSIM (0.670 vs. 0.624 on Re10K; 0.664 vs. 0.623 on ACID) and substantially better FID on ACID (33.16 vs. 47.76, a 44% gap). These are not catastrophic failures—LPIPS and PSNR are arguably more important—but the claim of unambiguous out-performance is not supported by the full metric picture.
+
+- **Figure 6 framing**: The figure is labeled "Error accumulation analysis." For non-AR baselines (LVSM, MotionCtrl, ViewCrafter), per-frame degradation is primarily due to increasing viewpoint distance from the input, not autoregressive error propagation. The analysis remains useful as a per-frame quality comparison, but the "accumulation" framing conflates geometric difficulty with the AR-specific error propagation the paper is motivated by.
 
 ### Trivial
 
-- "purpose" should be "propose" (lines 126, 127).
-- Extra period in "steps. . We apply" (line 348).
+- None beyond minor presentation issues already captured above.
 
 ## Nice-to-Haves
-- A direct demonstration of the claimed advantage of causal generation over joint generation: an experiment where a user adds an extra view to a trajectory and ARSS generates only the new view (without regenerating the full sequence), while a diffusion method must regenerate everything.
-- A diversity/stochasticity analysis: NVS should ideally be deterministic given the input and camera trajectory, but the paper does not discuss whether multiple runs produce consistent results or vary stochastically.
-- Explicit discussion of AR video generation methods (e.g., Phenaki, VideoPoet) in related work to clarify how ARSS differs from / improves upon these (the key difference being explicit camera control for NVS, which these methods lack).
+
+- An ablation replacing the learned camera autoencoder with raw Plücker coordinates (or an MLP encoding without reconstruction loss) would illuminate whether the autoencoder is necessary or merely convenient.
+- Reporting decoding speed and analyzing the parallel decoding capability mentioned in Section 3.2.3 would strengthen the practical value proposition.
+- Statistical significance or multi-seed variance for the main results table.
 
 ## Removed Points
 
-These points were raised in the inputs but are removed for the following reasons:
+These points from the input reviews were considered but removed:
 
-- **"Methods like MotionCtrl and Genwarp are video-diffusion methods not specifically tuned for NVS from a single input view"** — Partially retained above (item 2 in Major). The critic's framing that this "invalidates the claimed superiority" is too strong; SEVA and Genwarp are directly designed for single-view NVS, and the paper acknowledges mixed results with SEVA. The concern is real but not fatal. Retained in weakened form.
+- *"Omission of Zero-1-to-3, MVDream as baselines"* — These are object-centric NVS methods designed for single-object 3D generation (Objaverse-scale). The paper targets scene-level NVS (RealEstate10K, ACID) with long camera trajectories. The baseline set (SEVA, LVSM, Genwarp, MotionCtrl, ViewCrafter, RayZer) is appropriate for the scene-level setting and scope.
 
-- **"The paper does not adequately situate itself relative to prior AR-based video/multi-view generation methods (Phenaki, VideoPoet, TATS)"** — Removed. These are text-to-video AR generation methods, not NVS methods with camera control. The paper's novelty claim is about NVS with explicit camera control, not AR video generation generally. However, a brief discussion would strengthen the paper; moved to Nice-to-Haves.
+- *"Statistical significance should be reported"* — Single-run evaluation on large-scale benchmarks is standard practice in the scene-level NVS literature (e.g., LVSM, SEVA). Moved to Nice-to-Haves.
 
-- **"Data leakage issue regarding the first frame"** — Removed. The paper's description of the training/inference setup (lines 344–375) is sufficiently clear: the input view's tokens are always visible, camera tokens for target views are provided as condition. This is a standard conditional generation setup, not a data leakage issue.
+- *"Tokenization ablation should compare against other video-capable tokenizers"* — The binary comparison (VQ image vs. video tokenizer) cleanly isolates the contribution of temporal modeling in tokenization. Comparing against alternative video tokenizers would add engineering value but is not essential for validating the core claim.
 
-- **"The paper does not report inference cost"** — Removed. This is a nice-to-have but not a core weakness. Many NVS papers do not report detailed inference costs.
+- *"The camera autoencoder should provide full architectural description, training data, pre-training details"* — Partially merged into the Minor weakness about under-ablation. The core concern is lack of justification and comparison, not missing implementation trivia.
 
-- **"The claim of being the first AR NVS method is weakened by not comparing against any AR video baseline"** — Removed. There are no existing AR video baselines designed for single-view NVS with camera control. The claim is appropriately scoped to the specific setting.
+- *"Parallel decoding claim is not validated"* — Moved to Nice-to-Haves. This is a forward-looking statement, not a core claim.
 
-- **"Missing comparison with Cat3D or other 3D reconstruction-based methods"** — Removed. These address a different problem setup (multi-view to 3D vs single-view to multi-view). The paper scopes its task appropriately.
-
-- **"Inference details missing: The sampling strategy (temperature, top-k, top-p) is not specified"** — Moved to Minor (item 1 above). This is a valid point but minor relative to the core contributions.
-
-- **"No human evaluation"** — Removed. Human evaluation is valuable but not standard for benchmarking NVS on established datasets with ground-truth views. Pixel-aligned and perceptual metrics are the norm.
-
-- **"No diversity evaluation"** — Moved to Nice-to-Haves. Relevant but not a core flaw.
+- *Strengths about "addressing an important problem" or "interesting question"* — Removed as generic; the kept strengths are grounded in specific evidence from the paper.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews primarily surface concerns about validation of the camera autoencoder and baseline fairness rather than synthesizing novel observations about the method itself.
+
+Beyond the paper's own contributions, a notable insight emerging from the review is that the spatial-only permutation strategy represents an elegant resolution of a fundamental tension in applying causal transformers to visual data: it preserves the temporal autoregressive structure (views farther from the source are always predicted after closer ones) while allowing the model to exploit full bidirectional spatial context within each frame. The ablation (Table 2, Figure 7) shows that both extremes—full spatiotemporal permutation and rigid raster ordering—fail for different, interpretable reasons (incorrect geometry vs. long-range distortion). This design principle may generalize to other tasks requiring causally ordered generation of spatially structured data.
 
 ## Suggestions
 
-1. **Validate the camera autoencoder.** Report reconstruction accuracy (mean angular error, unit-norm violation, orthogonality error) on held-out camera trajectories. Show that perturbing camera tokens leads to expected view changes, or that nearest-neighbor camera tokens in latent space correspond to geometrically similar poses.
+1. **Add an incremental generation experiment**: Generate views 1–8, then condition on those to generate views 9–16 using extended camera poses. Compare consistency against a diffusion baseline that must regenerate the full trajectory. This would directly validate the paper's core motivation.
 
-2. **Ablate camera tokens.** Replace camera tokens with learnable positional embeddings indexed by (frame, spatial position). If performance drops significantly, the 3D information is crucial. This would be the cleanest validation of a core contribution.
+2. **Add a camera encoding ablation**: Compare the full camera autoencoder against (a) raw Plücker coordinates passed through a small MLP and (b) direct Plücker encoding without compression. Report PSNR/LPIPS for each variant.
 
-3. **Explain the Table 1 vs Table 2 discrepancy.** State whether these come from different evaluation splits, different random seeds, or other factors. If the ablation uses a subset, say so explicitly.
-
-4. **Clarify baseline adaptation.** Describe how LVSM, RayZer, and ViewCrafter were adapted to the single-view setting. If they were given only one input view, state this explicitly. If the results in Table 1 for these methods are from their original papers or from re-implementation, clarify the source.
-
-5. **Specify sampling parameters.** Report temperature, top-k, top-p, or note that greedy decoding was used.
+3. **Align claims with evidence**: Either soften the "out-performs" language to match the abstract's "comparable to" phrasing, or add the experiments that would justify the stronger claim.
 
 ## Score and Decision
 
-All anchors retrieved:
+**Round 1 bracket**: Compared the paper against three score bands. Weak anchors (2.33–3.40) were clearly below this paper. Middle anchors included AR-1-to-3 (5.00, AR-based object NVS, synthetic-only eval) and GST (6.25, AR for joint pose+view prediction). Strong anchors included LVSM (7.67, transformer NVS, directly compared in this paper). Initial bracket: ~5.5–7.5.
 
-| Anchor ID | Avg Score | Round | Comparison to ARSS |
-|-----------|-----------|-------|-------------------|
-| I86z54CL2y (GeoGS3D) | 3.40 | R1 | Weaker — different task, lower quality |
-| hWlCc7Iksi (ARVideo) | 3.40 | R1 | Weaker — video representation learning, not NVS |
-| hrXt6Fdl2P (FV-NeRV) | 2.60 | R1 | Much weaker — compression task |
-| mHkbi3XM58 (Cond. density) | 3.25 | R1 | Weaker — different formulation |
-| pOcGFvfgjS (AR-1-to-3) | 5.00 | R1/R2 | Weaker — similar task but less evaluation, weaker ablations, diffusion+AR not pure AR |
-| NuHYh4YKNe (GST) | 6.25 | R1/R2 | Stronger — joint pose+NVS, accepted, more comprehensive |
-| QQBPWtvtcn (LVSM) | 7.67 | R1 | Much stronger — accepted with high scores |
-| zDJf7fvdid (Zero-shot NVS) | 6.00 | R2 | Slightly stronger — training-free, accepted |
-| KUz8QXAgFV (Bridging AR) | 5.50 | R2 | Similar — different task, both have methodological gaps |
-| KI1zldOFz9 (CamTrol) | 5.80 | R2 | Slightly stronger — accepted, training-free camera control |
-| d2UrCGtntF (4DiM) | 6.50 | R2 | Stronger — more comprehensive, higher resolution, accepted |
-| VLuJL8cnGk (3D-free meets 3D) | 5.00 | R2 | Weaker — rejected |
-| tJoS2d0Onf (SV4D) | 6.25 | R2 | Stronger — accepted |
-| fectsEG2GU (Diffusion²) | 6.25 | R2 | Stronger — accepted |
+**Round 2 narrowing**: Compared against anchors in (4.5–6.5) and (6.0–8.0). ARSS is clearly stronger than AR-1-to-3 (5.00, Reject) which evaluated only on synthetic objects with limited baselines. It is comparable to GST (6.25, Accept) in novelty and experimental thoroughness, and somewhat stronger in evaluation breadth. It is below LVSM (7.67, Accept), whose contribution was cleaner (minimal 3D bias, directly validated) and whose central claim was fully supported by experiments; ARSS's strongest motivating claim (AR enables incremental extension) remains unvalidated. It is also below LARP (7.50, Accept), a more focused contribution with tighter validation.
 
-**Round 1 bracket**: Between 3.5 and 7.5. **Round 2 narrowing**: The paper is weaker than GST (6.25) and 4DiM (6.50), comparable to training-free methods like CamTrol (5.80), and stronger than AR-1-to-3 (5.00).
+**Final assessment**: The paper makes a genuine contribution—first AR paradigm for scene-level NVS, with well-executed technical components and solid empirical results. The disconnect between its strongest motivating claim and its experimental validation is a real limitation that prevents it from reaching the top tier, but this is addressable and does not invalidate the contribution. Score: 6.5.
 
-The paper has a genuine contribution (first decoder-only AR for NVS with camera control) and strong ablations, but the camera autoencoder validation gap and baseline fairness concerns are significant weaknesses. The paper is borderline — it would need substantial revision (particularly validating the camera autoencoder and addressing baseline concerns) to be a clear accept.
+**Anchor summary**:
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+| Anchor | Score | Round | Comparison |
+|---|---|---|---|
+| MI0UiWeqOl (PAR modeling) | 2.33 | 1 | Different domain; ARSS substantially stronger |
+| I86z54CL2y (GeoGS3D) | 3.40 | 1 | 3D reconstruction; ARSS superior in evaluation |
+| hWlCc7Iksi (ARVideo) | 3.40 | 1 | AR video pretraining; ARSS stronger contribution |
+| 15lk4nBXYb (CCM-DiT) | 3.00 | 1 | Camera control for DiT; ARSS more novel |
+| pOcGFvfgjS (AR-1-to-3) | 5.00 | 1,2 | Closest AR paradigm; ARSS has better eval breadth and real-scene results |
+| dTGH9vUVdf (FreeVS) | 5.80 | 2 | Different domain (driving); ARSS more comprehensive |
+| zDJf7fvdid (Zero-shot NVS) | 6.00 | 2 | Diffusion-based zero-shot NVS; ARSS has training + stronger results |
+| NuHYh4YKNe (GST) | 6.25 | 1,2 | Most similar AR contribution; ARSS comparable novelty, slightly better evaluation |
+| wkbx7BRAsM (AR video imitators) | 7.00 | 2 | AR for video; different task |
+| Wr3UuEx72f (LARP) | 7.50 | 2 | Tokenizer design; cleaner contribution, better validated |
+| QQBPWtvtcn (LVSM) | 7.67 | 1,2 | Directly compared; LVSM's claims fully validated, ARSS's strongest claim is not |
+| P4o9akekdf (NoPoSplat) | 8.00 | 1 | Stronger contribution, more thoroughly validated |
+| QQ6RgKYiQq (MovingParts) | 8.00 | 1 | Different domain; stronger paper |
+
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

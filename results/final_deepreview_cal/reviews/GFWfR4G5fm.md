@@ -1,88 +1,92 @@
-Now I have all the information needed. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper and its calibration anchors. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper identifies and experimentally demonstrates three key limitations of static pre-training in supervised causal learning (SCL) — fragility to distribution shifts, failure in compositional generalization, and a synthetic-to-real generalization gap. To address these, it proposes TTT-SCL, a framework that dynamically generates training data aligned to each test instance, operationalized via an Alignment of Distribution (AD) metric combined with sparsity constraints. The instantiation, TACTIC, uses stochastic graph refinement guided by AD + sparsity to construct test-specific training sets and then trains an SCL model, achieving strong results on synthetic benchmarks, the Sachs real-world dataset, and the Syntren pseudo-real dataset.
+This paper identifies three fundamental out-of-distribution (OOD) generalization failures in static supervised causal learning (SCL)—fragility to distribution shifts, compositional generalization failure, and synthetic-to-real performance gaps—and proposes Test-Time Training for Supervised Causal Learning (TTT-SCL), a framework that dynamically generates training data aligned to each test instance. Its instantiation, TACTIC, uses a distributional alignment metric (AD) with sparsity constraints to guide stochastic graph refinement, producing tailored synthetic training instances that an SCL model is trained on at test time. Experiments show TACTIC significantly outperforms both traditional causal discovery methods and the strongest static SCL baseline (AVICI) on challenging OOD and real-world datasets.
 
 ## Strengths
 
-1. **Well-executed diagnosis of SCL limitations (Section 3).** The paper systematically demonstrates, through controlled experiments (Figure 2), that static SCL models degrade under graph/mechanism/noise shifts and, more fundamentally, fail at compositional generalization even when all individual components are seen during training. The "Component-mixed" condition is a genuinely informative experimental design that reveals memorization rather than modular understanding. This diagnostic contribution is valuable independent of the proposed method.
+- **Systematic and compelling demonstration of SCL generalization failures**: Section 3 provides a controlled, multi-factorial empirical analysis showing that AVICI—the strongest open-source SCL model—degrades under isolated shifts in graph structure, causal mechanism, or noise distribution; fails at compositional generalization even when all individual components were seen during training; and shows a dramatic synthetic-to-real gap (e.g., 97.8 AUROC on RFF_G vs. 62.3 on Sachs). This directly and convincingly motivates the need for test-time alignment.
 
-2. **TACTIC achieves strong results on the Sachs real-world dataset.** Table 2 shows TACTIC (Notears) reaching 78.9 AUROC on Sachs, substantially above all baselines (next best: PC at 67.1, AVICI at 62.3). This directly demonstrates that test-time alignment can bridge the synthetic-to-real gap diagnosed in Issue 3. The gain on Syntren (80.1 vs. AVICI's 65.4) provides corroborating evidence on a second, biologically-structured benchmark.
+- **Broad and rigorous empirical validation**: TACTIC (Notears) achieves best or competitive AUROC across five diverse test domains: Linear_U (86.3), Chebyshev_G (83.0), the real-world Sachs dataset (78.9 vs. AVICI's 62.3), and the pseudo-real Syntren dataset (80.1 vs. AVICI's 65.4), with only a modest gap to AVICI on the in-distribution RFF_G setting (91.8 vs. 97.8). Comparison against seven baselines (PC, GES, NOTEARS, RESIT, SCORE, NoGAM, AVICI) and consistent results across multiple metrics (Appendix D) build strong evidence.
 
-3. **Stage-wise analysis (Table 4) isolates the two-stage improvement.** The paper shows that TACTIC's final SCL output (91.8 on RFF_G, 86.3 on Linear_U, 83.0 on Chebyshev_G, 78.9 on Sachs) consistently outperforms both the seed graph and the highest-scoring graph from the search (e.g., 78.9 vs. 66.6 on Sachs). This provides _prima facie_ evidence that the SCL phase adds value beyond the score-based search, distinguishing TACTIC from classical score-based approaches.
-
-4. **Sparsity ablation confirms the necessity of the constraint.** Table 3 shows removing the sparsity penalty drops performance sharply (e.g., Sachs: 78.9 → 63.5; Chebyshev_G: 83.0 → 69.7), validating that optimizing AD alone leads to degenerate dense graphs and that the joint formulation is critical.
+- **Well-designed ablations isolating each component's contribution**: Removing the sparsity penalty causes consistent AUROC drops (e.g., Chebyshev_G: 83.0→69.7; Sachs: 78.9→63.5), directly validating the necessity of sparsity. The stage-wise analysis (Table 4) demonstrates incremental improvement from seed graph → highest-score refinement graph → final SCL prediction (e.g., Sachs: 61.8→66.6→78.9), showing both the search and the supervised learning phase contribute meaningfully.
 
 ## Weaknesses
 
+### Fatal
+
+None. No weakness identified that unambiguously invalidates the paper's core claims given what is on the page.
+
 ### Major
 
-1. **Missing controlled comparison against simpler test-time adaptation.** TACTIC's core claim is that the full two-stage pipeline (search + SCL training on generated data) outperforms static methods. But the paper does not include a baseline that also adapts to the test instance in a simpler way — for example, fine-tuning the pre-trained AVICI model on D_test (using the same likelihood-based objective), or simply using the highest-scoring graph from the search directly without the SCL step. Table 4 partially addresses this (comparing search output vs. SCL output), but the comparison to AVICI (scm-v0) conflates two differences: (a) test-time adaptation vs. static, and (b) the specific TTT-SCL mechanism vs. simpler forms of adaptation. Without a baseline like "AVICI fine-tuned on D_test data," we cannot tell whether the gains come from any form of test-time training or from TACTIC's specific design. This is the most significant gap in the evaluation.
-
-2. **Limited real-world validation relative to the paper's claims.** The paper frames the synthetic-to-real gap as "the primary bottleneck for SCL" and claims TACTIC addresses real-world applicability. Yet the only real-world dataset with ground truth is Sachs (11 variables, 853 samples). Syntren is pseudo-real (simulated gene expression), and the bnlearn benchmarks mentioned in Appendix G are small (5–8 variables). This is thin support for sweeping claims about real-world applicability. Additional real-world datasets of moderate size would substantially strengthen the evidence.
+- **Mathematically problematic acceptance criterion in the stochastic refinement step**: Figure 3 specifies the transition probability as α = min[1, score(G^{k+1}) / score(G^k)], where score(G) = AD(G, D_test) − λ·‖A_G‖₀ and AD is a log-likelihood (Eq. 3). Since log-likelihoods on continuous data can be negative and the sparsity penalty is non-positive, scores can be negative. When scores are negative, this ratio formula produces counter-intuitive behavior: a move from score = −5 to score = −10 (deterioration) yields α = min(1, 2) = 1 (always accepted), while a move from −10 to −5 (improvement) yields α = min(1, 0.5) = 0.5 (accepted only 50% of the time). This is not a proper Metropolis-Hastings acceptance ratio. The paper does not claim to implement MCMC, describing it as "stochastic graph refinement" with acceptance "proportional to its score," so this is a heuristic search and the directional bias may still favor higher-scoring graphs depending on the sign of scores. However, the formulation as written in Figure 3 is unsound and the paper provides no justification for why this specific ratio is appropriate. The authors should either correct the formula (e.g., to exp(Δscore) if a log-posterior interpretation is intended) or explicitly justify the ratio as a heuristic and explain why it directionally works.
 
 ### Minor
 
-3. **The mechanism by which the SCL model improves over the highest-scoring search graph is not explained.** Table 4 shows that the final SCL output outperforms the highest-scoring graph found during search. The paper's explanation ("learns more accurate causal relationships") is vague. It could be simple ensembling of multiple candidate graphs, or it could be that the SCL model's inductive bias is beneficial. A controlled comparison against an ensemble of the top-K search graphs (e.g., averaging edge probabilities) would clarify whether the SCL model provides value beyond what a simple combination of candidates would achieve.
+- **In-sample AD computation may favor overfitted graphs**: AD (Eq. 3) is computed by fitting mechanisms directly to D_test and evaluating likelihood on the same D_test. This in-sample scoring could favor graphs that fit noise patterns in the finite test sample rather than capturing the true causal structure. The sparsity penalty provides partial mitigation, and the strong performance on held-out real-world data (Sachs, Syntren) suggests this concern is not catastrophic in practice, but the paper provides no analysis (e.g., cross-validation or out-of-sample AD evaluation) to bound this risk.
 
-4. **No ablation of the number of generated training instances K.** K=200 is fixed without sensitivity analysis. The paper does not examine whether fewer instances suffice or whether performance continues to improve with more. This is a practical parameter that affects computational cost and should be characterized.
+- **Noise distribution mismatch in forward sampling**: TACTIC forward-samples training data using Gaussian noise N(0,1) by default (Section 4.2), but the Linear_U test setting uses Uniform noise for identifiability. The paper does not discuss whether this mismatch between training-data generation noise and test-data noise affects alignment quality. The strong results on Linear_U (86.3 AUROC) suggest the mismatch is not fatal, but it deserves acknowledgment.
 
-5. **No discussion of sensitivity to the noise distribution used for forward-sampling training data.** The method defaults to standard Gaussian noise for generating training data, even though test data may have non-Gaussian noise. The paper does not test whether this mismatch matters or discuss potential robustness.
+### Trivial
 
-6. **Technical concern about the iterative search refinements.** The MCMC-like refinement (Section 4.2) uses a Metropolis-style acceptance rule based on score ratios. But the score function (likelihood + sparsity) is not guaranteed to concentrate around the true graph — any DAG that fits the data well with few edges can score highly, including ones with incorrect edges that happen to have negligible effect on likelihood. The paper does not discuss whether the search could converge to high-scoring but structurally incorrect graphs and how this would affect the training data quality.
+- The aggregation of ER and SF graph variants into single columns (RFF_G, Linear_U, Chebyshev_G) in Table 2 is not explicitly stated in the main text, making it slightly harder to interpret the experimental design.
 
 ## Nice-to-Haves
 
-- A comparison against an ensemble of top-K candidate graphs (averaged edge probabilities) to isolate whether the SCL model provides value beyond simple candidate aggregation.
-- Sensitivity analysis on K (number of training graphs).
-- A controlled variant where the pre-trained AVICI model is fine-tuned on the test data D_test using the same likelihood objective.
-- A discussion of how the noise distribution used in forward-sampling (Gaussian by default) interacts with test data where noise is non-Gaussian.
-- Runtime/scalability analysis (noted as in Appendix F, which was not available for review).
+- A discussion connecting the AD score to identifiability conditions (e.g., when does high AD imply the true graph is recovered?) would strengthen the theoretical grounding.
+- Runtime comparison of TACTIC versus static SCL methods would help readers assess practical applicability, given that test-time search and SCL training add computational cost.
+- Reporting variance for the highest-score graph in Table 4 would sharpen the stage-wise analysis.
 
 ## Removed Points
 
-These points were considered but removed from the main review:
+These points were flagged by reviewers but are removed from the final review:
 
-- **"Unfair comparison — TACTIC has access to test data while baselines don't":** This is incorrect. All baselines (PC, GES, NOTEARS, etc.) also use D_test directly. TACTIC uses D_test more extensively, but this is the point of test-time training, not a flaw. The real issue (covered in Major #1) is the absence of a baseline that also spends extra test-time computation on adaptation.
-- **"Conceptual circularity — the candidate graphs are already fits to test data":** This misinterprets the method. The candidate graphs are indeed evaluated on D_test, but the SCL model is trained on *generated* (forward-sampled) data, not D_test itself. Table 4 shows that this SCL training phase does improve over the candidate graphs.
-- **"No discussion of identifiability":** The paper explicitly states in Section 4 that the method applies under standard identifiability assumptions (LiNGAM, ANM, PNL).
-- **"No discussion of computational cost / complexity":** The paper references Appendix F for complexity analysis. The appendix was stripped during parsing.
-- **"The sparsity ablation only confirms an expected result":** A negative result from an ablation is still informative. The magnitude of the drop (especially on Sachs) is useful evidence.
-- **"Missing related works":** Hard rule prohibits this criticism.
+- **"Invalid MCMC acceptance criterion" as a fatal flaw**: The paper does not claim to implement MCMC or sample from a posterior. The text describes "stochastic graph refinement" with acceptance "proportional to its score." This is presented as a heuristic directed search, not a principled MCMC sampler. The formula issue is real (retained as Major) but does not "invalidate the claim that the algorithm samples high-score graphs in a principled way" because the paper makes no such formal sampling claim. The empirical evidence that the search produces useful graphs is strong (Table 4).
+
+- **"Severe under-specification of key components (regression method, likelihood model)"**: The paper references Appendix A for AD implementation details. Per review policy, the appendix is stripped by the parser and its contents are assumed to exist in the original submission. The noise distribution is specified as N(0,1) in the main text (Section 4.2).
+
+- **"SCL model training ambiguity"**: Architecture and training hyperparameters are likely detailed in the stripped appendix. Removed per policy on appendix-deferred content.
+
+- **"AVICI backbone exclusivity in Section 3"**: The paper explicitly states that results with other backbones (SiCL) are consistent and shown in Appendix C. Removed per policy.
+
+- **"The paper does not report whether mechanisms are identifiable from test data alone"**: This is scope creep—the paper's framework is positioned as applicable under any identifiable model class (stated in Section 4). A theoretical identifiability analysis is not required for an empirical method paper.
 
 ## Novel Insights
 
-The most insightful observation that emerges from this review is that the paper's strongest contribution may actually be its diagnostic work in Section 3 (the systematic documentation of SCL's compositional generalization failure) rather than the TACTIC method itself. The "Component-mixed" experiments reveal that SCL models memorize configurations rather than learning modular causal representations — a finding that has implications for how SCL training sets should be designed even independently of test-time adaptation. Meanwhile, the main methodological question the paper raises but does not fully resolve is: what exactly does the SCL model contribute beyond the search? Table 4 shows *that* it contributes, but the mechanism remains opaque. If the SCL model primarily serves as a denoising aggregator over the search trajectory's high-scoring graphs, then TACTIC is better understood as a hybrid method (score-based search → learned aggregation) than as a true test-time training approach.
+The paper's core insight—that the similarity between a candidate causal instance and the true test instance can be captured implicitly through distributional alignment of their data, without knowing the true graph—is genuinely novel and theoretically interesting. The operationalization via AD (log-likelihood under structure-induced mechanisms) is clean and bridges structural hypotheses to observable data in a practically computable way. The finding that sparsity is essential not just for graph quality but specifically for generating *effective training data* for the downstream SCL model (rather than merely for regularization) is a non-obvious result with implications for how we think about synthetic data generation for supervised causal learning.
 
 ## Suggestions
 
-1. Add a controlled baseline where AVICI is fine-tuned on D_test (using the same likelihood-based objective or a simple fine-tuning loss) for a comparable amount of computation. This would directly test whether the improvement comes from test-time adaptation in general or from TACTIC's specific pipeline.
-2. Add an "ensemble of top-K candidate graphs" baseline for Table 4 to isolate the SCL model's contribution.
-3. Include at least one additional real-world causal discovery benchmark of moderate size (e.g., from the bnlearn or CauseMe suites) to strengthen the real-world applicability claims.
-4. Add an ablation varying K (number of training graphs) from small (e.g., 10, 50) to larger (e.g., 500) to characterize sensitivity.
-5. Discuss the noise distribution choice and its potential impact when test noise is non-Gaussian.
+- Replace the acceptance criterion with either a proper exponentiated form (min(1, exp(Δscore))) or explicitly acknowledge and justify the current ratio as a heuristic, explaining why it directionally works (e.g., by discussing the typical sign and range of scores encountered in practice).
+- Add a brief discussion of the potential in-sample bias in AD and why the sparsity penalty and empirical results on real-world data suggest it is not decisive.
+- Acknowledge the Gaussian-vs-Uniform noise mismatch for the Linear_U setting and explain why results remain strong despite it.
+
+---
 
 ## Score and Decision
 
-**Calibration summary:**
-All retrieved anchors are listed below with their avg human score, retrieval round, and comparison to this paper:
+**Round 1 bracketing**: Retrieved anchors in three bands—weak (<3.5: papers scoring 3.00–3.25 on causal structure learning), middle (3.5–7.5: papers scoring 5.00–6.25 including TICL at 5.50, Zero-Shot SCM at 6.25), and strong (>7.5: papers scoring 8.00 on theoretical causal discovery contributions). The paper clearly sits in the middle band, above TICL (5.50) and comparable to or slightly below Zero-Shot (6.25).
 
-| Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| ZXs3pkmrRG (TICL) | 5.50 | R2 | Similar paper (also test-time causal learning). TICL was rejected for limited novelty and unclear contributions. This paper is stronger on problem diagnosis and novelty of the TTT-SCL framework, but shares the concern about missing simpler adaptation baselines. **This paper is moderately stronger.** |
-| lQYi2zeDyh (Demystifying amortized CD) | 5.00 | R2 | Analysis-only paper limited to bivariate causal discovery. This paper has broader scope and proposes a method, making it stronger. |
-| x3F8oPxKV2 (Zero-shot causal models) | 6.25 | R1/R2 | Novel amortized framework but rejected due to strong assumptions (needs noise samples) and limited evaluation. This paper has more practical evaluation but weaker theoretical grounding. **Comparable overall quality.** |
-| pOoKI3ouv1 (Robust agents) | 5.75 | R1 | Pure theory paper (accepted despite no experiments). Different type of contribution, not directly comparable. |
-| wmV4cIbgl6 (CausalRivers) | 7.33 | R2 | Large-scale real-world benchmark for causal discovery. Stronger evaluation but different contribution type. This paper has weaker real-world validation. |
-| AvXrppAS2o, JzFLBOFMZ2, jFox1iMWUa, 4LiegvCeQD | 2.5–3.4 | R1 | Weak papers on related topics. This paper is clearly much stronger. |
-| bMvqccRmKD, zwMfg9PfPs | 6.75–7.00 | R1/R2 | Accepted papers on causality-guided generalization. This paper is slightly weaker due to evaluation gaps. |
+**Round 2 narrowing**: Retrieved additional anchors in the 5.0–7.5 range. TICL (5.50) proposes a conceptually similar test-time training approach for interventional SCL but suffers from unclear algorithm description, limited novelty, and narrower scope. Zero-Shot (6.25) amortizes SCM inference but assumes known graphs and additive noise, with evaluation limited to synthetic data. DrBO (6.50) is a cleaner method with Bayesian optimization for DAG learning. The paper under review has a more thorough empirical evaluation than all of these, a clearer problem motivation, and genuine novelty in the AD-driven alignment framework, but is held back by the problematic acceptance criterion formulation.
 
-**Round 1 bracket:** 5.0–7.0 (weak anchors at 3.0 → this paper is clearly stronger; strong anchors at 8.0 → this paper is clearly weaker).
+**Final comparison**: This paper is stronger than TICL (5.50)—cleaner framework, better empirical validation, more diverse evaluation. It is comparable to Zero-Shot (6.25)—less ambitious in scope but more practical and better evaluated. It falls slightly below DrBO (6.50) due to the acceptance criterion issue and some missing rigor. The final score reflects the paper's genuine novelty, strong empirical results, and the real but non-fatal weakness in the search algorithm formulation.
 
-**Round 2 narrowing:** Anchors in the 5.0–7.5 range placed this paper near the 5.5–6.5 zone. The most directly comparable paper (TICL, 5.50) is weaker on diagnosis and framework novelty. The zero-shot causal models paper (6.25) is comparable in novelty but was rejected for assumptions and limited evaluation. This paper falls between them.
-
-**Final score:** 6.0. The paper makes genuine contributions — the diagnosis of SCL limitations is strong and the TTT-SCL framework is well-motivated. But the evaluation has a significant gap (no simpler test-time adaptation baseline) that prevents the empirical claims from being fully substantiated, and the real-world validation is thin. With additional controlled experiments and real-world benchmarks, this could be a stronger paper.
+**Anchors consulted**:
+- AvXrppAS2o (3.00, Round 1): Weaker, limited causal structure learning for prediction
+- JzFLBOFMZ2 (3.20, Round 1): LLM-supervised CSL, less rigorous
+- fSxiromxAq (3.00, Round 1): Sparse causal model, weaker contribution
+- TRHyAnInUC (3.25, Round 1): Diffusion model for CD, less developed
+- lQYi2zeDyh (5.00, Round 1): Analysis of CSIvA, bivariate only — our paper is stronger
+- ZXs3pkmrRG (5.50, Rounds 1 & 2): TICL, similar concept — our paper is stronger
+- x3F8oPxKV2 (6.25, Rounds 1 & 2): Zero-Shot SCM, comparable — our paper has better evaluation
+- ozZG5FXuTV (6.00, Round 2): Causal alignment for diagnosis, different domain — comparable quality
+- l11DZY5Nxu (6.50, Round 2): Root cause diagnosis, cleaner method — our paper slightly weaker
+- 8muemqlnG3 (6.50, Round 2): DrBO, cleaner BO-based method — our paper slightly weaker
+- zwMfg9PfPs (6.75, Round 2): Out-of-variable generalization, strong theory — our paper weaker
+- HBf6HFnpmH (5.50, Round 2): Scalability evaluation, different focus — our paper stronger
 
 MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL DECISION: <decision>Accept</decision>

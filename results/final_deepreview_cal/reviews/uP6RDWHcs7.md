@@ -1,112 +1,89 @@
-Here is my final consolidated review:
+Now I have enough information to write the consolidated review. Let me organize my findings.
+
+---
 
 ## Summary
 
-Marginal Flow introduces a density estimation framework where the model density is defined as a mixture over resampled latent parameters: $q_\theta(x) = \frac{1}{N_c}\sum_i q(x|w_i)$, where the $w_i$ are drawn from a learned distribution $q_\theta(w)$ (implemented by pushing a base noise through an unconstrained neural network). This simple design enables efficient single-step sampling, fast density evaluation, flexible neural architectures (no bijective constraints), and support for lower-dimensional manifolds. Experiments demonstrate orders-of-magnitude speedups over Normalizing Flows, Flow Matching, and Free-form Flows on synthetic benchmarks, along with applications to simulation-based inference, distributions on positive-definite matrices, and latent-space manifold learning for images.
+Marginal Flow proposes a density estimation framework where the model density is defined as a finite mixture \(q_\theta(\mathbf{x}) = \frac{1}{N_c}\sum_i q(\mathbf{x}|\mathbf{w}_i)\) with parameters \(\mathbf{w}_i\) resampled at each evaluation from a learnable distribution \(q_\theta(\mathbf{w})\) parameterized by an unconstrained neural network. The resampling approximates the continuous marginal \(\int q(\mathbf{x}|\mathbf{w})q_\theta(\mathbf{w})d\mathbf{w}\) while avoiding the limitations of fixed-mixture models. The framework achieves efficient exact density evaluation (for the defined finite-sum model) and single-step sampling, supports lower-dimensional base distributions for manifold learning, handles multi-modal targets, and is trainable with both forward and reverse KL. Extensive experiments across synthetic data, simulation-based inference, Wishart matrix distributions, and latent-space manifolds demonstrate orders-of-magnitude speedups over competing models.
 
 ## Strengths
 
-- **Novel framework that genuinely combines properties that prior models achieve separately.** Marginal Flow is the only model in Table 1 that marks both "Efficient exact likelihood" and "Efficient single-step sampling" while also allowing free-form Jacobians and lower-dimensional base distributions. This combination—efficient density *and* efficient sampling without architectural constraints—is a real advance. Figure 3 shows the runtime advantage is dramatic (orders of magnitude) across dimensions $10^2$ to $10^5$.
+- **Genuinely novel and simple framework**: The idea of resampling mixture parameters from a learnable, neural-network-parameterized distribution at each evaluation — rather than optimizing fixed mixture components — is clever and novel. The paper's Figure 1 compellingly demonstrates that this marginalization prevents the collapse to a standard GMM and yields smooth density estimates even with few nominal components.
 
-- **Clear empirical evidence of faster convergence.** Figure 7 shows Marginal Flow reaching near-optimal test log-likelihood on five 2D synthetic datasets in seconds, while competing models (NF, FM, FFF) require orders of magnitude more runtime. Even accounting for possible Monte Carlo noise in the evaluation, these convergence speed differences are too large to be artifacts.
+- **Compelling empirical efficiency**: The runtime measurements in Figure 3 show Marginal Flow is orders of magnitude faster than Normalizing Flows, Flow Matching, and Free-form Flows for both sampling and density evaluation across dimensions up to \(10^5\). Table 1 correctly identifies Marginal Flow as uniquely combining efficient exact likelihood, efficient single-step sampling, and efficient training.
 
-- **Flexible framework demonstrated on genuinely non-trivial applications.** (a) The Wishart mixture experiment (Section 4.3) shows that changing $q(x|w)$ to a Wishart distribution lets the model learn densities on $100 \times 100$ positive-definite matrices ($d=5050$) while also recovering a 1D manifold—a task that is computationally prohibitive for Normalizing Flows. (b) The SBI experiments achieve state-of-the-art results in low-data regimes. (c) The 1D manifold learning in VAE latent spaces for MNIST and JAFFE faces (Section 4.4) produces qualitatively sensible interpolations.
+- **Genuine flexibility advantages**: The ability to use a base distribution dimension \(m < d\) allows learning densities on lower-dimensional manifolds — Figure 4 shows this works correctly where Flow Matching and Normalizing Flows cannot account for a manifold. This is a real practical advantage with no workaround in standard NF/FM frameworks. The parametric family \(q(\mathbf{x}|\mathbf{w})\) can be swapped out (e.g., Wishart for positive-definite matrices in Section 4.3), demonstrating domain adaptability.
 
-- **Robust multi-modal density estimation from few data points.** Figure 5 shows Marginal Flow accurately reconstructing 5 distinct clusters from only 150 training points, whereas NF, FM, and FFF all produce collapsed or blurred results. This robustness follows naturally from the resampling mechanism.
-
-- **Reverse KL training without observations.** Figure 8 demonstrates that Marginal Flow trained solely on unnormalized target densities (no data) achieves lower test reverse KL than Normalizing Flow on four synthetic distributions—a capability not available to Flow Matching or Free-form Flows.
+- **Broad empirical validation**: The paper evaluates on diverse tasks: synthetic density estimation (forward and reverse KL), simulation-based inference (SBI benchmark), Wishart mixture distributions (both \(10\times 10\) and \(100\times 100\) matrices), MNIST latent-space manifold learning, and JAFFE face manifold learning with only 214 images. The convergence plots (Figure 7) show Marginal Flow reaching higher test log-likelihoods in a fraction of the time of competitors.
 
 ## Weaknesses
 
 ### Major
 
-- **The "exact density evaluation" claim is overstated and conflates two different things.** The paper claims "exact density evaluation" throughout (abstract, Table 1, Section 2.2, conclusion). The model is defined in Eq. 2 as $q_\theta(x) := \frac{1}{N_c}\sum_i q(x|w_i)$, which *is* exact conditional on the sampled $\{w_i\}$. However, because the $w_i$ are resampled at each evaluation, the resulting density function is stochastic: evaluating it twice at the same $x$ yields different values. This differs fundamentally from what "exact density" means for a Normalizing Flow (a fixed, deterministic density function). The claim conflates (a) the exact computation of a conditional mixture density with (b) the exactness of a deterministic marginal density. Table 1's checkmark for "Efficient exact likelihood" alongside NF's is therefore misleading, since NF provides a *deterministic* exact density, while Marginal Flow provides a *stochastic* one. The paper should clarify this distinction and qualify the claim (e.g., "exact conditional density evaluation with Monte Carlo marginal"). This does not invalidate the method's practical value, but it is a meaningful difference that should be transparent.
+- **Missing analysis of the \(N_c\) approximation**: The paper defines its model via Eq. 2 as a finite sum with \(N_c\) samples and explicitly acknowledges (line 68) that "the resampling induces an approximation to the marginal distribution in Eq. 1." However, it provides **no analysis** of the relationship between the finite-\(N_c\) objective and the true marginal: no bias/variance characterization, no consistency argument as \(N_c\) grows, no discussion of Jensen's inequality relating \(\mathbb{E}[\log(\frac{1}{N_c}\sum_i q(\mathbf{x}|\mathbf{w}_i))]\) to \(\log \mathbb{E}[q(\mathbf{x}|\mathbf{w})]\). The claimed "exact density evaluation" refers to evaluating the finite-sum formula for a given draw of \(\{\mathbf{w}_i\}\), but the paper does not acknowledge that this value is itself a random variable that changes with each evaluation. This gap between the defined model and the motivating marginal (Eq. 1) needs to be bridged theoretically, or the framing should be adjusted to present the method honestly as what it is — a stochastic approximation scheme.
 
-- **The value of $N_c$ is never reported for any experiment or runtime comparison.** The paper mentions $N_c$ is "not required to be fixed" in Section 2.1, but no experiment specifies what $N_c$ was used. Without this, the reader cannot assess the bias-variance trade-off in the density estimates, nor the fairness of the runtime comparison. For the runtime plot (Figure 3), it is impossible to tell whether the reported speed advantage is achieved at an $N_c$ that produces accurate density estimates, or whether $N_c$ was set so low that the estimate is dominated by noise. This is a critical missing experimental detail.
+- **No ablation on \(N_c\)**: \(N_c\) is the central hyperparameter controlling approximation quality. The paper never reports what values of \(N_c\) were used across experiments, nor does it include any ablation study showing how test log-likelihood, runtime, and sample quality vary with \(N_c\). Without this, the empirical results cannot be properly interpreted — a small \(N_c\) would make evaluation trivially fast but potentially inaccurate, while large \(N_c\) could erode the claimed speed advantage.
 
-- **No discussion of the bias in the training objective.** Training via log-likelihood requires computing $\log \frac{1}{N_c}\sum_i q(x|w_i)$. The gradient of this expression is a ratio-of-averages estimator that is biased for any finite $N_c$ (the expectation of a ratio is not the ratio of expectations). The paper does not acknowledge this bias, nor does it provide any analysis (e.g., how $N_c$ affects gradient variance, or whether the bias is empirically negligible for the chosen $N_c$). Given that faster convergence (Figure 7) is a headline result, some evidence that the log-likelihood values are not substantially biased would be important.
+- **Unclear evaluation protocol regarding randomness**: The paper reports test log-likelihood values throughout (e.g., Figure 7) without specifying whether \(\{\mathbf{w}_i\}\) is held fixed across all test points, resampled per test point, or averaged over multiple draws, and without reporting error bars that reflect the stochasticity from the resampling. Given that \(q_\theta(\mathbf{x})\) depends on the random draw of \(\{\mathbf{w}_i\}\), test log-likelihood comparisons with deterministic models like trained NFs are not on equal footing unless this is properly controlled.
 
 ### Minor
 
-- **The runtime comparison lacks accuracy control.** Figure 3 compares runtime for density evaluation but does not control for accuracy. For Flow Matching, the paper uses an ODE solver for density evaluation, which is known to be slow—but FM models are primarily evaluated via sample quality, not exact density. For Marginal Flow, if $N_c$ is scaled with dimensionality to maintain a fixed accuracy level, the runtime advantage may shrink. The paper would be stronger by including a comparison at matched accuracy levels (e.g., fixing an error tolerance and measuring time-to-reach-it), or at least acknowledging this limitation.
+- **"Universality" claim unsupported**: The paper states (line 56) that "the resulting marginal \(q(\mathbf{x})\) is universal for many families of distributions" with only a citation to Micchelli et al. (2006). No theorem or argument is provided connecting the specific model definition (Eq. 2) to a universality result. This claim should either be backed by a concrete argument or softened.
 
-- **Test log-likelihood is evaluated via the same Monte Carlo estimator used in training.** The test log-likelihood curves in Figure 7 are computed using the same finite-$N_c$ estimator. If the estimator is noisy, convergence in this metric could partly reflect overfitting to Monte Carlo noise rather than the true density. Reporting test log-likelihood with a much larger $N_c$ at evaluation (to reduce estimator variance), or providing confidence intervals, would strengthen the evidence.
+- **Runtime comparison details deferred to Appendix**: Figure 3 compares runtime across methods, but key details — model sizes, specific NF architecture, whether the NF used fast inverse or exact Jacobian, and \(N_c\) values — are stated to be in Appendix A.3.1, which is stripped in this version. These details are essential for interpreting the fairness of the comparison.
 
-- **The manifold learning comparison to Free-form Flow is somewhat unfair.** Figure 4 shows Free-form Flow learning an incorrect manifold, but FFF is designed for generic architectures (approximate Jacobians) rather than manifold learning specifically. Including a VAE with a 1D latent (which inherently learns a 1D manifold) as an additional baseline would make the comparison more informative.
-
-- **No limitations section or discussion of failure cases.** The paper does not discuss settings where Marginal Flow might struggle (e.g., very high-dimensional data where a Gaussian $q(x|w)$ with diagonal covariance may be too restrictive, or datasets requiring a very large $N_c$ to control approximation error). A brief discussion would improve the paper's balance.
+- **No comparison with Mixture Density Networks**: Given that the method defines a mixture whose parameters are output by a neural network, Mixture Density Networks (MDNs) are a natural baseline. The paper compares against a simple GMM with fixed components (Figure 1) but not against an MDN that also learns to predict mixture parameters, which would isolate the benefit of resampling vs. fixed parameter prediction.
 
 ### Trivial
 
-- None beyond the issues already noted in Major/Minor.
+- The paper's framing could be more precise about "exact density evaluation" — the density is evaluated exactly *for the defined finite-sum model*, but the paper sometimes writes as if it provides the exact density of a fixed probabilistic model in the traditional sense (e.g., the abstract and introduction). This is a presentation issue rather than a technical flaw.
 
 ## Nice-to-Haves
 
-- Reporting test log-likelihood with a large $N_c$ at evaluation time to confirm that the reported values are not substantially biased.
-- Including an ablation study on $N_c$ to show how the bias-variance trade-off affects log-likelihood and runtime.
-- Comparing against a VAE with a 1D latent for the manifold learning experiment.
-- Adding confidence intervals or variance estimates for the test log-likelihood values in Figures 6 and 7, given the stochasticity of the density estimator.
+- A theoretical result bounding the KL divergence between the finite-\(N_c\) model and the true marginal as a function of \(N_c\) would substantially strengthen the contribution.
+- Reporting test log-likelihoods averaged over multiple independent draws of \(\{\mathbf{w}_i\}\) with standard deviations would make the evaluation more rigorous.
+- Including an MDN baseline in the synthetic experiments would better isolate the contribution of resampling.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed for the following reasons:
+These points are flagged to be removed; treat them with caution:
 
-- **"The Monte Carlo estimator is used for training – potential for biased gradients"** (Harsh Critic point 2): This is a real theoretical concern but is properly classified as a major/minor issue already covered. The strength finder's corresponding claim is that the paper does not discuss this, which is correct. Not removed, just merged into the existing weakness about missing bias analysis.
+- **"The density function is a random variable, making this not a valid probabilistic model"** — REMOVED as a fatal claim. The model is well-defined: \(q_\theta(\mathbf{x})\) is a stochastic function whose value for a given \(\mathbf{x}\) depends on the draw of \(\{\mathbf{w}_i\}\). This is unusual but not invalid; many models involve randomness (dropout, stochastic layers). The legitimate concern — that the relationship to the intended marginal is not analyzed — is retained above as a major weakness.
 
-- **"The comparison against a standard GMM is missing"**: The paper already compares against optimizing fixed $w_i$ (which is a GMM) in Figure 1 as motivation. This comparison is implicitly present and the paper's argument about marginalization vs. optimization is clear.
+- **"The training objective does not correspond to maximizing likelihood of the target marginal"** — REMOVED as a standalone fatal claim but folded into the major weakness about missing analysis. Optimizing \(\log(\frac{1}{N_c}\sum_i q(\mathbf{x}|\mathbf{w}_i))\) yields a stochastic lower bound on \(\log \mathbb{E}[q(\mathbf{x}|\mathbf{w})]\) (by Jensen), which is a legitimate training approach used in IWAE and related methods. The paper's failing is not analyzing this relationship, not the objective being "invalid."
 
-- **"NF baseline may be underpowered for Wishart"**: The harsh critic speculates the NF may be undertuned, but the paper reports a test KL of 0.0088 for Marginal Flow vs. 0.82 for NF. While the gap is large, the paper does note NF uses a Cholesky parameterization and that NF cannot scale to 100×100 matrices. This is an experimental comparison, not a flaw in the method itself.
+- **"The runtime comparison omits crucial details like N_c, model sizes, and specific NF architecture"** — RETAINED as minor (not fatal) since these details are stated to be in Appendix A.3.1 (stripped); the authors likely provided this information in the full submission.
 
-- **"Disentanglement claimed without metric for image manifolds"**: The paper says "disentanglement" only once in passing ("digits and writing style") and the qualitative results are presented as demonstrations, not rigorous claims. The paper does not make strong quantitative claims here.
+- **Demand for "theoretical results on consistency as \(N_c\) increases"** — MOVED to Nice-to-Haves. While valuable, many empirical methods are accepted without full consistency proofs; the paper's contribution is primarily empirical/methodological.
 
-- **"SBI results relegated to appendix"**: The appendix is missing due to parser issues, not author omission. The SBI results exist in the original submission.
+- **"The paper does not compare against modern mixture density networks"** — RETAINED as minor. This is a reasonable baseline request but not essential to the core claim.
 
-- **Formatting, typos, missing appendix content**: Parser artifacts, not author errors.
+- **"Evaluations may be artifacts of a particular instantiation of random w_i"** — This concern is real and captured in the major weakness about unclear evaluation protocol.
 
-- **"Missing related works"**: Cannot verify from paper alone.
+- **Strength Finder: "The marginalization scheme prevents collapse to a fixed mixture"** — KEPT; verified against Figure 1 and paper text.
+
+- **Generic strength about "important problem" or "interesting question"** — REMOVED as superficial.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The core idea — replacing fixed mixture optimization with learned resampling of mixture parameters to approximate a continuous marginal — is genuinely novel in the density estimation literature and represents an interesting design point between mixture models and continuous latent-variable models.
 
 ## Suggestions
 
-1. **Clarify the "exact density" language.** Distinguish between (a) the deterministic marginal $\mathbb{E}_{w\sim q_\theta}[q(x|w)]$ and (b) the stochastic conditional $\frac{1}{N_c}\sum_i q(x|w_i)$ used in practice. Qualify Table 1's checkmark (e.g., "Exact density evaluation (conditional on sampled parameters)").
-
-2. **Report $N_c$ for every experiment**, including the runtime comparison. Show how test log-likelihood varies with $N_c$ (e.g., a plot of log-likelihood vs. $N_c$ for a representative dataset) to demonstrate that the chosen value yields negligible bias.
-
-3. **Add a brief analysis of the training objective bias.** Provide empirical evidence (e.g., gradient variance as a function of $N_c$, or comparison of final log-likelihood at different $N_c$ values) that the bias from the Monte Carlo estimator does not significantly affect results.
-
-4. **Add error bars or confidence intervals for test log-likelihood** in Figures 6 and 7. Since the model's density estimator is itself stochastic, the test metric should be reported with uncertainty.
-
-5. **Include a limitations paragraph** discussing when the model's assumptions (e.g., Gaussian $q(x|w)$ with diagonal covariance) may be restrictive, and how $N_c$ should be chosen in practice.
+- Add a paragraph discussing the relationship between the finite-\(N_c\) training objective and the intended marginal: note that \(\mathbb{E}[\log q_\theta(\mathbf{x})] \leq \log \mathbb{E}[q_\theta(\mathbf{x})]\) via Jensen, so the objective optimizes a stochastic lower bound, and characterize how the tightness depends on \(N_c\) and the variance of \(q(\mathbf{x}|\mathbf{w})\).
+- Include an ablation table or figure showing test log-likelihood and runtime as a function of \(N_c\) on at least one synthetic dataset.
+- Clarify in the evaluation protocol whether \(\{\mathbf{w}_i\}\) is fixed or resampled per test point, and report error bars (e.g., ±1 std over 5 independent draws) on test log-likelihood.
+- Soften the "exact density evaluation" language to "exact evaluation of the defined finite-sum density" or "exact evaluation of the model density."
 
 ## Score and Decision
 
 **Calibration summary:**
 
-| Anchor ID | Avg Score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| 5sPgOyyjG5 | 3.00 | R1 (weak) | FKEE: significantly weaker — method has limited validation, this paper has extensive experiments |
-| 46tjvA75h6 | 3.00 | R1 (weak) | No MCMC Teaching EBM: weaker — unrelated methodology, less complete empirical story |
-| sK2A7Ve2co | 2.50 | R1 (weak) | a-GPS: much weaker — limited scope, this paper is far stronger |
-| BUQLiu4VA8 | 4.50 | R1 (mid) | VAPO: similar structure (novel framework, moderate claim inflation). Marginal Flow has stronger/ more experiments |
-| x17qiTPDy5 | 5.00 | R1 (mid) | DiffFlow: similar overclaiming about unification but no experiments. Marginal Flow has extensive experiments |
-| zrxlSviRqC | 5.00 | R1 (mid) | Self-normalised likelihood: similar issue (new training method, limited validation). Marginal Flow more complete |
-| RuP17cJtZo | 8.00 | R1 (strong) | Generator Matching: significantly stronger — rigorous theory, broader framework, cleaner claims |
-| NSVtmmzeRB | 8.00 | R1 (strong) | GeoBFN: stronger — more mature, extensive experiments on hard problems |
-| LyJi5ugyJx | 9.20 | R1 (strong) | Consistency Models: much stronger — large-scale experiments, stable training at 1.5B parameters |
-| ndCJeysCPe | 6.33 | R2 (narrow) | Flow analysis theory paper: narrower scope (only Gaussian mixtures). Marginal Flow broader |
-| kIPEyMSdFV | 7.00 | R2 (narrow) | rdMC: stronger theory, but also limited experiments. Marginal Flow has more diverse experiments |
-| 8NiTKmEzJV | 6.25 | R3 | NETS: similar tier — novel algorithm, useful but with limitations. Comparable quality |
-| RiS2cxpENN | 6.25 | R3 | Diffusion Cartoonists: similar tier — interesting findings but limited scope |
-| qOgLmcJxxF | 5.75 | R3 | Sample-efficient training: comparable — solid contribution with clear limitations |
+*Round 1 bracketing* identified a plausible range of 5.5–7.0 based on three broad queries. Key anchors: `rUH2EDpToF` (6.00, "Generative Marginalization Models" — similar theme, mixed reviews, theoretical concerns), `xIHi5nxu9P` (7.20, "Subtractive Mixture Models" — stronger theory, well-executed), `99YEbiBbdy` (6.75, theory paper on density estimation rates).
 
-**Round 1 bracket:** 4.5–7.5 (the paper is clearly stronger than score-3 anchors but not at the level of score-8+ papers).
+*Round 2 narrowing* within (5.0, 8.0) pulled: `WR9M6AA4LT` (6.00 — theory + limited experiments, restrictive assumptions), `8NiTKmEzJV` (6.25 — novel sampler, some theoretical gaps), `kIPEyMSdFV` (7.00 — accepted, theory + experiments, some unsupported claims), `ALGFFPXWSi` (7.00 — accepted, novel gradient estimation method).
 
-**Round 2 narrowing:** Compared to anchors at 6.0–7.0, Marginal Flow has a novel framework with extensive experiments across diverse tasks, but the "exact density" overclaim and missing $N_c$ details are more significant weaknesses than the issues in comparable papers. The paper sits below rdMC (7.0) which has rigorous theoretical guarantees, but above or comparable to papers like NETS (6.25) and DiffFlow (5.0).
-
-**Final score: 6.0.** The paper presents a genuinely novel framework with impressive empirical results across diverse tasks. The main weaknesses—the overstated "exact density" claim and missing $N_c$ values—are not fatal but are significant enough to prevent the paper from reaching the strong accept range. With clarifications and additional details, this could be a solid contribution.
+**Comparison**: This paper is stronger than `rUH2EDpToF` (6.00) — it has broader empirical validation, clearer efficiency advantages, and a simpler, more intuitive framework. It is weaker than `xIHi5nxu9P` (7.20) which provides rigorous proofs and theoretical depth. It sits comparably to `kIPEyMSdFV` (7.00) in ambition and empirical scope but has less theoretical analysis. The paper's combination of genuine novelty, compelling empirical results, and broad applicability — weighed against the theoretical gaps around the \(N_c\) approximation — places it in the **6.0–6.5** range. I assign **6.0**: the contributions are real and valuable, but the missing analysis of the core approximation and the unclear evaluation protocol prevent a higher score.
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

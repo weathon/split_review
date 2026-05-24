@@ -1,87 +1,84 @@
-I now have sufficient information for a calibrated assessment. Here is the final consolidated review.
+I have now thoroughly read the paper and all reviewer inputs. Let me synthesize the final authoritative review.
 
 ---
 
 ## Summary
 
-This paper proposes an end-to-end framework for multi-view diabetic retinopathy grading that replaces expensive external lesion annotations with self-derived lesion proposals. Two modules are introduced: GALP (Grade-Activated Lesion Proposal) generates lesion proposals from stage-wise auxiliary classifiers via CAM-based evidence maps and Top-K selection, and LGRF (Cross-View Lesion Expert Guided Regional Fusion) uses a gated mixture-of-experts with Top-K weighted cross-view attention to fuse proposals across views. The method is evaluated on the four-view MFIDDR and two-view DRTiD benchmarks, showing competitive performance against both end-to-end and externally informed methods.
+This paper proposes an end-to-end multi-view diabetic retinopathy (DR) grading framework that generates self-derived lesion proposals via a Grade-Activated Lesion Proposal (GALP) module and fuses them across views using a gated mixture-of-experts module (LGRF). The key claim is that these internally generated proposals can serve as surrogates for costly external annotations (lesion masks, vessel maps, OD coordinates). On two multi-view benchmarks (MFIDDR and DRTiD), the method achieves 83.9% and 76.0% accuracy respectively without any external supervision, outperforming all end-to-end baselines and many externally-informed methods.
 
 ## Strengths
 
-- **Self-derived proposals achieve competitive accuracy without external annotations.** The lesion-free variant (83.9% accuracy on MFIDDR) surpasses all purely end-to-end baselines (best prior: ETMC 81.5%) and matches or exceeds several externally informed methods (e.g., LFMVDR with lesion at 82.2%, CVSA with vessel at 82.6%). On DRTiD, the end-to-end method (76.0%) outperforms the annotation-dependent CrossFIT (75.6%). This directly supports the core claim that self-generated proposals can reduce annotation reliance.
+- **Strong empirical results on two benchmarks**: Without any external annotations, the method achieves 83.9% accuracy on MFIDDR and 76.0% on DRTiD, surpassing all purely end-to-end baselines (e.g., ETMC at 81.5%, CrossFiT at 75.6%) and even outperforming several externally-informed methods such as CVSA (82.6%) and LFMVDR (82.2%) on MFIDDR (Tables 1 and 3). This directly supports the claim that self-derived cues can reduce annotation dependence while maintaining competitive grading accuracy.
 
-- **Ablation confirms both GALP and LGRF contribute measurably.** Table 4 shows consistent degradation when removing GALP (83.9 → 82.7%), LGRF (83.9 → 82.3%), or the expert pool (83.9 → 82.6%). The ablation is cleanly designed — each variant tests a specific component — and the drops are non-trivial (1.2–1.6 points on accuracy).
+- **Well-designed LGRF module with validated components**: The ablation study (Table 4) cleanly isolates the LGRF contributions: removing the entire LGRF module drops accuracy from 83.9% to 82.3%, and removing only the expert pool drops it to 82.6%. These are meaningful, interpretable gaps that demonstrate both the gated expert selection and the cross-view attention mechanism contribute independently.
 
-- **Generalization to a different multi-view setting.** On DRTiD (2-view), the method outperforms all compared methods including those requiring optic disc and macula coordinates, providing cross-dataset and cross-annotation-regime evidence.
+- **Thorough hyperparameter analysis**: Figure 3 provides a systematic sweep over token retention ratio (α), number of routed experts (K₂), and total expert count (M), grounding the design choices empirically. The finding that α=0.5 outperforms α=1.0 (all tokens) provides indirect evidence that the proposal selection mechanism matters within the full model.
 
-- **Systematic hyperparameter analysis.** Figure 3 evaluates retention ratio α, number of routed experts K₂, and total experts M, identifying optimal settings (α=0.5, K₂=2, M=6) and showing the method is not overly sensitive to these choices.
-
-- **Grade-wise improvements on challenging categories.** With lesion input, the method achieves the best F1 on Grade 2 (65.2%) and Grade 3 (74.8%) among all compared methods, demonstrating sensitivity to mid-grade pathology where micro-lesions matter most.
+- **Clear problem motivation and positioning**: The paper situates itself well within the three-stage evolution of DR grading research (single-view → multi-view → annotation-augmented) and accurately identifies the practical burdens of externally-informed approaches (annotation cost, workflow burden, upstream model dependency).
 
 ## Weaknesses
 
 ### Major
 
-- **No qualitative validation that proposals correspond to actual lesions.** The paper's central motivation is that GALP generates "lesion proposals" that serve as surrogates for expert annotations. Yet no visualization is provided — no overlay of Grade-Activated Evidence Maps on fundus images, no comparison with ground-truth lesion masks, no analysis of what the Top-K regions actually capture. Without this, the mechanism is a black box: the selected regions could be picking up illumination gradients, background artifacts, or other grade-correlated but non-lesion patterns. The paper's claims about interpretability are also entirely unsubstantiated. This is a major methodological gap that weakens the core narrative.
+- **Ablation conflates auxiliary supervision with the proposal selection mechanism**: The "w/o GALP" configuration (Table 4) removes the entire GALP module — both the auxiliary classifiers and the proposal selection — and replaces proposals with all tokens fed into LGRF. The resulting 1.2% accuracy drop (83.9% → 82.7%) therefore cannot be attributed specifically to the proposal mechanism; it could arise entirely from the deep supervision provided by the auxiliary classification loss (Eq. 2, Section 3.2). A critical missing ablation is: auxiliary classifiers retained, but proposal selection replaced with all tokens (or a random subset) fed into LGRF. Without this, the paper's central claim that the *proposal selection* mechanism is what recovers fine lesion detail remains unisolated from the well-known benefits of deep supervision.
 
-- **Backbone-controlled comparison to prior methods is absent.** The headline comparisons pit the proposed method (Swin-B backbone) against published results from methods using different backbones (e.g., RETFound uses ViT-Large, MVCINN uses a custom hybrid, MVCNN uses ResNet50/VGG19). The gains over end-to-end baselines (e.g., 83.9% vs 80.1% for MVCINN) are therefore uninterpretable as evidence for the proposed modules — they could be substantially driven by the stronger backbone. The ablation (Table 4) credibly isolates the modules' contributions *within* the Swin-B framework, so the internal evidence is solid. But the paper's central external claim — matching/surpassing prior methods without annotations — rests on comparisons that are not held on equal architectural terms. Re-implementing the strongest baselines with the same backbone would directly address this.
+- **No direct validation that proposals correspond to lesions**: The paper's narrative is built around the claim that GALP proposals recover small, low-contrast lesions (microaneurysms) that end-to-end pipelines miss. However, the evaluation is confined entirely to image-level grading metrics (accuracy, kappa, F1). The MFIDDR dataset includes lesion segmentation masks (Section 4.1: "The provider also releases lesion segmentation masks generated by a segmentation model"), yet no overlap metrics (IoU, recall), no per-lesion-type sensitivity analysis, and no qualitative visualizations of proposals overlaid on fundus images with ground-truth annotations are provided. The grading improvement could be driven by grade-correlated but non-lesion image features captured by the CAMs. The mechanistic claim about lesion recovery is therefore not directly substantiated.
 
 ### Minor
 
-- **No error bars, confidence intervals, or statistical tests.** All results are single numbers. On DRTiD the margin over CrossFIT is only 0.4% (76.0 vs 75.6); on MFIDDR the w/o-lesion variant (83.9%) is 0.3% below the best externally informed method WGLIN (84.2%). Without variance estimates, the reader cannot assess whether these differences are meaningful or within noise. While single-run reporting is common in this benchmark setting, the small margins make this omission more consequential.
+- **No variance estimates or statistical significance**: All results are reported as single-run numbers. Several key comparisons involve small margins (e.g., 83.9% vs. 82.7% in ablation, 83.9% vs. 82.6% for CVSA in Table 1). Without standard deviations, confidence intervals, or significance tests across multiple seeds, the reader cannot assess whether these differences are reliable or within run-to-run noise. This is a common limitation in the field but weakens the specific numerical claims.
 
-- **Missing a simple multi-view Swin-B baseline without either module.** The ablation removes GALP or LGRF one at a time, but "w/o GALP" still uses LGRF's expert routing and "w/o LGRF" still uses GALP's proposals. A baseline that strips both modules — a plain multi-view Swin-B with standard cross-attention on all tokens — would cleanly isolate the combined contribution. The current design is informative but incomplete.
-
-- **No report of model size (parameters) or inference cost.** The MoE with 6 transformer experts per stage (4 stages) per view could be substantial. Reporting parameters and FLOPs would help assess practical viability, especially when comparing to simpler baselines.
+- **Resolution mismatch at deep stages for micro-lesion recovery**: With Swin-B on 224×224 inputs and q=7 patch size, stage 3 produces only 2×2 = 4 spatial regions (each covering ~112×112 pixels of the original image), yielding K₁ = 2 proposals at α=50%. While stage 1 provides finer-grained proposals (64 regions, 32 proposals), the paper's framing around recovering "micro-scale" lesions sits uncomfortably with the coarseness of deeper-stage evidence maps. The multi-stage design partially mitigates this, but the paper does not discuss the resolution limitation or analyze which stages contribute most to proposal quality.
 
 ### Trivial
 
-None.
+- The paper states it uses cyclic adjacent-view fusion (Eq. after Eq. 8: j = i+1 or 1) without justifying this design choice over global all-pairs fusion for N=4 views. This is a minor exposition gap.
 
 ## Nice-to-Haves
 
-- **Failure case analysis.** The CAM-based proposals depend on the auxiliary classifier being reasonably accurate for early-stage lesions. The paper does not discuss settings where the auxiliary head is inaccurate and proposals miss critical regions.
-- **The paper could clarify whether reported baseline numbers are taken from original papers or re-implemented under the same preprocessing.** The high variance in Grade 4 F1 among baselines (0.9% for ETMC to 64.1% for CVSA) suggests sensitivity to preprocessing or split details that is not discussed.
+- Qualitative visualization of proposals overlaid on fundus images, ideally alongside ground-truth lesion masks from MFIDDR, would substantially strengthen the mechanistic narrative and reader confidence.
+- Reporting computational cost (training/inference time, parameter count) would help assess practicality for large-scale screening.
+- An analysis of failure cases stratified by DR grade would reveal whether errors concentrate in early-stage DR where small lesions dominate — directly relevant to the paper's motivation.
 
 ## Removed Points
 
-The following are removed (with justifications) from the Harsh Critic / Strength Finder inputs:
+These points were raised in the inputs but are not retained as weaknesses. Treat them with caution.
 
-- **"Microaneurysms are under-represented claim lacks citation"** — The paper states this as a general motivation (not a quantitative claim requiring a specific citation), and the broader context is well-referenced. Removing as overly pedantic.
-- **"Equation (3) notation is ambiguous"** — The notation `\mathbf{w}_{s_n, c}^{(s_n)}` is standard for class-specific weight vectors in CAM methods. The superscript clarifies the stage index; this is typical notational density, not an error. Removing as a nitpick.
-- **"The paper doesn't make explicit that the predicted grade is used"** — The paper states "the class-specific weight vector for the predicted grade" (Sec 3.2), which is explicit. The critic's concern is addressed by the paper as written.
-- **Strength Finder's claim about Grade 4 F1 being "the best among all compared methods"** — Incorrect. CVSA achieves F1=64.1% on Grade 4, which is higher than the paper's with-lesion variant (51.6%). This strength is factually wrong and removed.
-- **"Models that were not originally designed for this exact dataset split"** — The paper explicitly follows prior work's experimental protocol and splits. This criticism is speculation about preprocessing differences without evidence.
+- *"Baselines are compared as reported in prior work without controlled reimplementation; differences in backbone, pretraining, and training recipes are not eliminated"* — The paper explicitly aligns its backbone and pretraining to each benchmark's standard (ImageNet for MFIDDR following CVSA; EyePACS for DRTiD following CrossFiT; Section 4.1). This is standard practice in the DR grading literature, and the harsh critic acknowledged this.
+
+- *"The load-balancing loss is adopted without any ablation on whether it actually matters"* — The load-balancing loss is a standard regularizer in MoE architectures, not a claimed contribution of this paper. Demanding an ablation for it is scope creep.
+
+- *"No discussion of failure cases or per-image performance"* — Moved to Nice-to-Haves. While valuable, this is not a core weakness.
+
+- *"The computational cost of the MoE and overall training/inference speed are not discussed"* — Moved to Nice-to-Haves. This is a practical consideration but not a methodological flaw.
+
+- *"Missing related works"* — The harsh critic did not specify any missing references, and I have no external sources to verify such claims.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The paper's genuinely interesting insight is that grade-conditioned CAMs from auxiliary classifiers can serve a dual purpose — they simultaneously provide deep supervision to intermediate features *and* identify spatial regions whose cross-view fusion improves grading, without requiring the CAMs to be accurate lesion segmentations per se. The hyperparameter result that α=0.5 (50% token retention) outperforms both α=0.2 (too selective) and α=1.0 (no selection) is a clean empirical finding that the proposal filtering mechanism is doing meaningful work beyond simple dimensionality reduction.
 
 ## Suggestions
 
-1. **Provide qualitative evidence that proposals correspond to lesions.** Show overlays of the Top-K proposal regions on fundus images, ideally with ground-truth lesion masks for a subset. Without this, the central mechanism is unvalidated and the interpretability claim is empty.
-2. **Re-implement the strongest baselines** (e.g., MVCINN, CVSA's non-annotated variant) with the same Swin-B backbone and training pipeline to isolate the effect of the proposed modules from backbone choice.
-3. **Add a simple baseline** — multi-view Swin-B with standard cross-attention (no GALP, no LGRF, no expert routing) — to complete the ablation.
-4. **Report confidence intervals** (e.g., via bootstrapping or multiple seeds) for the key results, particularly where margins are small.
-5. **Report model parameters and approximate FLOPs** to contextualize the computational cost of the MoE design.
+- Add one ablation: auxiliary classifiers retained + all tokens (or random K tokens) fed into LGRF instead of Top-K proposals. This directly isolates whether the CAM-based proposal selection provides value beyond deep supervision.
+- Use the available MFIDDR lesion segmentation masks to compute recall/precision of top-K proposals against ground-truth lesion regions. Even a modest positive correlation would substantially strengthen the paper's central narrative.
+- Run 3–5 seeds and report mean ± std for the main results table. This is low-cost but significantly improves the credibility of small-margin claims.
+- Include 2–3 qualitative examples showing proposal heatmaps overlaid on fundus images from different DR grades.
 
 ## Score and Decision
 
-### Calibration Report
+**Round 1 bracket**: The initial calibration search across weak (<3.5), middle (3.5–7.5), and strong (>7.5) anchors returned papers mostly from 3D vision rather than medical imaging. The plausible bracket from the available anchors was approximately 5.5–7.2.
 
-**Round 1 (Bracketing):** Queried multi-view/medical DR grading papers across three score bands. Weak band (avg < 3.5) produced mostly out-of-domain papers (aircraft distance, stereo matching) with scores 2.33–3.40. Middle band (3.5–7.5) produced relevant anchors: Eye Fairness (5.50), M4oE (5.75), TEF (6.25), DSPFusion (4.60). Strong band (7.5+) produced papers with avg scores 7.60–8.00 but topically dissimilar (3D generation, view synthesis). **Initial bracket: 5.0–6.5.**
+**Round 2 narrowing**: Targeted search for medical imaging and multi-view classification papers yielded these anchors:
 
-**Round 2 (Narrowing):** Queried medical/deep-learning papers within (4.5–6.0) and (6.0–7.5). Read full reviews for key anchors:
+| Anchor | Avg Score | Round | Comparison |
+|---|---|---|---|
+| NJxCpMt0sf (M4oE) | 5.75 | 2 | Medical MoE for multi-modal diagnosis. Our paper has more comprehensive baselines and clearer claims. **Our paper is stronger.** |
+| t1J2CnDFwj (Multi-View Classification) | 5.75 | 2 | Multi-view alignment + expanded boundary. Our paper has better experimental scope, more baselines, and SOTA results. **Our paper is stronger.** |
+| QG31By6S6w (Malenia) | 6.25 | 2 | Lesion segmentation with VL pretraining. Different task but comparable contribution level and experimental rigor. **Roughly comparable.** |
+| cINwAhrgLf (Aux-NAS) | 7.20 | 2 | Auxiliary learning with NAS, extensive experiments across 6 tasks/3 backbones, clear methodology. Its weaknesses (marginal gains, no error bars) overlap with ours but its experimental breadth and methodological clarity exceed ours. **Our paper is somewhat weaker.** |
 
-| Anchor | Score | Round | Comparison |
-|--------|-------|-------|------------|
-| Lv9KZ5qCSG (Eye Fairness) | 5.50 | R1 | Dataset paper with fairness method; similar evidential gaps (no significance testing, baseline concerns). Paper under review has stronger technical novelty but missing qualitative validation is a bigger gap. |
-| NJxCpMt0sf (M4oE) | 5.75 | R1 | Multi-modal MoE medical paper; similar gaps (no error bars, baseline comparison concerns, no compute reporting). Paper under review has comparable technical depth and similar evidential quality — slightly weaker on validation but slightly stronger on ablation. |
-| M3kBtqpys5 (TEF) | 6.25 | R1 | Multi-view classification with NAS; more extensive experiments. Paper under review has weaker comparative evidence but stronger module-level ablation. |
-| RJDjSXNuAZ (Weakly Supervised Virus) | 5.50 | R2 | Weakly supervised medical detection; comparable evidence quality. Paper under review has more architectural novelty. |
-| zcTLpIfj9u (Future-Guided Pretraining) | 6.33 | R2 | Stronger medical imaging paper with clear contribution. Paper under review is weaker — the two major evidential gaps (qualitative validation, backbone control) are more significant than that paper's limitations. |
+The paper lands between the 5.75 anchors and the 7.20 anchor, closest to the 6.25 anchor. The two major weaknesses (conflated ablation, no direct lesion validation) pull it below 7.0, while the strong SOTA results, comprehensive baselines, and thorough hyperparameter study keep it above 5.75. The paper makes a genuine contribution but the mechanistic claim about lesion recovery is not fully substantiated and the ablation needs tightening.
 
-**Final score:** The paper is positioned between the 5.50 and 5.75 anchors. It has genuine technical novelty and solid internal ablation evidence, but the two major weaknesses (no qualitative validation of the core proposal mechanism, and uncalibrated backbone comparisons for external claims) prevent it from reaching the 6+ level. **Score: 5.5.**
-
-MY FINAL SCORE: <score>5.5</score>
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

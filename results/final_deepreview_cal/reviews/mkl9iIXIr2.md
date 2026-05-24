@@ -1,20 +1,18 @@
-Now I have all the information I need to synthesize the final review.
-
 ## Summary
 
-This paper addresses online inventory optimization (OIO) in adversarial, non-stationary environments. It proposes a two-stage projection algorithm that connects OIO to smoothed online convex optimization (SOCO), achieving a dynamic regret bound of \(\tilde{O}(\sqrt{L_{\max}(1+P_T)T})\) — the first such guarantee for OIO — and an improved static regret of \(O(\sqrt{L_{\max}T})\) with a matching lower bound \(\Omega(\sqrt{L_{\max}T})\), resolving an open question from Hihat et al. (2023).
+This paper addresses online inventory optimization (OIO) in non-stationary environments. It proposes the first algorithm with near-optimal dynamic regret guarantees for OIO, achieving \(\tilde{\mathcal{O}}(\sqrt{L_{\max}T(1+P_T)})\) dynamic regret and \(\mathcal{O}(\sqrt{L_{\max}T})\) static regret — improving the prior state-of-the-art by a \(\sqrt{L_{\max}}\) factor. The key technical insight is a two-stage projection that connects OIO to Smoothed Online Convex Optimization (SOCO), transforming the carryover stock constraint into a time-varying switching cost. The paper also provides a matching \(\Omega(\sqrt{L_{\max}T})\) lower bound, establishing near-optimality and resolving an open question from Hihat et al. (2023).
 
 ## Strengths
 
-1. **Novel theoretical connection between OIO and SOCO.** Lemma 1 shows that the regret gap from the carryover stock constraint can be bounded by the base learner's switching cost, reducing OIO to SOCO. This is the paper's key technical insight and is both clean and non-trivial.
+- **First dynamic regret guarantee for OIO**: The paper presents the first algorithm with a \(\tilde{\mathcal{O}}(\sqrt{L_{\max}(1+P_T)T})\) dynamic regret bound (Theorems 1 and 4), addressing a critical gap where prior work only analyzed static regret. The motivating example in Section 1 (fluctuating demand \(d_t = Dt/T\)) concretely demonstrates why static comparators fail and why dynamic regret matters.
 
-2. **First dynamic regret guarantee for OIO.** Prior work only provided static regret guarantees; Theorem 4 gives \(\tilde{O}(\sqrt{L_{\max}(1+P_T)T})\) without requiring a priori knowledge of either \(L_{\max}\) or the path-length \(P_T\), using SOGD and a doubling trick.
+- **Improved static regret with matching lower bound**: The static regret bound of \(\mathcal{O}(\sqrt{L_{\max}T})\) improves over the \(\mathcal{O}(L_{\max}\sqrt{T})\) of existing OIO algorithms (Table 1). Theorem 5 establishes an \(\Omega(\sqrt{L_{\max}T})\) lower bound, proving the \(\sqrt{L_{\max}}\) factor is essential and resolving the open question raised by Hihat et al. (2023).
 
-3. **Improvement over prior static regret by \(\sqrt{L_{\max}}\) and matching lower bound.** Table 1 shows the improvement from \(O(L_{\max}\sqrt{T})\) to \(O(\sqrt{L_{\max}T})\). Theorem 5 provides a matching \(\Omega(GD\sqrt{L_{\max}T})\) lower bound — the first for OIO — establishing near-optimality for the static case.
+- **Elegant reduction from OIO to SOCO**: Lemma 1 is the paper's central technical contribution — it shows that under the two-stage projection, the regret gap \(\sum\langle g_t, y_t - \hat{y}_t\rangle\) is bounded by a switching cost term \(2GL_t^*\|\hat{y}_t - \hat{y}_{t+1}\|_1\). This insight transforms the complicated carryover constraint into a manageable SOCO instance and is genuinely novel.
 
-4. **Handles adversarial, non-i.i.d. demands.** Unlike most prior work that assumes i.i.d. or independent demands, the setting is fully adversarial subject only to the \(L_{\max}\) constraint, which is honestly discussed and shown to be necessary.
+- **Practical adaptivity with doubling trick**: The algorithm (Alg. 2) handles unknown \(L_{\max}\) via a doubling trick that restarts the base learner when the observed cycle length exceeds the current estimate, requiring only \(\mathcal{O}(\log L_{\max})\) restarts (Theorem 2). The SOGD-based variant (Theorem 4) further adapts to unknown comparator path-length \(P_T\).
 
-5. **Clean presentation with honest scope delineation.** The problem setting, algorithm structure, and limitations are clearly stated. The paper does not overclaim its reach beyond linear capacity constraints or settings with lead times and fixed costs.
+- **Byproduct SOCO lower bound**: Corollary 1 provides a new \(\Omega(\sqrt{LT})\) lower bound for smoothed online convex optimization, consolidating the relationship between the two problem settings.
 
 ## Weaknesses
 
@@ -22,79 +20,68 @@ This paper addresses online inventory optimization (OIO) in adversarial, non-sta
 None.
 
 ### Major
-
-1. **The "near-optimal dynamic regret" claim is slightly over-aligned with the evidence.** The paper proves a dynamic regret bound of \(\tilde{O}(\sqrt{L_{\max}(1+P_T)T})\) and a *static* lower bound of \(\Omega(\sqrt{L_{\max}T})\). A matching *dynamic* lower bound that jointly involves \(L_{\max}\) and \(P_T\) is not provided. The paper compares its dynamic bound to the OCO lower bound \(\Omega(\sqrt{(1+P_T)T})\) (which lacks \(L_{\max}\)), and the \(\sqrt{L_{\max}}\) factor is only justified by the static lower bound. The claim is reasonable — the dynamic bound matches the best-known OCO lower bound up to the \(\sqrt{L_{\max}}\) factor, which is provably necessary in the static case — but a reader should not be left with the impression that the *joint* \((L_{\max}, P_T)\) dependence has been certified optimal. A brief clarifying paragraph acknowledging this gap would resolve the issue.
+None.
 
 ### Minor
 
-1. **\(L_{\max}\) constrains the adversary.** The definition of \(L_{\max}\) ensures cumulative demand reaches \(D\) within every window of length \(L_{\max}\). This is a substantive restriction: when \(L_{\max} = \Omega(T)\), sublinear regret is impossible (as the paper notes). The paper acknowledges this honestly ("mildly constrains the duration of periods with small demand"), but the discussion could more explicitly compare how this assumption relates to the i.i.d. or independent-demand assumptions in prior work, helping readers gauge the trade-off between generality and the strength of the bound.
+- **Linear capacity constraint vs. general convex**: The paper assumes a linear warehouse capacity constraint \(\sum_i y_t^i \leq D\) (Eq. 3), while Hihat et al. (2023) handles general convex constraints. The authors acknowledge this limitation in the conclusion and note it is critical for Lemmas 5–6. The linear case is practically relevant (the authors argue it covers weighted-sum capacities), but the improvement over Hihat et al. is achieved under a more restricted constraint class. This does not invalidate the contribution — even under linear constraints, no prior work achieved dynamic regret — but it tempers the comparison slightly.
 
-2. **No experiments or simulations.** For a theory paper this is acceptable, but the algorithm's constants and the practical behavior of the doubling trick are not explored. A small numerical illustration (e.g., on synthetic demand with known \(L_{\max}\) and \(P_T\)) would increase impact and demonstrate the bounds are not vacuous.
+- **Condition on horizon length**: Theorems 3 and 4 require \(T\) to be sufficiently large relative to \(L_{\max}\) (e.g., \(T \geq \sqrt{L_{\max}(\log_2 T + e)}\) for Theorem 4). While the authors note this holds broadly (e.g., \(T > L_{\max}\log^2 L_{\max}\)), the condition means the bounds are not fully unconditional and may not apply in the very-short-horizon regime.
 
 ### Trivial
-None worth listing.
+
+- The precise tracking of \(\max\mathcal{L}_t\) (Eq. 9) and the restart condition in lines 7–9 of Algorithm 2 could be described more explicitly for implementation clarity.
 
 ## Nice-to-Haves
 
-- A brief intuitive proof sketch of Lemma 1 in the main text (the cycle-length bound emerging from the demand clearing property) would demystify the core connection for readers.
-- A note on the computational cost of the projection onto \(\mathcal{C}(x_{t+1})\) (e.g., it can be computed in \(O(N\log N)\) by sorting or \(O(N)\) with a simple algorithm) would be helpful for practitioners.
+- A small synthetic simulation on the motivating example (\(d_t = Dt/T\)) would illustrate the practical gap between static-regret baselines and the proposed dynamic-regret algorithm, strengthening the narrative.
+- A brief discussion of whether the \(\log T\) overhead from the SOGD meta-algorithm (Theorem 4) could be removed via more recent meta-learning advances would be informative.
+- Some intuition about the prospects and obstacles for extending the approach to general convex capacity constraints would enrich the limitations discussion.
 
 ## Removed Points
 
-The following points from the inputs were removed with justification:
+These points are flagged to be removed; treat them with caution.
 
-- **Harsh critic's point about the doubling trick restarting with horizon \(T\)**: The paper already addresses this through the overhead term \(\Delta(L_{\max},\beta)\) in Theorem 2, and the regret bound is monotone in horizon (a standard property). This is a minor technical observation that does not affect the validity of the results.
-- **Criticism about Lemma 1's proof being relegated to the appendix**: Relegating proofs to the appendix is standard practice in theory papers. The statement of Lemma 1 is clear and accompanied by sufficient contextual explanation.
-- **Strength Finder's generic strength about "handles adversarial non-i.i.d. demands"**: This is actually a specific, concrete strength — it contrasts with prior work's i.i.d. assumptions — so it is retained, not removed.
-- **Strength Finder's other generic strengths**: All other strengths are specific and evidence-backed, so they are retained.
+- **Harsh critic's concern about Lemma 1 proof being in the appendix**: The paper states "All omitted proofs are given in the appendix" — this is standard practice in CS theory papers. The appendix exists in the original submission but is stripped by the parser. Per policy, criticisms about missing proofs in appendix must be removed.
+
+- **Harsh critic's concern about the doubling trick proof**: Same as above — appendix-deferred. Removed.
+
+- **Strength Finder's generic framing**: No strengths were removed; all six are concrete and grounded in specific theorems, lemmas, and sections of the paper.
+
+- **Demand for confidence intervals, user studies, or empirical validation in a theory paper**: These are not standard expectations for a theory contribution. Removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight — that OIO's carryover constraint can be transformed into a switching cost in a SOCO problem via a two-stage projection — is the paper's own.
+The paper's reduction of OIO to SOCO via the two-stage projection (Lemma 1) is genuinely novel and may have broader implications. By showing that the carryover constraint produces a switching cost whose coefficient is bounded by the sell-out period \(L_{\max}\), the paper opens the door to applying the rich SOCO toolkit to inventory problems. The observation that this connection runs in both directions — the OIO lower bound directly implies a new SOCO lower bound (Corollary 1) — is elegant and suggests the two problems share deeper structural commonalities than previously recognized.
 
 ## Suggestions
 
-1. Add a short paragraph in Section 5 clarifying that the dynamic bound matches the OCO lower bound \(\Omega(\sqrt{(1+P_T)T})\) up to the \(\sqrt{L_{\max}}\) factor, which is provably necessary in the static case, but that a fully joint dynamic lower bound involving both \(L_{\max}\) and \(P_T\) remains open.
-2. Include a brief numerical illustration on synthetic data (even a single figure) to demonstrate that the regret bounds are not vacuous.
-3. Add a sentence in Section 4.1 sketching the intuition behind Lemma 1's proof to make the core idea accessible without requiring the appendix.
+- Consider adding a proof sketch of Lemma 1 in the main body (even 4–5 lines of key inequalities) to make the paper more self-contained without depending on the appendix for the central insight.
+- Clarify in the main text how \(\max\mathcal{L}_t\) is maintained incrementally with \(\mathcal{O}(N)\) memory, since the paper mentions this only briefly.
+- In the comparison with Hihat et al. (2023), explicitly note the constraint-class difference (linear vs. convex) when discussing the \(\sqrt{L_{\max}}\) improvement.
 
 ## Score and Decision
 
-### Calibration Report
+**Round 1 bracketing**: The three queries returned weak anchors (3.00), middle anchors (4.50–6.50), and strong anchors (8.00). The paper clearly sits above the middle band — it is stronger than the 4.50 and 5.25 anchors (which had incremental contributions and unclear novelty) and comparable to or above the 6.25–6.50 anchors. **Initial bracket: 6.5–8.0**.
 
-**Round 1 — Bracketing**
+**Round 2 narrowing**: Anchors in (6.0, 7.5) included iZgECfyHXF (6.50, online nonconvex optimization with matching lower bounds), RR70yWYenC (6.25, continual finite-sum minimization), and wISvONp3Kq (7.33, sparse GLMs with varying observations). Anchors in (6.5, 8.0) included FCMpUOZkxi (6.75, contextual bandits with knapsacks) and jeMZi2Z9xe (6.75, adversarial bandits).
 
-| anchor_id | avg_score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| lFzUHGebeb | 2.00 | R1 | Much weaker: incremental algorithmic contribution with practical failures |
-| HLxWF7xqiK | 3.00 | R1 | Weaker: applied pricing problem, less technical depth |
-| J7hbPeOZ39 | 3.00 | R1 | Weaker: applied assortment/pricing, less theoretical novelty |
-| YuYxoaL7YX | 3.00 | R1 | Weaker: applied inventory control, no dynamic regret |
-| Rdb0HxGJa3 | 4.50 | R1 | Weaker: incremental theory, weaker lower bounds |
-| iZgECfyHXF | 6.50 | R1 | Comparable: matching bounds, novel theory, accepted |
-| WIerHtNyKr | 5.25 | R1 | Weaker: modular but limited novelty, rejected |
-| RR70yWYenC | 6.25 | R1 | Comparable but different topic (finite-sum minimization) |
-| 5t57omGVMw | 8.00 | R1 | Stronger: tighter bounds, broader impact |
-| fMTPkDEhLQ | 8.00 | R1 | Stronger: tight lower bounds in optimization |
-| A3YUPeJTNR | 8.00 | R1 | Stronger: broader practical implications |
-| TTrzgEZt9s | 8.00 | R1 | Stronger: more general framework |
+The paper is clearly stronger than iZgECfyHXF (6.50): both provide matching lower bounds and optimal algorithms, but this paper additionally connects two problem domains (OIO ↔ SOCO) and resolves an explicitly stated open question. The paper is comparable to wISvONp3Kq (7.33): that paper has both theory and real experiments with a novel methodology; this paper is pure theory but has matching lower bounds and a deeper structural insight. The paper is stronger than FCMpUOZkxi (6.75), which had more limited novelty per reviewers.
 
-Round 1 bracket: The paper clearly sits above the weak anchors (2–3) and below the strongest anchors (8). The plausible range is between 5 and 7.
+Anchor comparison summary:
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| J7hbPeOZ39 | 3.00 | 1 | Much weaker — different problem, limited contribution |
+| Rdb0HxGJa3 | 4.50 | 1 | Weaker — incremental contribution, unclear motivation |
+| WIerHtNyKr | 5.25 | 1 | Weaker — modular but incremental, limited novelty |
+| RR70yWYenC | 6.25 | 2 | Weaker — narrower problem, no matching lower bound |
+| iZgECfyHXF | 6.50 | 1,2 | Comparable but this paper is stronger: connects two domains, resolves open problem |
+| cUN8lJB4rD | 6.50 | 2 | Weaker — narrower scope, more specialized |
+| FCMpUOZkxi | 6.75 | 2 | Weaker — more limited novelty per reviewers |
+| wISvONp3Kq | 7.33 | 2 | Comparable: that paper has experiments + theory; this paper has matching lower bound + deeper structural insight |
+| 5t57omGVMw | 8.00 | 1 | Stronger — more novel application, cleaner results |
 
-**Round 2 — Narrowing**
+The paper sits between the 6.50–6.75 anchors (clearly stronger) and the 8.00 anchor (clearly not at that level). It is comparable to wISvONp3Kq (7.33) but slightly weaker due to being theory-only with a linear constraint limitation. **Final score: 7.0**.
 
-| anchor_id | avg_score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| WIerHtNyKr | 5.25 | R2 | Weaker: criticized for limited novelty over prior techniques, unclear contributions |
-| 6HfNB34x9I | 5.25 | R2 | Weaker: different topic (online MDPs), less crisp theoretical contributions |
-| z1Jq1PLQWs | 5.67 | R2 | Different topic (dueling bandits/RLHF); paper under review is stronger |
-| z7JBs8UOLI | 5.75 | R2 | Comparable but slightly weaker: relies heavily on existing techniques, less novel connection |
-| iZgECfyHXF | 6.50 | R2 | Comparable: matching lower/upper bounds, novel theory for nonconvex OCO, accepted |
-| RR70yWYenC | 6.25 | R2 | Different topic (finite-sum minimization), comparable quality |
-| cUN8lJB4rD | 6.50 | R2 | Different topic (distributed opt), some reviewers found incremental over prior work |
-| wISvONp3Kq | 7.33 | R2 | Stronger: broader scope, practical implications beyond pure theory |
-
-The paper is stronger than the 5.25–5.75 anchors (which were rejected for limited novelty or unclear contributions). The OIO-to-SOCO connection is genuinely novel. It is comparable to the accepted 6.5 anchor (nonconvex OCO), which also provided matching bounds and novel theory. However, this paper's dynamic lower bound is only partially matched (static, not joint dynamic), which slightly weakens the "near-optimal" claim compared to that anchor. The paper sits cleanly at **6.0**.
-
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

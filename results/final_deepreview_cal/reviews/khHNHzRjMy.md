@@ -1,102 +1,88 @@
-Now I have all the information I need. Let me write the consolidated review.
+Now I have solid calibration. Let me synthesize everything into the final review.
 
-Based on my analysis comparing the paper against calibration anchors:
+## Calibration Summary
 
-**Round 1 bracket**: The paper is not in the very weak band (1.67-3.0) — those papers had fundamental issues with methods or motivation. It's also not in the very strong band (8.0+) — those are large-scale, comprehensive contributions. The paper sits in the middle band (3.5-7.5). My initial bracket: **4.5 to 6.0**.
+**Round 1 bracket:** EmoSign sits well above the weak anchors (<3.5) and below the strong anchors (>7.5). Plausible range: **4.5–6.5**.
 
-**Round 2 narrowing**: Comparing against:
-- Sign2GPT (5.75, Accept) — SLT method with SOTA results. EmoSign is weaker; smaller contribution and more limitations.
-- Open-vocabulary MER (5.40, Reject) — Emotion recognition dataset with novel paradigm but concerns about LLM label generation. EmoSign has more genuine human annotations but is much smaller.
-- SignAvatars (6.25, Reject) — Large-scale SL dataset (70K videos). Far more comprehensive but rejected partly for being "derivative data." EmoSign has more original annotation contribution but much less scale.
-- BabyView (5.40, Reject) — Large developmental dataset. More scale but different domain.
+**Round 2 narrowing:**
+- SignAvatars (6.25, Reject): Larger SL dataset but derivative data concerns; EmoSign has genuine novel annotations but smaller scale and selection bias → EmoSign is somewhat below this
+- OV-MER (5.40, Reject): Emotion dataset with LLM-annotation quality issues; EmoSign has expert human annotations but selection bias → comparable, EmoSign slightly better on annotation trustworthiness
+- MIntRec2.0 (6.50, Accept): Larger, more comprehensive multimodal dataset with rigorous evaluation → EmoSign clearly below
+- Sign2GPT (5.75, Accept): Method paper with strong SLT results; EmoSign fills different niche → hard to compare directly
 
-The paper's core contribution (first emotion-annotated ASL dataset with Deaf annotators) is genuine, but the scale is very small and the label reliability on several categories is concerning. These limitations place it below accepted papers like Sign2GPT (5.75) but above the clearly weak papers in the 3-range. **Final score: 5.0**.
+EmoSign lands around **5.0–5.5**: genuine novelty and expert annotation quality offset by structural selection bias and limited benchmarking.
 
 ---
 
 ## Summary
-
-This paper introduces EmoSign, a dataset of 200 ASL video clips (16 min, 4 signers, sourced from ASLLRP) annotated by 3 Deaf native ASL signers for: (1) sentiment on a 7-point scale, (2) presence/intensity of 10 emotion categories, and (3) open-ended descriptions of emotion cues. Baseline benchmarks with four multimodal LLMs (GPT-4o, AffectGPT, Qwen2.5-VL, MiniGPT4) across caption-only, video-only, and video+caption conditions show that current models perform poorly on visual-only emotion recognition and rely heavily on text captions.
+This paper introduces EmoSign, the first emotion-annotated ASL video dataset, containing 200 clips annotated by three Deaf native signers with sentiment ratings, emotion category presence/intensity, and free-text descriptions of emotional cues. The dataset fills a genuine gap in sign language emotion research. The authors benchmark four zero-shot multimodal LLMs across three tasks (sentiment analysis, emotion classification, emotion cue grounding) under video-only, caption-only, and combined conditions.
 
 ## Strengths
+- **Genuinely novel dataset contribution.** EmoSign is the first dataset providing fine-grained emotion annotations (sentiment, emotion categories, cue descriptions) for ASL videos from Deaf native signers with professional interpretation experience. This directly addresses a gap identified in Section 2 — prior datasets like FePh offered only binary labels from hearing annotators on cropped faces. The native-signer perspective is critical given that hearing individuals frequently misinterpret signers' facial expressions (Lim et al., 2024).
 
-- **First ASL dataset with fine-grained emotion/sentiment labels from Deaf native signer annotators.** Table 1 convincingly shows that EmoSign is the only dataset among seven compared ASL datasets that includes emotion labels, sentiment labels, and emotion cue descriptions while using Deaf native signers — directly filling the gap that translation-focused datasets (YouTube-ASL, OpenASL, How2Sign, etc.) do not address.
+- **Annotation quality supported by inter-annotator reliability.** Krippendorff's alpha values (average 0.593; sentiment 0.738, joy 0.699) meet or exceed those of established multimodal emotion benchmarks like MELD and IEMOCAP (Section 3.3, Table 2). This validates the multi-layer annotation pipeline and native-signer expertise.
 
-- **Open-ended emotion cue descriptions provide a unique qualitative layer.** Section 3.4 synthesizes annotators' free-text responses into concrete themes (non-manual markers, sign modification for emphasis, role of context) that no prior ASL dataset offers. This is a genuinely novel contribution that provides a grounded account of how Deaf signers perceive emotion in ASL.
+- **Qualitative cue analysis yields linguistically grounded insights.** Section 3.4 synthesizes free-text annotator responses into three interpretable themes — non-manual markers, sign modifications, and narrative context — offering concrete findings about how emotions manifest in ASL that can inform future visual encoder design.
 
-- **Controlled three-condition ablation across all tasks.** The paper systematically evaluates every model in caption-only, video-only, and video+caption conditions for both sentiment analysis (Table 3) and single-label emotion classification (Table 4). This experimental design cleanly isolates the degree to which models rely on text and reveals that visual-only performance is near-chance for most models.
-
-- **Rigorous annotation pipeline.** The use of three Deaf native signers with professional interpretation experience, a dedicated training session, confidence ratings, a skip option for difficult clips, and majority-vote with tie-breaking by confidence reflects careful methodology that distinguishes this dataset from prior work using hearing annotators (contrasted with FePh).
+- **Emotion cue grounding analysis reveals modality-dependent reasoning failures.** Figure 3 demonstrates that models can identify facial expressions (furrowed brows, thumbs-up) but interpret identical cues oppositely depending on caption presence, providing evidence for text-overreliance that strengthens the motivation for the dataset.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
-
-- **Low inter-annotator agreement on several emotion categories is not discussed in context of benchmark validity.** Krippendorff's alpha values for surprise_negative (0.119), disgust (0.166), frustration (0.330), sadness (0.333), and anger (0.370) indicate near-chance agreement on roughly half the fine-grained emotion categories. The paper compares these to MELD (Fleiss' kappa=0.43) and IEMOCAP (0.48), but these are different metrics applied to spoken-language datasets — the comparison does not address the fact that benchmarks in Table 4 report per-class accuracies for categories where the ground-truth labels themselves are unreliable. The paper's Limitations section does not discuss this issue or its implications for the reported benchmark numbers. This is the most consequential weakness: benchmark conclusions for these categories rest on shaky ground truth.
-
-- **VADER-based selection filter constrains what the dataset can support.** The dataset selects the 100 most positive and 100 most negative utterances from ASLLRP based on VADER sentiment analysis of the *text captions*, not visual emotion cues. The paper acknowledges this limitation (Section 6), but the abstract and introduction frame the dataset as supporting "understanding emotions in ASL" broadly. The selection procedure means EmoSign captures ASL utterances where the English caption is emotionally salient — not necessarily utterances where the *signing itself* conveys detectable emotion. The paper would benefit from explicitly scoping claims to reflect this constraint.
+- **VADER-based selection creates a structural bias toward text-emotion alignment, weakening the benchmark's evidential value for the paper's central claims.** The dataset construction (Section 3.1) selects the 100 most positive and 100 most negative utterances by VADER text sentiment. This means clips where visual emotional expression is strong but the text caption is neutral or incongruent were systematically excluded. Consequently, the finding that "caption-only performance was similar to or better than video-only" and that "models fail to integrate visual cues" (Section 5.1–5.2) cannot be cleanly attributed to model limitations — the data themselves make text a rational, predictive signal. The paper acknowledges in Section 6 that VADER and annotator ratings sometimes diverged, but this does not repair the selection bias; those divergences occurred within a pool already filtered for textual emotional extremes. This bias constrains the strength of the benchmarking conclusions and should be foregrounded more honestly.
 
 ### Minor
+- **Low inter-annotator agreement for several emotion categories undermines benchmark reliability for those classes.** Table 2 shows surprise_neg (α = 0.119) and disgust (α = 0.166), well below acceptable thresholds. The emotion classification benchmark (Section 5.2) treats these labels as ground truth without discussing how unreliable ground truth affects model accuracy interpretation for those classes. The paper should either report metrics only on the subset with acceptable agreement (e.g., α > 0.5) or explicitly qualify results for low-agreement categories.
 
-- **Small dataset scale limits robustness of benchmark analyses.** With 200 clips, 4 signers, and 12-class emotion classification, the single-expression set (140 clips) yields very few examples per class. The paper acknowledges the size constraint and cites similar-sized datasets as precedent, which is reasonable for a first dataset, but the per-class sample sizes are not reported in Table 4, making it impossible to assess the statistical reliability of the reported accuracies. Bootstrapped confidence intervals or per-class counts would substantially strengthen the presentation.
+- **Factual inaccuracy in results reporting.** Section 5.1 claims "Caption-only performance was similar to or slightly better than video-only results with the exception of MiniGPT4." Table 3 contradicts this: GPT-4o on 3-class sentiment achieves 40.72 wAcc video-only vs. 31.12 caption-only — video notably outperforms caption. This error weakens confidence in the paper's analytical precision and the textual summary of modality contributions.
 
-- **Train/validation/test split is not specified.** The paper does not state how the 200 (or 140 for single-label) clips were partitioned for the benchmarks. This is a basic reproducibility detail that should be included.
+- **Benchmark limited to four zero-shot general-purpose MLLMs.** No domain-adapted baselines (e.g., models fine-tuned on sign-language recognition, facial expression analysis, or facial action unit extraction) are included. While establishing initial baselines is reasonable for a new dataset, the paper's headline claim that "current multimodal models fail to integrate visual cues" overgeneralizes from four off-the-shelf models that were not designed for sign-language video understanding. The limitations section acknowledges this gap, but the main-text claims should be more carefully scoped.
 
-- **Qualitative emotion cue grounding analysis lacks structure.** Section 5.3 describes "manually inspecting several randomly selected videos" without specifying the number of examples, selection criteria, or whether the analysis was blinded. While the examples in Figure 3 are informative, the analysis is exploratory and should be labeled as such rather than presented as evidence for model behavior claims.
+- **Emotion cue grounding evaluated only qualitatively** (Section 5.3). The analysis is suggestive and well-presented, but without quantitative metrics or ground-truth temporal/spatial annotations it remains anecdotal. This is acknowledged as preliminary, which is acceptable for a first dataset paper.
 
-- **Limitations section omits two important issues.** The paper discusses the VADER filter, the lab setting, and the absence of multi-label evaluation, but does not mention the low inter-annotator agreement on several emotions or the small number of signers (4) as limitations.
+### Trivial
+- The paper does not discuss how the low-agreement emotion categories affect the single-label classification benchmark results (Section 5.2), where per-class accuracies are reported for all categories including those with α < 0.2.
 
 ## Nice-to-Haves
-
-- Reporting per-class test sample sizes and bootstrapped confidence intervals for benchmark results.
-- A systematic analysis separating high-agreement from low-agreement emotion categories, with benchmark results reported separately for each group.
-- A structured protocol for the emotion cue grounding analysis (e.g., independent raters evaluating whether model reasoning references specific visual cues actually present in the video).
+- Adding at least one domain-adapted visual baseline (e.g., facial action unit extraction + lightweight classifier) would ground the benchmarking claims more concretely.
+- A quantitative analysis of how often annotator sentiment ratings diverge from VADER in magnitude/direction would help readers assess the actual role of visual cues in the present data.
+- Coarse temporal annotations for a subset of clips (e.g., "facial cue present from frame X to Y") would enable quantitative evaluation of the emotion cue grounding task.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution.
 
-- *Criticism about "manual inspection" being underspecified in pre-processing*: The paper describes a two-stage process (manual coarse filter → VADER fine-grained selection). The VADER step is well-documented and is the operative selection criterion. This is a reasonable level of detail for a dataset paper.
-- *Criticism about GPT-4o reproducibility*: Temperature=0 and structured output are standard mitigations for API-based models. This is a known limitation of all benchmark work using proprietary models.
-- *Criticism about the VADER comparison being "not a fatal flaw... but more severe than the paper acknowledges"*: The paper does acknowledge this in the Limitations section. The concern is valid but is already on the page.
-- *Criticism about the emotion cue grounding analysis being "anecdotal"*: The underlying concern (thin analysis) is kept above, but the framing as "anecdotal" overstated the severity. It is an exploratory analysis, which is acceptable for a dataset paper.
+- **"Model card details and reproducibility" concerns about stripped appendix content**: The paper references model cards in the appendix, which was stripped by the parser. Removed per hard rules — appendix content exists in the original submission.
+- **"Annotation instrument" concerns about the Qualtrics interface**: The appendix containing the Qualtrics interface was stripped. Removed per hard rules.
+- **Criticism demanding statistical significance tests**: Removed — for small-scale benchmarks with 200 clips and 4 models, confidence intervals are a nice-to-have, not a requirement. The paper's field norms (emotion recognition benchmarking) do not consistently demand them.
+- **Criticism that the paper should include fine-tuned models or domain-specific architectures**: Demoted to Nice-to-Have. A first dataset paper establishing zero-shot baselines is a reasonable scope.
+- **Requests for missing references or expanded related work**: Removed per hard rules — no external sources confirm missing references.
+- **All formatting/typography concerns**: Removed per hard rules — parser artifacts, not author errors.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The key finding — that current MLLMs fail at visual emotion recognition in ASL and default to text-based reasoning — is interesting but aligns with prior work on modality bias in MLLMs (cited by the authors as Xiao et al., 2024). The dataset's unique value lies in its Deaf-native-signer annotations and the open-ended emotion cue descriptions, not in surprising experimental conclusions.
+The paper's most novel empirical finding — beyond its own dataset contribution — is the demonstration through the emotion cue grounding analysis (Figure 3) that multimodal LLMs can visually identify the same facial expressions (e.g., furrowed brows, thumbs-up) but assign them opposite emotional interpretations depending on whether a text caption is present. This is a concrete, replicable demonstration of text-driven reasoning overriding visual evidence, going beyond the standard "models rely on text" observation to show specific interpretive reversals. This finding has implications beyond sign language for any multimodal system where language context can override visual perception.
 
 ## Suggestions
-
-1. **Discuss inter-annotator agreement in Limitations** and stratify benchmark results by high-agreement vs. low-agreement emotion categories. This would both demonstrate intellectual honesty and potentially reveal whether models perform differently on reliable vs. unreliable labels.
-2. **Report the train/validation/test split** and per-class sample sizes for all benchmark tasks. Add bootstrapped confidence intervals to the accuracy/F1 numbers in Tables 3 and 4.
-3. **Tone down claims of generality.** The title and abstract should reflect that EmoSign samples ASL utterances with emotionally salient text captions, not ASL utterances in general.
-4. **Structure the emotion cue grounding analysis** with a clear protocol (number of examples, selection method, independent rating criteria) rather than "several randomly selected videos."
+- Reframe the dataset honestly as a text-emotion-aligned ASL corpus and temper claims about what the benchmarking demonstrates regarding visual-only emotion recognition, unless the dataset can be expanded to include neutral-text but visually emotional clips.
+- Report emotion classification metrics only on the subset of categories with acceptable inter-annotator agreement (α > 0.5), or at minimum add a prominent caveat for results on surprise_neg and disgust.
+- Correct the factual error in Section 5.1 about caption-only vs. video-only performance.
+- Add a quantitative comparison of VADER scores vs. annotator sentiment ratings (e.g., correlation, agreement rate, direction of divergence) to help readers assess how much visual information exists beyond the text in the constructed dataset.
 
 ## Score and Decision
 
-**Score**: 5.0  
-**Decision**: Reject
+**Anchor comparison:**
+- SignAvatars (L2kbdthX5M, avg 6.25, Reject): Larger SL dataset but derivative data; EmoSign has genuine novel annotations but smaller scale and selection bias → EmoSign below this
+- OV-MER (f1uXrAjpOH, avg 5.40, Reject): Emotion dataset with LLM-annotation quality concerns; EmoSign has expert human annotations of higher trustworthiness but structural selection bias → comparable
+- MIntRec2.0 (nY9nITZQjc, avg 6.50, Accept): Much larger, more rigorous multimodal dataset → EmoSign clearly below
+- Sign2GPT (LqaEEs3UxU, avg 5.75, Accept): Method paper with strong SLT results; different category → EmoSign somewhat below on rigor, comparable on novelty within its niche
+- VRG-SLT (7kRFnSFN89, avg 5.00, Reject): SLT method paper with limited novelty → EmoSign above on novelty
+- MDPE (EqCbc4wrzy, avg 2.50, Reject): Weak deception dataset → EmoSign clearly above
+- EQA-MX (7gUrYE50Rb, avg 8.00, Accept): Large-scale, well-executed multimodal QA dataset → EmoSign clearly below
+- LOKI (z8sxoCYgmd, avg 8.00, Accept): Comprehensive benchmark → EmoSign clearly below
 
-**Calibration anchors used** (all rounds):
+Round 1 bracket: 4.5–6.5. Round 2 narrowed to: the paper is comparable to OV-MER (5.40) in the emotion dataset space — OV-MER had LLM-annotation concerns, EmoSign has selection bias concerns. EmoSign's expert annotations are more trustworthy, but the benchmark claims are equally undermined by the dataset construction. EmoSign is somewhat below SignAvatars (6.25) due to smaller scale and selection bias, and clearly below MIntRec2.0 (6.50). Final score: **5.5**.
 
-| Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| lMW9d1AqC9 | 1.67 | 1 (bracket) | Much weaker; poorly motivated framework paper. |
-| EqCbc4wrzy | 2.50 | 1 (bracket) | Weaker; deception detection dataset with less clear contribution. |
-| TadxJc1XAE | 3.00 | 1 (bracket) | Weaker; niche faculty monitoring dataset. |
-| Jq8HYNZG9s | 3.00 | 1 (bracket) | Weaker; narrow shadowboxing dataset. |
-| f1uXrAjpOH | 5.40 | 1 (bracket) | Comparable; emotion recognition dataset paper with concerns about LLM-generated labels. |
-| ns0KIpfQVy | 5.50 | 1 (bracket) | Slightly stronger; large-scale banking dataset (1.5M clients). |
-| nY9nITZQjc | 6.50 | 1 (bracket) | Stronger; large-scale multimodal intent dataset (15K samples). |
-| sMFqEror1b | 4.75 | 1 (bracket) | Comparable; multimodal ToM benchmark with modest scale. |
-| LqaEEs3UxU | 5.75 | 2 (narrowing) | Stronger; SLT method with SOTA results and clearer methodological contribution. |
-| L2kbdthX5M | 6.25 | 2 (narrowing) | Stronger; large-scale 3D SL motion dataset (70K videos, 153 signers). |
-| 7kRFnSFN89 | 5.00 | 2 (narrowing) | Comparable; SLT method paper with mixed reviews. |
-| P8uOZmypb6 | 5.40 | 2 (narrowing) | Slightly stronger; large developmental egocentric dataset. |
-| F6h0v1CTpC | 6.00 | 2 (narrowing) | Stronger; empathy dataset with 10K samples. |
-| qnlG3zPQUy | 6.00 | 2 (narrowing) | Stronger; large-scale deepfake dataset (1.3M samples). |
-
-**Round 1 bracket**: 4.5 – 6.0  
-**Round 2 narrowing**: The paper sits below accepted anchors like Sign2GPT (5.75) due to limited scale and concerns about label reliability, but above clearly weak papers in the 3-range. It is most comparable to Open-vocabulary MER (5.40) and the 5.0-range SLT papers.  
-**Final justification**: The dataset fills a genuine gap and the annotation methodology is sound, but the small scale (200 clips, 4 signers), near-chance inter-annotator agreement on several emotion categories, and missing discussion of these limitations in the paper prevent acceptance at this stage. With substantial revisions to address these issues, the paper could become a solid contribution.
-
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

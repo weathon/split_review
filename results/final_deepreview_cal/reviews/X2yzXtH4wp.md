@@ -1,69 +1,91 @@
-Now I have a solid calibration. Let me produce the final review.
+Now I have a thorough understanding of both the paper and the calibration landscape. Let me synthesize the final review.
 
 ## Summary
-The paper introduces Ambig-SWE, an underspecified variant of SWE-Bench Verified built by using GPT-4o to strip details from fully-specified GitHub issues while preserving key terminology, creating paired ground-truth data. The authors propose a three-capacity evaluation framework (detection, clarification, integration) and evaluate six proprietary and open-weight models. The main findings are that interaction can recover up to ~74% of performance lost to underspecification, but models rarely initiate clarification unprompted, and prompt engineering alone is insufficient for reliable detection.
+This paper introduces Ambig-SWE, a benchmark that pairs synthetically underspecified variants of SWE-Bench Verified issues with their fully specified counterparts, enabling controlled study of how LLM agents handle missing information through interactive clarification. The authors decompose the problem into three evaluable sub-capacities — detecting underspecification (RQ2), asking targeted questions (RQ3), and leveraging interaction to improve task resolution (RQ1) — and evaluate six proprietary and open-weight models across three settings (Full, Hidden, Interaction). The core findings are that interaction substantially recovers performance lost to underspecification, that models default to non-interactive behavior without prompting, and that question quality and integration matter more than extraction volume.
 
 ## Strengths
-1. **Paired dataset design.** The paper creates underspecified variants of SWE-Bench Verified issues while preserving the original full specifications as ground truth (§2.1). This paired design is a methodological advance over prior ambiguity work because it enables causal measurement of interaction impact—something impossible with naturally underspecified examples that lack verified complete versions. The distributional difference analysis comparing generated vs. natural underspecified issues is a validation step missing from most synthetic benchmark efforts.
-
-2. **Three-capacity decomposition.** The paper breaks resolution under underspecification into detection (§4), clarification quality (§5), and task completion with integrated information (§3). This structured decomposition is more granular than prior work that treats ambiguity as a monolithic problem, and it generates targeted findings—e.g., that Qwen 3 Coder never initiates interaction (100% FNR across all prompts, Table 2), that Claude Sonnet 4 achieves comparable information gain to Qwen with 50% fewer questions through exploration-first strategies (Table 6), and that navigational vs. informational details produce different performance profiles across models (Table 1).
-
-3. **Counterintuitive finding about Qwen 3 Coder's rigidity.** The paper documents that Qwen 3 Coder fails to interact under any encouragement condition, achieves only chance-level detection accuracy (50%), and its performance actually *worsens* when it receives navigational information from the user because it rigidly re-explores the codebase anyway (§3.3, §4.3). This is a concrete, actionable finding about current training paradigm limitations.
-
-4. **Conservative user-proxy design.** The GPT-4o proxy is explicitly restricted to information present in the full issue and responds "I don't have that information" for missing details (§2.2). This isolates the agent's ability to handle missing information rather than the proxy's helpfulness or hallucination.
+- **Controlled benchmark design with causal measurement**: The paired full/underspecified issue design (Section 2.1) enables direct measurement of interaction's causal impact. The GPT-4o user proxy is carefully constrained to respond only from the full issue, preventing hallucinated information and isolating agent behavior. This design is methodologically sound and well-justified.
+- **Decomposition into three evaluable sub-capacities**: The paper structures evaluation around detection (RQ2, Table 2), question quality (RQ3, Figures 5–6), and integration (RQ1, Figure 3), with experiments specifically designed for each. This isolates failures — e.g., Qwen 3 Coder's 100% false negative rate in detection and Llama 3.1's low information gain (cosine distance 0.101) — and directly supports targeted improvement claims.
+- **Strong quantitative evidence for interaction benefits**: Statistically significant resolution-rate gains across all models (Figure 3, Table 4 in Appendix) demonstrate that interactive clarification effectively recovers from underspecification. Claude Sonnet 4's improvement from 40.0% (Hidden) to 61.4% (Interaction) is a clear demonstration of the effect.
+- **Broad model coverage with prompt variation**: Evaluation spans six models (Claude Sonnet 4, Qwen 3 Coder, Claude Sonnet 3.5, Haiku 3.5, Deepseek-v2, Llama 3.1 70B) and three prompt conditions (Neutral, Moderate, Strong), revealing that open-weight models exhibit divergent and often brittle detection behavior that prompt engineering alone cannot fix (Table 2).
+- **Insightful analysis of question-answering strategies**: The combination of cosine distance and LLM-as-judge metrics (Section 5.2–5.3) reveals that Qwen 3 Coder extracts the most information (0.179) but with 6.02 questions on average, while Claude Sonnet 4 obtains nearly as much (0.171) with only 4.03 questions — demonstrating that efficient, exploration-first strategies yield better integration than aggressive extraction. The qualitative analysis in Figure 4 concretely illustrates these strategy differences.
 
 ## Weaknesses
 
-### Major
-1. **Unequal turn budgets confound cross-model comparisons.** Claude Sonnet 4 and Qwen 3 Coder receive up to 100 interaction turns, while all other models are capped at 30 turns (§3.1). The paper's justification ("greater reasoning and planning capacity") does not address the confound: a model with 100 turns has more opportunities to explore, recover from dead ends, and attempt candidate fixes, independently of any interaction advantage. This directly affects claims such as "Claude Sonnet 4 attains the highest relative performance (89%)" and any cross-model ranking. The paper reports that Qwen uses ~65 average steps and Claude Sonnet 4 uses 65–75 steps, suggesting the 100-turn cap may not be fully utilized for these models, but it does not report actual turn usage for the 30-turn-capped models, so we cannot assess whether the cap was binding for them. This does **not** invalidate the within-model Hidden vs. Interaction comparisons (each model is compared against itself under the same budget), but it makes cross-model performance comparisons unreliable.
+### Fatal
+None.
 
-2. **Detection experiment (RQ2) measures interaction behavior, not detection capability per se.** The experiment evaluates whether models choose to interact when given underspecified vs. fully-specified inputs, under varying prompt encouragement levels. The paper's framing ("Can LLMs identify whether a given task description is missing crucial information?") and conclusions ("models struggle to distinguish between well-specified and underspecified instructions") overinterpret these results. The decision to interact depends on instruction-following tendencies, confidence calibration, and interaction propensity—not purely on detection of missing information. Qwen 3 Coder's 100% FNR, for example, could reflect a refusal to engage rather than a detection failure. The paper should reframe this experiment as measuring *interaction initiation behavior* under various prompts, not detection ability. A direct detection test (e.g., "Is this issue well-specified? Yes/No") would cleanly measure detection.
+### Major
+None.
 
 ### Minor
-3. **Claude Sonnet 4 evaluated on a subset for the Hidden setting.** Footnote 4 notes that Claude Sonnet 4's Hidden setting performance is measured on only 100/500 instances (due to cost), while all other models use the full 500. This creates an unbalanced comparison: Claude Sonnet 4's Hidden result of 40.0% is on a different, potentially easier or harder, subset than the other models' Hidden results. The paper asserts the findings remain statistically significant but does not discuss potential selection bias from the subset.
+- **Synthetic underspecification limits external validity**: The underspecified issues are generated by prompting GPT-4o to summarize full issues while removing detail (Section 2.1). The paper's own distributional analysis shows this systematically eliminates code snippets, error messages, and reproducibility details found in natural issues. While the paper acknowledges this and justifies the approach by the need for paired ground truth for causal measurement, conclusions about detection difficulty and question strategy effectiveness may not fully transfer to naturally occurring underspecification patterns. The limitation is noted but not mitigated through any validation on natural data.
 
-4. **Interaction vs. Hidden comparison conflates the instruction to interact with the content of interaction.** The Hidden setting gives no interaction instructions, while the Interaction setting makes interaction compulsory (§2.3). The measured performance gap therefore includes both (a) the effect of the instruction itself (which may make the model more careful or exploratory) and (b) the actual information gained. The paper treats the entire gap as the value of interaction content. This is a standard baseline choice (no-instruction vs. instruction-with-interaction) and does not invalidate the finding that "the combined intervention helps." However, the paper's strongest claim—"up to 74% improvement"—would be better framed as "the combined effect of instructing models to interact and providing a responsive user proxy," not purely the value of interaction content.
+- **Turn-limit asymmetry complicates cross-model comparisons**: Claude Sonnet 4 and Qwen 3 Coder receive up to 100 turns while all other models are limited to 30 (Section 3.1). This is justified by their "greater reasoning and planning capacity," but it introduces a confound for absolute performance rankings and relative gain comparisons across models. Within-model comparisons (Hidden vs. Interaction) are unaffected. A sensitivity analysis equalizing turn limits, at least on a subset, would strengthen the cross-model claims.
 
-5. **Navigational information analysis lacks statistical grounding.** The claim that Qwen 3 Coder's performance worsens after receiving file locations (52.38% vs. 55.43%, Table 1) is based on a 3 percentage point difference. The paper provides no confidence intervals or significance test for this difference, making the conclusion speculative. The same applies to other fine-grained comparisons in Table 1.
-
-6. **Interaction turn usage not reported for most models.** The paper reports average steps only for Claude Sonnet 4 (65→75) and Qwen 3 Coder (~65), but not for other models. Since the Hidden vs. Interaction comparison is central to the paper, understanding whether smaller models exhaust their 30-turn budget or have room to explore is important for interpreting results.
+- **Subgroup analyses in Table 1 lack statistical support**: The breakdown of resolve rates with versus without navigational information is reported as point estimates without confidence intervals or sample size disclosure. The claimed anomalous behavior for Qwen 3 Coder (resolve rate dropping from 55.43% to 52.38% after receiving file paths) rests on a difference of ~3 percentage points that may not be statistically distinguishable from noise. The trajectory-based qualitative explanation partially compensates, but the quantitative claim would benefit from formal statistical support.
 
 ### Trivial
-7. The paper should specify the number of interaction transcripts qualitatively analyzed in §5.3 and whether patterns were systematic or based on cherry-picked examples.
+- **Ambiguous "74%" claim in abstract**: The abstract states "up to 74% over the non-interactive settings" without specifying whether this refers to relative improvement over Hidden or gap closure toward Full. Clarifying the computation (e.g., gap closure of 76.4% for Claude Sonnet 4) would prevent misinterpretation.
+
+- **Wilcoxon test specification incomplete**: Section 3.1 mentions Wilcoxon Signed-Rank tests with significance level 0.05 but defers details to Appendix §A.3.1. The paired-sample structure (per-issue pairing across settings) is inferable but not explicitly stated, which would aid replicability.
 
 ## Nice-to-Haves
-- A control condition where the model receives the same interaction prompt but the user proxy does not provide useful information would help isolate how much of the improvement comes from the instruction itself vs. actual information gain.
-- Reporting 95% confidence intervals for the primary resolve rates (Figure 3) would strengthen claims about performance differences.
-- A direct detection test (classify specification as complete/incomplete without interaction) would cleanly separate detection ability from interaction propensity.
+- **Validate against naturally underspecified issues**: Even a small-scale evaluation on naturally underspecified SWE-Bench issues with approximate ground-truth recoveries would strengthen external validity claims.
+- **Sensitivity analysis on turn limits**: Equalizing turn budgets across all models on a subset would clarify whether observed cross-model differences persist under uniform resource constraints.
+- **Evaluate proxy reliability effects**: Varying the user proxy's cooperativeness (e.g., reluctant or error-prone simulated users) would test robustness of the interaction findings beyond the conservative proxy used.
+- **Efficiency taxonomy**: A systematic characterization of when interaction leads to wasted versus productive turns would enrich the practical guidance for agent design.
+- **Human study on question quality**: A small human evaluation rating question specificity, actionability, and redundancy would anchor the automated cosine-distance and LLM-as-judge metrics.
 
 ## Removed Points
-- **Criticism about proxy user being too cooperative (Critical Issue #4):** Removed because the paper explicitly acknowledges this limitation in Section 7 ("our simulated user proxy may be more cooperative than real users"). This is a transparent, acknowledged scope constraint, not an overlooked weakness.
-- **"Code and data release not verified":** Removed per hard rule: do not question existence of cited artifacts.
-- **Missing related works:** Removed per hard rule.
-- **Formatting/style nitpicks and reproducibility nitpicks:** Removed per hard rules.
-- **Strength finder generic strengths (e.g., "addressed an important problem"):** These are generic and not anchored to specific evidence in the paper; removed.
+_These points are flagged to be removed — treat them with caution._
+
+- **HC claim that question-quality metrics "do not isolate the quality of the agent's questions from the user proxy's response style"** → REMOVED. The paper explicitly acknowledges in Section 7 that "Question quality is approximated via latent vector changes that weigh all information equally, though models may prioritize details differently." The disconnect between information gain and resolve rates is presented as a finding, not a flaw. The metrics have known limitations that the paper is transparent about.
+
+- **HC claim about Section 2.1 that natural issues contain "conversational fragments" and "links to external references" may make tasks harder** → REMOVED. This is the paper *reporting its own analysis*, not a weakness. The paper already discusses these distributional differences.
+
+- **HC claim about Section 5.2 that the paper "conflates question quantity with model capability"** → MOVED to Nice-to-Haves as a request for deeper analysis. The paper already addresses this through qualitative trajectory analysis and acknowledges the efficiency/effectiveness disconnect as a key finding.
+
+- **SF's "well-controlled dataset for underspecification" and "controlled user proxy prevents information leakage"** → KEPT and merged into Strengths. Well-supported by the paper.
+
+- **HC "Missing Parts" about varying proxy quality, efficiency taxonomy, practical implications** → MOVED to Nice-to-Haves. These are scope-expanding suggestions, not weaknesses.
 
 ## Novel Insights
-The review surfaces two observations not fully articulated by the paper itself. First, the three-capacity decomposition (detect → clarify → integrate) reveals an asymmetry that the paper does not exploit: detection failure (RQ2) and integration failure (RQ1) appear to be the binding constraints, not clarification quality (RQ3, where all capable models score ~4/5). This suggests that training interventions should prioritize detection and integration over question quality. Second, the interaction between turn budgets and model capability produces an interesting edge case: the models with more turns (Claude Sonnet 4, Qwen 3 Coder) are also the ones that need them less (using 65–75 of 100), while it is unknown whether the 30-turn-capped models would benefit from larger budgets. This inversion—where compute allocation inversely matches need—suggests future work should study adaptive turn allocation rather than uniform caps.
+The paper's most genuinely novel contribution is the demonstration that under identical underspecification conditions, models with similar task-solving capabilities (Claude Sonnet 4 and Qwen 3 Coder) exhibit radically different interaction behaviors — Qwen 3 Coder extracts the most information but integrates it rigidly (performance *worsens* with navigational cues, Section 3.3), while Claude Sonnet 4 extracts less but integrates adaptively through exploration-first strategies (Section 5.3). This dissociation between information extraction and task success, combined with the finding that even state-of-the-art models (Qwen 3 Coder) can have 100% false negative rates in underspecification detection (Table 2), reveals that current training paradigms produce brittle rather than robust interactive capabilities. This is a more nuanced and actionable finding than the generic claim that interaction helps.
 
 ## Suggestions
-- **For the next revision:** Equalize turn budgets across models (or report actual turn usage for all models and perform sensitivity analysis truncating high-budget models).
-- **Reframe RQ2's conclusions** to accurately reflect that the experiment measures interaction initiation behavior, not raw detection ability. Add a direct detection classification task.
-- **Report confidence intervals** for the per-model resolve rates and for the fine-grained comparisons in Table 1.
-- **Clarify the subset issue for Claude Sonnet 4's Hidden evaluation** by reporting whether the 100-instance subset is representative of the full 500.
+- Explicitly report the computation behind the "74%" figure in the abstract and introduction, ideally in terms of gap closure toward the Full setting.
+- Add confidence intervals or statistical test results to Table 1's subgroup breakdowns, or qualify the Qwen 3 Coder anomalous-behavior claim with the appropriate caveat about effect size.
+- Consider a small ablation where Claude Sonnet 4 and Qwen 3 Coder are also run at 30 turns on a random subset, to demonstrate that the turn-limit asymmetry does not qualitatively change the conclusions.
+- Clarify the paired-sample structure of the Wilcoxon tests in Section 3.1 rather than deferring entirely to the appendix.
 
 ## Score and Decision
 
-**Round-1 bracket:** After comparing against weak anchors (avg 1.67–3.00: rejected papers with flawed methodology or trivial contributions), middle anchors (avg 4.00–6.75: accepted benchmarks like LiveCodeBench, ConvCodeWorld, MINT), and strong anchors (avg 7.75–9.00: top-tier benchmarks like BigCodeBench, Spider 2.0), the narrowest plausible range was [4.5, 6.5].
+### Calibration anchors considered:
 
-**Round-2 anchors used for narrowing:**
-- AgentBench (6.20, scores 3,8,6,8,6) — Broader LLM-as-agent benchmark but less focused analytical contribution. Ambig-SWE has a more novel dataset design but weaker experimental control. Ambig-SWE is slightly weaker.
-- MINT (6.75, scores 6,8,8,5) — Most similar in spirit (multi-turn interaction evaluation). MINT has more thorough analysis and controls. Ambig-SWE has a more specific niche (underspecification in SWE tasks) but the methodological issues reduce confidence. Ambig-SWE is weaker.
-- ConvCodeWorld (6.00, scores 5,5,8,6) — Conversational code generation benchmark. Similar evaluation breadth. Ambig-SWE has comparable contribution but with more significant methodological caveats. Ambig-SWE is slightly weaker.
-- Active Task Disambiguation (7.33, scores 8,8,6) — Method paper + evaluation on ambiguity. More formally rigorous. Ambig-SWE is a different type of contribution (benchmark/evaluation vs. method), harder to compare directly. Not used for final calibration.
-- LiveCodeBench (6.25, scores 6,5,8,6) — Contamination-free code benchmark. More polished and comprehensive evaluation. Ambig-SWE is weaker on experimental rigor.
+**Round 1 (bracketing):**
+| Anchor | Score | Comparison |
+|--------|-------|------------|
+| CscKx97jBi (Improve Code Gen with Feedback) | 3.00 | Much weaker — basic LLM+feedback, no systematic benchmark |
+| BltaWJZMeR (DataSciBench) | 3.20 | Weaker — less controlled design, narrower analysis |
+| NiNIthntx7 (RefactorBench) | 6.50 | Weaker — 100 instances, mainly one model, less analysis depth |
+| MMwaQEVsAg (Commit0) | 6.67 | Comparable quality — ambitious interactive benchmark |
+| JAMxRSXLFz (Active Task Disambiguation) | 7.33 | Stronger on theoretical novelty but weaker on benchmark scope |
+| YrycTjllL0 (BigCodeBench) | 9.00 | Much stronger — comprehensive, large-scale benchmark |
 
-**Final positioning:** The paper has genuine contributions (paired dataset, three-capacity framework, interesting empirical findings) that place it clearly above rejected papers (~3 range). However, the unequal turn budgets and RQ2 framing issues reduce confidence in some claims below the level of accepted papers like MINT (6.75) or LiveCodeBench (6.25). The paper is closest in quality to ConvCodeWorld (6.00) but with more significant methodological caveats that prevent reaching that score in its current form. Score: **5.5**.
+**Round 2 (narrowing):**
+| Anchor | Score | Comparison |
+|--------|-------|------------|
+| 6z4YKr0GK6 (ScienceAgentBench) | 6.00 | Weaker — less comprehensive analysis |
+| sf1u3vTRjm (ML-Bench) | 5.75 | Weaker — narrower scope |
+| jp3gWrMuIZ (MINT) | 6.75 | Comparable — similar multi-turn interaction focus, 20 models |
+| M4qNIzQYpd (OpenRCA) | 6.75 | Slightly different domain, comparable quality |
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+**Round 1 bracket:** 5.5–7.5 (between RefactorBench at 6.50 and JAMxRSXLFz at 7.33).
+
+**Round 2 narrowing:** The paper lands between RefactorBench (6.50) and MINT (6.75). It is clearly stronger than RefactorBench (larger dataset, more models, richer analysis) and comparable to MINT (similar scope, similarly well-executed, similar minor limitations around simulation realism). It is below JAMxRSXLFz (7.33) which has stronger theoretical novelty, and well below the top-tier benchmarks.
+
+**Final score: 6.5** — A solid benchmark and analysis paper with well-executed experiments, genuine empirical insights, and no fatal or major flaws. Minor weaknesses (synthetic data external validity, turn-limit asymmetry, lack of statistical support for some subgroup claims) are acknowledged or addressable but prevent the paper from reaching the top tier.
+
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

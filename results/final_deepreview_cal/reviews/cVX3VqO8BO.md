@@ -1,91 +1,94 @@
-Now I have good calibration. Let me write the final review.
-
-**Round-1 bracket:** Based on the calibration, the paper clearly sits above the weak band (scores 2.5–3.0, all reject) and below the strong band (scores 8.0, all accept). The middle band (3.5–7.5) contains the most relevant comparisons. I initially bracket this paper between 5.0 and 7.0.
-
-**Round-2 narrowing anchors considered:** HandsOnVLM (6.33, Reject), HAMSTER (6.00, Accept), Cross-Embodiment (5.00, Accept), Articulate-Anything (6.20, Accept), VLP (7.00, Accept).
-
-**Comparison to anchors:** UniHM is clearly stronger than Cross-Embodiment (5.00). It is comparable to HAMSTER (6.00) and slightly stronger than HandsOnVLM (6.33, Reject) because UniHM's experiments are cleaner and its technical contributions more substantial. It is weaker than VLP (7.00), which has broader scope and more polished presentation. **Final score: 6.0, leaning Accept.**
+Now let me write the consolidated review.
 
 ---
 
 ## Summary
 
-UniHM proposes a unified framework for generating *dynamic*, *language-conditioned* dexterous hand manipulation sequences (not just static grasps). It couples (a) a cross-morphology VQ-VAE codebook that lets different hand types share a common discrete action space, (b) a small VLM (Qwen3-0.6B) with a decoupled perception module and progressive masking curriculum for instruction-conditioned token generation, and (c) a physics-guided refinement that optimizes contact, generative-prior, and smoothness terms per frame. Evaluated on DexYCB and OakInk, UniHM outperforms adapted motion-generation baselines (TM2T, MDM, FlowMDM, MotionGPT3) on MPJPE, FOL, FPL, and FID, and shows promising real-world success rates.
+UniHM proposes a unified framework for generating dexterous hand manipulation sequences from open-vocabulary language instructions and RGB-D observations. The pipeline combines three components: (1) a morphology-agnostic VQ-VAE tokenizer with a shared codebook that maps heterogeneous hand kinematics into a common discrete latent space, (2) a vision-language model (Qwen3-0.6B) that generates manipulation token sequences conditioned on language, object point clouds, and target trajectories, and (3) a physics-guided Gauss-Newton refinement stage that enforces contact, generative, and temporal priors. The system is trained on human HOI datasets (DexYCB, OakInk) without teleoperation data and evaluated on both benchmarks and real-world tasks.
 
 ## Strengths
 
-- **First dynamic, language-conditioned dexterous manipulation beyond static grasps.** Prior methods either generate static grasp poses only or work on low-DoF grippers. UniHM produces full manipulation sequences conditioned on open-vocabulary instructions, and the experiments support this advance: e.g., MPJPE 61.40 vs. 74.80 (MotionGPT3) on seen DexYCB (Table 1), with similar margins on OakInk (Table 2).
+- **Novel integrated framework for language-conditioned dexterous manipulation.** UniHM is the first system to combine a shared-hand tokenizer, a VLM, and physics-based refinement into a single pipeline that produces multi-step dexterous manipulation sequences rather than static grasps. This addresses a genuine gap in the literature, where prior language-guided methods are predominantly pose-centric.
 
-- **Morphology-agnostic shared codebook with cross-hand distillation.** The paper formalizes a shared VQ-VAE codebook (Eq. 1–2) with a distillation objective (Eq. 3) that aligns encoders across hand morphologies, enabling token reuse across five dexterous hands (Shadow, Allegro, SVH, Leap, Panda). The unified translation formula (Eq. 6) makes cross-morphology transfer direct.
+- **Physics-guided dynamic refinement with demonstrated impact.** The frame-by-frame Gauss-Newton optimization with contact energy (Eq. 11–13), generative prior (Eq. 14), and temporal regularizers (Eq. 15) is well-specified and validated. Table 4 shows that removing this module increases MPJPE from 61.40 to 65.78 on seen objects and degrades FID from 31.24 to 33.57, confirming it meaningfully improves physical plausibility.
 
-- **Physics-guided dynamic refinement is clearly beneficial.** The energy-based post-processing (Eq. 11–18) with contact, generative-prior, and temporal-smoothness terms improves feasibility. Ablation (Table 4) shows physical refinement degrades MPJPE from 61.40 to 65.78 on seen DexYCB, confirming its contribution.
+- **Progressive masking curriculum effectively reduces exposure bias.** The paper transitions from teacher-forced training to fully autoregressive generation via a masking schedule (Eq. 10). Table 4 shows removing this curriculum substantially degrades performance (MPJPE 73.41 vs. 61.40, FID 44.87 vs. 31.24), providing clean evidence for its effectiveness.
 
-- **Strong ablation study.** The paper ablates depth input, masked training, and physical refinement (Table 4), showing all components are necessary. The progressive masking curriculum (Eq. 10) alone accounts for a large performance drop when removed (MPJPE 61.40 → 73.41).
-
-- **Real-world validation on diverse task categories.** Table 3 reports success rates for four task types (Grab, Pick&Place, Pull&Push, Open&Close) on both seen and unseen objects, demonstrating practical applicability.
+- **Learning from human video data eliminates teleoperation dependency.** The system trains on retargeted HOI data from DexYCB and OakInk and achieves 50–65% real-world success rates on dynamic tasks (Table 3), demonstrating that robot-collected demonstration data is not required — a meaningful practical contribution.
 
 ## Weaknesses
 
 ### Major
 
-1. **Diversity collapse on DexYCB is not discussed.** In Table 1, the ground-truth Diversity is 125.53; UniHM achieves 39.62 (seen) and 42.70 (unseen) — a ~68% collapse. MotionGPT3 achieves 72.51/75.84, substantially more diverse. The paper claims "closer to GT is better" but does not acknowledge this weakness or analyze its cause (e.g., codebook collapse, mode-seeking from the masking curriculum, or smoothness penalties in refinement). On OakInk the diversity is closer to GT (165.47 vs. 147.40 seen), making the DexYCB gap particularly notable. This omission undermines the claim that the method produces "human-like" and "diverse" sequences across all settings.
+- **Baseline comparisons are structurally unfair, undermining the quantitative claims.** UniHM receives an object point cloud (from PointSAM) and a target trajectory (from CLIPort) as inputs; the baselines (TM2T, MDM, FlowMDM, MotionGPT3) are text-to-motion models that generate from language alone without access to scene geometry or planned trajectories. The paper states baselines are "post-process[ed] with our physics-guided refinement to ensure a fair comparison" (Section 4.3), but this addresses only the output side, not the input asymmetry. The performance gap in Tables 1–2 therefore cannot be attributed to the VLM or tokenizer specifically — it may largely reflect access to perception-derived spatial information that the baselines lack. No experiment controls for this by, e.g., giving baselines the same CLIPort outputs or ablating the perception module's contribution against a fixed-perception baseline.
 
-2. **Real-world evaluation lacks critical experimental details.** The entire real-world section (Table 3, Fig. 3) provides no: hardware specification (which dexterous hand? Which robot arm?), number of trials per condition, success criteria per task category, failure mode analysis, or breakdown by object. Without this information, the 60% "Grab" success rate for unseen objects cannot be properly interpreted or compared. The ablation study uses only DexYCB, not OakInk, and real-world results lack any breakdown by object category or instruction type.
+- **The cross-morphology tokenizer — a core claimed contribution — is not independently validated.** The abstract and contributions list prominently claim that the shared codebook "improves cross-dexterous hand generalization and scalability to new morphologies." However, the paper reports no VQ-VAE reconstruction error per hand type, no cross-hand pose translation accuracy (despite Eq. 6 claiming translation is "straightforward"), and no ablation comparing the shared codebook against per-hand codebooks. The only evidence comes from downstream task results, but those are confounded by the CLIPort module and physics refinement. The morphology-agnostic claim rests on an untested assertion.
+
+- **No evaluation of instruction following.** All quantitative metrics (MPJPE, FOL, FPL, FID, Diversity) measure motion quality against retargeted ground truth — i.e., how closely the generated hand pose sequence matches a reference. None assess whether the generated sequence actually fulfills the language command (e.g., whether the hand successfully grasps the specified object versus moving past it). For a paper whose headline contribution is language-conditioned manipulation, this omission is significant. The real-world success rate (Table 3) partially addresses this but lacks the detail to serve as a systematic instruction-following evaluation.
 
 ### Minor
 
-3. **Baseline adaptation method is underspecified.** The paper states that baselines (TM2D, MDM, FlowMDM, MotionGPT3) are post-processed with the physics-guided refinement "to ensure a fair comparison" (Section 4.3), but does not describe how these full-body motion generation models are adapted to the hand-manipulation input format (language + object point cloud + target trajectory) or whether they are fine-tuned on the hand-specific datasets. The real-world table (Table 3) lists "MDM+Dex-Retargeting" and "MotionGPT3+Dex-Retargeting" without the physics refinement, creating an inconsistency with the main tables where refinement is applied. While the paper's overall improvement is likely robust, the comparison is less informative than it could be.
+- **HOIGPT is cited as directly relevant but omitted from experiments.** The related work (Section 2.2) describes HOIGPT as a model that "extends token-based generation to long 3D hand-object interaction, learning a bidirectional mapping between text and HOI sequences." Despite this direct relevance, it is not included as a baseline. The paper justifies the baseline selection by characterizing prior work as targeting "static grasp poses," but this characterization does not clearly apply to HOIGPT. Including it — or explaining its exclusion — would strengthen the evaluation.
 
-4. **The "first" claim is slightly overstated.** The abstract claims "the first unified framework for dexterous hand manipulation guided by free-form language commands." HOIGPT (Huang et al., 2025) also generates HOI sequences from text. The Related Work section acknowledges HOIGPT and makes the distinction that prior work targets "Digital Hand" rather than dexterous robot hands — this distinction is reasonable but should be clearer in the abstract/introduction.
+- **Real-world experiments lack supporting detail.** Table 3 reports success rates as percentages without trial counts, variance estimates, number of objects, or a clear definition of what constitutes "success" for each task category. The baselines (MDM + Dex-Retargeting, MotionGPT3 + Dex-Retargeting) again lack scene perception, making the comparison uninformative about the VLM's contribution specifically. These issues limit the interpretability of what is otherwise a valuable real-world demonstration.
 
-5. **No direct comparison with or discussion of HOIGPT as a baseline.** Since HOIGPT generates HOI sequences, it would be a natural competitor. The paper acknowledges it in Related Work but does not include it in the experimental comparison, citing that it targets digital hands. Explanation of why HOIGPT cannot be adapted to this setting would strengthen the evaluation.
+- **CLIPort and VLM architecture details are thin.** The CLIPort module — which generates the target trajectory and object point cloud critical to the system — is described only as "CLIPort-style" (Section 3.3), with no architecture, training data, or training procedure specified. Similarly, the MLP-based trajectory encoder and the VLM's input token layout receive no dimensional or structural detail. While CLIPort is a known reference architecture, a paper whose pipeline critically depends on it should specify how it is instantiated.
 
 ### Trivial
 
-6. Table 2 footnote style is inconsistent: MPJPE for GT row shows "—" while Diversity shows "147.40". Clarify which GT metrics exist.
-7. Some abbreviations (FOL, FPL) are defined only in Section 4.2 but the arrow notation "→" for Diversity is not explicitly explained (it means "closer to GT is better").
+- None identified that carry evaluation weight.
 
 ## Nice-to-Haves
 
-- **Ablate the shared codebook.** The paper central claim of cross-morphology capability is not directly ablated (e.g., training separate codebooks per hand vs. shared).
-- **Sensitivity analysis of CLIPort/Point-SAM errors.** The inference pipeline uses estimated trajectories from CLIPort while training uses ground-truth. An analysis of how perception errors propagate to manipulation quality would be informative.
-- **Inference time / optimization cost.** The frame-by-frame Gauss-Newton optimization — reporting total time per sequence would help assess real-time viability.
-
-## Novel Insights
-
-None beyond the paper's own contributions. The combination of a cross-morphology discrete codebook with a small VLM and physics-guided refinement is a design choice with ablative support, but the individual components are standard.
-
-## Suggestions
-
-1. **Discuss the diversity gap on DexYCB explicitly.** Analyze whether the collapse is caused by the VQ codebook size, the masking curriculum, or the refinement smoothness penalty, and if possible, increase diversity (larger codebook, stochastic sampling) or justify why lower diversity is acceptable for the target tasks.
-2. **Add real-world experimental details:** hardware setup, number of trials, success criteria per task, failure analysis, and object breakdown. This is essential for the claimed "strong generalization to open-world tasks."
-3. **Clarify baseline adaptation** by explicitly stating: (a) whether baselines received text + point cloud + trajectory input or just text + initial pose, and (b) whether they were fine-tuned or used off-the-shelf.
+- A failure case analysis (e.g., where the physics refinement diverges, or where the VLM misinterprets the instruction) would add depth.
+- Computational cost and runtime for training and inference would help assess practical deployability.
+- An ablation replacing the 0.6B VLM with a larger model, or comparing to fine-tuning a larger LLM, would strengthen the data-efficiency claim.
 
 ## Removed Points
 
-- **"CLIPort and Point-SAM are not cited/described"** — The references section (which would contain these citations) was stripped by the parser. The paper describes the functional role of both modules ("takes RGB-D and language to infer target trajectories" for CLIPort; "segments the object point cloud" for Point-SAM), which is reasonable granularity for a systems-level description. Per hard rules, absent citation visibility cannot be penalized.
-- **"Point-SAM receives no definition"** — The paper explicitly says it is used to "segment the object point cloud P_obj with the corresponding semantics" (Eq. 8). Its function is defined.
-- **"Dexterity metrics are ambiguous"** — The paper states "Diversity → closer to GT is better" and the GT values are listed. The calculation direction is clear.
-- **"Hyperparameters not given"** — Training hyperparameters (learning rate, batch size, etc.) are standard details that would appear in an appendix (which was stripped). Per hard rules, this is not a valid criticism.
-- **"Missing ablation of shared codebook"** — This is a nice-to-have rather than a core weakness, as the ablation study does show the components that directly impact the main metrics.
+These points are flagged to be removed, treated with caution:
+
+- **"CLIPort is a black box making the method unreproducible — this is a fatal methodological gap."** Overstated. CLIPort is a known reference architecture; the paper describes its functional role (RGB-D + instruction → trajectory + point cloud). The lack of architectural detail is a real but minor weakness, not a fatal flaw. Retained as Minor above.
+
+- **"The abstract overstates the contribution as 'first framework for unified dexterous hand manipulation guided by free-form language commands.'"** The paper's literature review substantiates that prior language-guided dexterous works target static grasps, not dynamic sequences. The "first" claim, while debatable at the margin, is reasonable given the evidence presented. Removed.
+
+- **"The introduction asserts learning from human videos as a key advantage, but the pipeline relies on retargeted HOI data, not raw video."** The paper is clear that it uses retargeted HOI sequences from DexYCB and OakInk, not raw video. The "learning from video" phrasing refers to the source data being human-captured video datasets. This is a terminology preference, not a weakness. Removed.
+
+- **Demand for confidence intervals or larger-scale benchmarking.** Neither is standard practice in this subfield; the paper follows community norms with its 80/20 split and standard deviation reporting in Tables 1–2. Removed.
+
+- **"The physics refinement effect is modest."** Table 4 shows removing it increases MPJPE by ~4 points, a non-trivial degradation. The critic's characterization is inaccurate. Removed.
+
+## Novel Insights
+
+Beyond the paper's own contributions, the review process surfaces an important methodological tension: when a perception front-end (CLIPort) provides spatial information to a generative model, disentangling the contributions of perception versus generation requires controlled ablation that neither this paper nor its closest comparators (HandsOnVLM, HAMSTER) consistently perform. Designing a "perception-only" lower bound — e.g., a heuristic policy that uses the same CLIPort outputs without the VLM — would be a valuable evaluation standard for this emerging class of perception-augmented manipulation models.
+
+## Suggestions
+
+- **Add a perception-ablated baseline**: Run UniHM's CLIPort + PointSAM to produce trajectories but replace the VLM with a simple trajectory-following policy (e.g., fixed-grasp heuristic). This would isolate the VLM's contribution above the perception module.
+- **Evaluate instruction following**: Design a simulator-based check for whether the generated sequence actually executes the commanded task (e.g., object displacement, lid opening), and report success rates alongside motion-quality metrics.
+- **Validate the tokenizer**: Report VQ-VAE reconstruction error per hand morphology, cross-hand translation accuracy, and an ablation of shared vs. per-hand codebooks on at least one downstream metric.
+- **Include HOIGPT or explain its exclusion** from the experimental comparison.
+- **Specify CLIPort instantiation** (architecture variant, training data, training procedure) and VLM input encoding details.
 
 ## Score and Decision
 
-**Calibration anchors used:**
+**Bracketing round**: The topically closest anchors were HandsOnVLM (6.33, rejected — hand trajectory prediction with VLMs, similar evaluation gaps), HAMSTER (6.00, accepted — hierarchical VLA, cleaner evaluation), and CrayonRobo (5.20, rejected — visual prompting for manipulation, limited evaluation). UniHM's ambition exceeds CrayonRobo's but its evaluation gaps are more consequential than HandsOnVLM's or HAMSTER's. Initial bracket: 5.0–6.0.
 
-| Anchor ID | Avg Score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| xcHIiZr3DT | 2.50 | R1 | Much weaker — simple vision-based grasping, no language or sequence generation |
-| q1Cv7Hp52y | 3.00 | R1 | Much weaker — RL skill discovery, unrelated to dexterous manipulation |
-| AJQuTFd9es | 6.33 | R1/R2 | Slightly weaker — had missing experimental details and unclear baselines, was rejected |
-| h7aQxzKbq6 | 6.00 | R1/R2 | Comparable — hierarchical VLA with similar documentation gaps, accepted |
-| 9pKtcJcMP3 | 7.00 | R2 | Stronger — broader scope, more polished presentation, accept |
-| Aqfwhna1D7 | 5.20 | R1 | Weaker — simpler problem setting, reject |
-| twIPSx9qHn | 5.00 | R2 | Weaker — static grasps only, limited cross-embodiment, accepted |
-| s3FTX4Ay55 | 6.20 | R2 | Comparable quality — different domain (articulated objects), accepted |
+**Narrowing round**: Compared against CrayonRobo (5.20), UniHM offers substantially more technical depth (three novel components, two benchmarks, real-world results) and is clearly stronger. Compared against HandsOnVLM (6.33), UniHM shares similar weaknesses (missing baselines, metric limitations) but adds the significant issue of structurally unfair comparisons that HandsOnVLM did not face. Compared against HAMSTER (6.00), UniHM is more ambitious but less rigorously evaluated.
 
-**Round-1 bracket:** 5.0–7.0  
-**Narrowing:** Comparisons to HAMSTER (6.00, accept) and HandsOnVLM (6.33, reject) place UniHM around 6.0. The paper has stronger experiments than HandsOnVLM but similar documentation gaps, putting it in a "borderline accept" territory.
+The paper sits between CrayonRobo and HAMSTER: stronger than the former due to its technical scope and evidence base, but weaker than the latter due to evaluation gaps that directly undermine its core quantitative claims. The unfair baseline comparison, unvalidated tokenizer claim, and absent instruction-following metric are addressable but collectively represent a substantial gap between claimed and demonstrated contributions.
 
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+**Anchors referenced across all rounds**:
+| Anchor | Score | Round | Comparison |
+|--------|-------|-------|------------|
+| wl1Kup6oES | 3.00 | 1 (bracket) | Visual pre-training for manipulation — much narrower scope, weaker evidence. UniHM is stronger. |
+| KBSHR4h8XV | 3.33 | 1 (bracket) | Early Fusion VLA — smaller contribution, rejected. UniHM is stronger. |
+| AJQuTFd9es (HandsOnVLM) | 6.33 | 1,2 | VLM for hand trajectory prediction — most topically similar. UniHM has similar gaps but adds unfair comparison issues. UniHM is weaker. |
+| h7aQxzKbq6 (HAMSTER) | 6.00 | 1 | Hierarchical VLA — cleaner evaluation, accepted. UniHM is weaker on rigor. |
+| Aqfwhna1D7 (CrayonRobo) | 5.20 | 2 | Visual prompting for manipulation — less ambitious, rejected. UniHM is stronger. |
+| NxoFmGgWC9 | 5.50 | 2 | Video generative pre-training — different domain. Roughly comparable quality. |
+| 9pKtcJcMP3 (VLP) | 7.00 | 1,2 | Video language planning — stronger methodology, accepted. UniHM is clearly weaker. |
+| n64NYyc6rQ | 6.20 | 2 | Tokenization in MLLMs — different domain. Not directly comparable. |
+
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

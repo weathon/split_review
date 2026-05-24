@@ -1,87 +1,83 @@
-Now I have all the information I need. Let me write the final consolidated review.
+Now I have all the information needed to write the consolidated review.
+
+---
 
 ## Summary
 
-PIRN proposes a prototype-driven reconstruction framework for few-shot multimodal anomaly detection (MAD), combining RGB and surface-normal modalities. It introduces three components: Balanced Prototype Assignment (BPA) using optimal transport to prevent codebook collapse, Adaptive Prototype Refinement (APR) with gated GRU updates to expand normal coverage at inference, and Multimodal Normality Communication (MNC) for cross-modal knowledge transfer. The method is evaluated on MVTec-3D-AD, Eyecandies, and Real-IAD D3, showing consistent improvements over a broad set of baselines in few-shot settings, along with substantial computational efficiency gains.
+PIRN proposes a prototype-driven reconstruction framework for few-shot multimodal anomaly detection that leverages RGB and surface-normal modalities. Instead of dense cross-modal alignment or large memory banks, it uses three novel components: Balanced Prototype Assignment (BPA, via optimal transport) to prevent codebook collapse; Adaptive Prototype Refinement (APR, via GRU-based prototype updates at inference) to bridge train-test distribution gaps; and Multimodal Normality Communication (MNC) to exchange prototype-level normality cues across modalities. The method is evaluated on MVTec-3D-AD, Eyecandies, and Real-IAD D3, showing consistent gains under few-shot settings and offering an 85% FLOPs reduction over the prior state of the art.
 
 ## Strengths
 
-1. **Consistent and substantial few-shot gains across multiple benchmarks.** Table 1 shows PIRN outperforms the strongest baseline (INP-Former) by +3.9, +3.7, and +2.4 AUROC_I on MVTec-3D-AD for 5-, 10-, and 50-shot settings, with similar margins on Eyecandies (+3.6, +4.0, +2.2). These gains are non-trivial and hold across three metrics (AUROC_I, AUROC_P, AUPRO), providing strong evidence for the method's effectiveness under data scarcity.
+- **Consistent few-shot performance gains across multiple benchmarks.** Table 1 shows PIRN outperforming all baselines at every shot setting (5, 10, 50, all) on both MVTec-3D-AD and Eyecandies. For example, at 10-shot on MVTec-3D-AD, AUROC_I improves from 0.885 (INP-Former) to 0.922, and similar margins hold consistently. The improvements are not fragile or cherry-picked — they persist across metrics and datasets.
 
-2. **Technically sound and well-motivated component design.** Each of the three components targets a specific failure mode of prototype-based AD in the few-shot regime: BPA addresses codebook collapse via balanced optimal transport (validated by t-SNE in Figure 1 and ablation drops from 0.828 to 0.883), APR bridges the train-test distribution gap via GRU-gated updates (ablated from 0.883 to 0.916), and MNC enables cross-modal knowledge transfer. The optimal transport formulations for both BPA and APR are clearly derived (Eq. 1-2, Section 3.3).
+- **Well-designed component ablations demonstrate each module's contribution.** Table 2 shows that removing any one of BPA, APR, or MNC from the full model degrades performance. Table 7 further validates the OT-based aggregation in APR against global averaging and top-k alternatives. Tables 5–6 ablate codebook size and decoder depth, showing the design choices are well-tuned.
 
-3. **Impressive computational efficiency.** Table 4 shows PIRN achieves 0.922 AUROC_I with 103.36G FLOPs and 17.49ms latency — an 85% FLOPs reduction and 4.35× speedup over the SOTA method FIND (728.46G, 76.09ms, 0.921 AUROC_I) while matching accuracy. This is a meaningful practical contribution for real-time industrial inspection.
+- **Substantial computational efficiency advantage.** Table 4 reports 103.36 GFLOPs and 17.49 ms latency for PIRN versus 728.46 GFLOPs and 76.09 ms for FIND (the previous SOTA), while achieving better AUROC_I (0.922 vs. 0.921). An 85% FLOPs reduction while improving accuracy is a genuine practical contribution.
 
-4. **Comprehensive ablation and analysis.** The paper ablates codebook size K (Table 5), decoder depth L (Table 6), token aggregation methods in APR (Table 7), modality availability (Table 3), and provides displacement visualization (Figure 4) linking prototype behavior to anomaly discrimination. The consistent ablation patterns support the design choices.
+- **Qualitative and interpretability analyses are informative.** Figure 3 shows cleaner anomaly maps with fewer false positives and better separation of normal/anomalous score distributions. Figure 4 provides a novel feature-displacement analysis showing that anomalous tokens undergo much larger displacements toward prototypes than normal tokens, offering an interpretable view of the reconstruction bottleneck.
+
+- **The method is coherently motivated.** The three components — BPA, APR, and MNC — each directly address a clearly identified failure mode of prototype-based reconstruction in few-shot multimodal settings (codebook collapse, unseen normal variation, and modality isolation). The technical narrative is tight.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+- **Backbone standardization across baselines is incomplete, weakening the few-shot superiority claim.** PIRN uses a frozen DINOv2 ViT-B/14 backbone with multi-scale features. Among the baselines, only the adapted INP-Former is confirmed to share this backbone (Section 4, Implementation Details). Baselines such as M3DM, CFM, 3D-ADNAS, AST, and BTF use their own feature extractors (e.g., ResNet-50, PointNet, custom CNNs). In few-shot regimes, the quality of the pre-trained representation is known to dominate performance, so some fraction of PIRN's margin over these baselines may stem from the representation gap rather than the proposed BPA/APR/MNC modules. The improvement over the same-backbone INP-Former (+3.7 AUROC_I at 10-shot on MVTec-3D-AD) is still substantial, but the claim of consistent superiority over *all* baselines should be tempered. A simple reconstruction baseline sharing the same DINOv2 backbone would strengthen confidence.
 
 ### Minor
 
-1. **The Adaptive Prototype Refinement (APR) safety mechanism is asserted but not quantitatively validated.** The paper argues that APR does not adapt to anomalies because anomalous patch tokens are assigned diffusely across prototypes via balanced OT and their contribution is suppressed by the GRU gate. However, no quantitative evidence is provided: there are no measurements of OT assignment entropy for anomalous vs. normal patches, no gate value comparisons (g_rgb, g_sn) for anomalous vs. normal inputs, and no analysis of prototype drift (cosine similarity of prototypes before/after APR on clean vs. anomalous test images). Figure 4 shows displacement magnitudes but does not directly measure the APR safety claim. This weakens confidence in a key design claim.
+- **APR's claimed robustness to anomalous patches is not empirically validated.** The paper argues that anomalous patches contribute weakly to prototype updates because OT assigns them diffusely (Section 3.3). While the ablation (Table 2: 0.916 → 0.922 with APR) and aggregation comparison (Table 7) are supportive, they do not directly test whether prototypes remain stable when exposed to anomalous test inputs. Measuring prototype update magnitude as a function of input normality, or comparing detection performance with APR on anomalous-only vs. normal-only test sets, would directly validate this safety property. The theoretical argument is plausible but currently rests on intuition.
 
-2. **The ablation table (Table 2) is ambiguous due to formatting corruption.** The table as rendered has identical checkmarks in all rows, making it impossible to verify which module combinations correspond to each value. The text claims "removing each component from the full model results in a consistent performance drop," yet one row (0.967) exceeds the full model (0.922). While this is almost certainly a parser-induced artifact, the absence of a clean table undermines the ablation narrative. The authors should provide a properly formatted version or clarify the exact row-to-configuration mapping.
+- **The Real-IAD D3 evaluation (Table 8) is in the full-data regime** and thus does not directly support the paper's central few-shot claim. Including a few-shot version of this experiment would align it with the core thesis. The paper's few-shot claim is primarily supported by MVTec-3D-AD and Eyecandies, which is sufficient, but the D3 results as presented sit somewhat outside the paper's narrative arc.
 
-3. **FIND is omitted from the main few-shot accuracy comparison (Table 1).** The contemporary SOTA method FIND (Li et al., 2025) appears only in the efficiency Table 4, where it achieves 0.921 AUROC_I vs. PIRN's 0.922 — virtually identical accuracy. Since FIND uses the same modalities (RGB + surface normals) and the same backbone (DINOv2 ViT), its exclusion from the main accuracy comparison makes it difficult to assess how PIRN's detection accuracy compares to the strongest contemporary baseline. The paper frames its contribution partly around accuracy ("consistently achieves superior performance"), but the evidence suggests PIRN's main advantage over FIND is computational efficiency, not accuracy. Including FIND in Table 1 would sharpen the paper's actual contribution.
-
-4. **No statistical significance or variance reporting for few-shot results.** Given the small training sample sizes (5, 10, 50 shots), the reported single-run AUROC values could be sensitive to which specific normal samples are selected. Reporting means and standard deviations over multiple random seed runs would substantially strengthen confidence in the observed gains. For example, a +3.7 AUROC_I gain at 10-shot on MVTec-3D-AD could be within noise if the baseline variance is high.
+- **No discussion of limitations or failure modes.** The conclusion recapitulates contributions without addressing scenarios where APR might suppress subtle anomalies, where prototype count is critical, or where cross-modal communication could introduce noise. A limitations paragraph would improve completeness.
 
 ### Trivial
-- The claim of being "the first multimodal AD framework to integrate a vector-quantized prototype codebook into a ViT encoder-decoder" (Section 3.1) is narrow enough to be defensible, but VQ prototypes have been used in single-modality AD (HVQ-Trans, MemAE). The hedged phrasing "to the best of our knowledge" is appropriate.
-- The Real-IAD D3 table (Table 8) has a dense multi-column layout that is hard to parse; the paper honestly acknowledges PIRN is second-best on image-level AUROC (0.873 vs. D3M's 0.890) and best on localization. The discussion is fair.
+
+- Table 2 as rendered in the parsed version shows identical checkmarks across all rows due to a parser artifact; the original submission presumably has the correct module selection patterns, and the surrounding text describes the ablations clearly enough to follow.
 
 ## Nice-to-Haves
-- Provide quantitative analysis of APR's safety: gate values (g_rgb, g_sn) for anomalous vs. normal test samples, prototype cosine similarity before/after APR, or OT assignment entropy.
-- Include FIND in the main few-shot accuracy comparison (Table 1) to allow direct accuracy assessment.
-- Add standard deviations over 3-5 random seed runs for few-shot results.
-- Ablate hyperparameter sensitivity for Sinkhorn iterations and entropic regularization in the balanced OT.
+
+- A basic reconstruction baseline (e.g., a prototype-free autoencoder or two-stream reconstruction loss) using the same DINOv2 ViT backbone and multi-scale features would provide a clean lower bound to isolate the contribution of the PIRN architecture from the feature extractor.
+- An ablation swapping the DINOv2 encoder for a weaker pre-trained model (e.g., supervised ViT) would reveal sensitivity to backbone quality.
+- A few-shot version of the Real-IAD D3 experiment would better align that evaluation with the paper's core claim.
+- Per-category results (mentioned in the appendix but stripped by the parser) should be made easily accessible for assessing the distribution of gains.
 
 ## Removed Points
-- *Harsh critic's claim that the "first multimodal AD framework" claim is inflated* — The phrasing is appropriately hedged ("to the best of our knowledge") and the claim is specific (VQ prototype codebook in ViT encoder-decoder for MAD, not VQ in general). Removed as overcritical.
-- *Harsh critic's complaint about Real-IAD D3 table being "poorly structured and inconclusive"* — The paper transparently acknowledges being second-best on detection AUROC and discusses the modality difference (PIRN uses 2 modalities vs. D3M's 3). The discussion is fair. Removed as overstated.
-- *Harsh critic's assertion that "APR hurts accuracy" from Table 2* — The table is parser-corrupted (identical checkmarks in all rows). The paper text explicitly claims consistent drops when removing components. Not verifiable as a weakness from the paper as readable. Removed.
-- *Strength Finder's generic strengths about "addressed an important problem"* — These are superficial and not specific to the paper's technical content. Removed.
+
+These points raised by the reviewers were considered but not retained in the final review:
+
+- *"Table 2 is garbled by the parser"* — This is a parser artifact, not an author error. The paper's description of Table 2 is clear enough to follow. Moved to Trivial.
+- *"Per-category results are not visible in the parsed version"* — The appendix was stripped; this is a parser issue, not an author omission. Removed.
+- *"The paper does not discuss missing related works"* — Not verifiable from the paper; the related work section covers the main paradigms (2D AD, multimodal AD). Removed.
+- *"The efficiency comparison may not be fair because FIND uses a different backbone"* — Table 4 is a useful practical comparison; efficiency is reported alongside accuracy, and readers can interpret the trade-off. The paper doesn't claim fairness of efficiency comparison across architectures. Removed (this was not in the harsh critic's output but is worth noting).
+- *Generic strength claims* such as "the problem is important" or "the paper addresses an interesting question" — These are too generic and not grounded in specific evidence. Removed from Strengths.
 
 ## Novel Insights
-None beyond the paper's own contributions. The novel synthesis from the reviews is that PIRN's accuracy contribution relative to the closest baseline (FIND) is primarily about efficiency at matched accuracy rather than raw accuracy superiority, which the paper could state more explicitly to improve credibility.
+
+The paper offers a genuinely novel synthesis: applying balanced optimal transport simultaneously for two distinct purposes within the same framework — (1) uniform prototype assignment (BPA) to prevent codebook collapse, and (2) anomaly-resistant context extraction (APR) for prototype refinement at inference. The insight that anomalous patches are naturally suppressed in an OT plan because they lack strong affinity to any single prototype is both elegant and leveraged consistently across both mechanisms. The feature-displacement visualization (Figure 4), showing that BPA routing produces large reconstruction displacements specifically for anomalous tokens, provides a compelling empirical lens on why the prototype bottleneck works — this type of analysis is not common in the prototype-based anomaly detection literature and could be adopted by other works.
 
 ## Suggestions
-1. Include FIND in the main few-shot accuracy table to provide a complete picture of where PIRN's advantage lies (accuracy vs. efficiency).
-2. Add a paragraph or supplementary figure quantitatively validating APR safety: measure OT assignment diffuseness and GRU gate values on anomalous vs. normal test patches.
-3. Report standard deviations for few-shot results over multiple random training subset selections.
-4. Clarify the Table 2 configuration mapping (which modules correspond to each row) in the rebuttal.
+
+- Add a DINOv2-backbone-equivalent baseline (e.g., a simple reconstruction loss operating on the same multi-scale features) to isolate architectural contributions. This is the single highest-impact experiment for strengthening the paper's claims.
+- Include a direct empirical validation of APR's robustness, e.g., measuring prototype drift magnitude on normal vs. anomalous test inputs, or reporting detection performance with/without APR stratified by anomaly severity.
+- Add a concise limitations paragraph to the conclusion, discussing assumptions and boundary conditions.
 
 ## Score and Decision
 
-Let me compile the calibration anchor listing:
+**Calibration anchors considered:**
 
-**All anchors retrieved:**
-- bESxQeXTlo (3.00, Round 1): CLIP-LAD for few-shot logical AD. Much weaker than PIRN.
-- MbtUctg3KW (2.50, Round 1): Generalized AD with augmentation. Much weaker.
-- O0vy7hHqyU (3.00, Round 1): Fake news detection. Irrelevant topic.
-- 3ZdGSTxKuy (2.00, Round 1): Video representation learning. Irrelevant.
-- YrxhSkfHh0 (3.33, Round 1): Multimodal feature extraction. Much weaker.
-- Vi6p2TeujL (4.25, Round 1): PTAD tabular AD. Weaker — different domain, less convincing.
-- gTsLBDMZrL (5.50, Rounds 1&2): Prototype refinement for few-shot IAD. PIRN is clearly stronger.
-- J2we1sVd9m (4.60, Round 1): OT for OOD detection. Weaker.
-- 8TBGdH3t6a (5.60, Round 2): Time series prototype AD. Different domain, PIRN is stronger.
-- uNkKaD3MCs (5.75, Round 2): OOD detection with prototypes. Weaker framing.
-- cJs4oE4m9Q (8.00, Round 1): Orthogonal hypersphere AD. Different topic, stronger in other ways.
-- Zzs3JwknAY (6.40, Round 2): One-for-All few-shot AD. Comparable — both accepted quality.
-- buC4E91xZE (6.17, Round 2): AnomalyCLIP zero-shot AD. Comparable or slightly weaker.
-- ybFRoGxZjs (6.60, Round 2): Thermal 3D Gaussian splatting. Different domain.
-- KiespDPaRH (6.00, Round 3): Dynamic NeRF with OT. Different domain.
-- 62Ff8LDAJZ (6.80, Round 3): OT for 3D point clouds. Different domain.
+| Anchor | Avg Score | Round | Comparison to PIRN |
+|---|---|---|---|
+| `gTsLBDMZrL` (prototype refinement, few-shot IAD) | 5.50 | R1 | PIRN is clearly stronger: multimodal, more comprehensive ablations, better efficiency analysis, clearer methodology |
+| `Zzs3JwknAY` (one-for-all few-shot AD) | 6.40 | R1/R2 | Comparable contribution level; PIRN has more thorough ablations and efficiency focus |
+| `JDiER86r8v` (MMAD benchmark) | 6.50 | R2 | Different paper type (benchmark); PIRN's methodological contribution is deeper |
+| `lR3rk7ysXz` (diffusion modeling for AD) | 7.00 | R2 | PIRN is slightly below — less theoretical depth and some evaluation gaps (backbone fairness, APR validation) |
+| `cJs4oE4m9Q` (hypersphere compression) | 8.00 | R1 | PIRN is clearly below — lacks theoretical propositions and breadth of data modalities |
 
-**Round 1 bracket:** [5.0, 7.0]
-**Round 2 narrowing:** [6.0, 6.8]
-**Final score:** 6.5 — positioned above gTsLBDMZrL (5.50) and 8TBGdH3t6a (5.60), comparable to Zzs3JwknAY (6.40) and slightly above buC4E91xZE (6.17), but below the top-end of the bracket because of the APR validation gap and missing FIND baseline in the main comparison.
+**Round 1 bracket:** 5.50–8.00, narrowed to 6.0–7.5 based on initial comparison.
+
+**Round 2 narrowing:** Comparison with 6.40, 6.50, and 7.00 anchors places PIRN at approximately 6.5. The paper is clearly above the 5.50 rejected anchor, comparable to or slightly stronger than the 6.40 accepted anchor in terms of methodology and ablations, but below the 7.00 anchor which offered stronger theoretical grounding. The backbone fairness concern and unvalidated APR robustness prevent a higher score.
 
 MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

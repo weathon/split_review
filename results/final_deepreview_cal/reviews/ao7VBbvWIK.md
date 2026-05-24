@@ -1,77 +1,80 @@
-Now I have all the evidence needed. Let me compile the final review.
+Now I have a thorough understanding of the paper and calibration. Let me synthesize the final review.
+
+---
 
 ## Summary
 
-HASTE proposes a framework for context compression of code files before feeding them to LLMs for code editing tasks. The idea is to combine AST-aware structural analysis (via chunking, call-graph expansion, and AST-bounded pruning) with hybrid lexical/semantic retrieval (BM25 + embedding, fused via Reciprocal Rank Fusion) to produce compact but structurally coherent code contexts. The paper evaluates HASTE on 6 curated Python files and 12 SWE-PolyBench instances using an LLM-as-Judge metric.
+HASTE proposes a framework for code context retrieval that combines AST-based chunking, hybrid lexical-semantic ranking, and call-graph expansion under a token budget, aiming to resolve the tension between structural coherence and semantic relevance when feeding code to LLMs. The paper describes a modular pipeline architecture and presents an evaluation on a small curated dataset of six Python files and 12 SWE-PolyBench instances. While the problem framing is clear and the high-level concept is plausible, the paper's central empirical claims are left unsupported by the evidence provided.
 
 ## Strengths
 
-1. **Clear motivation and well-motivated architecture**: The paper articulates a genuine tension in code context engineering—structure-aware approaches preserve syntax but miss relevance, while relevance-focused approaches retrieve pertinent code but sever structural dependencies. The pipeline (AST-aware chunking, hybrid retrieval, call-graph expansion, token-bounded pruning) is modular and each component's role in resolving this tension is explained. The architecture diagram (Figure 1) and the description in Section 3 make the system understandable.
+- **Well-motivated problem framing.** The paper clearly articulates the trade-off between structure-aware and relevance-focused code retrieval approaches for LLM context engineering, and the introduction does an effective job of motivating why resolving this tension matters for automated code editing.
 
-2. **Concrete evidence of the value of AST-guided expansion**: The test3.py result (Section 5.1, Table 2) is a genuine demonstration: with 85% compression (6.8× reduction), HASTE's call-graph expansion included a dependent class definition, enabling the LLM to generate a correct complex type hint that would be impossible with incomplete context. This provides a qualitative, grounded illustration of why the hybrid approach can help.
+- **Reasonable high-level architecture design.** The separation into ingestion, indexing, retrieval, and observability layers (Section 3, Figure 1) is sensible, and the integration of BM25 lexical search with semantic embeddings via reciprocal rank fusion (Section 3.3) follows established best practices in hybrid retrieval.
 
-3. **Evaluation on a public benchmark**: The SWE-PolyBench evaluation (Section 5.3) goes beyond the curated dataset and shows HASTE operating on standardized tasks, with transparent reporting of both successes (7/12 perfect scores on NOOP tasks) and failures (low scores from task misinterpretation or flawed suggestions).
+- **Honest failure analysis on SWE-PolyBench.** Section 5.3 includes instances where HASTE's context was insufficient to rescue flawed suggestions or where the LLM misinterpreted tasks, and the paper correctly notes that context quality alone cannot compensate for poor prompts or limited reasoning capability. This transparency is a genuine strength.
 
 ## Weaknesses
 
 ### Fatal
 
-1. **No baseline comparisons, despite defining three baselines.** Section 4.1.3 defines three baseline strategies (IR-only retrieval, AST-only retrieval, Naïve truncation) and RQ1 asks "compared to baseline methods." Yet Section 5 reports only HASTE's own performance—no table, figure, or sentence compares HASTE against any baseline. The paper's central claim—that HASTE resolves the trade-off between relevance and structural coherence—requires showing that HASTE outperforms structure-agnostic pruning (IR-only) and relevance-agnostic structure preservation (AST-only). Without this comparison, the paper's core contribution is unsubstantiated. The abstract's claim of "significantly improving the success rate of automated code edits" cannot be evaluated.
-
-2. **Two of three defined evaluation metrics never reported.** Section 4.2 defines AST Fidelity (structural metric) and Hallucination Rate alongside the Judge Score. The abstract and introduction specifically claim HASTE "maintains high structural fidelity" and "reduces model-generated hallucinations." Yet neither AST Fidelity nor Hallucination Rate appears anywhere in Section 5. The paper reports only Judge Scores and compression ratios. Two headline contributions are entirely unsubstantiated by data.
+- **No baseline comparisons are reported.** The paper defines three baselines in Section 4.1.3 (IR-only retrieval, AST-only retrieval, naïve truncation) and frames RQ1 explicitly as measuring HASTE's performance "compared to baseline methods." Yet the entire results section (Section 5) contains only HASTE's own numbers — no baseline values appear in any table or figure. The abstract claims HASTE "significantly improv[es] the success rate of automated code edits," but the paper provides zero evidence that HASTE outperforms any alternative. For an empirical systems paper whose core contribution is demonstrating superiority over existing approaches, this is a structural evidential gap that invalidates the central claim. Without comparative results, the paper reduces to a technical report describing a system and reporting its absolute scores on a handful of examples.
 
 ### Major
 
-3. **Core algorithmic step (token-bounded extraction) is underspecified.** Section 3.3 describes the Selection stage: "The expanded set is then filtered under a strict token budget." No algorithm, heuristic, or decision procedure is given for how the AST guides this pruning—how are subtrees selected or discarded while retaining syntactic validity? How does the system resolve conflicts when a relevant snippet exceeds the budget? This is the paper's claimed novelty (the "T" in HASTE stands for "Token-bounded Extraction"), yet it is barely described. The approach is not reproducible from the paper as written.
+- **AST Fidelity and Hallucination Rate are defined but never reported.** Section 4.2 defines three evaluation dimensions, including AST Fidelity (Section 4.2.2) and Hallucination Rate (Section 4.2.3). The abstract claims the evaluation demonstrates "maintaining high structural fidelity, thereby reducing model-generated hallucinations." However, the results section (Section 5) reports only Judge Scores and compression ratios. No AST Fidelity or Hallucination Rate values appear anywhere. These missing metrics directly undermine the paper's claims about structural preservation and hallucination reduction.
 
-4. **Extremely small evaluation sample; no statistical rigor.** The curated dataset contains 6 files (52–1317 LOC each). The SWE-PolyBench evaluation covers 12 instances. Despite stating that "each task was executed three times and averaged," no standard deviations, confidence intervals, or any measure of variance are reported. The correlation analysis (RQ2) reports Pearson's r = −0.97 from 6 data points, driven heavily by a single outlier (test3.py at 6.8× compression). With n=6, this does not constitute a meaningful analysis of the compression-quality trade-off.
+- **The core compression mechanism is underspecified.** Section 3.3 describes the critical Selection step in a single sentence: "The expanded set is then filtered under a strict token budget." There is no pseudocode, no description of how the AST is used during filtering, no specification of what granularity of pruning is employed, and no explanation of how syntactic validity is guaranteed. The paper's headline claim — that HASTE uses the AST to "guarantee that parent-child relationships remain intact" and "prunes with syntactic awareness" — is stated repeatedly but never backed by an algorithmic description. The method cannot be replicated from the paper as written.
 
 ### Minor
 
-5. **LLM-as-Judge used without validation.** The primary evaluation metric relies on an LLM judging code edit quality, but the paper provides no validation of this judge—no correlation with human judgments, no inter-rater reliability, no analysis of judge bias. Given the small sample sizes, this makes the quantitative scores less reliable.
+- **The evaluation is small and the judge protocol is opaque.** The curated dataset comprises only six Python files, and the Pearson correlation of −0.97 reported in Section 5.2 is computed from six data points, which provides limited inferential value. The SWE-PolyBench evaluation uses 12 instances after undisclosed exclusions for "processing errors" (Section 5.3), with no reporting of how many instances were originally attempted or why they failed. The judge LLM is not identified (the paper identifies Gemini 1.5 Flash as the generation LLM in Section 4.1.4 but does not specify whether it is also the judge), the scoring rubric is not described, and no calibration or consistency checks are reported.
 
-6. **Most SWE-PolyBench successes are on NOOP tasks.** Section 5.3 reports that 7/12 instances achieved perfect scores, but these were "POLYBENCH-NOOP" tasks producing non-functional changes (e.g., adding comments). These do not demonstrate HASTE's value for substantive code edits, and without baseline comparisons there is no way to know whether HASTE helped or was irrelevant.
+### Trivial
 
-7. **Key implementation parameters not disclosed.** The paper does not specify the number of chunks retrieved (top-n), the token budget used for pruning, the call-graph expansion depth, the concrete embedding model, or the chunk size. These are essential for reproducibility.
+- **Factual inconsistency in Section 5.1.** The text refers to "the judge's justification for the perfect score in 'test3.py'" but Table 2 reports test3.py's Judge Score as 90.0, not 100. This appears to be a drafting error.
 
 ## Nice-to-Haves
 
-- Ablation studies isolating the contribution of each component (AST-aware chunking, hybrid retrieval, call-graph expansion, AST-guided pruning) would strengthen the paper and clarify whether the core novelty (token-bounded AST pruning) actually drives performance.
-- Cross-language evaluation would support the generalizability claims more strongly. The paper evaluates only Python, with multi-language support deferred to future work.
-- Validation of the LLM-as-Judge against human annotations or against a held-out set with known ground truth would increase confidence in the reported scores.
+- A systematic ablation that varies the token budget across a range of values for each file, with all three defined metrics reported, would give credible insight into the compression-quality trade-off the paper aims to characterize.
+- Expanding the evaluation beyond Python to test generality would strengthen the contribution, though the paper acknowledges this as future work.
 
 ## Removed Points
 
-- *"The paper claims HASTE is language-agnostic."* The paper does not claim this; it mentions Tree-sitter support for other languages only as future work (Section 6). Removed as factually inaccurate.
-- *"The paper's framing implicitly claims no prior work bridges the gap."* The Related Work section (Section 2.3) explicitly discusses hybrid RAG systems for code; there is no claim of being first. This criticism is a misreading.
-- *"Standard deviations not reported despite 3 runs"* — This is already covered under Weakness #4 (no statistical rigor). Merged.
-- Various formatting, style, and "missing appendix" nitpicks. Removed per instructions.
+These points are flagged to be removed, treat them with caution.
+
+- **Missing related works (RepoFusion, CoCoGen).** The harsh critic suggested several systems were missing from the related work. Per review policy, I do not evaluate missing references — I cannot independently verify their relevance, and the paper's contribution should be judged on its own terms.
+- **Speculation that the same LLM is used for generation and judging.** The harsh critic claimed Gemini 1.5 Flash was used for both. The paper only identifies it as the generation LLM; the judge LLM is simply unspecified. This speculative claim has been removed.
+- **Request for confidence intervals / statistical tests on a 6-file dataset.** This is a nice-to-have but not standard practice for this type of evaluation.
+- **"Formatting/spelling issues"** — removed as parser artifacts.
 
 ## Novel Insights
 
-The harsh critic correctly identifies that the paper defines baselines and metrics that it never uses, which is an unusual structural failure. The strength finder correctly identifies that the test3.py result is the paper's single most compelling piece of evidence. When these are combined, the key insight is that HASTE's architecture—hybrid retrieval + call-graph expansion + AST-bounded pruning—is a plausible and well-motivated design for code context compression, but the paper's evaluation is essentially a proof-of-concept (n=6 on curated data, n=12 on SWE-PolyBench) that does not test the comparative claims or measure the stated metrics. The paper reads like a system description whose evaluation was not completed to the standard necessary to support its claims.
+None beyond the paper's own contributions. The observation that AST-bounded pruning could theoretically combine the strengths of structure-aware and relevance-focused retrieval is the paper's core idea, but the evaluation does not substantiate it as an insight beyond plausible hypothesis.
 
 ## Suggestions
 
-1. **Run the baseline comparisons that the paper already defines.** Compare HASTE against IR-only, AST-only, and Naïve truncation on both the curated dataset and SWE-PolyBench, reporting all three metrics (Judge Score, AST Fidelity, Hallucination Rate). This is the single most impactful improvement.
-
-2. **Specify the token-bounded filtering algorithm.** Provide the actual decision procedure for how the expanded candidate set is pruned under the token budget while preserving AST validity. Without this, the claimed novelty cannot be assessed or reproduced.
-
-3. **Report AST Fidelity and Hallucination Rate.** These are defined but never used. If they were measured, report them; if they were not measured, acknowledge this as a limitation and explain why.
-
-4. **Expand the evaluation.** Add more files (not necessarily in the paper, but at minimum acknowledge the sample size limitation), report variance, and validate the LLM-as-Judge against human judgments.
+- **Run and report the baselines.** Execute the three defined baselines (IR-only, AST-only, naïve truncation) on exactly the same tasks with the same token budget and LLM, and report all metrics side-by-side. This is the minimum required for the paper to support its central claims.
+- **Report AST Fidelity and Hallucination Rate.** If these metrics were collected, include them; if not, remove or relegate them to planned future work rather than defining them in the methodology.
+- **Provide pseudocode for the budget-filtering step.** A concrete description of how the AST is used to decide what to keep under a token constraint would transform the method from a vague sketch into a replicable contribution.
+- **Disclose SWE-PolyBench processing errors.** Report the total number of instances attempted, the nature of failures, and per-instance details so readers can assess selection bias.
+- **Identify the judge LLM and describe its scoring rubric.** Even a brief description of the prompt and scoring dimensions would substantially increase confidence in the Judge Scores.
 
 ## Score and Decision
 
-Now let me compute the score properly using calibration.
+**Round 1 bracket:** Based on comparison with topically similar anchors — RCC (4.00), FRAPPE (3.80), SWE-Bench+ (3.75), NT-Java-1.1B (2.50) — the paper plausibly sits in the 2.0–4.0 range.
 
-**Round 1 bracketing:** I searched three bands. Weak anchors (<3.5) averaged 1.67–3.0. Middle anchors (3.5–7.5) averaged 4.0–6.25. Strong anchors (>7.5) averaged 8.0–9.0. The paper sits in the lower portion of the middle band—clearly above the weak anchors (which had fundamentally broken or trivial contributions) but well below the middle anchors (RepoGraph at 6.20, AST-T5 at 5.67, CoRNStack at 6.25).
+**Round 2 narrowing:** HASTE is worse than FRAPPE (3.80) which at least reports comparisons against baselines across multiple tasks. It is worse than RCC (4.00) which has limited but present comparisons. It is comparable to NT-Java-1.1B (2.50) in evaluation scope but has a more interesting concept. The fatal absence of baseline comparisons — for a paper whose abstract claims improvement over alternatives — places it below papers that at least attempted to support their empirical claims with evidence. I score this paper at **2.5**.
 
-**Round 1 bracket:** 3.0–5.0.
+**Anchor comparison summary:**
+- `GYk0thSY1M` (RCC, avg 4.00, Round 2): HASTE is worse — RCC had limited but real comparisons; HASTE has none.
+- `DfTWrTwLzD` (SharedLLM, avg 5.00, Round 2): HASTE is significantly worse — SharedLLM has comprehensive benchmarks and baselines.
+- `MjR5LcAGXJ` (FRAPPE, avg 3.80, Round 2): HASTE is worse — FRAPPE compares against multiple baselines across tasks.
+- `8sglLco8Ti` (ChunkKV, avg 5.25, Round 2): HASTE is significantly worse — ChunkKV has extensive multi-model, multi-benchmark evaluation.
+- `ech9J3xl9X` (NT-Java-1.1B, avg 2.50, Round 2): HASTE is roughly comparable — both have limited evaluation scope but identifiable technical ideas; HASTE's missing baselines are a more fundamental gap.
+- `pwIGnH2LHJ` (SWE-Bench+, avg 3.75, Round 1): HASTE is worse — SWE-Bench+ has actual analysis and comparisons.
+- `TS8PXBN6B6` (AST-T5, avg 5.67, Round 1): HASTE is significantly worse.
+- `iyJOUELYir` (CoRNStack, avg 6.25, Round 1): HASTE is significantly worse.
 
-**Round 2 narrowing:** I examined anchors inside that bracket. The Tests-as-Instructions benchmark (sqciWyTm70, 4.00) had mixed reviews but at least had a complete evaluation of its benchmark. The Code Reasoning paper (2umZVWYmVG, 3.75) had methodological concerns but still evaluated its claims. Both are stronger than HASTE because HASTE's evaluation is critically incomplete—it defines baselines and key metrics but never uses them. HASTE is weaker than these anchors. I place it at **3.0**, a clear reject.
-
-**Final calibration:** dw9VUsSHGB (RepoGraph, 6.20, Round 1): Proper baselines, larger evaluation, clearly stronger. TS8PXBN6B6 (AST-T5, 5.67, Round 1): Complete experiments with baselines, stronger. sqciWyTm70 (4.00, Round 2): Had evaluation issues but at least reported benchmark results completely, slightly stronger. 2umZVWYmVG (3.75, Round 2): Comparable methodology concerns but still evaluated its central claims, slightly stronger. CscKx97jBi (3.00, Round 1): Code generation with feedback; this is the closest anchor in quality. HASTE is comparable—interesting idea, incomplete evaluation, central claims unsupported.
-
-MY FINAL SCORE: <score>3.0</score>
+MY FINAL SCORE: <score>2.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

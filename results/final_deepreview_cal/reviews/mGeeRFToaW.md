@@ -1,77 +1,73 @@
-Now I have sufficient calibration data. Let me write the final review.
-
-Round-1 bracket: Based on comparing with SubZero (4.25), MeZO-A³dam (4.75), Sparse MeZO (5.50), HiZOO (5.67), LOZO (7.0), and SensZOQ (5.80), the paper sits between 4.5 and 5.5.
-
-Round-2 narrowing: Compared to SensZOQ (5.80, Accept) which combines ZO + quantization via static sparsity, QZO has a more novel core idea but weaker theory and experimental practices. Sparse MeZO (5.50, Reject) has better experimental practices but is more incremental.
-
-Final score: 5.0. The novel idea of perturbing quantization scales is genuinely clever and the memory numbers are impressive, but the theoretical analysis contains verifiable errors and the experiments lack basic statistical rigor.
+Now I have all the information I need. Let me synthesize the final review.
 
 ---
 
 ## Summary
-
-This paper proposes Quantized Zeroth-order Optimization (QZO), which enables fine-tuning of quantized neural networks by perturbing the *continuous quantization scale parameters* (rather than the discrete quantized weights) using the SPSA zeroth-order gradient estimator. A directional derivative clipping (DDC) method is introduced to stabilize training. The paper demonstrates QZO on 4-bit GPTQ-quantized OPT-6.7B, Llama-2-7B, and Llama-3.1-8B, and 2-bit AQLM-quantized Llama-2-13B, reporting up to 18× memory reduction versus full-precision AdamW fine-tuning while achieving competitive performance against MeZO (which operates on 16-bit models with 3× more memory).
+This paper proposes Quantized Zeroth-Order Optimization (QZO), a method for fine-tuning quantized LLMs using zeroth-order optimization. Instead of perturbing discrete quantized weights (which is infeasible), QZO perturbs the continuous quantization scales and applies directional derivative clipping (DDC) to stabilize training. The method achieves >18× memory reduction vs. full-parameter AdamW fine-tuning at 16-bit while matching MeZO's accuracy on 4-bit models across OPT, Llama-2, and Llama-3.1 families. QZO also demonstrates effective fine-tuning of 2-bit models using codebook-based quantization.
 
 ## Strengths
-
-- **Genuinely novel core idea**: Perturbing the continuous quantization scale (Δ) instead of the discrete weights (θ̄) to bridge the gap between ZO gradient estimation and quantized weights is clever and non-obvious. This contrasts with prior ZO-quantized methods (ZO-signSGD, Bar & Giryes 2025) that quantize perturbation noises and apply sign-based updates to discrete weights.
-- **Impressive and well-documented memory reduction**: Figure 1 and Table 1 show QZO achieves 4.8 GB vs. 87.6 GB (18.3×) for OPT-6.7B, 5.0 GB vs. 92.2 GB (18.4×) for Llama-2-7B, and 6.2 GB vs. 113.7 GB (18.3×) for Llama-3.1-8B relative to AdamW fine-tuning. This enables fine-tuning Llama-2-13B (2-bit) within a single 24 GB GPU.
-- **Orthogonal to multiple quantization paradigms**: QZO works with both scalar-based GPTQ (4-bit, Table 1) and codebook-based AQLM (2-bit, Table 3), demonstrating generality.
-- **Two orders of magnitude fewer trainable parameters**: Table 2 shows QZO uses ~5×10⁷ parameters vs. ~6.65×10⁹ for MeZO (~0.75%) on OPT-6.7B, with corresponding FLOP reductions.
-- **DDC is empirically effective**: Figure 2 shows that without DDC, training collapses to NaN by step 22; with DDC it remains stable. Figure 3 demonstrates a wide safe range (C≥75) where accuracy is stable around 90%.
+- **Novel and elegant mechanism**: Perturbing quantization scales rather than discrete weights to enable ZO optimization on quantized models is a genuinely clever idea that cleanly sidesteps the precision mismatch between discrete weights and continuous gradients. The approach is simple and compatible with both scalar-based (GPTQ) and codebook-based (AQLM) quantization methods.
+- **Dramatic and well-validated memory reduction**: The paper provides concrete memory profiling (Figure 1, Table 1) showing QZO uses 4.8–6.3 GB for 4-bit 7B-class models — an >18× reduction vs. AdamW and ~3× vs. MeZO. Enabling Llama-2-13B (2-bit) fine-tuning within a single 24 GB GPU (5.78 GB) is a compelling practical result.
+- **Broad empirical evaluation**: Results span three model families (OPT, Llama-2, Llama-3.1), five NLP tasks covering classification and generation, and both 4-bit and 2-bit quantization regimes. QZO consistently lifts performance far above frozen quantized baselines and frequently matches 16-bit MeZO despite operating on compressed models.
+- **Effective stabilization via DDC**: Both theory and ablations (Figure 2, Figure 3) convincingly demonstrate that directional derivative clipping prevents training collapse. Without DDC, training produces NaN losses within 22 steps; with DDC, training remains stable and robust across a wide range of clipping thresholds (C ≥ 75).
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
+- **FLOPs analysis contains errors and unsupported claims**: Table 2 reports "Total FLOPs (SST-2)" for QZO. For OPT-6.7B, QZO is listed at 8.19×10¹³, which is ~275× smaller than the Llama-2-7B QZO figure (2.26×10¹⁶) despite similar model sizes. This discrepancy strongly indicates a computation error. More broadly, the paper claims QZO uses "about 1% of the FLOPs of MeZO" (line 260), but the actual ratios in Table 2 vary from 0.008% (OPT-6.7B) to 7% (Llama-3.1-8B), and none consistently match the 1% claim. The paper asserts QZO is "computation-efficient" based on these numbers, but the FLOPs accounting is unreliable. The core contribution (memory efficiency) is not undermined, but the computational-efficiency claim is unsupported as presented.
 
-1. **Theoretical analysis of DDC is unsound in multiple respects.** (a) Theorem 1 claims the clipped gradient estimate is unbiased, but clipping the scalar directional derivative *d* before multiplying by the correlated random vector *z* generally introduces bias — the nonlinear clipping operation changes the estimate when |d|>C, and this change is correlated with *z*. This is not a subtle condition; it breaks for any finite C in standard settings. (b) The variance derivation in Eq. 8 uses an incorrect definition of vector variance ($\mathbb{E}[\|X\|^2] - \mathbb{E}[\|X\|]^2$) instead of the standard $\mathbb{E}[\|X\|^2] - \|\mathbb{E}[X]\|^2$, and improperly replaces $\mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}\|]^2$ with $\|\nabla_{\Delta} \mathcal{L}\|^2$ (which would require $\mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}\|] = \|\mathbb{E}[\hat{\nabla}_{\Delta} \mathcal{L}]\|$, false by Jensen's inequality). The conclusion that $Var[\text{clipped}] \leq Var[\text{unclipped}]$ is therefore not properly supported by the derivation presented. The paper's central theoretical claim is not credible as written. (Note: the empirical evidence in Figures 2 and 3 independently supports DDC's practical value; the flaw is in the claimed *theoretical* justification.)
-
-2. **Experimental evaluation lacks statistical rigor.** All results in Tables 1 and 3 are single runs without error bars, standard deviations, or multiple seeds. Given the small dataset sizes (1000 training examples) and the inherently high variance of zeroth-order optimization, the reported differences — e.g., QZO 90.0 vs. MeZO 83.5 on Llama-2-7B SST-2 (QZO wins by 6.5), but QZO 69.6 vs. MeZO 91.1 on Llama-3.1-8B CB (MeZO wins by 21.5) — could easily be within noise. The claim that QZO "performs on par with MeZO" is not supported by the evidence as presented.
+- **Theorem 1 (unbiasedness of clipped estimator) is presented without accessible justification**: The paper claims the DDC-clipped gradient estimate is unbiased (Theorem 1) and uses this to derive a variance reduction bound. Clipping a directional derivative estimator will generally introduce bias in the SPSA framework for finite perturbation size ε, so the claim requires careful justification. The proof is deferred to a stripped appendix and cannot be verified. The empirical benefit of DDC is clear regardless, but the theoretical framing as "unbiased" rather than "bias-variance tradeoff" may be misleading.
 
 ### Minor
-
-3. **No experimental comparison with prior ZO-quantized methods.** The Related Work section cites ZO-signSGD (Liu et al., 2019), Feng et al. (2024), Zhou et al. (2025), and Bar & Giryes (2025) as "inherently less efficient and flexible" (Section 2), but none are included as baselines. Without direct comparison, the claimed practical advantages remain unvalidated.
-
-4. **Mixed results not discussed.** QZO underperforms substantially on several tasks (e.g., CB with Llama-3.1-8B: 69.6 vs. MeZO's 91.1; BoolQ with Llama-3.1-8B: 78.2 vs. 83.4; SST-2 with OPT-6.7B: 87.6 vs. 93.0). The paper does not comment on this variability, which weakens the "consistently effective" narrative.
-
-5. **Memory profiling methodology for AdamW baseline is unclear.** The 92.2 GB figure for Llama-2-7B AdamW (batch size 1, FSDP) seems high relative to a back-of-envelope calculation (14 GB weights + 14 GB gradients + 56 GB Adam states = 84 GB, with FSDP sharding reducing per-GPU usage), and no profiling tool or GPU count is specified. The relative advantage of QZO is clear regardless, but the absolute numbers warrant clarification.
+- **Missing comparison to quantized fine-tuning baselines**: QLoRA (Dettmers et al., 2023) is the most prominent method for fine-tuning quantized LLMs and shares the same high-level goal. While QLO and QZO operate in different paradigms (first-order via backpropagation vs. zeroth-order), a comparison — even on a subset of tasks — would help readers situate QZO within the broader landscape of memory-efficient quantized training. The current baselines (MeZO, full fine-tuning, zero-shot) answer whether QZO can recover performance but not how it stacks up against the state of the art in quantized fine-tuning.
 
 ### Trivial
-
-6. The "18× memory reduction" claim compares QZO (4-bit) against AdamW (16-bit) — the fairer comparison with MeZO (16-bit) shows a 3× reduction. This distinction is clear in the text but the headline number could be misleading without context.
+- The "about 1% of FLOPs" claim in the main text is inconsistent with the individual numbers in Table 2 (e.g., 7% for Llama-3.1-8B). Even after correcting the likely error for OPT-6.7B, the text should either use a range or the correct figure for each model.
 
 ## Nice-to-Haves
-
-- Report hyperparameter sensitivity for the perturbation scale ε and learning rate, in addition to the clipping threshold C.
-- Investigate why QZO underperforms on CB and BoolQ — is this task-specific, architecture-specific, or a statistical artifact?
+- An analytical or empirical exploration of what kinds of task shifts can be captured by uniformly scaling weight groups (via quantization scales) versus adjusting individual weights would deepen understanding of the method's expressivity limits.
+- Reporting wall-clock time alongside FLOPs would give a more complete picture of practical computational efficiency.
 
 ## Removed Points
+These points were flagged for removal and treated with caution:
 
-None of the removed points are relevant here — all weaknesses I've kept are verified against the paper's text.
+- *"Absence of a strong quantized-fine-tuning baseline weakens the comparative evaluation"* — Partially retained but downgraded from Major to Minor. QLoRA uses first-order backpropagation and thus stores activations, making it not a direct ZO comparison. QZO's primary baselines (MeZO, zero-shot) are appropriate for the ZO paradigm. The QLoRA comparison is nice-to-have context, not a critical gap.
+- *"The theoretical justification for unbiasedness after clipping is not obviously sound"* — Retained as Major but with the caveat that the proof is in a stripped appendix and cannot be definitively judged. The harsh critic's claim that clipping "will generally break" unbiasedness is itself speculative without seeing the proof. Downgraded from the harsh critic's "critical issue" framing.
+- *"Claim of unbiasedness... is inadequately justified"* — Merged with the Theorem 1 concern.
+- Strength Finder claim that QZO "uses roughly 1% of... FLOPs of MeZO" — Removed as a strength because Table 2 shows inconsistent ratios and the OPT-6.7B figure appears erroneous. The memory-reduction strength stands independently.
+- Any criticism about missing appendix content, unreleased code, or reproducibility — Removed per hard rules (appendix is stripped by the parser; code URL is provided).
+- Any mention of QLoRA being unreleased — Removed per hard rules (QLoRA is a published, cited work).
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+The paper's key insight — that perturbing continuous quantization scales rather than discrete quantized weights enables zeroth-order optimization on compressed models — is genuinely novel and not obvious. Prior ZO+quantization work (e.g., ZO-signSGD variants) required quantizing perturbation noise and re-quantizing weights at each step. QZO's scale-perturbation approach is both simpler and more flexible, as it works plug-and-play with existing PTQ methods without modifying their quantization pipelines. This opens up a new axis in the design space of memory-efficient training: decoupling what is perturbed (scales) from what is stored compactly (discrete weights).
 
 ## Suggestions
+- Recompute and verify the FLOPs for all models in Table 2. If the numbers are intended to represent only optimization-related FLOPs (not forward passes), make this explicit and rename the column accordingly. If they include forward passes, the OPT-6.7B figure is certainly incorrect. Align the text claim ("about 1%") with the actual computed ratios.
+- Either provide the Theorem 1 proof's core reasoning in the main text (even a sketch), or reframe the DDC analysis as a bias-variance tradeoff — which is standard and equally defensible — rather than an unbiasedness claim.
+- Consider adding QLoRA as a reference point on 1–2 tasks to contextualize QZO's memory/accuracy tradeoff relative to first-order quantized fine-tuning.
 
-1. **Drop or substantially revise the theoretical claims about DDC.** Either prove unbiasedness correctly (which seems unlikely for finite C), or characterize the bias and argue it is negligible in practice, or — most honestly — present DDC purely as an empirically effective heuristic clipping trick supported by Figures 2 and 3 (which are compelling on their own).
-2. **Add 3–5 seeds with mean ± std to all experimental tables.** Without this, the central claim of "on par with MeZO" is unverifiable.
-3. **Include at least one prior ZO-quantized method as a baseline** (e.g., Bar & Giryes 2025) on a representative subset of tasks.
-4. **Clarify the AdamW memory profiling methodology** (number of GPUs, FSDP configuration, profiling tool).
+## Score and Decision
 
-## Calibration Report
+**Round 1 bracket**: The paper sits between 5.5 and 7.0, based on comparison to SensZOQ (5.80, ZO+quantization via sparsity) and LOZO (7.00, low-rank ZO with convergence theory).
 
-| Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| SubZero (FK6T0U4Mg1) | 4.25 | 1 | Similar ZO+LLM fine-tuning approach, rejected. QZO has more novel core idea. |
-| MeZO-A³dam (OBIuFjZzmp) | 4.75 | 2 | Adaptive ZO, rejected. Comparable theory issues; QZO slightly more novel. |
-| Sparse MeZO (4Kw4KAoVnx) | 5.50 | 2 | Sparse ZO, rejected. Better experimental practices; QZO more novel idea. |
-| HiZOO (bEqI61iBue) | 5.67 | 1 | Hessian-informed ZO, accepted. Stronger theory and broader evals than QZO. |
-| SensZOQ (myYzr50xBh) | 5.80 | 2 | ZO+quantization via static sparsity, accepted. Comparable domain; QZO has more novel core idea but weaker experimental rigor. |
-| LOZO (9BiVepgmWW) | 7.00 | 1 | Low-rank ZO, accepted. Stronger theory and experiments than QZO. |
+**Round 2 narrowing**:
+- QZO is clearly stronger than SensZOQ (5.80): broader evaluation (3 model families, 5 datasets, 2-bit experiments vs. C4-only, 7B-only), cleaner mechanism, and better-demonstrated memory savings.
+- QZO is comparable to QA-LoRA (6.33) and Sparse MeZO (5.50) in contribution level, but with a more elegant mechanism.
+- QZO is below LQ-LoRA (6.75) and LOZO (7.00) due to weaker theoretical treatment (Theorem 1 concerns) and the FLOPs reporting issues.
 
-Round-1 bracket: [4.5, 5.5]. Round-2 narrowed to ~5.0 based on comparison with Sparse MeZO (5.50, weaker idea but stronger experiments) and SensZOQ (5.80, similar domain but stronger rigor). QZO is between MeZO-A³dam (4.75) and Sparse MeZO (5.50).
+**Anchors referenced across all rounds**:
+- `myYzr50xBh` (SensZOQ, 5.80, Round 1/2): QZO is stronger — better evaluation, cleaner mechanism.
+- `9BiVepgmWW` (LOZO, 7.00, Round 1/2): QZO is weaker — less theoretical depth, FLOPs issues.
+- `FK6T0U4Mg1` (SubZero, 4.25, Round 1): QZO is substantially stronger.
+- `4Kw4KAoVnx` (Sparse MeZO, 5.50, Round 2): QZO is stronger — more novel mechanism, better evaluation.
+- `xw29VvOMmU` (LQ-LoRA, 6.75, Round 2): QZO is slightly weaker — less polished analysis.
+- `zcx6rIMbbR` (Three-Stage Q, 5.40, Round 2): QZO is stronger.
+- `WvFoJccpo8` (QA-LoRA, 6.33, Round 2): QZO is comparable, different paradigm.
 
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+**Final score**: 6.0. The core contribution — enabling ZO fine-tuning of quantized models via scale perturbation — is novel, well-executed, and validated across a broad set of experiments. The memory savings are convincingly demonstrated. The FLOPs errors and theoretical concerns are real but addressable and do not invalidate the central contribution. The paper sits clearly above the Reject boundary (5.50) and earns acceptance.
+
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

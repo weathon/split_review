@@ -1,89 +1,81 @@
-Now let me write the consolidated review.
+Now I have a thorough understanding of the paper. Let me synthesize the review.
+
+---
 
 ## Summary
 
-This paper studies conformal prediction (CP) for surrogate models of time-dependent linear PDEs, where standard exchangeability fails because the solution distribution drifts over time. The paper makes three contributions: (1) Theorem 4.1 proves that for the heat equation in function space, solution distributions at distinct times are mutually singular (TV distance = 1), ruling out CP guarantees in that setting; (2) Theorem 4.2 shows that for discretized linear PDEs with Gaussian initial conditions, the solution law remains Gaussian with closed-form mean and covariance, enabling exact likelihood-ratio weights for weighted conformal prediction (WCP); (3) experiments on a tunable second-order PDE (varying stability parameters a, b, c) show that WCP maintains nominal 90% coverage while naïve CP and LSCI systematically undercover, especially as the PDE becomes more unstable.
+This paper studies conformal prediction (CP) for time-dependent PDE surrogate models, where non-stationarity breaks the exchangeability assumption required for standard coverage guarantees. The authors make two theoretical contributions: (1) a proof that in function space, the distributions of PDE solutions at different times are mutually singular (maximal TV distance), making CP guarantees impossible in the infinite-dimensional setting (Theorem 4.1); and (2) a derivation showing that under discretized linear PDEs with Gaussian initial conditions, the solution at any time is Gaussian with explicitly computable mean and covariance (Theorem 4.2). Building on Theorem 4.2, they propose likelihood-weighted conformal prediction using the ratio of marginal densities of the discretized solution at different times (Equation 1). Experiments on synthetic PDEs show the method maintains target coverage where naïve CP and LSCI baselines fail.
 
 ## Strengths
 
-- **Theorem 4.1 (mutual singularity in function space) is a conceptually important negative result.** It formalizes the intuition that infinite-dimensional function spaces make CP guarantees hopeless, and it provides a clean theoretical justification for why practical methods must work on discretized domains. The result is non-trivial and well-positioned relative to the neural operator literature.
+- **Theorem 4.1 — A crisp negative result in function space.** The proof that Gaussian measures induced by the heat equation at different times are mutually singular, with TV distance exactly 1, provides a principled explanation for why CP methods relying on exchangeability or distributional similarity must fail in the infinite-dimensional setting. This result is clean, well-scoped, and motivates the shift to a discretized perspective. The proof is deferred to the appendix but the statement is clear.
 
-- **Theorem 4.2 (closed-form Gaussian distributions for discretized linear PDEs) enables principled weighted CP with exact density ratios.** The derivation is elementary but valuable: it connects the method-of-lines discretization to the Gaussian pushforward structure, yielding closed-form weights that no prior CP work on PDE surrogates has exploited. This is the paper's core methodological contribution.
+- **Theorem 4.2 — Exact closed-form distributions for discretized linear PDEs.** The derivation of the Gaussian law of the discretized solution (mean and covariance via matrix exponential) is correct and self-contained. This provides the computational machinery — exact density ratios without estimation — that enables the weighting scheme. The result is stated with appropriate generality (linear spatial operator, Gaussian initial conditions) and the proof is given in the main text.
 
-- **Empirical validation convincingly shows WCP outperforms the most directly relevant baselines (naïve CP and LSCI) across multiple PDE stability regimes.** The experiments cover 9 combinations of the parameters a and c (Figure 3) and report both coverage and bandwidth for 20 time horizons. WCP is the only method that consistently meets the 90% target, and the gap widens as the PDE becomes more unstable (a more negative). The speed advantage (seconds vs. ~40 minutes for LSCI) is a practical benefit worth noting.
-
-- **The paper is well-structured and clearly written.** The problem framing (non-stationarity in PDEs breaking CP) is well-motivated, the connection to the weighted CP literature is properly cited, and the mathematical presentation is precise without being overly dense.
+- **Compelling empirical demonstration of coverage maintenance.** Across multiple instability levels and PDE parameterizations (Figure 3, Table 1), the proposed weighted CP consistently stays near the 90% target coverage over up to 20 time steps, while naïve CP and LSCI coverage degrade severely in unstable regimes. The experiments are well-parameterized (three values of $a$, three values of $c$, multiple prediction horizons) and use substantial sample sizes (5000 calibration and test points each). The transparent reporting of $n_\infty$ (fraction of samples receiving infinite bands) is a good practice.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The claim about transferring discretized bands to the continuous solution (Remark 4.5) is unsubstantiated.** The remark states that "asymptotic—and in some cases even non-asymptotic—guarantees" can be obtained by "leveraging numerical error guarantees of the scheme," but no analysis, bound, or concrete example is provided. This is at best a promissory note that the paper does not deliver. The remark should either be removed or developed with a specific error bound; as written, it undermines the paper's precision.
+- **Theoretical gap in the justification of the weighting scheme (Equation 1).** The paper uses the ratio of *marginal* densities of the discretized solution $u_t$ to compute weights for weighted CP (Equation 1). However, the CP nonconformity scores depend on the full data pairs — the surrogate prediction (a function of the initial condition $u_0$) and the true solution. In the discretized setting, the joint distribution of $(u_0, u_t)$ is a degenerate Gaussian supported on an $n$-dimensional affine subspace of $\mathbb{R}^{2n}$, and these subspaces differ for different $t$, making the joint distributions mutually singular. The paper does not address why reweighting by the marginal density ratio of $u$ alone should yield valid coverage guarantees when (a) the score depends on both $u_0$ and $u$, and (b) the function mapping $u$ to the nonconformity score itself changes between calibration and test time (because the surrogate model's predictions and the PDE solution operator both differ). The claim of "exact coverage guarantees" (Abstract, Section 4.4) is therefore not adequately supported. The method may work as a well-motivated heuristic — and the empirical results suggest it does — but the theoretical foundation as presented is incomplete. This is the central claim of the paper and requires rigorous justification or appropriately hedged language.
+
+- **Overclaimed guarantees in the abstract and introduction.** The abstract states the method provides "exact coverage guarantees… by reweighting calibration scores," and the introduction claims the method "enables exact coverage guarantees for PDEs without limiting assumptions." Given the theoretical gap described above, these claims are too strong. The method provides empirically reliable coverage in the tested settings, which is valuable, but the jump to "exact guarantees" is not justified by the analysis presented.
 
 ### Minor
 
-- **The paper does not discuss how estimation error in the initial distribution parameters (μ₀, Σ₀) propagates to the coverage guarantee.** The WCP method assumes these parameters are known exactly; in practice they would need to be estimated from data. The paper cites Barber et al. (2023), who show that weighted CP with estimated weights degrades the guarantee by an additive TV-distance term, but does not analyze this for the PDE setting. This is not a fatal flaw—the paper is transparent about its assumptions—but it is an important practical limitation that should be acknowledged more explicitly, and the discussion section should mention it alongside the linear-PDE limitation.
+- **Infinite-band mechanism not described in the main text.** The paper states that when "distributional dissimilarity… is too large, our WCP method predicts infinite bands" (Section 5, Evaluation), but the mechanism by which this decision is made is not described in the main paper. How does the method determine that the shift is too large? Is this based on a threshold on the weights, or some other criterion? This matters for understanding the method's behavior and for reproducibility.
 
-- **The primary reported coverage metric is conditional on finite-band samples, not unconditional coverage.** When infinite bands occur (n∞ as high as 86.4% in Table 1, a=-0.0075, t=15), the reported coverage of 0.84 looks concerning, but the unconditional coverage would be ~0.978 (since infinite bands trivially cover). The paper acknowledges this in the prose and reports n∞, but the tables and figures (Figure 3) give conditional coverage as the primary visual result. Reporting unconditional coverage as the main metric, with n∞ as a secondary statistic, would more transparently reflect the method's behavior. A reader could misinterpret the conditional numbers as evidence of undercoverage.
-
-- **The comparison set of baselines is somewhat narrow.** The paper compares against naïve CP and LSCI (Harris & Liu, 2025). While these are the most relevant baselines from the neural operator literature, the paper's claim of being "the only method providing reliable coverage" would be stronger if it also tested against a time-series CP method (e.g., Adaptive Conformal Inference or an online CP baseline), even if those methods provide only asymptotic guarantees. The paper acknowledges these methods exist but dismisses them without empirical comparison. Adding just one such baseline would tighten the claim.
+- **Conditional coverage reporting could be clearer.** The paper reports empirical coverage only for samples that do *not* receive infinite bands, separately tracking $n_\infty$. While this transparency is appreciated, the paper could strengthen its presentation by also reporting unconditional coverage (treating infinite bands as trivially covering) to give a complete picture, and by more explicitly discussing the implications of this conditional reporting for the practical interpretation of the guarantees.
 
 ### Trivial
-None.
+
+- None.
 
 ## Nice-to-Haves
 
-- **Provide a characterization of when infinite bands occur.** The paper reports n∞ empirically but does not analyze analytically when the weighted quantile exceeds the maximum possible score. A simple condition relating the distribution shift (e.g., the spectral norm of exp(tA)) to the onset of infinite bands would help practitioners understand when the method is useful.
-- **Report standard deviations or confidence intervals for the empirical coverage numbers in Table 1.** Single-run point estimates make it hard to distinguish genuine undercoverage from stochastic variation.
-- **A brief note on the computational cost of computing exp(tA) for large spatial discretizations** would be helpful for practitioners considering the method.
+- A discussion of what happens when the surrogate model's approximation error itself shifts over time (e.g., error accumulation in long-horizon rollouts) would strengthen the practical relevance. The method relies on the true solution distribution, but the surrogate's error characteristics may also drift.
+- Extending the analysis to provide a bound on the coverage gap induced by using marginal rather than joint density ratios would be valuable for situating the method within the broader weighted CP literature.
+- The real-world thermography experiment is described only via an appendix reference; a brief summary in the main text (one paragraph with key numbers) would help readers assess the practical applicability claim.
 
 ## Removed Points
 
-These points were raised by reviewers but removed after cross-checking against the paper:
+These points were flagged by reviewers but removed from the main review after verification:
 
-- **"The method's coverage guarantee is contingent on exact knowledge of the initial distribution parameters, which is assumed but not justified in practice" as a fatal/decisive weakness.** The paper is transparent about its Gaussian assumption and the known-parameters setting. Weighted CP papers in the literature routinely assume known density ratios; the estimation problem is a separate practical concern that the paper does not claim to solve. This is a limitation, not a fatal flaw. Retained as a minor weakness above with softened framing.
+- **"The joint distributions are mutually singular, so the likelihood ratio is undefined — fatal flaw."** → While the joint distributions of $(u_0, u_t)$ are indeed mutually singular (degenerate Gaussians on different subspaces), the paper uses the *marginal* densities of $u$ which are non-degenerate and have a well-defined ratio. The issue is not that the ratio in Equation (1) is undefined — it is well-defined. The issue is whether marginal reweighting suffices for valid CP when the score depends on the full pair. This is reclassified as a Major weakness about insufficient justification, not a fatal mathematical error.
 
-- **"The evaluation is misleading" as a fatal claim.** The paper explicitly acknowledges it reports conditional coverage (Section 5: "we exclude the sample and only predict coverage of the other samples") and reports n∞ alongside. The figure caption states "We omit coverages when infinite conformal bands were reported (coverage of 1 would hold trivially)." While unconditional coverage would be a better primary metric, the reporting is transparent, not misleading. Retained as a minor weakness.
+- **"The real-world experiment is only in the (unavailable) appendix — cannot assess validity."** → The appendix is not available due to parser stripping, not author omission. The paper states it exists and describes its high-level outcome. Removed as a parser artifact.
 
-- **"Theorem 4.1 assumes a very specific covariance structure (I−Δ)^{-1}" as a weakness.** The paper explicitly states this is "representative of a broader phenomenon" and cites Hairer (2023) on mutual singularity in infinite dimensions. Using a Matérn-type covariance for a random field is standard. This is not a weakness of the paper.
+- **"The treatment of infinite bands is entirely unexplained."** → Downgraded to Minor. The paper does mention the mechanism exists and reports $n_\infty$; the missing detail is a presentation issue, not a methodological one.
 
-- **"The paper understates recent work on time-series CP" as a weakness.** The paper devotes a paragraph to time-series CP, correctly noting that most methods provide only asymptotic guarantees. It does not dismiss them—it places its own contribution in context. The missing empirical comparison is noted as a minor weakness above, but the literature discussion itself is fair.
+- **Strength: 'The paper addressed an important problem.'** → Generic; removed as per instructions.
 
-- **Various formatting/style nitpicks and concerns about missing appendix content.** These are parser artifacts, not author errors.
+- **Strength: 'Real-world validation on pulsed-thermography data.'** → Kept only as context; cannot be independently verified without the appendix, but the paper claims it.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight—that closed-form Gaussian likelihoods for discretized linear PDEs enable exact weighted CP—is clearly articulated by the paper itself. The novelty is in connecting these two existing literatures (weighted CP and PDE discretization) in a principled way, and adding the function-space impossibility result as motivation.
+The paper's sharp formulation of the function-space singularity result (Theorem 4.1) is genuinely insightful: it shows that even for the elementary heat equation with a natural Gaussian prior, the solution measures at distinct times are mutually singular with TV distance 1. This crystallizes why the "neural operator on function space" perspective — while mathematically elegant — creates an insurmountable barrier for distribution-shift-aware CP, and why discretization is not merely a computational convenience but a *necessity* for recovering coverage guarantees. This tension between infinite-dimensional theory and finite-dimensional practice is clearly articulated and likely to be useful to researchers working at the intersection of operator learning and uncertainty quantification.
 
 ## Suggestions
 
-1. **Remove or substantiate Remark 4.5.** Either provide a concrete error bound linking discretized coverage to the continuous PDE solution, or delete the remark. As written, it makes a promise the paper does not keep.
-2. **Report unconditional coverage as the primary metric** in Table 1 and Figure 3, with the fraction of finite-band samples (n∞) as a clearly labeled secondary metric. This would preempt any misinterpretation.
-3. **Discuss the estimation of initial distribution parameters** in the Discussion section, noting the Barber et al. (2023) TV-distance correction as a direction for future work when parameters are unknown.
-4. **Add one time-series CP baseline** (e.g., ACI with a small grid of step sizes) to strengthen the claim that WCP provides benefits over existing alternatives in practice.
-5. **Soften the "only method" phrasing** to something like "the only method providing *finite-sample guaranteed* coverage among compared approaches" to avoid overclaiming.
+- The authors should either (a) provide a rigorous argument connecting the marginal density ratio in Equation (1) to the validity of weighted CP for the specific score function used, or (b) temper the claims from "exact coverage guarantees" to "empirically achieves target coverage" and clearly state the assumption under which the weighting is expected to be valid (e.g., that the conditional distribution of the score given $u$ is approximately invariant across time steps). Option (b) is likely more achievable and would still leave a valuable paper.
+- Describe the infinite-band decision rule explicitly in the main text, even if briefly.
+- Consider adding a short paragraph to the main text summarizing the real-world thermography results with numerical coverage values.
 
 ## Score and Decision
 
-### Calibration Summary
+**Round 1 bracket:** Based on comparison with anchors cF6OoaYcRa (4.50, CP for PDE UQ — weaker theory and experiments), LgfaMR6Sst (6.80, PDE active learning — stronger empirical depth but comparable novelty), and the 7.5+ anchors (clearly stronger papers), the paper plausibly sits in the **5.0–7.0** range.
 
-**Round 1 (bracketing):**
-- Weak anchors (avg < 3.5): CP/PDE papers scoring 2.5–3.4 — fundamental methodological flaws; our paper is clearly stronger.
-- Middle anchors (avg 3.5–7.5): Weighted CP / time-series CP papers scoring 5.5–6.67 — solid contributions with clear theorems and experiments.
-- Strong anchors (avg > 7.5): SciML papers scoring 7.6–8.0 — comprehensive contributions exceeding this paper's scope.
+**Round 2 narrowing:** Compared to aJ3tiX1Tu4 (6.67, Wasserstein-regularized CP under distribution shift — accepted, with rigorous theoretical bounds and practical algorithm), this paper has a less complete theoretical justification for its core claim. Compared to MxHgnYbxly (5.67, CP with temperature scaling — empirical study, moderate novelty) and GQhlM0Mavg (5.00, OOD-CP link), this paper has stronger theoretical contributions (Theorems 4.1, 4.2) and more substantive experiments. The paper is weaker than aJ3tiX1Tu4 but stronger than MxHgnYbxly and GQhlM0Mavg, placing it at approximately **5.5**.
 
-**Round 1 bracket:** 5.0–7.0
+**Anchor comparison summary:**
+- cF6OoaYcRa (4.50, Reject): CP for PDE UQ — this paper has substantially stronger theory and more systematic experiments.
+- GQhlM0Mavg (5.00, Reject): OOD-CP link — this paper has more original theoretical content.
+- MxHgnYbxly (5.67, Reject): CP with temperature scaling — comparable empirical depth, this paper has more novel theory.
+- aJ3tiX1Tu4 (6.67, Accept): Wasserstein CP under distribution shift — stronger theoretical foundations, our paper has a more focused application domain.
+- LgfaMR6Sst (6.80, Reject): Flexible active learning for PDEs — comparable in ambition and scope but with different strengths.
 
-**Round 2 (narrowing):**
-- KOWCPI (avg 6.00, 4×6): Similar-level contribution — theory + experiments + clear writing. Our paper has a more novel theoretical result (Theorem 4.1) but is narrower in scope (linear PDEs only). **Comparable.**
-- PINN Certification (avg 5.50): Rejected; presentation and applicability concerns. Our paper is stronger. **Above this anchor.**
-- PAC Label Shift (avg 6.40, scores 6,6,6,6,8): Solid paper. Our paper has a more distinctive theoretical contribution. **Modestly above or comparable.**
-- Wasserstein CP (avg 6.67, scores 8,6,6): Novel framework but mixed confidence in execution. **Comparable but slightly below.**
+The paper makes genuine contributions (Theorems 4.1 and 4.2, strong empirical validation) but the central claim of exact coverage guarantees through Equation (1) is not adequately justified. This is a significant but addressable weakness — the method is empirically valuable and the theoretical pieces are largely correct, but the connection between them needs either stronger proof or more modest claims.
 
-**Final assessment:** The paper is most comparable to the KOWCPI paper (6.00) — both have clear theoretical contributions, clean experiments, and address a well-motivated problem. The paper is stronger than the 5.5-level reject papers and sits solidly in the accept band. The weaknesses are real but minor (unsubstantiated remark, conditional coverage reporting, narrow baseline set). The paper does not rise to the 6.67–7.0 level because these addressable weaknesses dilute the otherwise strong contribution. Final score: **6.0**.
-
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

@@ -1,26 +1,22 @@
-Now I have enough anchors for calibration. Let me write the final review.
-
----
-
 ## Summary
 
-This paper introduces RADAR, a neural framework that augments constructive VRP solvers to handle asymmetric distance matrices — a realistic but underexplored setting in neural combinatorial optimization. Two architectural components are proposed: (1) an SVD-based initialization that compresses the asymmetric distance matrix into compact node embeddings capturing static directional structure, and (2) Sinkhorn normalization that replaces row-wise softmax in the encoder attention to model dynamic asymmetry. The method is evaluated on 17 synthetic VRP variants (ATSP, ACVRP, and 16 multi-task variants) plus 3 real-world benchmarks, consistently outperforming strong baselines (ICAM, ReLD, RRNCO, MatNet, UniCO) and even surpassing LKH on some out-of-distribution settings.
-
----
+RADAR proposes a neural framework for solving asymmetric vehicle routing problems by combining two complementary components: (1) an SVD-based initialization that produces compact, generalizable node embeddings encoding static directional asymmetry from the distance matrix, and (2) Sinkhorn-normalized attention that replaces row-wise softmax to model dynamic asymmetry during encoding. The paper evaluates RADAR across 17 synthetic and 3 real-world VRP variants, demonstrating consistent outperformance over prior neural solvers on both in-distribution and out-of-distribution instances, with particularly strong size-generalization results (e.g., ATSP1000 gap of 4.13% vs. 7.24+% for competitors).
 
 ## Strengths
 
-1. **Principled, well-motivated design for a clear gap.** The paper identifies that existing neural VRP solvers are designed for symmetric Euclidean inputs and cannot effectively encode asymmetric distance matrices. The two-component architecture (SVD for static asymmetry, Sinkhorn for dynamic asymmetry) is directly motivated by this problem, not ad-hoc. Definition 1 formalizes what it means for an embedding to be asymmetry-aware, and the construction via truncated SVD provably satisfies it (Eq. 1–5).
+- **Principled SVD initialization with theoretical grounding**: The paper defines *asymmetry-aware embeddings* (Definition 1) and proves the SVD-based construction satisfies this property via Equation (5), showing that the concatenated embedding can reconstruct the asymmetric distance matrix through two distinct linear projections. This provides a non-trivial theoretical justification for why the initialization captures static directional information, going beyond ad-hoc embedding schemes.
 
-2. **Consistent SOTA across an unusually broad evaluation.** RADAR achieves the best learning-based objective on all ATSP/ACVRP sizes (Table 1, e.g., ATSP100 gap 0.72% vs next-best ReLD 1.64%), on the 16-variant multi-task suite (Table 2, avg gap 1.33% vs RF-NN 1.99%), and on all three real-world benchmarks across in-distribution and two out-of-distribution settings (Table 3). The margin is not marginal — RADAR often halves the gap of the next-best neural method.
+- **Comprehensive and convincing empirical evaluation**: RADAR is tested on a broad spectrum — synthetic ATSP/ACVRP at sizes 100–1000 (Table 1), 16 multi-task asymmetric VRP variants (Table 2), and 3 real-world datasets with in-distribution and out-of-distribution shifts (Table 3). It outperforms all neural baselines in nearly every setting, including strong recent methods like ReLD and RRNCO. The out-of-distribution generalization from size-100 training to size-1000 testing is particularly strong and well-supported.
 
-3. **Clean ablation isolating each component's contribution.** Table 6 shows that SVD alone reduces the ATSP100 gap from 2.08% (no SVD, no Sinkhorn) to 1.19%; adding Sinkhorn further drops it to 0.72%. The effect grows with instance size: on ATSP1000, SVD alone gives 7.24% vs both components 4.13%. The paper also compares against alternative decompositions (EVD, MDS, QR, random) and studies rank sensitivity (Figure 3), providing solid evidence for design choices.
+- **Clean ablation isolating each component's effect**: Table 6 cleanly separates the contributions of SVD initialization and Sinkhorn normalization across four instance sizes. Adding Sinkhorn improves the ATSP1000 gap from 7.24% to 4.13%, and the combination of both components produces the best result. The ablation of alternative SVD variants (EVD, MDS, QR — Appendix D.2) and the rank parameter study (Figure 3, Section 6.1) provide thorough design justification.
 
-4. **Informative analysis that strengthens the central thesis.** The coordinate-vs-distance study (Table 4) shows RADAR without coordinates (gap 1.49%) already beats RRNCO with coordinates and augmentation (1.80%), supporting the claim that SVD embeddings capture structural information more effectively than positional cues. The asymmetry-level study (Table 5) further demonstrates robustness as directional noise increases.
-
----
+- **Practical robustness demonstrated on real-world data**: On three real-world benchmarks (Table 3), RADAR consistently outperforms the strongest baseline RRNCO across all distribution settings, and Table 4 shows RADAR without coordinate information still beats RRNCO *with* coordinate augmentation — a strong signal that the distance-matrix encoding captures meaningful structural signal independent of geometric priors.
 
 ## Weaknesses
+
+### Fatal
+
+None.
 
 ### Major
 
@@ -28,73 +24,60 @@ None.
 
 ### Minor
 
-1. **Numerical inconsistency in Table 1 (ACVRP100, LKH-1000).** The reported objective is 2.2635 with gap 1.86% relative to LKH-10000 (2.1240). Computing (2.2635−2.1240)/2.1240 ≈ 6.57%, not 1.86%. The gap of 1.86% would be correct for an objective of ~2.1635. All other entries in the table are self-consistent, so this is almost certainly a typographical error in the objective value. The paper's conclusions are unaffected, but the error should be corrected to maintain trust in the reported numbers.
+- **Overclaimed mechanism for Sinkhorn normalization**: Section 4.2 states that Sinkhorn "ensures that each attention score \(A_{i,j}\) reflects a more complete characterization … by incorporating the full set of distance-based relations directly connected to them." Sinkhorn operates on already-computed attention logits (which include \(D_{i,j}\) and \(D_{j,i}\)) and enforces a doubly stochastic constraint through iterative row/column normalization. While column normalization does couple \(j\)'s neighborhood context into \(A_{i,j}\) indirectly, the phrase "full set of distance-based relations" overstates what is mechanistically happening. The empirical gains from Sinkhorn are real and well-demonstrated, but the explanatory framing — why it works rather than just that it works — would benefit from either tempering the language or adding a diagnostic analysis (e.g., attention-matrix visualization, Frobenius distance to the original distance matrix under softmax vs. Sinkhorn). This does not threaten the core contribution.
 
-2. **The conceptual link between Sinkhorn normalization and "dynamic asymmetry" could be sharpened.** The paper argues that row-wise softmax considers only node i's neighborhood, while Sinkhorn doubly normalizes rows and columns to also consider node j's neighborhood. This is empirically validated (Table 6), and the intuition is sound. However, the paper stops short of demonstrating *how* doubly stochastic attention weights encode directional asymmetry differently from softmax — e.g., with a small worked example showing A_{i,j} ≠ A_{j,i} emerging from Sinkhorn in a way that tracks the cost asymmetry. A concrete illustration would make the narrative more compelling.
+- **No variance or stability information in results**: All tables report mean objective values over 1,000 test instances without standard deviations, confidence intervals, or interquartile ranges. Some performance margins are modest (e.g., ~0.9% gap between RADAR and ReLD on ATSP100), and the reader cannot gauge whether these differences are reliable above instance-level noise. While reporting only means is standard practice in the NCO literature, including variance would substantially strengthen an otherwise strong empirical case.
 
 ### Trivial
 
-None.
-
----
+- The paper lacks a dedicated Limitations section. The conclusion gestures at future work but does not examine assumptions such as the low-rank requirement of SVD or computational bottlenecks at extreme scales.
 
 ## Nice-to-Haves
 
-- Report the reconstruction error ‖XW₁(XW₂)ᵀ − D‖_F / ‖D‖_F for the chosen rank k=10 on actual test instances, to give readers a direct sense of approximation quality.
-- Include a brief runtime breakdown separating the SVD step from encoder/decoder time, for practitioners considering deployment.
-- The Sinkhorn iteration sensitivity study is deferred to the stripped appendix; if the authors can show that performance is stable across a range of T values (e.g., T ∈ {5, 10, 20}), that would strengthen the case for the chosen T=10.
+- A diagnostic study (e.g., attention matrix visualization with and without Sinkhorn, or measuring how well the effective attention approximates the original distance structure under each normalization) would ground the Sinkhorn interpretation and elevate the conceptual contribution beyond "it works."
 
----
+- A brief acknowledgment of scenarios where SVD-based initialization may be challenged (e.g., when the distance matrix is not well-approximated by a low-rank factorization) would demonstrate awareness of scope.
 
 ## Removed Points
 
-These points were flagged by reviewers but removed for the following reasons:
+These points were flagged by reviewers but are removed from the final review with justification:
 
-- **Comparison with additional methods like BQ-NCO or Sym-NCO** — The paper already covers 10+ baselines with proper retraining. Missing a baseline that may or may not support asymmetric inputs is a scope-creep concern, not a weakness.
-- **Hyperparameter sensitivity for Sinkhorn iterations being deferred to appendix** — The paper explicitly states this study exists in Appendix D.7 (stripped by parsing). This is not a weakness of the submitted paper.
-- **"Missing related works"** — The paper covers the relevant literature (MatNet, ICAM, ReLD, RRNCO, UniCO, ELG, GLOP, UDC, etc.) appropriately. We do not have external sources to confirm omissions.
-- **Stylistic and formatting concerns** — Parser artifacts, not author errors.
+- *"Sinkhorn does not inject any additional structural information beyond what is already present in the logits"* — This is partially incorrect. The Sinkhorn column normalization step does indirectly couple \(j\)'s neighborhood context into \(A_{i,j}\) through iterative row/column rebalancing, since column normalization makes each \(A_{i,j}\) depend on how other nodes attend to \(j\). The claim is about degree of overstatement, not factual error. Retained as a Minor weakness with tempered language.
 
----
+- *"Definition 1 is very close to a restatement"* — This is a methodological judgment, not a factual error. The definition serves a clear purpose in formalizing what asymmetry-aware embeddings should achieve, and the SVD construction is demonstrably shown to satisfy it. Not a weakness.
+
+- *"Missing comparison with additional baselines"* — The harsh critic did not raise this, but the strength finder notes thorough baselines. The paper compares against LKH, HGS, MatNet, ICAM, ELG, ReLD, UNICO, GLOP, UDC, RRNCO, and adapted RouteFinder variants. Coverage is comprehensive for this subfield. Removed.
+
+- *Absence of confidence intervals for efficiency analysis* — The harsh critic flagged missing variance, which is retained as Minor. But the strength finder's claim about "modest margins" being "unreliable" is speculative — the margin on ATSP200 is 1.01% vs. 3.75% for the next-best neural solver, which is not a borderline result. Removed the speculative framing.
+
+- *"The paper is silent on masking interaction with Sinkhorn"* — The harsh critic noted this and immediately retracted it, since Sinkhorn is used only in the encoder (no masking needed). Removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
-
----
+The paper's framing of asymmetry into *static* (distance-matrix-level) and *dynamic* (attention-level) components is a useful conceptual decomposition that organizes the solution design clearly. More concretely, the finding that SVD-based initialization enables strong out-of-distribution generalization without coordinate cues (Table 4 shows RADAR without coordinates outperforms RRNCO *with* coordinate augmentation) suggests that low-rank spectral structure in distance matrices may encode sufficient topological signal to replace geometric priors — an insight with implications beyond VRP to other relational-learning tasks where only pairwise asymmetric features are available.
 
 ## Suggestions
 
-1. Correct the numerical entry in Table 1 (ACVRP100, LKH-1000 row): either the objective should be ~2.1635 to match the 1.86% gap, or the gap should be recomputed. Verify all other gap computations in the table.
-2. Consider adding a small illustrative example (3–4 nodes) in Section 4.2 showing how Sinkhorn changes attention weights relative to softmax for an asymmetric graph, to concretize the "dynamic asymmetry" narrative.
-3. Report the reconstruction error of the SVD embedding (Eq. 1) for the chosen k=10 on the actual benchmarks, e.g., as a footnote or in an ablation table.
+- Soften the Sinkhorn interpretation in Section 4.2: replace "full set of distance-based relations" with language that accurately reflects doubly stochastic normalization, e.g., "enforcing balanced row and column attention scores so that \(A_{i,j}\) is informed by both how \(i\) attends to its neighbors and how other nodes attend to \(j\)."
 
----
+- Add standard deviations or interquartile ranges to the main result tables (Tables 1–3), even if placed in the appendix with a one-sentence note in the main text.
+
+- Add a brief Limitations paragraph in the conclusion noting assumptions (low-rank SVD, moderate instance sizes for SVD overhead).
 
 ## Score and Decision
 
-### Calibration Anchors
+**Calibration summary:**
 
-| Anchor ID | Avg Score | Round | Comparison to RADAR |
-|-----------|-----------|-------|---------------------|
-| SrnTGdJKYG | 3.00 | R1 (weak) | Rejected; limited contribution. RADAR is much stronger. |
-| oGsR3MJvwS | 3.00 | R1 (weak) | Rejected; generalization focus. RADAR is much stronger. |
-| iWCfiDxLIY | 3.00 | R1 (weak) | Rejected; edge-based GNN. RADAR is much stronger. |
-| Gs8jWk0F01 | 2.20 | R1 (weak) | Rejected; dynamic VRP. RADAR is much stronger. |
-| TbTJJNjumY | 6.25 | R1/R2 (mid) | Accepted; cross-attention for scaling. RADAR addresses a different gap (asymmetry vs. scaling) with broader eval. Comparable quality. |
-| DKfcxPxunu | 5.75 | R1 (mid) | Rejected; multi-task VRP. RADAR has clearer novelty and stronger results. |
-| gyTkfVYL45 | 6.00 | R1 (mid) | Rejected (ICAM); directly compared baseline. RADAR consistently outperforms it and has code available. |
-| agEy9hliY1 | 5.25 | R1 (mid) | Rejected; probing NCO representations. Not directly comparable. |
-| yEwakMNIex | 6.25 | R2 (mid) | Accepted (RedCO); general TSP via problem reduction. Different scope; RADAR's focused asymmetric-VRP contribution is better supported. |
-| 6hvtSLkKeZ | 6.40 | R2 (mid) | Accepted; bin packing. Not directly comparable. |
-| GM7cmQfk2F | 7.00 | R2 (mid) | Accepted; neural MOCO. Comparable in contribution depth and eval thoroughness. |
-| CFLEIeX7iK | 5.75 | R2 (mid) | Rejected; solver selection. Less novel. |
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| SrnTGdJKYG (Neural Deconstruction Search) | 3.00 | R1 | RADAR is **far stronger** — more novel, more comprehensive, real-world evaluation |
+| iWCfiDxLIY (GREAT architecture) | 3.00 | R1 | RADAR is **far stronger** — cleaner method, far better evaluation, stronger results |
+| CFLEIeX7iK (Neural Solver Selection) | 5.75 | R2 | RADAR is **stronger** — more novel contribution, more comprehensive experiments |
+| yEwakMNIex (RedCO / Unified Neural Solvers) | 6.25 | R1 | RADAR is **stronger** — better real-world evaluation, cleaner methodology, stronger generalization |
+| TbTJJNjumY (Boosting NCO for Large-Scale VRPs) | 6.25 | R1 | RADAR is **comparable in quality** — both have strong empirical results; RADAR has more comprehensive ablation and real-world testing |
+| GM7cmQfk2F (Neat Weight Embedding for MOCO) | 7.00 | R2 | RADAR is **comparable, slightly stronger** — similar level of novelty and comprehensiveness; RADAR has stronger real-world evaluation and theoretical grounding |
 
-**Round 1 bracket:** Placed RADAR between 6.0 and 8.0, based on strong-band anchors being off-topic and middle-band VRP papers averaging 5.25–6.25.
-
-**Round 2 narrowing:** The 7.0 anchor (MOCO via weight embedding) is the closest in contribution quality — both have principled methodology, thorough ablation, and SOTA results. RADAR has a broader evaluation (20 benchmarks vs MOCO's multi-objective variants) and addresses a more clearly underexplored problem (asymmetric VRPs). The only material issue is a typo in one table cell. This places RADAR at the upper end of the bracket but not at the extreme 8+ level, which would require exceptional contributions beyond what is demonstrated.
-
-**Final score: 7.0**
+**Round-1 bracket**: 5.5–7.5. **Round-2 narrowing**: Anchors at 5.75 and 7.00 confirm RADAR sits near the upper end. The paper is clearly stronger than the 5.75–6.25 range (more comprehensive evaluation, stronger theoretical grounding) and comparable to the 7.00 anchor, with an edge in real-world applicability and ablation depth. The Sinkhorn overclaim and missing variance are minor issues that do not diminish the strong empirical contribution. Score: **7.0**.
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

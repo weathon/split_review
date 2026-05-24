@@ -1,81 +1,96 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have all the information I need. Let me produce the consolidated review.
+
+---
 
 ## Summary
 
-PI-CCA proposes a replay-free continual learning framework for vision-language models that reframes catastrophic forgetting as alignment-geometry drift. Instead of regularizing proxy signals (logits, similarities), it preserves a compact "CCA certificate" — the top-*k* canonical correlations and sketched subspaces of the whitened cross-modal covariance — across tasks using only mini-batch statistics and exponential moving averages, with an added prompt-invariance mechanism. The method achieves state-of-the-art results among replay-free methods on MTIL, X-TAIL, VLCL, and ConStruct-VL benchmarks, supported by comprehensive ablations and analyses.
+This paper proposes PI-CCA, a replay-free continual learning framework for vision-language models that reframes forgetting as drift of the canonical correlation analysis (CCA) alignment geometry. The key idea is to maintain a compact "certificate" of the top-k canonical spectrum and subspaces, then constrain new-task adaptation to preserve these invariants via spectral, subspace-angle, and prompt-invariance losses. Across MTIL, X-TAIL, VLCL, and ConStruct-VL benchmarks, PI-CCA achieves state-of-the-art results among replay-free methods while using only mini-batch statistics and constant memory.
 
 ## Strengths
 
-- **Conceptually novel reframing of forgetting as alignment-geometry drift.** Rather than matching logits, similarities, or parameters, PI-CCA directly preserves the canonical spectrum and subspaces of the whitened cross-covariance — the underlying object that drives CLIP's zero-shot retrieval and recognition. This geometry-first perspective is a principled departure from prior VL-CL methods that act on proxy signals. (Sec. 1, Sec. 2)
+- **Strong, consistent empirical performance across four benchmarks**: Tables 1 and 2 show PI-CCA achieves best or near-best results on all tracks (e.g., MTIL Avg 76.8, X-TAIL Avg 68.1, VLCL I2T R@1 48.6, ConStruct-VL FA 75.2 / AF 2.7), outperforming strong baselines including C-CLIP, DIKI, MG-CLIP, and RAIL, and even surpassing the synthetic-replay method GIFT without storing or generating data.
 
-- **SOTA among replay-free methods across four benchmarks.** PI-CCA achieves the highest scores on MTIL (Avg 76.8 vs. next best 75.2), X-TAIL (Avg 68.1 vs. 67.4), VLCL retrieval (I2T R@1 48.6 vs. 47.3 of the synthetic-replay method GIFT), and ConStruct-VL (FA 75.2, AF 2.7). It even surpasses GIFT, which uses diffusion-generated synthetic replay, without storing or generating any data. (Tables 1, 2, Sec. 4.2)
+- **Well-designed component ablation validates the CCA-specific design**: Table 3 demonstrates that removing the spectral term (λ₁=0) or subspace term (λ₂=0) causes the largest performance drops (~2.2–2.7 pp on MTIL, ~2.3–2.7 on VLCL R@1), confirming that both the canonical correlation spectrum and subspace directions are necessary contributors beyond the base task loss.
 
-- **Replay- and generator-free with constant memory.** The certificate stores only a sketched summary (spectrum + subspaces) whose size is independent of feature dimensions, using random orthonormal sketches. No exemplar buffers, generators, or task-specific metadata are required. (Sec. 3.2)
+- **Prompt-invariance mechanism provides genuine robustness to phrasing shifts**: Figure 4 shows that PI-CCA with L_pi maintains flatter degradation curves under increasing prompt perturbation strength s, with +2.44 pp R@1 improvement (ID) and +2.51 pp (OOD) at s=1.0 compared to the no-invariance variant, demonstrating that the projector-averaging approach meaningfully reduces sensitivity to prompt/style variation.
 
-- **Thorough ablation isolating each component's contribution.** Table 3 cleanly shows that removing the spectral term or subspace term causes the largest drops (MTIL Avg −2.5 and −2.2 p.p.), confirming both are necessary. Ablations of covariance EMA, prompt invariance, certificate EMA, sketching type, and Hungarian vs. sorted pairing are all provided. (Sec. 4.3, Table 3)
+- **Task-order insensitivity indicates reliable behavior**: Figure 5 reports narrow IQRs (≤0.8 pp) across 20 random MTIL task orders for Avg, Last accuracy, and AF, establishing that the method's performance is not an artifact of favorable task ordering.
 
-- **Robustness to task order and certificate capacity.** 20 random task-order permutations show narrow IQRs (~0.5 p.p. for Avg), and the Pareto sweep over *k* and *h* (Fig. 2) reveals a broad robust ridge, confirming the method does not rely on a specific configuration or lucky ordering. (Fig. 2, Fig. 5, Sec. 4.3)
+- **Efficiency analysis supports practicality**: Figure 2 provides a Pareto analysis of certificate capacity (k, h) versus memory and step time, identifying a broad efficient ridge (k ∈ [48,96], h ∈ [192,320]) where performance remains high with modest resource costs.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The core claims — that explicitly constraining CCA geometry achieves strong replay-free VL-CL performance — are supported by the main results and ablations.
 
 ### Major
 
-1. **Implausible perfect correlations in the geometry–performance analysis (Fig. 3).** The paper reports Pearson *r* = 1.00 and Spearman *ρ* = 1.00 for the relationship between subspace-angle drift and accuracy drop, and *r* = 0.99 / *ρ* = 1.00 for spectral drift. These values are physically impossible on any real experimental data that exhibits the "realistic scatter" the caption itself describes — any measurement noise, rounding, or stochasticity would produce correlations strictly below 1.0. The figure caption also mentions a 95% confidence interval shaded area, which would be degenerate (zero width) at *r* = 1.00. This suggests either a rounding artifact (e.g., *r* = 0.9997 truncated to 1.00), a computation error, or that the data points are not as independently sampled as claimed. This does not invalidate the paper's core results (Tables 1–2) but undermines trust in the analysis section and must be corrected or explained. (Fig. 3, Sec. 4.3)
+- **The geometry–performance correlation analysis (Figure 3) reports implausibly perfect correlation coefficients (Pearson r = 1.00, Spearman ρ = 1.00 in two of four panels)**: The data points are generated from within-method ablations (certificate size, EMA rates, invariance strength, etc.) where drift and performance drop are both computed relative to a single reference configuration. While this setup can produce strong correlations, r = 1.00 over tens of real experimental data points is not credible and signals either (a) a hidden deterministic relationship in the measurement protocol that inflates the coefficient, or (b) a very small number of data points. Either way, the reported coefficients overstate the strength of evidence that drift predicts generalization, and the analysis does not distinguish between a causal link and a self-fulfilling measurement. This weakens the paper's central narrative that geometry drift is a reliable *predictor* of downstream performance.
 
-2. **Missing variance measures in the headline classification results (Table 1).** Table 1 reports MTIL and X-TAIL accuracies without any error bars or confidence intervals, while Table 2 provides ± intervals for retrieval and ConStruct-VL results. The paper mentions 3 random seeds only in the Fig. 5 caption but does not state that Table 1 values are averaged over multiple seeds or report their variance. Given that the gains over the next-best method are 0.7–1.6 points, variance reporting is essential to establish that these differences are statistically significant. This is a basic methodological requirement for a SOTA claim. (Table 1 vs. Table 2, Sec. 4.2)
+- **Classification-track results (MTIL, X-TAIL, Table 1) lack any measure of uncertainty**: Unlike Table 2 (VLCL and ConStruct-VL, which report mean ± std), Table 1 provides only point estimates without standard deviations, confidence intervals, or indication of the number of seeds. The margins over the strongest baselines are modest (1.6 pp on MTIL Avg over C-CLIP; 0.7 pp on X-TAIL Last over RAIL), and without variance estimates it is impossible to assess whether these differences are meaningful or within noise. This is a standard expectation for empirical ML papers and its absence on the primary classification table weakens the SOTA claim.
 
 ### Minor
 
-3. **The geometry drift measures are closely related to the losses being regularized, limiting their value as independent evidence.** D_ang (sum sin² θ_i) and ℒ_sub (Frobenius distance of sketched projectors) are different but closely related quantities; D_ρ (L2 norm of spectral difference) is the unsquared precursor of the first term in ℒ_spec. The correlation analysis in Fig. 3 therefore shows that when PI-CCA's own losses are better satisfied, performance is better — which is informative but not the independent corroboration the paper frames it as. A stronger test would correlate performance with a drift measure *not* explicitly regularized by PI-CCA (e.g., CKA distance, mutual information gap). (Sec. 4.3; compare D_ang/ℒ_sub definitions in Sec. 3.3)
+- **The prompt perturbation strength s is defined only qualitatively**: The paper describes s ∈ [0,1] as "token-level synonym swap/back-translation/template jitter ratio," but does not specify the exact procedure mapping s to perturbation magnitude (e.g., probability of swapping a given token, number of back-translation rounds). This limits reproducibility of the prompt-invariance stress test and makes it hard to interpret what s = 0.6 corresponds to in practice.
 
-4. **Gains over strong baselines are modest on some tracks.** On MTIL, the margin over C-CLIP is 1.6 points (Avg) / 1.7 points (Last); on X-TAIL, the margin over RAIL is 0.7 points (Avg). While consistent and in the right direction, these are incremental improvements. The paper acknowledges this implicitly but could be more transparent about the modest effect sizes on certain benchmarks. (Table 1)
+- **Initial certificate construction detail is deferred**: The description "constructed from a diverse anchor prompt set" for the pre-continual CCA certificate is stated in the main text but the specification of what constitutes "diverse" and how many anchor prompts are used is left to the appendix. While this is a reasonable scope choice, the conceptual clarity of the method would benefit from at least a one-sentence summary of the construction procedure in the main body.
 
 ### Trivial
-None.
+
+- The 3D Pareto plot (Figure 2a) encodes forgetting only as color, making the AF dimension difficult to read precisely; the 2D view (Figure 2b) partially compensates but only for the Avg vs. memory trade-off.
 
 ## Nice-to-Haves
 
-- **Compare to a small-buffer replay baseline.** The paper positions itself as replay-free but does not quantify how much memory a small replay buffer (e.g., 200 samples per task) would require or how much PI-CCA closes the gap with such a baseline. A small comparison table would contextualize the replay-free claim.
-- **Report raw zero-shot accuracy numbers.** The paper mentions *PD* (performance drop) on a held-out zero-shot suite but does not report the raw zero-shot accuracy values before and after continual learning — only relative PD in the prompt invariance stress test (Fig. 4). A table with absolute numbers would strengthen the zero-shot retention claim.
-- **Specify which perturbation types are used for the main results.** The text mentions "synonym swap/back-translation/template jitter" for the stress test but does not clearly state which perturbation strategy is deployed in the main experiments (Sec. 4.2, Tables 1–2). This detail is likely in the appendix but should be explicit in the main text.
+- A comparison against a simple parameter-space or feature-space L2 regularizer (e.g., weight decay toward pre-trained LoRA weights) would help isolate whether the CCA-specific terms provide gains beyond what a generic anti-drift regularizer achieves. The existing ablations (Table 3) show that each CCA term matters *within* PI-CCA, but do not rule out that simpler regularization could achieve comparable results.
+- Reporting drift metrics on a held-out validation set (rather than on the same data used to compute the certificate) would strengthen the claim that alignment geometry drift predicts *generalization* rather than merely tracking within-method configuration changes.
 
 ## Removed Points
-- *"Overclaimed geometry–performance correlation (Fig. 3) ... D_ang and D_ρ are exactly the losses being optimized (ℒ_sub and ℒ_spec, up to constants)."* — Removed because D_ang measures principal angles in original space while ℒ_sub operates on sketched projectors, and D_ρ is an unsorted L2 norm while ℒ_spec uses sorted squared L2 plus a Ky-Fan term. They are related but not identical. The concern about circularity is retained in Minor #3 in a softened form. The valid concern about r=1.00 is retained as Major #1.
-- *"Reproducibility of the full procedure — many interlocking components, relies heavily on appendix material (A.1, A.2, A.3, A.4)."* — Removed per hard rules: the appendix exists in the original submission and was stripped by the parser. The reproducibility statement details hyperparameters explicitly.
-- *"No measure of variance appears for classification tasks. The paper claims 3 random seeds are used (stated in methods section)"* — The "3 seeds" mention only appears in Fig. 5's caption, not in the methods section. The core concern (missing variance in Table 1) is retained as Major #2; the inaccurate attribution is removed.
-- *Strength: "Geometry‑performance correlation supporting the core hypothesis (Pearson r up to 1.00, Spearman ρ up to 1.00)."* — Removed as a strength because the r=1.00 values themselves indicate a computation issue that undermines this evidence.
+
+These points are flagged to be removed; treat them with caution.
+
+- **"Baselines may not be fair (LoRA vs. full fine-tuning)"** — REMOVED. The paper states it uses LoRA for its own method. Many cited baselines (C-CLIP, DIKI, LADA) are themselves parameter-efficient methods that use LoRA or adapters. There is no evidence in the paper that an unfair comparison exists; this is speculative. Furthermore, if the asymmetry favored the baseline (full fine-tuning has more capacity), that would only strengthen PI-CCA's case.
+
+- **"Missing hyperparameter values (λ₁, λ₂, λ₃, α, β, M)"** — REMOVED. The paper explicitly states these are reported in Appendix A.1 and A.2. The appendix was stripped by the parser but exists in the original submission.
+
+- **"Theory section missing from main text"** — REMOVED. The paper references §A.4 for theoretical explanation and a Theory section in the appendix. The appendix was stripped. This is not a paper flaw.
+
+- **"No discussion of how initial pre-continual CCA certificate is computed when original pre-training data is unavailable"** — partially valid concern about underspecification, but the core idea (diverse anchor prompt set) is conceptually clear. The appendix likely contains details. Moved remaining concern to Minor.
+
+- **"Method feasibility not examined — wall-clock time, sensitivity to batch size not analyzed"** — partially REMOVED. Figure 2 already reports peak memory (GB) and per-step wall-clock time (ms) on A100-80GB across certificate configurations. The paper also mentions sensitivity experiments in Appendix A.3. The batch-size sensitivity analysis demand is a research-direction ask, not a weakness.
+
+- **Several harsh-critic points about reproducibility (undisclosed power-iteration steps, Newton-Schulz details)** — REMOVED per instructions: these are appendix-deferred or implementation details impractical for main-text inclusion.
+
+- **Strength: "State-of-the-art replay-free performance" claimed as the strongest evidence** — KEPT but qualified. The improvements are genuine and consistent but modest on classification tracks, and the missing error bars on Table 1 warrant caution.
+
+- **Strength: "The paper addressed an important problem"** — REMOVED as generic/superficial. This is true of many papers and carries no specific evaluative weight.
 
 ## Novel Insights
-The key insight that emerges from the interplay between the reviewer criticism and the paper's actual content is the tension between the paper's framing of the correlation analysis as "independent evidence" and the reality that the drift measures closely track the regularized losses. A genuinely stronger evidence design would compare PI-CCA's observed forgetting to a drift metric *not* part of its optimization — for instance, measuring how much the CKA or mutual information between modalities changes, and correlating that with performance. This design would separate the claim "preserving CCA geometry predicts retention" from the weaker claim "when PI-CCA works well, its own loss terms are small." The paper already has the experimental infrastructure to run such a test and would benefit from doing so.
+
+The paper's most valuable conceptual contribution is reframing catastrophic forgetting in VL-CL as *alignment-geometry drift* rather than proxy-signal mismatch. While representation similarity metrics (CKA, SVCCA) have been used diagnostically in CL, PI-CCA is the first to operationalize CCA invariants (spectrum + subspace) as *optimization targets* during continual adaptation. The idea of averaging sketched projectors over prompt perturbations to obtain a rotation-invariant certificate without Procrustes alignment is a neat technical insight that elegantly handles sign/rotation ambiguity in the canonical subspace.
 
 ## Suggestions
 
-1. **Recompute or properly report the correlations in Fig. 3.** If the values are 0.9997 rounded to 1.00, report them to a precision that honestly reflects the scatter. If the computation is correct, explain how perfect correlations arise given the visible scatter and the 95% CI shaded area. If a bug exists, fix it and re-run.
-2. **Add standard deviations or confidence intervals to Table 1** for the classification results, consistent with the reporting in Table 2.
-3. **Add a brief discussion** acknowledging that D_ang/D_ρ are closely related to the regularized losses, and therefore the correlation analysis is not fully independent evidence. This would strengthen rather than weaken the paper by demonstrating self-awareness.
-4. **Report absolute zero-shot accuracy** on the held-out suite before and after continual learning, not just PD.
+- Re-compute Figure 3 correlations on a held-out validation set rather than on the same configurations used for certificate estimation; report the actual number of data points and verify the correlation coefficients are credible.
+- Add standard deviations to Table 1 (MTIL and X-TAIL) from multiple seeds, matching the reporting standard already used in Table 2.
+- Provide a concise operational definition of the perturbation strength s (e.g., "s is the probability that each token is independently perturbed via synonym replacement") so the stress test is interpretable and reproducible without consulting the appendix.
+- Consider including the simple L2-regularizer sanity check in a revision to preempt questions about whether the CCA machinery is strictly necessary.
 
 ## Score and Decision
 
-**Calibration:**
+**Anchor comparison:**
 
-Round 1 bracket: [3.5, 7.5]
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| sb7qHFYwBc (C-CLIP) | 6.50 | R1 | PI-CCA is more methodologically novel and directly outperforms C-CLIP; evaluation breadth is similar. Slightly weaker on presentation rigor (missing std, implausible correlation). |
+| k9NYnsC4Mq (PROOF) | 5.67 | R1 | PI-CCA is clearly stronger: more novel geometric framing, broader benchmarks, more thorough analysis, and does not suffer from the inference-mismatch critique leveled at PROOF. |
+| TLADT8Wrhn (TiC-CLIP) | 6.25 | R2 | TiC-CLIP is a benchmark contribution with simpler methods. PI-CCA has a stronger methodological contribution but TiC-CLIP's evaluation is more carefully executed. Comparable overall contribution level. |
+| pB9XVRGVu0 (GeRA) | 5.75 | R2 | PI-CCA is more ambitious in scope (continual adaptation vs. static alignment), with more extensive experiments. Both use geometric regularization but PI-CCA's continual-learning application adds difficulty. |
+| V6uxd8MEqw (MISA) | 6.50 | R2 | Different CL setting (general CL vs. VL-CL). PI-CCA's contribution is comparably novel within its domain. |
+| wE1I9IGqeH | 6.00 | R2 | Different CL variant; PI-CCA's method is more technically sophisticated. |
 
-Anchors retrieved and evaluated:
-- C-CLIP (6.5, Accept) — Directly comparable VL-CL paper with SOTA results. PI-CCA has a more novel conceptual contribution but weaker analysis rigor (r=1.00 issue). Slightly below C-CLIP.
-- TiC-CLIP (6.25, Accept) — CLIP continual training paper. PI-CCA has stronger methodological novelty but less comprehensive benchmarking scope.
-- PROOF (5.67, Reject) — VLM class-incremental learning. PI-CCA is clearly more novel and better supported.
-- Vision+Language Synergy (5.0, Accept) — Prompt-based CL with language guidance. PI-CCA has a stronger conceptual contribution and better-controlled experiments.
-- LLaCA (5.33, Reject) — MLLM continual instruction tuning. PI-CCA demonstrates stronger methodological novelty.
-- Incrementally Adapting Generative VLMs (4.67, Reject) — Task codebook approach. PI-CCA is clearly stronger.
-
-Round 2 narrowing: PI-CCA sits above the 5.0–5.67 range but below C-CLIP (6.5). The conceptual novelty *and* strong empirical evaluation (four benchmarks, comprehensive ablations) place it closer to 6.0 than to 5.5, but the r=1.00 issue and missing Table 1 variance prevent it from reaching the C-CLIP level.
-
-**Final score:** 6.0  
-**Decision:** Accept
+**Round-1 bracket**: [5.0, 7.5] based on initial retrieval.  
+**Round-2 narrowing**: PI-CCA sits between 5.75 (GeRA) and 6.50 (C-CLIP). It is methodologically stronger than C-CLIP but has weaker presentation rigor (implausible correlation, missing std on Table 1). I place it at **6.0** — a solid contribution with a genuinely novel approach that outperforms existing replay-free methods, but with evaluation presentation issues that prevent a higher score.
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

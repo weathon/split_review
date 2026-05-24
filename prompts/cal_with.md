@@ -11,13 +11,13 @@ Make one `calibration_search` call with three queries that anchor each score ban
 
 If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 
-Use `read_anchor(anchor_id)` on a small number of anchors (typically 1–2 per band), using the `anchor_id` from the search results, to inspect the full reviews. Now form an initial bracket: based on these comparisons, what is the narrowest plausible score range for this paper (e.g., "between 4 and 6", "between 6.5 and 8")? State this bracket explicitly before round 2.
+Use `read_file` on a small number of anchors (typically 1–2 per band) to inspect the full reviews. Now form an initial bracket: based on these comparisons, what is the narrowest plausible score range for this paper (e.g., "between 4 and 6", "between 6.5 and 8")? State this bracket explicitly before round 2.
 
 ## Round 2 — Narrowing within the bracket
 
 Make a second `calibration_search` call to pull more anchors *inside* your round-1 bracket. Use 2–3 queries with `low_score` and `high_score` tuned to your bracket (remember: both bounds are exclusive — avg > low_score and avg < high_score). For example, if round 1 placed the paper between 5 and 7, query for anchors in `(4.5, 6)` and `(6, 7.5)` on the most topically relevant aspects of the paper. The goal is to find anchors that sit close to where you think the paper lands, so the comparison is sharper than "this paper is between the weak anchor at 3 and the strong anchor at 8." Since this narrows the search pool, you can use a more lax search term.
 
-Read 2–4 of these new anchors in full with `read_anchor(anchor_id)`. Compare the paper against each and ask: is this paper better, similar, or worse than this specific anchor? Use those comparisons to set the score.
+Read 2–4 of these new anchors in full with `read_file`. Compare the paper against each and ask: is this paper better, similar, or worse than this specific anchor? Use those comparisons to set the score.
 
 ## Round 3 — Optional, only if still genuinely uncertain
 
@@ -28,10 +28,6 @@ If after round 2 you still cannot decide between, say, 5.5 and 6.5 because all y
 - At most three `calibration_search` calls total. Stop after round 2 unless you have a concrete reason for round 3.
 - Each call is a batch of queries; do not spam single-query calls.
 - After your final retrieval, write the review and score. Do not call `calibration_search` again during the writing phase.
-
-## Calibration unavailable
-
-If you cannot complete both calibration rounds — `calibration_search` errors out, returns nothing usable, or you otherwise cannot retrieve and read anchors for round 1 and round 2 — do NOT fall back to an uncalibrated score from your own prior. Output `<score>-100</score>` and stop. A calibrated score requires the two-round anchor comparison; without it there is no score to report.
 
 ## Scoring rules
 
@@ -44,4 +40,4 @@ If you cannot complete both calibration rounds — `calibration_search` errors o
 
 ## Reporting
 
-When reporting your score, list every anchor paper retrieved across all rounds (not just the ones you read in full). For each anchor give the anchor_id, its avg human score, the round it came from, and one sentence on how it compares to the paper under review. State the round-1 bracket explicitly, then explain how round 2 (and 3, if used) narrowed it to the final score.
+When reporting your score, list every anchor paper retrieved across all rounds (not just the ones you read in full). For each anchor give the path, its avg human score, the round it came from, and one sentence on how it compares to the paper under review. State the round-1 bracket explicitly, then explain how round 2 (and 3, if used) narrowed it to the final score.

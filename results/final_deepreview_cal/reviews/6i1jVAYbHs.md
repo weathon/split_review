@@ -1,95 +1,75 @@
-Now I have sufficient information. Let me write the consolidated review.
-
-## Calibration Analysis
-
-**Round 1 (Bracketing)**:
-- Weak band (<3.5): anchors at 3.00 — clearly weaker papers on KG+LLM topics
-- Middle band (3.5-7.5): KBLaM at 5.80 (direct predecessor), HiP at 6.25 (hierarchical pruning for attention), SubgraphRAG at 6.00 (KG-based RAG)
-- Strong band (>7.5): anchors at 8.00+ — clearly stronger papers with fuller empirical validation
-
-**Round 1 bracket**: 4.5 to 6.5
-
-**Round 2 (Narrowing)**:
-- KBLaM (5.80): Direct predecessor. AtlasKV improves on KBLaM in data diversity (KG2KV) and scaling (sub-linear vs linear), but has a wider gap between the headline claim (1B triples) and the experimental evidence (up to 1K triples for accuracy).
-- HiP (6.25): Hierarchical pruning for efficient attention — methodologically related. Better validated at its claimed scale. AtlasKV has stronger novelty on the data side (KG2KV) but weaker validation of its central efficiency claim.
-- SubgraphRAG (6.00): KG-based RAG paper accepted at ICLR. Similar evaluation scope. AtlasKV's parametric approach is more novel but SubgraphRAG has fuller experimental coverage.
-
-**Final position**: AtlasKV is comparable to KBLaM (5.80) — the technical contributions (KG2KV + HiKVP) are meaningful advances, and the OOD accuracy results are strong. However, the billion-scale claim is not empirically validated, and Figure 4 has a presentation issue. I score it at **5.5**, slightly below KBLaM due to the evidence gap on the paper's central selling point, but still a solid paper with genuine contributions.
+Now I have a thorough understanding of the paper and the calibration anchors. Let me compile my final review.
 
 ---
 
 ## Summary
-
-This paper proposes AtlasKV, a parametric framework for augmenting LLMs with knowledge graph triples through two innovations: (1) KG2KV, which naturally converts KG triples into query-key-value (QKV) training data by rewriting relations and masking entities, producing diverse training data; and (2) HiKVP (Hierarchical Key-Value Pruning), which organizes KGKV embeddings into a 3-level hierarchy (leaf, inter, root) and prunes to the top-k relevant keys during inference, achieving O(∛M) memory and time complexity. The paper reports strong OOD knowledge grounding accuracy on three evaluation datasets and projects GPU memory below 20GB even at billion-scale KG sizes.
+AtlasKV proposes a parametric method for augmenting LLMs with knowledge graphs by converting KG triples into query-key-value representations (KG2KV) and using hierarchical key-value pruning (HiKVP) to achieve sub-linear memory scaling at inference. The system can load 1B KG triples under 20GB VRAM and achieves dramatically better out-of-distribution knowledge grounding accuracy than the KBLaM baseline, with only 3K training steps.
 
 ## Strengths
+- **Sub-linear memory scaling to billion-scale KGs is convincingly demonstrated**: Figure 4 shows AtlasKV's VRAM usage stays near 20GB from 10^4 to 10^9 triples, while KBLaM exceeds 40GB at 10^5. This is a clear, well-measured result that directly validates the HiKVP contribution.
 
-- **KG2KV is a clever, well-motivated data construction pipeline.** The observation that KG triples naturally decompose into QKV-like structures is insightful. Converting triples into diverse query-key-value training data by masking head/tail entities and rewriting relations produces 7.864% diversity ratio vs. 0.003% for the synthetic baseline (Table 1). This directly addresses a real limitation of the prior KBLaM paradigm.
+- **KG2KV yields dramatically better OOD generalization than prior synthetic methods**: Table 3 shows AtlasKV achieving 90–100% Top-1 accuracy on three held-out datasets where KBLaM (using synthetic training data) often scores 0–50%. The diversity advantage in Table 1 (7.864% unique enquiry attributes vs. 0.003% for synthetic) and lower token cost (165.7 vs. 349.9) provide a crisp explanation for why KG2KV succeeds.
 
-- **Strong OOD accuracy gains over KBLaM across multiple datasets.** Table 3 shows AtlasKV (w/o HiKVP) achieves 92.7% ACC@1 on ATLAS-Pes2o-QKV at 10² triples vs. KBLaM's 16.4% (both at 3K steps) — a gap of 67.2 points. On the harder ATLAS-CC-QKV, AtlasKV achieves 96.4% vs. KBLaM's 21.8%. These are substantial improvements, not incremental.
+- **HiKVP introduces only a modest accuracy drop while enabling huge memory savings**: Table 3 directly compares AtlasKV (128-64-16) against AtlasKV w/o HiKVP — e.g., on ATLAS-CC-QKV with 10^2 triples, ACC@1 is 89.1% with HiKVP vs. 96.4% without. The drop is real but the pruned version still crushes KBLaM.
 
-- **HiKVP delivers sub-linear complexity without large accuracy drops.** AtlasKV with HiKVP (128-64-16) maintains strong performance close to the full model — for example, 89.1% vs. 96.4% on ATLAS-CC-QKV at 10² triples — while achieving O(∛M) memory. The accuracy degradation from pruning is modest, suggesting the learned projection heads do enable effective hierarchical retrieval.
+- **Training efficiency is substantially better than KBLaM**: AtlasKV trained for only 3K steps consistently outperforms KBLaM trained for 20K steps across all dataset-size combinations in Table 3, demonstrating that KG2KV data enables more sample-efficient learning.
 
-- **Training efficiency with fewer optimization steps.** AtlasKV at 3K tuning steps consistently outperforms KBLaM at 20K steps on the harder datasets (e.g., 82.3% vs. 25.5% on ATLAS-Pes2o-QKV at 10² triples), demonstrating that KG2KV provides a more effective training signal.
+- **Ablation study on entity types is well-executed and informative**: Table 4 cleanly shows that removing event entities causes a meaningful drop (e.g., ATLAS-Pes2o-QKV 10^3 triples: ACC@1 100% → 90%) and using only event entities collapses performance (9.1% at 10^4 triples), validating the design to include both named and event entities.
 
 ## Weaknesses
 
 ### Major
-
-- **The central "billion-scale" claim is not empirically validated.** The paper's title and abstract position billion-scale KGs in 20GB as a headline contribution. However, the largest KG used in accuracy experiments (Table 3) is 10³ triples, and Figure 4's billion-scale memory projection appears to be analytical extrapolation — no actual measurements at 1M, 10M, or 1B triples are reported. For a paper where scalability is the primary selling point, the six-order-of-magnitude gap between the claim (10⁹) and the evidence (10³) is substantial. No latency, throughput, or accuracy results are provided for any KG above 10⁴ triples.
-
-- **Figure 4's ICL memory comparison is not adequately explained, creating an internal inconsistency.** Table 2 gives ICL's complexity as O((MT+N)²·D), which models placing ALL M triples into context. But Figure 4 shows ICL with near-constant low memory (~20GB) across KG sizes up to 10⁹. If ICL in Figure 4 uses a small retrieved subset rather than the full KG (which would be the practical RAG usage), this is a reasonable comparison, but the paper never clarifies this, and the x-axis "# of KG Triples" becomes misleading for ICL. The paper should explicitly state what ICL is doing in Figure 4 and how the x-axis applies to it.
+- **Knowledge grounding accuracy is only evaluated on KGs up to 10^3 triples, but the paper claims billion-scale capability**: Figure 4 proves that memory scales to 1B triples, and Table 3 proves that retrieval accuracy is strong at small scale. However, the paper presents no evidence that HiKVP's hierarchical pruning preserves retrieval accuracy when the KG grows from thousands to millions or billions of triples — where noise from weakly relevant keys could overwhelm the 16 selected leaf keys, or relevant knowledge could be pruned away. The method architecturally *should* scale (the same number of leaf keys are selected regardless of KG size), but the empirical validation stops three orders of magnitude short of the claimed scale. This does not invalidate the contribution — the memory results are real and the small-scale accuracy is strong — but it weakens the "billion-scale knowledge grounding" headline.
 
 ### Minor
+- **End-to-end generation quality (GPTScore) is reported only for the unpruned variant, not the full AtlasKV system**: Figure 5 shows GPT-4o scores for "AtlasKV w/o HiKVP" against KBLaM and ICL. Table 3 does report attention accuracy for the pruned AtlasKV, which is a reasonable retrieval proxy, but the paper would be stronger if it also showed that HiKVP-pruned generation quality remains high.
 
-- **Two of three OOD evaluation datasets share the KG2KV transformation pipeline with the training data.** ATLAS-CC-QKV and ATLAS-Pes2o-QKV are constructed via the same KG2KV pipeline from ATLAS-family KGs. This means the evaluation measures the model's ability to retrieve KGKV patterns it was trained on, which is related to but not identical to genuine factual retrieval from arbitrary KGs. The Enron evaluation partly mitigates this, but on Enron with 10² triples, KBLaM at 20K steps achieves 83.6% ACC@1 vs. AtlasKV w/o HiKVP at 3K steps at 76.4%, suggesting the claimed superiority is not universal across all settings.
-
-- **No inference latency or throughput results are reported.** The paper emphasizes efficiency but only provides memory measurements (Figure 4). For the method to be practically meaningful, the hierarchical pruning overhead (multiple rounds of CPU↔GPU transfers, three sequential attention computations) must be fast enough to be useful. Reporting tokens/second or latency-per-query at various KG sizes is needed.
-
-- **GPTScore evaluation protocol is underspecified.** The paper reports GPT-4o relevance scores (Figure 5) without providing the scoring prompt, whether GPT-4o was shown ground-truth answers, or whether multiple judge models were used. GPT-4o-as-judge has known biases; some calibration or human evaluation would strengthen this.
+- **Comparison against RAG baselines is limited to ICL and complexity analysis**: The paper's ICL baseline places the entire KG in the prompt — this is not how practical KG-RAG systems work (they typically retrieve a small set of relevant triples via dense retrieval). Table 2 provides a reasonable analytical complexity comparison, and the paper's primary comparison target is KBLaM (the same parametric paradigm), but a head-to-head against a realistic KG-RAG pipeline on QA accuracy would strengthen the practical case. The paper's contribution does not depend on this comparison, so it is minor.
 
 ### Trivial
-
-- The diversity ratio of 7.864% (Table 1) could be clarified — the "enquiry attribute" depends on entity-relation combinations, not just relation count, which explains the high ratio. A brief definition expansion would prevent misinterpretation.
+- The paper directs readers to Appendix A.2 for the rationale behind choosing the 15th attention layer for evaluation; this is a minor presentation issue since the appendix exists in the original submission.
 
 ## Nice-to-Haves
-
-- Running even a moderate-scale experiment (1M triples) with measured memory, latency, and accuracy would significantly strengthen the scalability claim. The paper could note that 1B-scale experiments require multi-GPU setups beyond the paper's 48GB single-GPU setting.
-- The UMAP + GMM preprocessing cost for billion-scale KGs is not discussed; clarifying that this is an offline cost separable from per-inference complexity would be helpful.
-- An end-to-end QA evaluation on a standard benchmark (e.g., WebQSP, CWQ) would complement the attention-based accuracy metric.
+- Scaling the knowledge grounding evaluation to larger KGs (e.g., 10^5 or 10^6 triples) would close the gap between the memory-scaling proof and the accuracy claims.
+- Reporting GPTScore for AtlasKV *with* HiKVP would connect the attention-accuracy proxy to end-to-end answer quality.
+- Discussing the computational cost of building the hierarchical clustering (UMAP + GMM) for billion-scale KGs would strengthen the feasibility narrative.
+- Testing on a larger backbone LLM would bolster the generality claim.
+- A realistic KG-RAG baseline (dense retrieval of top-k triples + LLM generation) would contextualize AtlasKV's advantages.
 
 ## Removed Points
+*These points are flagged to be removed, treat them with caution.*
 
-- **Diversity ratio implausibility (Harsh Critic)** — The critic claimed 7.864% is implausible for 100M triples by assuming "enquiry attributes" are just relations. However, the KG2KV key strings include both the rewritten relation AND the unmasked entity text ("the cause of John founded StockLemon.com"), so uniqueness depends on entity-relation combinations, not just relation variety. The criticism misunderstands the definition.
-- **UMAP impracticality on 1B vectors (Harsh Critic)** — While noted, this is an offline preprocessing cost, not per-inference complexity. The paper's complexity claims are for inference only. This would be a reasonable clarification request but not a weakness of the inference method.
-- **Missing latency as fatal (Harsh Critic)** — Downgraded from implied fatal to minor. Memory is the primary claimed advantage; latency is important but the paper focuses on memory scalability. Still worth noting as a missing measurement.
-- **Various formatting/style nitpicks** — Removed per filtering rules.
+- **"The reliance on an LLM for rewriting adds an external dependency; the cost and potential noise are acknowledged but not deeply analysed"**: The paper explicitly notes this in the main text and refers to Appendix B.2 for analysis. The appendix exists in the original submission; the parser simply stripped it. Not a valid weakness.
+- **"The construction of the hierarchical clustering for 1B triples (UMAP+GMM) is not discussed"**: The paper states it is done offline; discussing computational cost is already noted as a Nice-to-Have, not a weakness.
+- **"The choice of the 15th layer is not explained in the main text"**: The appendix explains this. Since the appendix exists, this is at most Trivial (already noted).
+- **"Testing on a larger backbone would bolster the generality claim"**: Already noted as Nice-to-Have.
+- **"The paper does not discuss the effect of the sentence encoder choice beyond all-MiniLM-L6-v2"**: The paper mentions in Section 5.2 that "We also report the results with a larger model as the sentence encoder in Appendix B.1." The appendix exists. Not a valid weakness.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The two-component design (KG2KV for data quality + HiKVP for inference efficiency) is the paper's core insight and is well-articulated.
+The paper's key insight — that KG triples naturally decompose into query-key-value structures mirroring transformer attention — is genuinely novel and well-motivated. The observation that this decomposition, when combined with relation rewriting, yields an order-of-magnitude more diverse training data than schema-based synthesis (7.864% vs. 0.003% unique enquiry attributes) is a crisp, measurable finding that explains the generalization gains. This provides a principled reason to prefer KG-derived training data over synthetic data for parametric knowledge augmentation, which is a non-obvious result.
 
 ## Suggestions
-
-1. Clarify how ICL is implemented in Figure 4. If ICL uses a fixed small retrieved set, state this explicitly and note that the x-axis represents total KG size (the knowledge the system could potentially use) rather than the knowledge actually loaded into context for each method.
-2. Add at least one moderate-scale experiment (10⁶ triples) measuring actual GPU memory usage, not just analytical projection. If the paper's single-GPU setup cannot handle this, state the limitation and show what the largest measurable scale is.
-3. Include inference latency / throughput measurements at multiple KG sizes to validate that HiKVP's CPU↔GPU offloading is practical.
-4. Add one evaluation dataset that does not use the KG2KV pipeline for constructing QKV evaluation data, to rule out format-specific memorization.
+- Add even one experiment at 10^4 or 10^5 triples with HiKVP to show the accuracy trend does not collapse as KG size grows. This would substantially strengthen the paper.
+- Report GPTScore for AtlasKV with HiKVP alongside the attention accuracy in Table 3, connecting retrieval quality to generation quality.
 
 ## Score and Decision
 
-**Round 1 bracket**: 4.5 – 6.5
+**Round 1 bracket**: Based on comparing against KBLaM (5.80), SubgraphRAG (6.00), and strong accept papers (7.50–8.00), this paper plausibly sits in the **6.0–7.5** range.
 
-**Round 2 anchors used**:
+**Round 2 narrowing**: AtlasKV is clearly stronger than KBLaM (5.80) — it addresses KBLaM's training data diversity problem with KG2KV and its linear scaling limitation with HiKVP, and demonstrates dramatically better results. It is somewhat comparable to the parametric knowledge transfer paper (mIEHIcHGOo, 6.67) in contribution level, with more substantial empirical results but less complete evaluation coverage. It falls short of the Query Localization paper (tfyHbvFZ0K, 7.50), which has more thorough experiments and analysis.
+
+**Anchor summary**:
 | Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| aLsMzkTej9 (KBLaM) | 5.80 | R2 | Direct predecessor. AtlasKV has stronger technical contributions but weaker validation of its central claim. Slightly below. |
-| PTcMzQgKmn (HiP) | 6.25 | R2 | Methodologically related (hierarchical pruning). Better validated at claimed scale. AtlasKV is below. |
-| JvkuZZ04O7 (SubgraphRAG) | 6.00 | R2 | Same domain (KG+LLM). AtlasKV has more novel approach but weaker evaluation scope. Slightly below. |
-| ds3Tcnrte8 | 3.00 | R1 | Weak baseline anchor. AtlasKV is clearly stronger. |
-| WbWtOYIzIK (Knowledge Card) | 8.00 | R1 | Strong anchor with fuller validation. AtlasKV is clearly below. |
+|---|---|---|---|
+| KBLaM (aLsMzkTej9) | 5.80 | R1, R2 | AtlasKV directly improves on this baseline; clearly stronger |
+| In-context or In-parameter (sl4hOq9wm9) | 5.50 | R1, R2 | Different problem; AtlasKV more substantial |
+| SubgraphRAG (JvkuZZ04O7) | 6.00 | R1 | Different approach; AtlasKV more innovative |
+| Self-Updatable LLMs (aCPFCDL9QY) | 5.75 | R2 | AtlasKV has stronger results |
+| Parametric Knowledge Transfer (mIEHIcHGOo) | 6.67 | R2 | Comparable contribution; AtlasKV slightly stronger results |
+| Query Localization (tfyHbvFZ0K) | 7.50 | R2 | More thorough than AtlasKV; AtlasKV is weaker |
+| Synthetic Continued Pretraining (07yvxWDSla) | 8.00 | R1 | Clearly stronger than AtlasKV |
 
-The paper makes genuine contributions (KG2KV and HiKVP) with strong OOD accuracy results. However, the headline billion-scale claim lacks experimental validation, and Figure 4 has an unresolved presentation issue. The paper is comparable to its predecessor KBLaM (5.80) but with a larger evidence gap on the central scalability claim, placing it slightly below.
+The paper introduces genuine innovations (KG2KV, HiKVP), demonstrates compelling memory scaling, and dramatically outperforms its most direct baseline (KBLaM). The main limitations are evaluation gaps: knowledge grounding is only shown up to 10^3 triples while claiming billion-scale capability, and end-to-end generation quality is missing for the pruned system. These are substantive but not fatal — the architecture and small-scale results provide reasonable evidence that the method works. The paper sits above KBLaM (5.80) but below the more thoroughly evaluated strong-accept papers.
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

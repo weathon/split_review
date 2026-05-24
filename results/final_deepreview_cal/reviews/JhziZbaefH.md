@@ -1,75 +1,97 @@
-Now I have sufficient context to write the consolidated review. Let me compose it.
+Now I have a thorough understanding of the paper and anchors. Let me compile the final review.
+
+---
 
 ## Summary
-The paper proposes OML, a brain-inspired hierarchical neural network for online multimodal learning that incorporates ascending, descending, and lateral pathways, reference extraction for precise word-referent mapping, conflict detection, and human-in-the-loop interaction. The architecture grows incrementally by adding neurons and connections when novel concepts arrive, and is evaluated on cross-modal retrieval tasks across visual, auditory, and taste modalities.
+
+This paper proposes OML, a brain-inspired hierarchical neural network for online multimodal learning that can continuously learn new multimodal concepts without catastrophic forgetting, detect conflicts between current input and prior knowledge, query a human user, and extract precise feature-level referents of words (e.g., learning that "red" refers to color, not shape). The architecture uses custom neuron models with ascending/descending/lateral pathways, a reference extraction algorithm based on coefficient of variation, and a four-case conflict-check-and-ask learning procedure. Experiments on small fruit/object datasets with hand-crafted features show OML retains high cross-modal retrieval accuracy in open (sequential) environments while offline baselines degrade, and OML outperforms the online baseline AEN on modal extension tasks.
 
 ## Strengths
-- **Reference extraction mechanism is genuinely novel and clearly motivated.** Section 3.4 describes a principled approach using the coefficient of variation across feature dimensions to identify which parts of a multimodal signal a word refers to (e.g., color vs. shape for "red"). This is tested in the precise-referring experiment (Table 2), where OML consistently achieves the highest accuracy (e.g., 87.3% on E-Fruits close V→A vs. next-best 82.9%), and the paper explicitly explains that baselines cannot make this distinction.
 
-- **Conflict detection with autonomous question generation is a concrete algorithmic capability not present in any baseline.** Section 3.5 defines four recognition scenarios with specific conflict-checking rules (e.g., "If \( {}^A N^b \cap G_p^b = \emptyset \) or \( {}^A N^c \cap G_q^c = \emptyset \), a conflict occurs") and templates for questions to the user. Section 4.1 reports that with 10% corrupted pairs, OML detects all conflicts. This is a useful advance over prior online methods (ART, AEN) which cannot detect conflicts at all.
+- **Online continual learning without catastrophic forgetting.** In open-environment evaluations (Tables 1–2), OML maintains stable accuracy (e.g., Fruits Open V→A 89.8, HomeF Open A→V 83.6) while offline methods suffer sharp drops (DBM falls from 70.5 to 54.3 on Fruits V→A). This directly validates the claim of online multimodal learning without forgetting.
 
-- **Modal extension to new channels is demonstrated with clear advantages over the only comparable method AEN.** Table 3 shows OML outperforming AEN on all 12 metrics across VAT and VAT-HomeF (e.g., 92.1% vs. 89.2% on VAT open T→V). The paper explains that OML's λ-based frequency parameters allow it to distinguish whether a word refers to a visual or taste concept, whereas AEN cannot make this distinction.
+- **Novel reference extraction mechanism for attribute grounding.** The algorithm in Section 3.4 uses coefficient of variation to identify which feature dimensions a word refers to. On the enhanced datasets E-Fruits and E-HomeF, where color-referring words are added, OML maintains near-baseline accuracy while offline methods drop by 5–15 points (Table 2), suggesting the architecture learns to distinguish name words from attribute words.
 
-- **The architecture is specified at a level of detail that goes beyond most online learning papers.** Equations (1)–(8) define the activation functions for each neuron type and pathway, including order-independent (OIAM) and order-dependent (ODAM) modes, the reference extraction function, and the incremental update rule for word neuron statistics (Eq. 8). The four learning scenarios in Section 3.5 provide concrete algorithmic rules for when and how to add neurons and connections.
+- **Effective cross-modal recall across all modality pairs.** The bidirectional ascending/descending pathway design consistently produces strong performance on both V→A and A→V tasks across all datasets (e.g., Fruits Close V→A 89.2, A→V 88.7; HomeF Open V→A 85.5, A→V 83.6), and on all six cross-modal directions in the taste-extension experiment (Table 3).
+
+- **Seamless extension to a new modality.** Table 3 demonstrates that when a taste channel is added to a previously trained visual-auditory network, OML outperforms AEN on all retrieval directions (e.g., VAT Open T→V 92.1 vs. 89.2) by using frequency-tagged signals to route descending activations to the correct modality channel.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **The comparison with offline methods in the open environment is uninformative and possibly unfair.** The paper states: "In the open environment, we divide the dataset into four equal parts, each containing different classes. We first feed one part to the network. After learning is completed, we feed the next part and so forth." For offline methods (DAE, DBM, DJSRH, NRCH, FUME), which are designed for batch training on the full dataset, the paper does not specify how they were adapted to this incremental setting. If they were trained on only one partition at a time without access to prior data, the accuracy drops in Table 1 (e.g., DJSRH from 92.1% to 86.3%, NRCH from 92.3% to 84.4%) reflect trivial under-training, not catastrophic forgetting in a meaningful sense. A fair comparison would require training offline methods with replay or comparing against their continual-learning variants. This undermines the paper's central claim about resilience to forgetting.
 
-- **The human-in-the-loop capability is not actually tested with humans.** The paper asserts that "OML is able to detect all conflicts and raise appropriate questions" when 10% of data pairs are corrupted, but this tests only conflict detection, not the interaction loop. Crucially, the paper states: "if the question posed by OML remains unanswered for a certain period of time, we set the answer to be positive." This means the interactive component — asking questions, receiving human answers, and updating based on those answers — is effectively bypassed in all experiments. The claimed capability for human-in-the-loop learning is therefore unvalidated.
-
-- **No ablation studies are conducted.** The method has many interacting components: feature neuron thresholds, lateral connections, Fourier-based activation, reference extraction, conflict detection, and multiple pathway types. Without ablations, it is impossible to determine which components drive performance. For instance, the role of the Fourier sum in Eq. (1) is unclear — the paper says T "does not affect the algorithm" — but no experiment tests whether removing it changes results.
-
-- **No standard deviations or confidence intervals are reported.** Tables 1–3 report only point estimates. With the small, non-standard datasets used (Fruits and HomeF, whose sizes and class counts are not reported), variance could be significant. The absence of error bars makes it impossible to assess whether the reported differences are statistically meaningful.
+- **The conflict detection and human-in-the-loop mechanism — the paper's most distinctive claimed contribution — is not quantitatively evaluated.** The paper states as a core attribute that OML "(2) It can detect conflict between the current input and the learned ones. If a conflict occurs, it can ask the user appropriate questions and conduct learning based on user's answer" (Section 1). Yet the experimental evidence consists of a single qualitative sentence in Section 4.1: "when we randomly add 10% of word-image or word-taste data pairs with incorrect matches, OML is able to detect all conflicts and raise appropriate questions." No detection rate, false positive/negative analysis, comparison to a "no conflict-check" ablation, or demonstration that user feedback actually improves learning outcomes is provided. Furthermore, the interaction loop is effectively disabled throughout the experiments: "if the question posed to the user by OLM remains unanswered for a certain period of time, we set the answer to be positive" (Section 4). This means the paper's headline human-in-the-loop capability — including the engaging motivating example in Figure 1 — goes essentially unevaluated. This substantially weakens the paper's central contribution claim.
 
 ### Minor
-- **The method's generalization relies heavily on hand-crafted thresholds with no sensitivity analysis.** The threshold θ in Eq. (1) is set to "a quarter of the 2-norm of the weight," ϑ in Eqs. (2)/(4) is set to 0.8, the reference extraction threshold r in Eq. (7) is set to 0.5. None of these are justified experimentally or varied in a sensitivity study. The lateral connection condition uses 2θ, compounding the lack of analysis.
 
-- **Some methodological details are underspecified.** The frequency parameters λ_i^{α_k} are assigned "unique natural numbers" with no stated mapping or analysis of how the choice affects activation. The initialization of μ and σ for descending pathways in non-word neurons is not specified. The capacity limits of the network (how many neurons can be added, how inference time scales) are not discussed.
+- **No ablation studies.** OML bundles together the hierarchical architecture, cosine-frequency signaling, lateral connections, reference extraction, and conflict-questioning logic. Without ablations, it is impossible to determine which components are responsible for the observed gains. For example, the improvement on E-Fruits (Table 2) is attributed to reference extraction, but could arise from other architectural factors.
 
-- **The "learns like humans" framing is an overreach.** The paper claims "all these designs enable our method to learn in a manner similar to humans," but no experiment involves human subjects or even a realistic simulation of human interaction. The method's threshold-based rule system bears little resemblance to human learning.
+- **Accuracy metric is not precisely defined.** The paper reports "accuracy" in all tables without specifying whether it is top-1 retrieval accuracy, how ties are handled, or over what test split. Section 4 states "we use one channel input to get outputs from other channels on the testing dataset" but the exact retrieval evaluation protocol is underspecified.
 
-- **Datasets are small and non-standard; their properties are unreported.** Fruits and HomeF are not standard benchmarks. The paper does not state the number of classes, images per class, vocabulary size, or the overlap between partitions. This makes it difficult to assess the scale of the problem or to reproduce the experiments.
+- **Limited scale and feature representation.** Experiments use small datasets (Fruits, HomeF) with hand-engineered features (Fourier descriptors, mean color, MFCCs). The paper does not discuss how the approach would scale to natural feature representations or larger datasets, nor does it analyze sensitivity to feature extraction quality.
+
+- **No error bars or significance tests.** Tables 1–3 report single-point accuracy values without any indication of variance across runs or statistical significance, making it difficult to assess whether the often-modest margins (e.g., OML 89.8 vs. AEN 86.2 on Fruits Open V→A) are reliable.
 
 ### Trivial
-None.
+
+- The method description, while mathematically specified, is dense and would benefit from a more streamlined presentation clarifying the functional role of design choices (cosine-weighted sums, Fourier transforms) beyond the appeal to brain inspiration.
 
 ## Nice-to-Haves
-- Running a small human-subject study (or even a rule-based oracle simulation with varying answer patterns) would validate the human-in-the-loop claim.
-- Evaluating on standard continual learning benchmarks (e.g., Split CIFAR-100 with multimodal extensions, or the protocols used by prior online multimodal work) would improve comparability.
-- A complexity analysis (inference time, memory usage as a function of number of learned concepts) would help assess scalability.
+
+- A controlled test for reference extraction where the model is taught words referring to known feature subsets (e.g., only color, only shape) with ground-truth annotation of which dimensions should be identified, and reporting precision/recall of the extraction.
+- A simulated noisy-teaching experiment with quantitative conflict-detection metrics (precision, recall) and a demonstration that learning with user feedback produces better final representations than learning without it.
+- Comparison with offline methods trained on all data at once in the close environment to contextualize OML's slight underperformance against offline baselines there (Table 1, Close: NRCH and FUME outperform OML).
+- Explicit discussion of limitations: dataset scale, engineered features, the "default yes" assumption for unanswered questions.
 
 ## Removed Points
-- **"The method is not a learning algorithm"** — This is too strong. Constructive/growing networks that add neurons and connections based on input patterns are a recognized form of online learning (cf. ART, growing neural gas). The paper specifies clear rules for network expansion in Section 3.5. However, the criticism that generalization depends heavily on hand-crafted thresholds rather than learned parameters is valid and has been incorporated as a minor weakness.
-- **"Biased metric in the precise-referring experiment"** — The critic claims that baselines are evaluated more leniently than OML. In fact, the paper states "we count this as a correct result for them in Table 2," meaning the same evaluation standard is applied to all methods. The baselines happen to return all features (they cannot precisely refer), but the metric is identical. The numbers are comparable; the bias, if any, favors the baselines, making OML's superiority more striking, not less.
-- **Formatting/style nitpicks, missing related works speculation, reproducibility concerns about code release** — Removed per filtering rules.
+
+These points from the input reviews were considered but not retained in the final review:
+
+- **"Offline methods comparison is misleading/unfair."** The open-environment setup is a standard continual learning evaluation — showing that offline methods suffer catastrophic forgetting under sequential training is the intended demonstration, not a fairness issue. The paper does not claim offline methods are designed for this setting.
+
+- **"Lateral connections are barely used / never tested."** Lateral connections are explicitly used in the conflict-detection logic of Section 3.5 (cases 1 and 2), where the intersection with laterally-connected neuron sets determines whether a conflict is raised. The claim that they are "barely used" is factually incorrect.
+
+- **"ODAM channel asymmetry not made concrete."** Section 3.4 describes how μ and σ are accumulated and how the reference extraction function re(μ,σ) operates (Eq. 7). While the distinction between online inference and batch statistics could be clearer, the mechanism is specified.
+
+- **"Method description hinders reproducibility."** The equations (1–8) are mathematically specified with concrete parameters. An independent researcher could implement from these specifications. This is a presentation/clarity issue, not a reproducibility blocker.
+
+- **"Ascending/descending/lateral pathway functional role not justified."** The paper describes what each pathway does: ascending pathways carry feature signals upward, descending pathways carry activation from MANs back to FNs to enable cross-modal recall, and lateral pathways connect similar FNs to improve generalization. These functional roles are clearly stated.
+
+- **Any concern about the existence or availability of cited models, benchmarks, or datasets.** All cited references are assumed to exist and be available.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+Beyond the paper's own contributions, the review process highlights an important gap in how interactive learning systems are evaluated. The paper designs a genuinely interesting conflict-detection-and-questioning protocol (the four cases in Section 3.5, with context-aware questions like "I think you call it X before, now you also call it Y?") but falls into a common trap: the experiments evaluate only retrieval accuracy rather than the interaction mechanism itself. This suggests a broader need in the field for standardized evaluation protocols for human-in-the-loop learning systems — metrics like conflict detection precision/recall, question appropriateness, and learning improvement from feedback — that go beyond end-task accuracy.
 
 ## Suggestions
-1. Rerun the open-environment experiment with a fair comparison: either train offline methods on the union of all partitions (which would show their ceiling) and compare against OML's incremental accuracy, or compare only against continual learning baselines (replay-based, regularization-based) that are designed for the incremental setting.
-2. Conduct a human evaluation of the interaction loop with at least a small number of participants, measuring correct conflict detection rate, question appropriateness, and the effect of different answer patterns on downstream accuracy.
-3. Add an ablation study that isolates the contributions of lateral connections, the reference extraction module, the Fourier activation, and the conflict-detection mechanism. Report the effect of each removal on the metrics in Table 1.
-4. Report means and standard deviations over multiple runs (at least 5) for all experiments, and report dataset statistics (class counts, partition sizes, vocabulary size).
 
-## Score and Decision
+- Add a focused experiment that quantitatively evaluates conflict detection: inject a known percentage of mismatched pairs, report detection precision and recall, and show that learning *with* simulated user feedback produces better representations than learning *without* it.
+- Conduct ablation experiments that remove individual components (reference extraction, lateral connections, conflict checking) to isolate their contributions.
+- Define the retrieval accuracy metric precisely (top-1, top-k, or MAP) and report results with error bars across multiple random seeds.
+- Clarify in the experiments section how offline baselines were trained in the open environment (e.g., were they fine-tuned sequentially or retrained from scratch on each new partition?).
 
-**Calibration documentation:**
+---
 
-Round 1 bracket: [3.5, 7.5]. The paper's topic (online multimodal learning with constructive architecture and interaction) does not have strong anchors above 7.5; the strongest papers retrieved on related themes score 8+ (e.g., Kuramoto oscillatory neurons at 9.0, test-time adaptation at 8.0) but these are substantively different in rigor. Weak anchors below 3.5 include papers on multimodal benchmarks (2.33) and simple multimodal representation methods (3.0). This places the paper plausibly in the middle band.
+**Calibration summary:**
 
-Round 2 anchors:
-- **Dual-Arch (5.20, Reject)**: Cleaner experiments, CIFAR-100, code release, ablation studies, but lower novelty. OML has more architectural novelty but weaker evaluation. **Comparison: OML is worse** — the evaluation flaws (unfair open-environment comparison, untested HIL, no ablations, no error bars) are more severe than Dual-Arch's weaknesses.
-- **Continual Memory Neurons (4.25, Reject)**: Similar issues with ad-hoc learning algorithms, missing ablations, weaker evaluation. **Comparison: OML is slightly better** — OML has clearer motivation and the reference extraction mechanism is genuinely novel.
-- **Multimodal Open Set Recognition (4.83, Reject)**: Novel problem framing, thorough experiments with error bars, ablation studies. **Comparison: OML is worse** — MRN has better evaluation methodology despite similar novelty level.
-- **Relaxing Representation Alignment (4.50, Reject)**: Multi-modal continual learning with ablation and error bars. **Comparison: Comparable** — similar scope, but OML has weaker evaluation.
+| Anchor ID | Avg Score | Round | Comparison |
+|---|---|---|---|
+| SI6zocV2SS | 1.50 | 1 | Weaker than OML — simple neuron-freezing with Hebbian learning, much less novelty |
+| WM5G2NWSYC | 2.00 | 1 | Weaker — projected subnetworks for meta-learning, limited evaluation |
+| gNoqEdT2wO | 2.33 | 1 | Weaker — a benchmark proposal without novel method |
+| HCCkCjClO0 | 3.00 | 1 | Weaker — online weight approximation, limited novelty |
+| Pa6SiS66p0 | 4.33 | 1 | Stronger evaluation design (benchmark + analysis) but simpler method; OML has more novelty but weaker evaluation |
+| 0CtIt485ew | 4.00 | 1,2 | Comparable — brain-inspired continual learning, better evaluation (standard benchmarks, ablation) but limited biological connection; OML has more novel problem framing but weaker evaluation of its key claims |
+| jYyste2HLP | 4.33 | 1,2 | Slightly stronger — bio-inspired model with more comprehensive experiments (public + proprietary dataset, real robot); OML has similar novelty but weaker evaluation |
+| JAnyCnK5In | 4.75 | 1 | Stronger — SNN online training with more rigorous experiments |
+| IhOeYKqnfp | 4.25 | 2 | Comparable in spirit (novel neuron model for continual learning) but better ablation and standard benchmarks; OML has broader scope but weaker validation |
+| 3YQYo1O01W | 3.67 | 2 | Most comparable — interesting problem (vision-knowledge conflicts) with weak evaluation of core claims; OML is similar in the gap between claimed contribution and empirical support |
 
-Final score: **4.0**. The paper introduces genuinely interesting capabilities (reference extraction, conflict detection) and goes beyond prior online multimodal methods, but the evaluation has significant issues: the open-environment comparison with offline methods is unfair, the human-in-the-loop claim is untested, there are no ablations, and there are no error bars. These weaknesses are substantial enough that the paper, in its current form, does not convincingly support its central claims.
+**Round-1 bracket:** 3.0–5.0. Round 2 narrowed this to 3.5–4.0. OML's core weakness — the unevaluated conflict-detection/human-in-the-loop claim — places it below the better-evaluated anchors at ~4.0+ (Artsy, FlyOrien, CMN) and closer to ConflictVis (3.67), which shares the pattern of an interesting problem formulation with insufficient empirical validation of its central claims. I assign **3.5**.
 
-MY FINAL SCORE: <score>4.0</score>
+MY FINAL SCORE: <score>3.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,85 +1,97 @@
-I have all the information I need. Here is the consolidated final review.
+Now I have all the information I need. Let me synthesize the final review.
 
 ---
 
 ## Summary
 
-HighClass replaces alignment-based metagenomic classification with hash-based token mapping, achieving O(|𝒯|) per-read complexity. On CAMI II, it delivers 85.1% F1 (within 1.5% of the state-of-the-art MetaTrinity at 86.6%) while providing 4.2× speedup and 68% memory reduction. The paper also presents a theoretical framework with generalization bounds (O(√(V|𝒴|/n))), concentration inequalities under α-mixing, and consistency guarantees. The empirical core — the architectural transformation from alignment to token mapping — is a genuine contribution, and the ablation study cleanly isolates each component's contribution.
+HighClass proposes a metagenomic classifier that replaces alignment-based operations with hash-based token lookup using quality-aware variable-length tokens from a pre-trained QA-Token vocabulary, combined with quality-weighted scoring and gradient-based index sparsification. The paper reports 85.1% species-level F1 on CAMI II Marine with a 4.2× speedup and 68% memory reduction over MetaTrinity, along with a theoretical framework of generalization bounds, concentration inequalities under α-mixing, and consistency results.
 
 ## Strengths
 
-- **Replacing alignment with hash-based token mapping is a genuine architectural transformation.** Table 5 shows HighClass eliminates containment search, seeding, and chaining (collectively 85% of MetaTrinity's runtime) and replaces them with token extraction + lookup + scoring totaling 1.9 ms/read vs. 8.8 ms/read — a verified 4.2× speedup. This is not an incremental optimization; it is a different computational paradigm.
+- **Informative ablation study (Table 3)：** The component-wise decomposition is the paper's strongest empirical contribution. It cleanly isolates the gains from variable-length tokens (+6.8 pp over fixed k-mers), quality weighting (+1.9 pp), and shows that QA-Token vocabulary combined with MetaTrinity alignment achieves 86.2% F1 — within 0.4 pp of the MetaTrinity baseline. This honest ablation makes clear what each piece contributes.
 
-- **Rigorous statistical validation exceeds typical practice in this area.** Results report 95% bootstrap confidence intervals (10,000 resamples), Wilcoxon signed-rank tests with Holm-Bonferroni correction, and Cohen's d effect sizes (runtime d=5.2, F1/hour d=4.8). The ablation study in Table 3 isolates each component contribution with uncertainty estimates.
+- **Clear cost breakdown (Table 5)：** The per-read latency decomposition shows exactly where the speedup comes from: eliminating containment search, seeding, and chaining (7.9 ms combined in MetaTrinity) and replacing them with token extraction and lookup (1.5 ms). This is a useful demonstration that alignment is the bottleneck and that token-mapping is a viable replacement.
 
-- **Component contributions are cleanly disentangled.** Table 3 shows that variable-length QA-Token vocabularies contribute 6.8 pp over fixed k-mers (78.3% → 85.1%), quality weighting contributes 1.9 pp (83.2% → 85.1%), and sparsification enables memory reduction from 19.3 GB to 6.8 GB with minimal accuracy loss. The paper honestly notes that QA-Token + MetaTrinity alignment achieves 86.2% F1, demonstrating the vocabulary drives accuracy while the hash lookup drives speed.
+- **Statistical rigor in evaluation：** The use of 10 independent runs, 95% bootstrap confidence intervals, Wilcoxon signed-rank tests with Holm-Bonferroni correction, and Cohen's *d* effect sizes is commendable and above typical standards for systems benchmarking in this area.
 
-- **Strong accuracy-efficiency Pareto improvement.** Table 6 shows HighClass achieves F1/hour = 170.2, which is 4.1× better than MetaTrinity (41.2) and better than both Kraken2 (140.0) and Centrifuge (9.6). This operational point is genuinely useful for throughput-constrained applications.
+- **Scalability experiments (Table 4)：** The comparison against Metalign across database sizes from 100 to 10,000 genomes provides useful evidence that the token-mapping approach scales more gracefully than alignment-based methods.
 
 ## Weaknesses
 
 ### Major
 
-- **Numerical inconsistency in the sparsification accuracy-preservation claim.** The abstract and Section 1.3 state that sparsification "preserving 94% accuracy." Table 1 shows the full index at 85.8% F1 and the sparsified index at 85.1% F1 — a relative preservation of 99.2% (85.1/85.8). Section 5.4.3 claims "99.5% relative accuracy." These three figures cannot all be correct. The 94% figure appears nowhere in the experimental results and contradicts the reported data. This is not a formatting artifact; it is a direct inconsistency in how the paper's central trade-off is communicated. The authors must resolve which number is correct and ensure consistency between text and tables.
+- **The theoretical analysis is disconnected from the implemented classifier and does not inform it.** The generalization bound (Theorem 6) is stated for a hypothesis class learned from *n* training samples, with the paper computing an excess risk bound of ≈0.021 for n = 10⁶. However, HighClass estimates token emission probabilities directly from reference genomes — there is no training set of reads whose size corresponds to the *n* in the bound. The paper never identifies what *n* actually represents in the real system. The concentration analysis under α-mixing reports a variance inflation factor of ≈31.7 and a mixing rate γ ≈ 0.15 said to be "empirically validated," but no experimental evidence or diagnostic is presented in the paper body to support these values. The consistency result (Theorem 8) restates standard MLE asymptotics under a well-specified model. These results do not guide any design choice, predict observed accuracy, or provide usable confidence guarantees for the classifier's outputs. The theory occupies substantial space (Section 4 and parts of Section 6) but functions as a parallel exercise rather than a foundation for the method. This undermines the paper's framing of providing "provable guarantees" and "transforming sequence classification from heuristic approaches to principled methods."
 
-- **The claimed excess-risk bound of 0.021 is presented without derivation and its numerical value is implausible without explanation.** The bound is stated as derived from rate O(√(V|𝒴|/n)). Plugging in V=32,000, |𝒴|=100, n=10⁶ gives √(3.2) ≈ 1.79. To reach 0.021 requires an implicit constant of ≈0.012, which is orders of magnitude smaller than typical constants in Rademacher complexity bounds (usually 2–4). The paper does not sketch the derivation or explain what brings the constant down. While the full proof is in the appendix, a concrete numerical claim of this specificity in the main text should be accompanied by at least a sketch of the calculation. As written, the bound appears either miscalculated or presented without sufficient justification.
+- **Promised benchmark results are absent.** Section 5.3 states evaluation on "CAMI II Marine, CAMI II Strain, HMP Mock communities, and Zymo Standards," yet Tables 2–6 report results exclusively for the CAMI II Marine dataset (and scalability experiments). No results for Strain, HMP, or Zymo appear anywhere in the paper body. This is a significant gap for a method claiming broad applicability and leaves the generality of the speed–accuracy tradeoff unsupported.
+
+- **Numerical discrepancy between Table 1 and Table 3.** Table 1 reports Full Index F1 = 85.8% (index size 21.3 GB), while Table 3 reports "QA-Token + no sparsification" at F1 = 84.7% ± 0.8 (memory 19.3 GB). These should describe comparable configurations — the full HighClass pipeline without the sparsification mask — yet they differ by 1.1 pp in F1 and 2.0 GB in index size. This discrepancy is large relative to the claimed component gains (e.g., quality weighting contributes 1.9 pp) and is not explained.
 
 ### Minor
 
-- **The mixing analysis and the generalization bound are presented as parallel results without integration.** The paper advertises the theory as addressing token dependencies, but the main generalization bound (O(√(V|𝒴|/n))) is derived under standard Rademacher complexity (which assumes independence). The α-mixing analysis (variance inflation factor ≈31.7) is presented as a separate concentration result for token scores. The connection between these two analyses is not made explicit: does the bound change under dependencies? If not, what does the mixing analysis add to the generalization guarantee? The paper should clarify this relationship.
+- **Unreconciled "94% accuracy" claim.** The abstract and Section 1.3 state that sparsification "preserves 94% accuracy." However, Table 1 shows the sparsified index achieves 85.1% F1 vs. 85.8% for the full index, representing 99.2% relative retention (85.1/85.8). The source of the "94%" figure is not identified in the paper.
 
-- **The method for empirically estimating γ≈0.15 is not described.** The paper states that mixing parameters C≈2.3 and γ≈0.15 are "empirically validated on CAMI II data" but provides no description of how these values were estimated (e.g., method-of-moments on autocorrelations, block bootstrap). This makes the mixing analysis difficult to reproduce or assess.
+- **Overstated framing relative to the ablation evidence.** The ablation (Table 3) demonstrates that the QA-Token vocabulary is the primary accuracy driver, and that the speedup comes from replacing alignment with hash-based lookups — the paper's own caption acknowledges this trade. The framing as "fundamental advances" and a "transformative" paradigm shift exceeds what a straightforward engineering integration (pre-trained vocabulary + inverted index + quality weighting + sparsification mask) supports.
 
-- **The learned sensitivity η=1.8 is presented as "optimal" without a sensitivity analysis.** While η comes from QA-Token, the paper claims it "optimally weights sequencing evidence" without showing any sweep or sensitivity study over η in the HighClass context.
-
-- **The gradient-based sparsification procedure is not fully described regarding data separation.** The paper says sparsification masks are "pre-computed" and cites Alser et al. (2024), but does not clarify whether these masks are computed on the reference database alone or could inadvertently incorporate information from test reads. A brief statement confirming that masks are computed solely from the reference (or a held-out set) would rule out data leakage concerns.
-
-### Trivial
-
-- In Section 1.3 (line 97), the generalization bound notation in the text changes between O(√(V|𝒴|/n)) in Section 4.3 and O(√(V𝒴/n)) in the Discussion (line 374) — the latter drops absolute value notation around |𝒴|.
+- **The 86.2% F1 result in Table 3 is notable but underexplored.** The "QA-Token + MetaTrinity alignment" configuration nearly matches the MetaTrinity baseline (86.2% vs. 86.6%) while still using alignment. This suggests the QA-Token vocabulary alone can largely replace MetaTrinity's seed-based approach without the hash-index architecture, which would strengthen the paper's narrative that tokenization is the key innovation. The paper mentions this only briefly.
 
 ## Nice-to-Haves
 
-- A sensitivity analysis over the quality sensitivity parameter η (e.g., F1 vs. η over [0.5, 3.0]) would confirm that 1.8 is a sensible choice within HighClass's pipeline.
-- Including additional alignment-free baselines such as KrakenUniq or minimap2 in mapping mode would contextualize the accuracy-efficiency trade-off against a broader set of fast methods.
-- A brief explanation of how γ is estimated from data (e.g., via autocorrelation decay or block bootstrapping) would make the mixing analysis self-contained.
+- Including Kraken2 with comparable quality information or variable-length tokens would strengthen the ablation by more cleanly attributing gains to the tokenizer vs. the classifier architecture.
+- An analysis of which taxa or read types suffer most from discarding positional information would help characterize the 1.5 pp accuracy gap to MetaTrinity and guide future work.
+- Reporting the offline costs of vocabulary training, index construction, and sparsification mask computation would provide a more complete picture for practitioners.
 
 ## Removed Points
 
-These points from the reviewers were removed (with justification):
+These points were flagged for removal, with justification:
 
-- *"Novelty of HighClass is limited; the method is essentially a bag-of-tokens classifier"* — The paper clearly articulates that the contribution is the architectural transformation from alignment to hash-based token mapping, which is a genuine and non-obvious change. The synthesis of QA-Token, MetaTrinity, and sparsification into a single system with theoretical analysis is itself a contribution. This criticism is scope-creep.
-- *"QA-Token+alignment nearly matches MetaTrinity, weakening the claim that speedup comes from replacing alignment"* — The paper itself makes this point honestly in the Table 3 caption. The claim is precisely that the speedup comes from replacing alignment (with minimal accuracy loss), which is exactly what Table 3 demonstrates.
-- *"Missing related works"* — Hard rule: do not penalize for missing references, as external verification is not possible.
-- *"Scoring function derivation deferred to appendix"* — Standard practice in papers with space constraints; the main text gives the key formula qualitatively.
-- *"Formatting concerns, typos, appendix content"* — Parser artifacts or standard paper organization.
+- **Harsh Critic claim that the paper should discuss prior work using learned tokenization for alignment-free classification (missing related work)：** Removed — the reviewer does not identify specific missing references, and I cannot verify their existence. The paper's related work section is adequate for its scope.
+
+- **Harsh Critic criticism about MetaTrinity and QA-Token citation reliance needing "clearer statement of what those systems already provide"：** Removed — the paper already describes what QA-Token and MetaTrinity provide in Sections 2.1 and the ablation study (Table 3), making the novelty of HighClass's integration sufficiently clear.
+
+- **Strength Finder's "rigorous theoretical guarantees" as a core strength：** Removed — conflicts with the verified major weakness that the theory is disconnected from the implemented classifier. The theory may be mathematically correct but does not apply to the actual system.
+
+- **Strength Finder's "dependency-aware concentration validated by genomic mixing" as a supporting strength：** Removed — the claimed empirical validation of γ ≈ 0.15 is not presented in the paper body, making this strength unverifiable.
+
+- **Harsh Critic demand for discussion of spaced seeds, minimizers, or other adaptive tokenization methods：** Moved to Nice-to-Haves — this is scope creep; the paper's comparison against fixed k-mers and alignment-based methods is sufficient for its stated goals.
+
+- **Harsh Critic point about "Pareto frontier" language being hyperbolic given few methods plotted：** Removed — this is a presentation preference, not a substantive flaw.
+
+- **Harsh Critic theoretical concern about the α-mixing model mapping to the token dependency graph：** Demoted and merged — this is a valid conceptual concern but the deeper issue (already captured as Major) is that the entire theoretical framework is disconnected from the system.
+
+- **Strength Finder's "the single most decisive piece of evidence" framing：** Removed — this is rhetorical praise, not a concrete strength.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The ablation study (Table 3) reveals a genuinely informative decomposition: QA-Token vocabulary alone accounts for nearly all accuracy gains (+6.8 pp over k-mers), quality weighting adds a modest +1.9 pp, and the hash-index architecture costs only 1.1–1.5 pp in accuracy relative to alignment-based scoring with the same tokens. This decomposition, which the paper presents transparently, tells a more nuanced story than the paper's own abstract: the practical contribution is demonstrating that a pre-trained variable-length tokenizer can nearly match alignment-based classification when paired with quality weighting, and that the remaining gap from discarding positional information is small (1.5 pp). This is a useful empirical finding even if not the "transformative" advance the framing claims.
 
 ## Suggestions
 
-1. **Fix the numerical inconsistency**: Decide whether the sparsification preserves 94%, 99.2%, or 99.5% of accuracy (Table 1 strongly supports the 99% figure) and make all text consistent with the experimental data.
-2. **Explain the 0.021 bound derivation**: Provide a brief sketch showing how the O(√(V|𝒴|/n)) rate yields 0.021 for the specific parameter values, or correct the number if it is miscalculated.
-3. **Clarify the relationship between the mixing analysis and the generalization bound**: State explicitly whether the bound accounts for dependencies or is derived under independence, and what the mixing analysis adds.
-4. **Describe the γ estimation procedure**: A 2–3 sentence description of how γ≈0.15 was empirically determined would make the mixing analysis reproducible.
-5. **Clarify the sparsification mask computation**: Add a sentence confirming that importance masks are computed solely on the reference database, not on test reads.
+- Either ground the theoretical analysis in the actual HighClass pipeline (specify what *n* corresponds to, show the empirical mixing diagnostic, demonstrate that the bound is non-vacuous for the real system) or substantially reduce the theory to a brief discussion of why standard concentration results would apply. In its current form, the theory dilutes rather than strengthens the paper.
+- Report results on the promised Strain, HMP, and Zymo benchmarks to support the claim of broad applicability.
+- Resolve and explain the discrepancy between Table 1's Full Index F1 (85.8%) and Table 3's QA-Token + no sparsification F1 (84.7%).
+- Reconcile or remove the "94% accuracy" claim, which does not match the numbers in Table 1.
+- Reframe the introduction and abstract to honestly position the contribution as what the ablation supports: an engineered integration of pre-trained tokenization + hash indexing that achieves a favorable speed–accuracy tradeoff, rather than a "fundamental advance."
 
 ## Score and Decision
 
-**Round 1 bracket**: 4.5–6.5 (based on calibration anchors in weak, middle, and strong bands).
+### Calibration anchors retrieved
 
-**Round 2 anchors examined**:
-| Anchor | Avg. Score | Round | Comparison to this paper |
-|---|---|---|---|
-| FastLSH (BvQkjCnXXr) | 4.50 | 2 | Weaker: less complete evaluation, less practical contribution. Our paper is stronger. |
-| DNABERT-S (9klRFLY2TT) | 5.67 | 2 | Similar: comparable breadth of experiments and concerns about component novelty. Our architectural contribution (alignment→hash) is more fundamental; our theory issues are more severe. |
-| MeToken (noUF58SMra) | 5.80 | 1 | Similar: both have solid ablation and benchmarks. Our theory is more ambitious but also more problematic. |
-| Tokenization Foundations (B5iOSxM2I0) | 6.50 | 1 | Weaker: pure theory paper with no empirical evaluation; our empirical contribution is substantial. |
-| FastLSH (BvQkjCnXXr) | 4.50 | 1 | Weaker: theory flaws + limited experiments. Our paper is clearly better. |
+**Round 1 (bracketing):**
+- IEZjjDX0iC (3.00): protein LM comparison — clearly weaker than HighClass, which has real empirical contributions.
+- GOjr2Ms5ID (3.25): learned Bloom filters — also weaker, narrower contribution.
+- B5iOSxM2I0 (6.50): Foundations of Tokenization (NLP) — purely theoretical, accepted. Stronger in theoretical rigor, weaker in empirical validation. HighClass has more empirical substance but less coherent theory.
+- noUF58SMra (5.80): MeToken for PTM prediction — comparable bioinformatics method paper with empirical results and ablation, accepted. Similar quality level.
+- o2Igqm95SJ (8.00): CAX library — far stronger, well-executed systems contribution. HighClass does not reach this level.
+- YrycTjllL0 (9.00): BigCodeBench — far stronger. Not comparable.
 
-**Final reasoning**: The paper's empirical core is genuinely useful — replacing alignment with hash-based token mapping is a real contribution with practical impact, and the statistical rigor (confidence intervals, effect sizes, corrected tests) is above typical standards for this area. However, the theoretical claims contain a clear numerical inconsistency (94% vs 99%+ accuracy preservation) and a plausibility gap in the excess-risk bound (0.021 from O(√(V|𝒴|/n)) without derivation). These issues do not invalidate the empirical contribution but they undermine the paper's headline claims and must be resolved. Relative to the calibration anchors, the paper is stronger than FastLSH (4.50) but has more serious presentation problems than the 5.5–6.0 range papers. The final score of 5.0 reflects a paper with genuine empirical contributions weighed down by verifiable inconsistencies in its theoretical claims.
+**Round 2 (narrowing):**
+- 9klRFLY2TT (5.67): DNABERT-S — bioinformatics method, rejected. Similar in having empirical contributions with methodological concerns and limited novelty. HighClass has better ablation and statistical rigor, but its theoretical disconnect and missing benchmarks are comparably weighty.
+- Q6PAnqYVpo (5.67): SoftMatcha — efficient inverted-index pattern matching, accepted. Similar in being an engineering contribution with clear speed advantages. SoftMatcha's evaluation was more limited but its claims were more modest and matched.
+- 0ApkwFlCxq (6.25): ComputAgeBench — rejected despite 6.25 average. Benchmark paper with different concerns. HighClass's core empirical contribution is less comprehensive.
 
-<score>5.0</score>
-<decision>Reject</decision>
+**Round 1 bracket:** 4.5–6.5. **Round 2 narrowing:** HighClass is comparable to DNABERT-S (5.67) in having genuine empirical contributions weighed down by significant weaknesses. It is slightly weaker than SoftMatcha (5.67) in terms of claims matching evidence, and clearly below ComputAgeBench (6.25) and Foundations of Tokenization (6.50) in execution quality. The disconnected theory and missing benchmarks place it toward the lower end of the bracket.
+
+**Final score: 5.0**
+
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

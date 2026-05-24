@@ -1,18 +1,20 @@
-Now let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and anchors. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper identifies a mismatch in tree-based speculative decoding: draft models are trained on linear sequences (EAGLE, HASS objectives) but deployed with tree-structured drafting at inference. Two contributions address this: **TALF**, a tree-aware loss that aggregates cross-entropy over all nodes of a target-model-generated tree during training, and **SALF**, a dynamic tree-construction algorithm that stops further drafting when the aggregate probability gain of newly expanded nodes falls below a threshold. On three LLMs (Llama2-7B, Llama3-8B, DeepSeek-R1-Distill-Llama-8B) across five benchmarks at two temperatures, SALF & TALF yield consistent end-to-end speedups of 15.6–39.4% over EAGLE-2 and 6.5–24.4% over HASS.
+This paper introduces two complementary techniques for tree-based speculative decoding: **TALF** (Tree-Aware Loss Function), which trains the draft model by aggregating cross-entropy losses over a pre-built target-model tree to align draft and target distributions across all tree branches, and **SALF** (Stopping at Low Further Gains), a dynamic tree-construction algorithm that prunes drafting iterations when the probability-sum of remaining candidate nodes falls below a threshold, with a provable monotonic-decrease guarantee. Across three model families (Llama-2-7B, Llama-3-8B, DeepSeek-R1-Distill-8B), five benchmarks, and both greedy and non-greedy sampling, SALF & TALF achieve 15.6–39.4% speedup over EAGLE-2 and 6.5–24.4% over HASS with no generation quality loss.
 
 ## Strengths
 
-1. **TALF directly and verifiably addresses a real training-inference gap.** Figure 2(a–b) shows that lower-ranked tokens (ranks 2–5) constitute >10% of draft-tree nodes, and that existing losses (EAGLE, HASS) produce worse accuracy and calibration on those nodes. TALF demonstrably improves accuracy by ~5% and ECE by ~0.05 on ranks 2–5 compared to HASS (Figure 2b), providing direct evidence that the tree-aware loss achieves its intended effect.
+- **Quantified, well-motivated problem identification**: Figure 2a empirically establishes that >45% of tree nodes during inference are not the top-1 choice, and Figure 2b shows EAGLE/HASS draft models sharply degrade in accuracy and calibration when conditioned on lower-ranked tokens. This directly motivates TALF's tree-aware training beyond intuition alone.
 
-2. **Clean factorial ablation (Table 2) that isolates each contribution.** The 3×3 design (three tree-construction methods × three loss functions) disentangles the benefit of TALF from the benefit of SALF. For example: with beam search fixed, TALF improves τ by 12.8% over EAGLE-2; with TALF fixed, SALF improves speedup by 14.4% over optimal tree search. This is a model of how to decompose a combined method.
+- **TALF delivers consistent τ improvements across tree-construction methods**: Table 2 shows that under beam search, optimal tree search, and SALF, TALF improves τ over EAGLE-2 by 11.7–12.9% and over HASS by 3.5–7.3%. The gain is robust to the choice of inference-time tree construction, demonstrating that the training improvement generalizes.
 
-3. **Consistent gains across a broad evaluation sweep.** Table 1 covers three LLMs, five benchmarks (dialog, code, math, instruction, summarization), two temperature settings, and 30 total cells. SALF & TALF outperform both baselines in every single cell. The gains are larger on harder-to-align models (DeepSeek-R1-Distill-Llama-8B), which is consistent with the method's motivation.
+- **SALF is principled and well-ablated**: Theorem 1 proves monotonic decrease of the probability sum across drafting iterations, giving formal grounding for the early-stopping criterion. Table 2 cleanly shows SALF trading off τ (moderate decrease) for reduced drafting overhead and net speedup gains (e.g., 2.47× vs 2.16× under optimal tree search with TALF). Table 4 further demonstrates that speedups are robust across a wide threshold range (0.2–0.7).
 
-4. **Principled stopping criterion for SALF.** Theorem 1 proves monotonic decrease of the sum of probabilities of newly expanded nodes, ensuring the SALF threshold controls a predictable quantity. This is clean and distinguishes SALF from heuristics.
+- **Comprehensive end-to-end evaluation**: Table 1 reports wall-clock speedups on three model families, five diverse benchmarks (MT-Bench, HumanEval, GSM8K, Alpaca, CNN/Daily Mail), and two temperature settings — a breadth that strongly supports generalizability. The equal-training-time protocol on DeepSeek addresses potential concerns about training budget fairness.
 
 ## Weaknesses
 
@@ -20,62 +22,74 @@ This paper identifies a mismatch in tree-based speculative decoding: draft model
 None.
 
 ### Major
-
-1. **Training convergence is not equitably validated between HASS and TALF.** For Llama2-7B and Llama3-8B, both methods are fine-tuned from a common EAGLE checkpoint for exactly 3 epochs. TALF processes multiple tree nodes per step via tree attention, so it obtains more gradient updates per input sequence than HASS in the same number of epochs. If HASS would continue to improve with 6–10 additional epochs, the claimed gap (6.5–24.4%) could shrink. The equal-wall-clock-time experiment for DeepSeek-8B partially addresses this concern but does not resolve it: if TALF per-step throughput is higher, equal time still yields unequal optimizer steps. The paper provides no training loss or validation τ curves to argue convergence. *Why this matters:* The headline comparison rests on the premise that both methods are compared at their respective best, and this premise is not yet convincingly supported.
-
-2. **SALF threshold sensitivity is reported for only one of three target models.** Table 4 shows a full sweep of *th* for DeepSeek-R1-Distill-Llama-8B, but no corresponding data for Llama2-7B or Llama3-8B. The paper states that *th*=0.6 was chosen because it yields "more consistent performance improvements for the tested target LLMs" — yet no data for those other LLMs is presented to substantiate this claim. The optimal threshold could vary across models (the DeepSeek sweep shows *th*=0.5 is actually best), and the reader cannot assess whether the chosen default is reasonable for the other two models. *Why this matters:* SALF's main hyperparameter is not adequately characterized across the paper's own testbed.
+None.
 
 ### Minor
 
-1. **Training overhead is mentioned qualitatively but never quantified.** The paper states that tree attention "significantly accelerates" TALF training, and that preprocessing the tree with the target model incurs cost. However, no wall-clock training times, per-epoch durations, or amortized preprocessing costs are reported. This omission makes it difficult for practitioners to assess the training cost of adopting TALF.
+- **Training-inference tree mismatch not addressed head-on**: TALF trains on a tree pre-built by the *target* model (fixed across epochs for cost reasons, §3.2), while at inference the draft model constructs trees from its *own* probability estimates via SALF or other methods. This means the training tree branches and the inference tree branches are drawn from different distributions. The paper's experimental results (Table 2) show TALF nevertheless improves τ across all tree-construction methods, so the practical impact is small, but the paper claims to "mitigate the misalignment" (abstract) without discussing this residual gap. Explicitly acknowledging that TALF narrows rather than fully resolves the misalignment would sharpen the contribution.
 
-2. **No statistical uncertainty is reported.** Speedup measurements are reported as point estimates without confidence intervals, standard deviations, or bootstrapped ranges. Several benchmarks (HumanEval has 164 samples; MT-Bench has 80 multi-turn questions) are relatively small, and variance could be non-negligible. This is standard practice in the SpD literature but still limits the strength of the empirical claims.
+- **Regression-loss removal is stated but not ablated**: TALF drops the feature-regression loss \(\mathcal{L}_{reg}\) used by EAGLE and HASS, asserting that "training solely on the token probability distributions across multiple nodes was sufficient" (§3.2). A brief ablation (TALF with vs. without \(\mathcal{L}_{reg}\)) would clarify whether the tree-based loss structure, the removal of regression loss, or their combination drives the improvement. This does not threaten the contribution but would strengthen the method's clarity.
 
-3. **The TALF training tree is built by the target model and fixed across epochs (Algorithm 1), while inference trees are built by the draft model (via SALF or beam search).** The paper indirectly addresses this through Figure 2b (calibration on lower-ranked tokens) and the fact that TALF improves τ even when inference uses beam search with the draft model's own probabilities (Table 2, first block). However, a direct comparison of tree-structure overlap (draft-vs-target trees after TALF training) would strengthen the story. As presented, the gap is acknowledged but not analyzed.
+- **SALF threshold selection is model-dependent**: Table 4 shows \(th = 0.5\) yields the highest mean speedup (2.62×) on DeepSeek, yet the paper uses \(th = 0.6\) as default, citing "more consistent performance improvements for the tested target LLMs" (§4.4). The paper acknowledges this as future work, which is fair, but the justification for the default choice could be more quantitative.
 
 ### Trivial
-None.
+
+- The abstract and conclusion phrase improvements as "1.16–1.39×" which are *relative* multipliers over baselines; a first-time reader could momentarily confuse these with absolute speedup factors. Context resolves this, but a clarifying phrase would help.
 
 ## Nice-to-Haves
 
-- Training convergence curves (loss or validation τ over epochs) for both HASS and TALF would cleanly resolve the convergence concern.
-- Extending the SALF threshold sweep (Table 4) to Llama2-7B and Llama3-8B would improve confidence in the default hyperparameter.
-- Reporting training wall-clock times (per-epoch or per-1K-steps for TALF vs. HASS) would help practitioners.
+- A small empirical measurement of the overlap between training trees (target-constructed) and inference trees (draft-constructed) would quantify the residual distribution-shift gap and strengthen the alignment argument.
+- A brief training-throughput comparison between TALF and HASS would help practitioners assess adoption cost.
+- A heuristic for automatically setting the SALF threshold \(th\) from the draft model's probability distribution would reduce reliance on per-model tuning.
 
 ## Removed Points
 
-*Weaknesses removed from the harsh critic's input:*
+These points were considered but excluded from the main review:
 
-- **"The proof requires B<|Vocab|, which is always true"** — The critic notes this as a concern but the guarantee is practically unconditional since B ≤ N ≤ 60 ≪ |Vocab|. Not a weakness.
-- **"Missing comparison with SpecExec"** — The paper already compares against optimal tree search (which is SpecExec's approach) in Table 2. This is sufficient.
-- **"Training tree is built by target model, not draft model"** — This was retained as a Minor weakness but the critic framed it as more severe than warranted. The empirical results (TALF helps with all three tree-construction methods including draft-model-based beam search) already constrain the severity of this issue significantly.
-- **Generic concerns about "could the metric be measuring a proxy"** — Not anchored to any specific evidence in the paper; removed.
-- **Reproducibility nitpicks about undisclosed hyperparameters** — The paper provides detailed hyperparameters in Section 4.1 and Appendix D; the critic's concerns about "trivial implementation details" are standard and not actionable.
+- *"The paper does not discuss memory/compute overhead of TALF training relative to HASS"* — This is a practical deployment concern, not a scientific weakness. Moved to Nice-to-Haves.
+- *"The reliance on a pre-computed target-model tree could limit TALF's applicability if the target model is fine-tuned"* — The paper already describes the cost trade-off explicitly and this is an inherent limitation of distillation-based approaches, not a flaw.
+- *"The SALF threshold was tuned for the reported models"* — The paper openly discusses this and the sensitivity analysis (Table 4) shows robustness. The concern is addressed in the Minor section above at appropriate severity.
+- *"Missing proofs in appendix"* — The parser strips appendices. The paper references them in §B and §C; they exist in the original submission.
+- *"Training protocol could slightly advantage TALF"* — The equal-time training on DeepSeek directly addresses this; the paper already anticipates and mitigates the concern.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The paper's core insight — that tree-based speculative decoding creates a training-inference mismatch that sequence-based losses cannot address, and that a tree-structured loss with target-model supervision can substantially improve draft quality on lower-ranked branches — is well-articulated and the quantitative evidence (Figure 2) makes it concrete. The observation that a monotonic probability-sum criterion can effectively balance tree optimality against drafting overhead (Theorem 1) is also a clean contribution.
 
 ## Suggestions
 
-1. Provide training loss curves or validation τ over training epochs for HASS vs. TALF to address the convergence concern directly.
-2. Extend the SALF threshold sensitivity analysis to at least one of the two Llama models in the main paper (or a summary plot in the appendix).
-3. Include a brief table of training wall-clock times per epoch for HASS and TALF.
-4. Consider reporting bootstrapped 95% confidence intervals for speedups on the smaller benchmarks (HumanEval, MT-Bench).
+- Add a sentence or short paragraph explicitly discussing the residual gap between training trees (target-built) and inference trees (draft-built), perhaps with a brief measurement of node overlap. This would preempt the main critique and strengthen the paper.
+- Include a one-paragraph ablation comparing TALF performance with and without the regression loss \(\mathcal{L}_{reg}\) (even a single-model, single-benchmark result) to isolate the contribution of the tree-structured loss from the simplification of dropping feature regression.
+- Clarify in the abstract that "1.16–1.39×" are relative improvements over baselines, not absolute speedup factors, to avoid momentary confusion.
 
 ## Score and Decision
 
-**Bracket and calibration:** Round 1 bracketing placed the paper between 3.0 (weak anchors, avg 3.00) and 8.5 (strong anchors), with the middle bracket (3.5–7.5) producing the most comparable anchors. Narrowing to a 6.0–8.0 plausible range, Round 2 queried for anchors in (5.0, 7.0) and (6.5, 8.5). Key anchors read in full:
+**Round-1 bracket**: Based on three band queries, the paper sits between ~5.5 and ~8.0. It is clearly stronger than the 5.75–5.80 range (drop-in adaptation, ParallelSpec) and the 6.00 anchor (DistillSpec), and is a clear improvement over the directly comparable HASS paper (7.00). It is not at the 8.0+ level of more transformative contributions.
 
-| Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| xOtOfdbBqK — Drop-In SD Adaptation | 5.75 | R1/R2 | Weaker: marginal improvements, non-tree-based, weaker baselines |
-| T9u56s7mbk — HASS paper | 7.00 | R1/R2 | Very similar scope; this paper improves upon HASS by 6.5–24.4% and has more thorough evaluation |
-| Rz0kozh3LE — Mixture of Attentions for SD | 7.00 | R2 | Comparable scope and quality; this paper's evaluation is broader (3 models, 5 tasks vs. 1 model) |
-| rsY6J3ZaTF — DistillSpec | 6.00 | R2 | Weaker: systematic study of existing techniques applied to SD; less novel contribution |
-| N1L5TgtkAw — Multi-Draft Speculative Sampling | 7.50 | R2 | Stronger but different contribution (theoretical analysis of multi-draft, not a training+inference system) |
+**Round-2 narrowing**: Compared to DistillSpec (6.00, Accept — limited novelty, task-dependent), our paper is substantially stronger in novelty and evaluation breadth. Compared to HASS (7.00, Accept — which our paper directly improves upon by 6.5–24.4%), our paper has stronger motivation (quantified misalignment), two complementary techniques rather than one, theoretical grounding (Theorem 1), and broader evaluation (3 models, 5 tasks, 2 temperatures). Compared to Multi-Draft Speculative Sampling (7.50, Accept — deeper theory, sparser practical evaluation), our paper trades some theoretical depth for broader practical validation and addresses the currently dominant tree-based paradigm. The paper is at least comparable to Multi-Draft in overall contribution quality.
 
-The HASS paper (7.00) and Mixture of Attentions paper (7.00) are the most directly comparable anchors. This paper is at least as strong as both — it has a more comprehensive evaluation, cleaner ablation, and two distinct contributions (TALF + SALF) rather than one. However, the training convergence concern and missing SALF threshold data for Llama models prevent it from reaching the 7.5 level occupied by the strongest accepted papers in this space. Final score: **7.0**.
+**Anchors referenced across all rounds**:
 
-MY FINAL SCORE: <score>7.0</score>
+| Anchor ID | Score | Round | Comparison |
+|---|---|---|---|
+| `n7iwmPacDt` | 3.00 | R1 | Far below — rejected, limited novelty |
+| `g3D27bfmrf` | 3.00 | R1 | Far below — different problem |
+| `ulGwcj1egv` | 3.00 | R1 | Far below — different problem |
+| `t15cWqydys` | 3.00 | R1 | Far below — different problem |
+| `xOtOfdbBqK` | 5.75 | R1/R2 | Below — marginal improvements, limited scope |
+| `SXvb8PS4Ud` | 5.80 | R1/R2 | Below — marginal speedup, questioned novelty |
+| `rsY6J3ZaTF` | 6.00 | R2 | Below — limited technical novelty, task-dependent |
+| `gfDbD1MRYk` | 4.50 | R1 | Below — different approach |
+| `T9u56s7mbk` (HASS) | 7.00 | R1/R2 | **Our paper improves over HASS** — stronger motivation, two complementary techniques, broader eval |
+| `N1L5TgtkAw` (Multi-Draft) | 7.50 | R2 | **Comparable** — both have theory + experiments; ours has broader practical validation |
+| `oDdzXQzP2F` | 7.33 | R2 | Different area (efficient attention) |
+| `7xCSK9BLPy` | 7.33 | R2 | Different area (MBR decoding) |
+| `OfjIlbelrT` | 8.00 | R1/R2 | Above — more transformative contribution |
+| `TJo6aQb7mK` | 7.60 | R1 | Above/similar — different area (ternary LMs) |
+| `E4Fk3YuG56` | 8.50 | R1 | Above — different area, more transformative |
+| `tyEyYT267x` | 8.00 | R1 | Above — different area |
+
+**Final placement**: The paper clearly improves over the HASS baseline (7.00) and is comparable in contribution quality to Multi-Draft Speculative Sampling (7.50). The few concerns raised are minor, well-scoped, and do not threaten the core claims. Score: **7.5**.
+
+MY FINAL SCORE: <score>7.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

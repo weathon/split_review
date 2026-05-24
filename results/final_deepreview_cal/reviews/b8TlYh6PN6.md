@@ -1,91 +1,90 @@
-Now let me write the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper establishes the first graphical characterization of distributional equivalence for linear non-Gaussian causal models that simultaneously include both latent variables and cycles. The central theoretical contribution is a criterion (Theorem 2) reducing the global equivalence check to local checks on each singleton observed variable, plus a transformational characterization (Theorem 3) analogous to the Meek conjecture that enables traversal of the entire equivalence class. A new tool—edge rank constraints—is introduced as a local, graph-manipulable alternative to path ranks, with a duality theorem linking the two. The paper also presents glvLiNG, an algorithm that recovers models up to equivalence, though it is positioned primarily as a proof-of-concept given its reliance on over-complete ICA (OICA). The theoretical results are clean, novel, and well-motivated; the empirical evaluation, while limited in the main text, is supplemented in the appendix.
+This paper establishes the first distributional equivalence characterization for linear non-Gaussian latent-variable models with arbitrary latent structure and cycles. The key technical innovations are (1) the introduction of **edge rank constraints**, a new graphical tool dual to the familiar path ranks, and (2) a **local graphical criterion** (Theorem 2) that reduces equivalence checking to per-variable basis-match conditions, yielding an efficiently checkable decision procedure. The paper further provides a **transformational characterization** (Theorem 3) — an analog of Meek's conjecture for this setting — that enables traversal of the full equivalence class via cycle reversals and edge additions/deletions, and develops a proof-of-concept algorithm (glvLiNG). The theoretical contribution is genuinely foundational: closing a long-standing gap in the causal discovery literature.
 
 ## Strengths
 
-- **First distributional equivalence characterization with latent variables in linear non-Gaussian models without structural assumptions.** This is the paper's headline contribution and is genuinely novel. Previous work either assumes acyclicity (Lacerda et al., 2008), assumes specific graphical patterns (pure children, triangle-free, etc.), or handles only the latents or only the cycles separately. Unifying both under a single framework and proving an equivalence criterion is a significant theoretical step forward.
+- **Novel edge-rank framework and duality (Theorem 1).** The introduction of edge ranks as a local, edge-level analog of path ranks is a genuine conceptual innovation. The duality theorem (Equation 16) elegantly connects two perspectives on graph bottlenecks and fills a missing piece in the rank-based causal discovery toolbox. The duality is not merely a restatement — it enables the decomposition in Lemma 5 that the entire subsequent characterization rests on.
 
-- **Introduction of edge rank constraints and the duality with path ranks (Theorem 1).** Edge ranks provide a local, edge-level perspective that complements the global path-rank perspective familiar from prior work. The duality theorem is elegantly stated and opens a new angle for analyzing rank constraints in causal discovery beyond this paper.
+- **Exact, checkable graphical criterion (Theorem 2).** The reduction from checking all subsets \(x \subseteq X\) to checking singletons \(X_i\) individually is the paper's central technical insight. The criterion (Equation 19) is clean, local, and reduces to the classical causally-sufficient result when latents are absent. This is the first constructive decision procedure for equivalence in this setting.
 
-- **Theorem 2 provides a practical graphical criterion that reduces exponentially many subset checks to a per-singleton check.** The result that equivalence can be verified by checking children bases of L and each L ∪ {X_i} independently is a genuine simplification, analogous to how "same adjacencies and v-structures" simplifies "same d-separations" in the Markov equivalence setting. This is what makes the characterization operational.
+- **Transformational characterization (Theorem 3) and traversal.** Lemma 6 (cycle reversals) and Lemma 7 (edge additions/deletions) provide a complete set of local graph operations that preserve equivalence, giving a direct analog of Meek's conjecture. The claim that at most one cycle reversal suffices is elegant, and the BFS/DFS traversal this enables has practical value — demonstrated in the paper's interactive online demo.
 
-- **Transformational characterization (Theorem 3) enabling equivalence class traversal.** The analogue of the Meek conjecture for this setting is a nice result. Together with Lemma 6 (admissible cycle reversals) and Lemma 7 (admissible edge additions/deletions), it provides a concrete mechanism to enumerate the equivalence class (e.g., via BFS/DFS). The online demo (equiv.cc) is a helpful complement.
+- **Clean theoretical foundation via irreducibility.** Propositions 1 and 2 define and operationalize a canonical reduction to irreducible models, eliminating trivial latent variables. This is a necessary and well-executed preliminary that strengthens the overall framework.
 
-- **Clear writing and careful positioning.** The paper is well-structured, definitions are precise, and the limitations (OICA reliance, glvLiNG as proof-of-concept) are acknowledged. The comparison to the CPDAG framework throughout helps readers from the causal discovery community grasp the results by analogy.
+- **Clear, well-structured exposition.** The paper is written with notable clarity. The extended analogy with Markov equivalence throughout (CPDAGs, Meek's conjecture) helps readers map new results onto familiar concepts. Definitions are precise, examples are well-chosen, and Figure 2's illustration of path-rank/edge-rank duality is pedagogically effective.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **The practical evaluation in the main text is too thin to support the practical discovery claim headlined in the abstract.** The evaluation section (§5) describes five evaluation aspects but provides almost no numerical results in the main body. For the finite-sample experiments (aspect 4), the text says only that glvLiNG "performs particularly better than baselines on denser graphs" — no precision/recall, SHD, F1, confidence intervals, or statistical tests appear. For the oracle comparison (aspect 3), the claim that baselines "misidentify over half of the edges" is stated without tabular support. The paper references Tables 3–5 and Appendix D, which contain the actual numbers, but the main text alone does not enable a reader to assess the method's reliability, failure modes, or the fairness of comparisons. Given that the abstract and introduction prominently claim "the first structural-assumption-free discovery method," this gap between claim and presented evidence is significant. The paper's own final remarks acknowledge that glvLiNG "serves more as a proof of concept," which is honest but creates a mismatch with the stronger claims in the abstract.
-
-- **The algorithmic claim is weakened by dependence on oracle OICA, and the practical implications are not discussed.** The glvLiNG pipeline assumes an oracle OICA that recovers the mixing matrix up to scaling and permutation (Assumption 1, deferred to Appendix A). Over-complete ICA (more sources than observations) is notoriously difficult — consistency results are delicate, sample-size requirements are high in practice, and the number of components may be estimated incorrectly. The paper does not analyze how glvLiNG would behave when OICA estimates are noisy, components are mis-specified, or the sources are not exactly independent/non-Gaussian. While the paper acknowledges this limitation in the conclusion, the practical feasibility of the algorithm as a "discovery method" remains unclear without a discussion of when OICA can be replaced by more robust rank estimation techniques or how estimation errors propagate.
+None. The theoretical core — the equivalence characterization, the criterion, and the transformational traversal — is coherently presented and its significance is clear.
 
 ### Minor
 
-- **Computational complexity of the irreducibility check (Proposition 1) is not discussed.** The condition requires checking every non-empty subset l ⊆ L, which is exponential in |L|. The paper notes that for acyclic graphs it suffices to check each single L_i, but the general cyclic case is left unaddressed. Since irreducibility is a prerequisite for the equivalence characterization, this computational cost deserves at least a brief discussion.
+- **Finite-sample evaluation results are absent from the main text.** The evaluation in §5 summarizes five experimental angles, but for the finite-sample simulations (angle 4) and the real-world application (angle 5), only qualitative remarks appear ("glvLiNG performs particularly better than baselines on denser graphs," "recovers meaningful patterns"). Actual metrics (e.g., SHD, F1, precision/recall, variance across trials) and the experimental setup are deferred to Appendix D.4–D.5. While the paper explicitly frames glvLiNG as a "proof of concept" and the main contribution as the equivalence characterization, the main text's evaluation section would be substantially stronger with even a single summary table of quantitative results. This is addressable in revision without new experiments.
 
-- **Computational complexity of the edge-addition criterion (Lemma 7) is not characterized.** The criterion requires computing edge ranks for subsets whose size grows with |L|. The paper mentions acceleration via parallel traversal (Lemmas 9 and 12, in the appendix) but provides no algorithmic analysis or empirical evidence on tractability for moderate |L|.
+- **"At most one cycle reversal" claim is stated without justification in the main text.** Theorem 3 asserts "at most one cycle reversal is needed," which is intriguing and simplifies the class description, but the main text provides no sketch of why this bound holds. A brief intuitive explanation (or a pointer to where in the appendix the justification lives) would improve confidence.
 
-- **Proof sketches for key theorems are absent from the main text.** Theorems 2 and 3 are stated without any proof intuition in the main body. A brief sketch (e.g., "Theorem 2 follows from Lemma 5 by a matroid intersection argument that reduces to checking singletons because the edge rank function is submodular") would increase reader trust and readability.
+- **Equivalence class traversal and its complexity are not discussed in the main text.** The transformational characterization (Theorem 3) enables traversal, but the paper does not address worst-case equivalence class sizes, traversal cost, or scaling behavior in the main body — information that would help readers assess the algorithm's practical scope beyond the small exhaustive enumeration (Table 3).
 
 ### Trivial
 
-- The claim "first such result known to us in any parametric setting" (contributions) is broader than what the paper supports — the result is established for linear non-Gaussian models, which is one parametric setting. The phrase "in any parametric setting" should be scoped to "in the linear non-Gaussian setting."
+- The real-world stock-return analysis (§5, angle 5) is anecdotal in the main text. Even simple consistency checks or cross-validation against known stylized facts are not mentioned (results deferred to Appendix D.5).
 
 ## Nice-to-Haves
 
-- An explicit verification that Theorem 2 reduces to known results when L = ∅ (the Lacerda et al., 2008 condition) or when cycles are absent would strengthen the paper's positioning relative to prior work. The paper hints at this connection (line 252: "Theorem 2 immediately reduces to the classical result") but could elaborate.
-- The finite-sample experiments, while deferred to the appendix, would benefit from a summary table in the main text (e.g., mean SHD or precision/recall across settings) to give readers a concrete sense of performance without having to cross-reference the appendix.
+- A self-contained sketch of the key proof idea behind the local decomposition in Theorem 2 — specifically how Lemma 5's condition on all subsets reduces to singletons — would make the reader's confidence less dependent on the appendix.
+- Discussion of computational complexity of equivalence class traversal, and statistics on class sizes beyond the small exhaustive enumeration, would ground the transformational approach in practical terms.
+- The CPDAG-like result (Theorem 4, Appendix C.3) is briefly mentioned; a sketch in the main text would strengthen the narrative of comprehensive characterization.
 
 ## Removed Points
 
-These points from the harsh critic or strength finder were evaluated and removed with justifications:
+These points were flagged by reviewers but are removed from the final review:
 
-- **"Theorem 3 reliance on checking all subsets is exponential"** — The paper notes the procedure can be accelerated via parallel traversal across children (Lemmas 9, 12, deferred to appendix). Without the appendix content, this is unverifiable either way. Demoted from a structural concern to a minor note about missing complexity analysis.
+- **"Proofs are deferred to an appendix not included in the review material."** REMOVED — per evaluation protocol, stripped appendices are a parser artifact, not an author error. The original submission includes full proofs.
 
-- **"No hardware details, standard deviations, or baseline descriptions for runtime"** — The main text reports that glvLiNG solves n=10 vertices in under 5s vs. a linear programming baseline that takes hours beyond n=5. This is sufficient for an illustrative runtime comparison in a theory-focused paper; the full details are in the appendix.
+- **"The core algorithm step is only sketched; Lemma 10 and full algorithmic details are in the appendix."** REMOVED — same reason as above. The paper explicitly states that detailed formulations are in Appendix A.
 
-- **"Missing related work"** — The paper does cite relevant prior work (Adams et al., Lacerda et al., Ghassami et al., Evans, etc.) and positions itself relative to them. The claim that it misses comparisons is not supported by the paper as read.
+- **"The paper should clarify that parametric assumptions (linearity, non-Gaussianity, faithfulness) remain."** REMOVED — the paper is explicitly scoped to "linear non-Gaussian models" from the title through every section. The abstract, introduction (§1), problem setup (§2.1), and conclusion (§6) all reiterate this scope. Faithfulness is stated as an assumption in §5. The OICA limitation is discussed in §5 and §6. No reasonable reader would mistake this for an assumption-free claim beyond structural assumptions.
 
-- **"The evaluation is not reproducible from the main text alone"** — Code is provided. The detailed results are in the appendix. Expecting full reproducibility from the main text alone is not a standard requirement for conference papers with page limits.
-
-- **Strength Finder's "first structural-assumption-free method"** — This claim appears in the abstract but is tempered by the paper's own acknowledgment that glvLiNG is a proof-of-concept. The strength as stated is valid for the theoretical contribution but oversold for the algorithm; kept the strength in modified form as "first equivalence characterization."
-
-- **Various generic strengths from the Strength Finder** — "Algorithm glvLiNG as the first structural-assumption-free method" is a duplicate of the core strength already listed. "Reduction to irreducible models" is a necessary step but not a standalone strength; merged into the summary.
+- **"The claim to be the first structural-assumption-free method should be clarified — OICA identifiability conditions remain."** REMOVED — the paper carefully distinguishes structural assumptions (about graph patterns) from parametric assumptions (linearity, non-Gaussianity). The "structural-assumption-free" claim refers to not requiring pure children, measurement models, triangle-freeness, bow-freeness, acyclicity, or other graph-structural restrictions that all prior latent-variable methods impose. The OICA requirements are discussed as limitations in §5 and §6.
 
 ## Novel Insights
 
-The paper's most insightful contribution beyond its own results is drawing the explicit parallel between edge-rank-based equivalence and classical Markov equivalence — showing that distributional equivalence in the linear non-Gaussian latent-variable setting admits both a "same adjacencies and v-structures" analog (Theorem 2) and a "Meek conjecture" analog (Theorem 3). This framing bridges the gap between parametric latent-variable models and the well-understood nonparametric causal sufficiency setting, suggesting that the equivalence class structure in this harder setting is more tractable than previously believed.
+The introduction of edge ranks and their duality with path ranks (Theorem 1) represents a genuinely novel insight with implications beyond this paper. The duality reveals that the familiar rank constraints used in causal discovery — path ranks, d-separation, t-separation — have an underexplored dual formulation in terms of bipartite matchings on edges. This is not merely a technical convenience for the current paper's proofs; it opens a new perspective on rank-based causal discovery that could simplify results in related settings (linear Gaussian, discrete models, selection bias). The paper's observation that this duality has been known in matroid theory since König (1931) but overlooked in causal discovery is itself a valuable scholarly contribution.
 
 ## Suggestions
 
-1. **Align the abstract and introduction claims with the actual contribution.** The phrase "first structural-assumption-free discovery method" should either be replaced with "first structural-assumption-free equivalence characterization" or be accompanied by a much stronger empirical evaluation. Currently, the abstract oversells the algorithmic contribution relative to what is demonstrated.
-
-2. **Include at least one summary table of finite-sample results in the main text.** Even a small table showing SHD or F1 for a few representative settings (dense/sparse, small/large n) would transform the evaluation from "thin" to "informative enough to judge."
-
-3. **Add proof sketches or intuition for Theorems 2 and 3 in the main body.** A paragraph of intuition would help readers gauge plausibility without diving into the appendix.
-
-4. **Discuss the computational complexity of the irreducibility check and edge-addition criterion.** Even a brief note on whether these can be checked in polynomial time or whether |L| is typically small would address a clear reader concern.
-
-5. **Clarify the scope of the "any parametric setting" claim.** This is established for linear non-Gaussian models; rephrase to avoid overclaiming.
+- Move a summary table of finite-sample metrics (SHD, edge F1, runtime vs. sample size and graph density) from Appendix D.4 into the main evaluation section. Even one compact table would substantially strengthen the empirical presentation without requiring new experiments.
+- Add a brief sketch of why at most one cycle reversal suffices in Theorem 3 (one or two sentences of intuition in the main text, with formal proof citation to the appendix).
+- Consider adding a short paragraph on the computational complexity of BFS traversal over the equivalence class, even if only to bound the worst-case number of admissible operations per graph.
 
 ## Score and Decision
 
-### Calibration report
+**Round-1 bracketing:** Searched for causal discovery / latent variable / equivalence characterization papers. Retrieved weak anchors (scores 3.0–3.25), middle anchors (5.25–6.50), and strong anchors (8.0). The paper clearly sits above the weak band and below the 8.0 anchors. Initial bracket: **6.0–8.0**.
 
-**Round 1 — Bracketing.** Three queries on topics similar to the paper (causal discovery with latent variables, linear non-Gaussian). Lower band (scores < 3.5): results showed papers at 3.00–3.25 with fundamental flaws. Middle band (3.5–7.5): anchors at 5.25, 6.00 (×2), 6.75. Upper band (> 7.5): anchors at 8.00 (×4) with very strong theory+experiments. **Initial bracket:** 5.5–7.5.
+**Round-2 narrowing:** Retrieved and read anchors inside the bracket:
 
-**Round 2 — Narrowing.** Queries targeting 4.5–7.0 and 5.5–7.5. Anchors read in full:
-- "Recovery of Causal Graph Involving Latent Variables via Homologous Surrogates" (6.00, 4 reviews): Makes structural assumptions (homologous surrogates), strong presentation issues, narrower contribution. **This paper is stronger** — it solves a more general problem (no pure-child-type assumptions, allows cycles) with cleaner theory.
-- "Efficient and Trustworthy Causal Discovery with Latent Variables" (6.00, 4 reviews): Makes pure-children-type assumptions, reviews note limited experiments and dense presentation. **This paper is stronger** — more general setting, more novel theory.
-- "Differentiable Causal Discovery for Latent Hierarchical Causal Models" (6.75, 4 reviews): Strong theory with differentiable method, but limited experiments; one reviewer gave 5, another gave 8. **Comparable** — similar profile of strong theory + limited experiments, but this paper's theoretical contribution (first equivalence characterization) is more fundamental.
-- "Structural Estimation of Partially Observed Linear Non-Gaussian Acyclic Model" (6.50, 4 reviews): Makes atomic-unit/pure-children assumptions, practical algorithm with good experiments. **This paper is slightly weaker on experiments but stronger on theoretical generality** — no acyclicity assumption, no pure-children assumption.
+| Anchor | Score | Comparison |
+|--------|-------|------------|
+| BZYIEw4mcY | 6.00 | Paper under review has a more fundamental theoretical contribution (first equivalence characterization vs. algorithm development), clearer presentation. **Clearly stronger.** |
+| fGhr39bqZa | 6.00 | Similar domain; homologous surrogates vs. first equivalence characterization. Paper under review is theoretically deeper. **Clearly stronger.** |
+| nHkMm0ywWm | 6.50 | PO-LiNGAM — comparable setting but still requires structural assumptions (pure children). The paper under review's equivalence characterization is more foundational. **Moderately stronger theoretically, weaker empirically in main text.** |
+| FhQSGhBlqv | 7.50 | Rank-based latent CD with strong theoretical results and well-presented empirical section. Comparable theoretical novelty, but the paper under review's equivalence characterization is more fundamental. The empirical gap keeps it below this anchor. **Slightly weaker.** |
+| bjxuqI4KwU | 7.50 | Purely theoretical identifiability paper. The paper under review is more comprehensive (theory + algorithm + demo + broader scope including cycles). **Comparable in theoretical quality.** |
 
-**Final score:** 6.5. The paper's theoretical contribution is genuinely novel and significant — it opens a new direction for latent-variable causal discovery. But the practical discovery claim is undersupported by the evaluation, and the gap between the abstract's "first structural-assumption-free discovery method" and the paper's own "proof of concept" acknowledgment pulls the score down from the 7+ range. The paper sits above the 6.00 papers (which make more restrictive assumptions and have narrower theoretical contributions) and is comparable to the 6.5–6.75 papers (strong theory, limited experiments).
+The paper lands between nHkMm0ywWm (6.50) and FhQSGhBlqv (7.50). The theoretical contribution — the first equivalence characterization in this setting — is more significant than nHkMm0ywWm's contribution, but the empirical presentation in the main text is weaker than FhQSGhBlqv's. Given that the paper explicitly frames glvLiNG as a proof of concept and the core contribution as the characterization, the empirical weakness carries less weight than it would for a primarily algorithmic paper. The paper is closer to the 7.5 anchors in theoretical quality but held back by the sparse empirical section.
 
-MY FINAL SCORE: <score>6.5</score>
+**Final score: 7.0.** Decision: **Accept.**
+
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

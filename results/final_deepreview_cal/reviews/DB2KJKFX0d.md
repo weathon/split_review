@@ -1,87 +1,109 @@
-Now I have all the information needed. Let me synthesize the final review.
-
-## Final Bracket Determination
-
-**Round 1 bracket:** Between approximately 4 and 7 (clearly above the weak anchors at 2–3, below the pure-theory papers at 7–8).
-
-**Narrowing via Round 2:** Compared against similar fMRI/methods papers (MindSimulator 5.75, PDH-Diffusion 6.75, Brain Decoding 5.75, Universal Encoder 6.25), the BDSB paper is stronger than the 5.75 papers and comparable to or slightly below the 6.75 PDH-Diffusion — the validation gap in the cross-dataset real experiment is more central to the paper's thesis than PDH-Diffusion's reproducibility issues were.
-
-**Final score: 6.0**
+Now let me synthesize the final review based on my careful reading of the paper and cross-checking of all claims.
 
 ---
 
 ## Summary
 
-The paper proposes BDSB, a framework that conformally maps 3T/7T fMRI from cortical surfaces onto 2D parametric brain disks and applies an unpaired Schrödinger Bridge diffusion model to enhance 3T signals toward 7T quality. The method is evaluated on synthetic data (with ground truth), cross-dataset real data (3T NOD → 7T NSD), and limited paired TDM data, using both image-quality metrics and downstream pRF decoding as the evaluation tasks.
+The paper proposes BDSB (Brain Disk Schrödinger Bridge), a framework for enhancing 3T BOLD fMRI to approximate 7T quality. The approach first maps cortical surfaces to 2D "brain disks" via conformal parameterization, then applies an unpaired Schrödinger Bridge diffusion model with PatchNCE and BD-SSIM regularization to translate low-quality (3T) brain disks toward high-quality (7T) distributions. Evaluated on synthetic data (down-sampled NSD), cross-dataset real data (NOD 3T → NSD 7T), and a small paired dataset (TDM), BDSB consistently outperforms five baselines in both image-quality metrics (SSIM, PSNR, FID) and downstream pRF retinotopic decoding (mean R²). The conformal mapping and BD-SSIM regularizer are shown via ablation to be essential components.
+
+---
 
 ## Strengths
 
-- **Novel and technically sound pipeline.** The combination of conformal disk parameterization (preserving cortical geometry across subjects) with the Schrödinger Bridge formulation is well-motivated and cleanly executed. The ablation study (Table 3) convincingly demonstrates that both the conformal mapping and the BD-SSIM regularization contribute meaningfully to performance — the conformal map lifts SSIM from 0.237 (direct slicing) to 0.849, and BD-SSIM further boosts pRF R² from 21.88% to 24.00%.
+- **Conformal brain disk parameterization is a genuinely effective domain for fMRI enhancement.** Table 3 shows that conformal mapping dramatically improves enhancement quality over direct slicing or harmonic mapping (SSIM 0.855 vs. 0.237; mean pRF R² 24.00% vs. 6.10%). The bijective nature of the mapping ensures vertex-level signals can be recovered after translation, preserving cortical geometry.
 
-- **Consistent SOTA-level quantitative results across all three settings.** On the synthetic experiment (Table 2), BDSB achieves the best SSIM (0.855), PSNR (25.05), FID (42.88), and pRF R² (24.00%) across all five baselines (Cycle-GAN, OTT-GAN, OTE-GAN, SCR-Net, fast-DDPM). On cross-dataset real (no ground truth) it achieves best FID (70.65) and R² (25.91). On TDM real it achieves best FID (62.09) and near-best SSIM/PSNR. These results are consistent, not cherry-picked.
+- **BDSB consistently and substantially outperforms all baselines across all three experiments.** Table 2 shows the proposed method achieves the best FID across synthetic (42.88 vs. next-best 71.40), cross-dataset (70.65 vs. 95.91), and TDM (62.09 vs. 84.45) settings. The pRF R² gains are similarly decisive: synthetic 24.00% vs. 18.30% raw LQ, cross-dataset 25.91% vs. 20.26% raw LQ. The margin over the best baseline (fast-DDPM) is large and consistent.
 
-- **Downstream task validation with pRF decoding.** Unlike many medical image translation papers that stop at similarity metrics, this paper evaluates whether the enhanced signals actually improve retinotopic decoding. The scatter plots (Fig. 7) show systematic improvement in R² agreement with ground truth on synthetic data, and the temporal stability analysis (Fig. 7b) is a clever diagnostic.
+- **The synthetic experiment provides convincing ground-truth validation.** Figure 7a shows enhanced R² values clustering near the identity line against ground truth, while Figure 7b demonstrates improved stability of receptive field centers under random stimulus intervals. The BOLD time series comparison (Figure 5) visually confirms signal recovery for active vertices.
 
-- **Well-scoped problem framing and honest limitations.** The paper clearly acknowledges the scarcity of paired 3T/7T fMRI data, the limitations of synthetic data, and the lack of ground truth in the cross-dataset setting. The "Lack of Paired Data" and "Synthetic Data" discussion paragraphs in Section 4 demonstrate appropriate caution.
+- **The ablation study (Table 3) cleanly isolates the contributions of conformal mapping and BD-SSIM regularization**, directly justifying the key design decisions. The BD-SSIM loss in particular drives the largest gains in both PSNR (24.88 → 25.05) and R² (21.88% → 24.00%).
+
+- **The paper honestly discusses its core limitation**—the absence of large-scale paired 3T/7T data—and designs its evaluation strategy (synthetic + cross-dataset + limited paired) explicitly around this constraint.
+
+---
 
 ## Weaknesses
 
 ### Major
 
-- **Cross-dataset real evaluation uses a self-consistency measure, not a ground-truth accuracy measure.** For the Cross-Dataset Real row in Table 2, the reported pRF R² is the variance explained by the pRF model *on the enhanced fMRI time series itself* — it measures how well a pRF model fits the enhanced signal, not whether the pRF parameters (center, size) are actually correct. The paper acknowledges that "no ground truth" exists for NOD subjects (Section 2.1), but the R² gain (20.26 → 25.91) is still presented as evidence of improved quality toward "7T quality." This is structurally distinct from the synthetic experiment where ground-truth comparison is available. Without ground-truth pRF parameters or an independent accuracy measure (e.g., stimulus decoding accuracy), the cross-dataset R² improvement could partly reflect better fit to noise or smoothing artifacts rather than genuine functional fidelity. This gap weakens the paper's headline claim.
-
-- **Missing ground-truth 7T R² in the synthetic experiment.** Table 2 reports R² = 18.30 (raw LQ) and 24.00 (proposed) for the synthetic experiment but does not report the R² of the ground-truth 7T data itself. Without knowing the ceiling (e.g., is the 7T R² 26%, 30%, or 40%?), the reader cannot gauge how much of the gap has been closed. The scatter plots in Fig. 7(a) partly compensate, but an aggregate number is essential.
-
-- **No error bars, confidence intervals, or significance tests.** All metrics in Tables 2 and 3 are reported as single numbers. Given the small test sets (2 NSD subjects for synthetic, 2 NOD subjects for cross-dataset, 2 TDM subjects with 3 runs each for TDM) and the stochastic nature of generative models, it is impossible to assess reliability. This is especially problematic for the TDM experiment where the gap between the best competitor (OTT-GAN, SSIM 0.727) and the proposed method (SSIM 0.718) is essentially a tie — without error bars, the reader cannot tell whether the bolded values represent meaningful differences.
+- **The cross-dataset real experiment—the most practically relevant evaluation—lacks ground truth and cannot rule out functionally incorrect enhancement.** The NOD 3T → NSD 7T experiment (Table 2, Cross-Dataset Real) reports improved FID (183.83 → 70.65) and mean R² (20.26% → 25.91%), but since no 7T ground truth exists for the NOD test subjects, the paper cannot verify that the enhanced signals faithfully represent those subjects' neural responses. A model that produces statistically "7T-like" temporal waveforms could inflate pRF goodness-of-fit without recovering the correct encoding. The synthetic experiment (where ground truth exists) shows that enhanced R² tracks ground truth well (Fig. 7a), which is reassuring, but the cross-dataset case involves different scanners, protocols, and populations where the synthetic guarantee does not transfer. The paper acknowledges the absence of paired data in the Discussion (Sec. 4), but the practical claim that the method makes real 3T data "comparable to 7T quality" rests substantially on this unverified experiment.
 
 ### Minor
 
-- **The ablation reveals an FID trade-off that is not discussed.** In Table 3, adding PatchNCE regularization *worsens* FID from 34.23 to 42.64 while improving SSIM/PSNR modestly. The full model (with BD-SSIM) recovers FID to only 42.88 — still worse than no regularization (34.23). Yet R² improves from 22.02% (no reg) to 24.00% (full). This suggests the regularization biases the generator away from the pure 7T distribution toward something that aids pRF fitting. Whether this is desirable depends on whether the R² improvement reflects genuine functional accuracy or a different kind of signal structure. The paper should address this directly.
+- **The pRF R² metric alone, in the unpaired cross-dataset setting, provides limited evidence of signal fidelity.** While FID offers an independent distributional check, R² is a goodness-of-fit measure to a pRF model estimated from the same time series. A translation that regularizes signals toward stimulus-typical profiles could inflate R² even if the recovered encoding were wrong. The random-interval stability test (Fig. 7b) provides a partial safeguard, but it is reported only for the synthetic experiment, not for cross-dataset data.
 
-- **The synthetic noise model (down-sampling + i.i.d. Gaussian) is acknowledged as a simplification but could be discussed more concretely.** Real 3T noise has spatially correlated, physiologically driven components. The paper notes this limitation (Section 4) but a quantitative discussion of how this might affect the gap between synthetic and real performance would strengthen the analysis.
+- **No analysis of temporal coherence across enhanced frames.** The model processes each time sample independently as a BD slice (Sec. 2.2–2.3). Frame-to-frame consistency of the enhanced time series is neither discussed nor quantified. The pRF results (which require coherent time series) and the BOLD signal trace in Fig. 5 suggest temporal coherence is preserved, but this should be explicitly addressed.
+
+- **Cross-dataset confounds beyond field strength are not discussed.** NOD and NSD differ in scanner vendor, acquisition protocol, surface representation (fsLR vs. fsaverage), and subject population. The model may learn a dataset-specific translation rather than a pure 3T→7T enhancement. The Discussion mentions that synthetic data "cannot fully capture scanner hardware, pulse sequence, or subject-level variability" but does not extend this analysis to the cross-dataset case.
+
+- **No error bars or subject-level breakdown for cross-dataset metrics.** Table 2 reports single aggregate FID and R² values for 2 test subjects. While N=2 limits statistical testing, reporting per-subject values would improve transparency.
+
+- **The TDM experiment is too small to serve as meaningful validation**, as the paper itself acknowledges ("limited to two subjects and non-standard stimuli"). The SSIM gap between proposed (0.718) and OTT-GAN (0.727) is negligible.
+
+### Trivial
+
+- The abstract and conclusion state the method makes 3T data "comparable to 7T quality." This is well-supported for the synthetic experiment but overstates the cross-dataset evidence, where the claim should be more carefully scoped.
+
+---
 
 ## Nice-to-Haves
 
-- A simple preprocessing baseline (e.g., spatial smoothing of the 3T data) would clarify the added value of the BDSB framework beyond conventional denoising.
-- For the synthetic experiment, reporting the correlation between enhanced and ground-truth pRF parameters (center, size) across vertices would directly test pRF accuracy beyond R² alone.
-- The qualitative BOLD time-series comparison (Fig. 5) illustrates only two vertices; a quantitative summary across all vertices (e.g., mean temporal correlation between enhanced and ground-truth signals) would be more convincing.
+- An indirect validation for the cross-dataset case—e.g., comparing enhanced 3T-derived pRF maps against group-level 7T retinotopic atlases (HCP 7T retinotopy) on a common surface, or computing test-retest reliability of pRF parameters across separate runs—would substantially strengthen the practical claim.
+- Explicitly measuring and reporting autocorrelation decay of enhanced vs. original time series would address the temporal coherence concern.
+- Isolating the effect of BD-SSIM vs. PatchNCE by showing results with PatchNCE retained but BD-SSIM removed (currently the ablation combines them) would clarify their individual contributions.
+
+---
+
+## Removed Points
+
+These points were flagged for removal; treat them with caution.
+
+- *"The paper does not report the number of BD slices per trial, the total number of training samples, or the amount of computation time"* — These are implementation details of the scale that are impractical to include (per reproducibility rules). The appendix (B.1) likely contains training details; the parser strips appendix content.
+- *"No statistical significance testing is provided"* — With 2 test subjects in the cross-dataset setting, formal statistical testing is inherently limited. Mentioned as a minor transparency concern above.
+- *"The potential influence of the conformal mapping on subsequent pRF analysis (such as subtle distortion of vertex spacing) is not discussed"* — The paper actually notes in the Fig. 6 caption that "different vertex labels between fsLR and fsaverage may cause slight ROI shifts," partially addressing this. The conformal mapping is bijective, so vertex locations are preserved.
+
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The combination of conformal cortical surface parameterization with an unpaired Schrödinger Bridge diffusion model for fMRI enhancement is genuinely novel. The finding that conformal mapping matters more for downstream pRF decoding than for image-quality metrics (harmonic mapping achieves nearly identical PSNR but much worse R², Table 3) is an interesting and non-obvious result: it suggests that preserving local face areas in the 2D mapping is particularly important for the spatial structure that pRF models exploit, even when the pixel-level reconstruction appears similar.
+
+---
 
 ## Suggestions
 
-1. Report the ground-truth 7T pRF R² in Table 2 (or in a footnote) for the synthetic experiment so readers can see how much of the gap is closed.
-2. Add error bars (e.g., bootstrapped confidence intervals) to all key metrics in Tables 2 and 3, particularly for the small test sets.
-3. Discuss the FID/R² trade-off revealed by the ablation explicitly — why does the regularization that improves R² degrade FID, and what does this imply about the nature of the enhancement?
-4. For the cross-dataset real experiment, consider an independent downstream accuracy measure (e.g., stimulus decoding accuracy using an encoding model) that does not require ground-truth pRF parameters.
-5. Tone down the "comparable to 7T quality" claim in the abstract and conclusion to more precisely reflect the actual level of validation, or add the experiments needed to support it.
+- Add per-subject breakdown of cross-dataset R² and FID values.
+- Discuss the temporal independence assumption explicitly and consider reporting a frame-to-frame consistency metric.
+- Temper the "comparable to 7T quality" claim in the abstract/conclusion to reflect that the strongest evidence comes from synthetic data; the cross-dataset case shows clear improvement but without ground-truth verification of functional fidelity.
+- Add a discussion of scanner/population confounds in the cross-dataset setting.
+
+---
 
 ## Score and Decision
 
-**Calibration Summary:**
+**Round 1 bracketing:** The weak-band anchors (scores 2.0–3.2) are clearly below this paper. The middle-band anchors include MindSimulator (5.75), X-Diffusion (5.50), a Universal Brain Encoder (6.25, rejected), and PDH-Diffusion (6.75, accepted). The strong-band anchors (8.0–9.0) are clearly above. Initial bracket: **5.5–7.0**.
 
-| Anchor ID | Avg Score | Round | Comparison to this paper |
-|-----------|-----------|-------|--------------------------|
-| z2QdVmhtAP | 3.00 | R1 | Weaker — limited method validation |
-| QdHg1SdDY2 | 3.00 | R1 | Weaker — less thorough evaluation |
-| exei8zvY13 | 2.00 | R1 | Weaker — narrow MRI SR focus |
-| A5utJ4xf27 | 2.33 | R1 | Much weaker — different task |
-| GqsepTIXWy | 5.00 | R1 | Weaker — method concerns, weak evaluation |
-| mbPvdO2dxb | 5.00 | R1 | Weaker — less thorough evaluation |
-| FKksTayvGo | 7.00 | R1 | Stronger — pure theory paper, harder to compare directly |
-| SoismgeX7z | 7.00 | R1 | Stronger — pure theory paper |
-| vgt2rSf6al | 5.75 | R2 | Weaker — concept localization with validation concerns |
-| zZ6TT254Np | 6.75 | R2 | Slightly stronger — solid fMRI synthesis, but also had validation gaps |
-| At9JmGF3xy | 5.75 | R2 | Weaker — simpler methodology, limited baselines |
-| xHGL9XqR8Y | 6.25 | R2 | Comparable — universal brain encoder with some validity concerns |
+**Round 2 narrowing:** Within this bracket, the most comparable anchors are:
+- **At9JmGF3xy** (5.75, accepted): fMRI decoding generalization; weaker methodology, limited comparisons. Our paper is stronger.
+- **xHGL9XqR8Y** (6.25, rejected): Universal Brain Encoder; strong paper with novelty concerns and limited evaluation metrics. Our paper has more novel methodology but shares the "practical claim partially supported" issue.
+- **zZ6TT254Np** (6.75, accepted): fMRI synthesis via diffusion; strong methodology, similar data limitation critique. Our paper has stronger evaluation diversity but a gap in cross-dataset ground truth that this anchor does not have.
+- **wxPnuFp8fZ** (6.80, accepted): dMRI denoising with strong thorough evaluation. Our paper is slightly weaker due to the cross-dataset gap.
 
-**Round 1 bracket:** The paper sits between 4 and 7 — clearly above weak anchors (2–3) and below pure-theory anchors (7–8).
+**Comparison:** This paper is stronger than At9JmGF3xy (5.75) and comparable to xHGL9XqR8Y (6.25), but the cross-dataset ground-truth gap prevents it from reaching the zZ6TT254Np / wxPnuFp8fZ tier (6.75–6.80). The novel methodology, strong synthetic results, and comprehensive evaluation design push it above the lower end of the bracket but the practical claim is partially unsupported, placing it near the middle. Score: **6.0**.
 
-**Round 2 narrowing:** The paper is stronger than MindSimulator (5.75) and the brain decoding paper (5.75), comparable to the Universal Brain Encoder (6.25, Reject), and slightly below PDH-Diffusion (6.75, Accept). The central validation gap in the cross-dataset experiment prevents it from scoring higher.
-
-**Final score:** 6.0 — solid paper with a well-motivated method, strong synthetic results, and honest scoping of limitations, but the headline claim is not fully supported by the cross-dataset evaluation and key experimental details (ground-truth ceiling, error bars) are missing.
+| Anchor | Avg Score | Round | Comparison |
+|---|---|---|---|
+| QdHg1SdDY2 (LEA) | 3.00 | R1 | Clearly weaker — different task, limited validation |
+| vK8C37eHXM (Sample what you can't compress) | 3.20 | R1 | Clearly weaker — different domain |
+| urf8a5G59f (X-Diffusion) | 5.50 | R1/R2 | Weaker — less novel, single-modality focus |
+| vgt2rSf6al (MindSimulator) | 5.75 | R1/R2 | Weaker — less rigorous validation, confound concerns |
+| At9JmGF3xy (Visual brain decoding generalization) | 5.75 | R2 | Weaker — simpler methodology, fewer experiments |
+| xHGL9XqR8Y (Universal Brain Encoder) | 6.25 | R2 | Comparable — strong but rejected for novelty/evaluation concerns |
+| zZ6TT254Np (PDH-Diffusion) | 6.75 | R1/R2 | Stronger — better grounded validation of core claim |
+| wxPnuFp8fZ (Di-Fusion) | 6.80 | R1/R2 | Stronger — more thorough evaluation, clearer practical benefit |
+| FKksTayvGo (Denoising Diffusion Bridge Models) | 7.00 | R2 | Stronger — method paper with broader scope, cleaner claims |
+| 9UGfOJBuL8 (Conditional Diffusion with Ordinal Regression) | 7.33 | R2 | Stronger — clinical application with strong validation |
+| DJSZGGZYVi (Representation Alignment) | 9.00 | R1 | Clearly stronger — foundational contribution |
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

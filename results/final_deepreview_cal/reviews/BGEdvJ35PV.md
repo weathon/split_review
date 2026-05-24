@@ -1,18 +1,14 @@
-Now I have all the information needed. Let me compose the final review.
+Now I have comprehensive data. Let me synthesize the final review.
 
 ## Summary
-
-This paper identifies and formalizes the **dense-concentrated structure (DC-structure)** of molecular distributions, where chemically valid configurations correspond to narrow, densely packed probability peaks separated by low-density regions. The authors show that this structure makes diffusion-based molecular generation fragile: at intermediate timesteps, reverse updates can overshoot valid peaks and enter low-density regions where errors become irrecoverable. To address this, they propose **DIST** (Diffuse and Steer), a plug-in corrective sampling method that filters intermediate model-distribution batches via pilot reverse inferences, discarding batches inconsistent with the true marginal distribution. DIST is applied to three distinct backbone diffusion models (EDM, GeoLDM, RADM) without any weight modification and shows consistent improvements in atom stability, molecule stability, and validity on QM9 and GEOM-Drugs, while simultaneously reducing the average number of inference timesteps by roughly half.
+This paper identifies and formalizes the "dense-concentrated" (DC) structure of molecular data distributions — narrow, well-separated probability peaks with near-zero density between them — and shows analytically that this structure causes diffusion reverse trajectories to overshoot valid regions, producing invalid molecules. Building on this diagnosis, the authors propose DIST, a model-agnostic plug-in corrective sampling method that filters intermediate distributions at a chosen timestep to steer trajectories back toward valid molecular peaks. DIST consistently improves atom stability, molecule stability, and validity across three diverse diffusion backbones (EDM, GeoLDM, RADM) on QM9 and GEOM-Drugs, while nearly halving inference timesteps.
 
 ## Strengths
-
-1. **First formal characterization of the DC-structure of molecular distributions.** Definition 3.1 provides a clean, quantitative handle on the geometry that makes molecular diffusion fragile—narrow peaks (small σ\*) separated by low-density gaps. This formalization directly motivates the overshoot analysis (Eq. 6–7), which explains why small errors at intermediate timesteps cause irrecoverable drift in molecular generation, and moves the paper's contribution beyond heuristic observation.
-
-2. **Model-agnostic plug-in architecture with consistent gains across diverse backbones.** DIST is applied to three fundamentally different backbones—an equivariant GNN (EDM), a latent-space equivariant model (GeoLDM), and a transformer-based non-equivariant model (RADM)—without altering any weights or hyperparameters. The improvements are monotonic across all metrics on both QM9 and GEOM-Drugs (Table 2). This breadth convincingly demonstrates that the DC-structure issue is architectural-independent and that DIST addresses a general failure mode.
-
-3. **Simultaneous quality improvement and efficiency gain.** Table 3 shows DIST reduces the average number of reverse timesteps from 1000 to 413–637 while simultaneously improving generation quality. The ablation study (Table 4) further confirms a reliable quality–efficiency trade-off: even at the smallest pilot budget (30 pilots), DIST already outperforms the original EDM, and increasing pilot count yields monotonic improvement.
-
-4. **Empirical demonstration that intermediate correction is needed beyond better architectures.** Table 1 shows that even starting from clean data and running only 100 reverse steps degrades molecule stability from 95.2% → 92.7%, with further degradation at more steps. This evidence, together with the consistent gains across backbones, supports the paper's central thesis that trajectory correction at intermediate timesteps is necessary and that architectural innovation alone is insufficient.
+- **Novel formalization of the DC-structure (Definition 3.1) and overshoot mechanism (equation 7).** The paper provides a crisp, quantitative explanation for why standard diffusion models fail on molecular data: narrow peaks cause reverse updates to step past high-density regions into invalid territory. This theoretical framing is specific, well-scoped, and directly motivates the corrective method.
+- **Consistent, significant empirical gains across diverse backbones and datasets (Table 2).** DIST improves every metric for every backbone on both QM9 and GEOM-Drugs. For example, EDM molecule stability on QM9 rises from 82.0% to 89.9%; RADM validity on GEOM-Drugs reaches 99.8%. The improvements span GNN-based, Transformer-based, equivariant, and latent-space models, demonstrating genuine generality.
+- **Inference efficiency as a practical side benefit (Table 3).** DIST requires roughly half the standard number of timesteps (e.g., 556 vs. 1000 for EDM+DIST on QM9) while simultaneously improving quality, making it a cost-effective plug-in.
+- **Plug-in design requires no retraining.** DIST uses officially released model weights without altering any hyperparameters, noise schedules, or dataset partitions. This makes adoption straightforward and the empirical comparisons fair.
+- **Ablation study on pilot subset size (Table 4).** Even a small pilot size (30) yields most of the quality improvement with a large inference time reduction, confirming the method's robustness and practical tunability.
 
 ## Weaknesses
 
@@ -23,62 +19,51 @@ None.
 None.
 
 ### Minor
-
-1. **Computational cost accounting does not transparently include pilot overhead.** The efficiency analysis (Section 4.3) reports average timesteps as "total timestep consumption needed to generate 10,000 molecules" using the formula (T−t)/|B| + t, but it is not clearly stated whether the cost of running full reverse inferences on the pilot subsets is included. Since the pilot step performs a "full reverse inference on a pilot subset" (Section 3.2), this represents additional compute that should be accounted for in the efficiency claim. The paper references Appendix G.1 for detailed quantification (stripped by the parser), but the main text should at least clarify what is and is not included in the reported timestep counts.
-
-2. **No direct comparison against simple post-hoc filtering.** DIST's core claim is that *intermediate* correction adds value beyond simply generating and then rejecting bad samples. A comparison against a baseline that generates 1000-step samples and then discards invalid molecules at the end (equivalent to EDM/RADM/GeoLDM standard sampling followed by validity filtering) would directly test this claim. Without such a comparison, it is unclear whether DIST's improvements come from steering or just from discarding bad trajectories at some stage.
-
-3. **Theory–algorithm connection is somewhat loose.** While Corollary 3.1 (TV-contraction) and Proposition 3.1 (selective reverse error bound) provide a principled framework, the key design decisions of DIST—how the pilot score *sⱼ* is computed, how the threshold τ is set, how batches are constructed—are not guided by the theoretical analysis. Proposition 3.1 depends on the pilot scores correctly identifying low-density batches, but no analysis or empirical evidence links the pilot procedure to the theoretical conditions. The theory motivates *that* steering helps, but does not inform *how* the specific instantiation achieves it.
-
-4. **GEOM-Drugs results lack variance estimates.** On QM9, three-run averages with standard deviations are reported, but GEOM-Drugs results are single values. The improvements on GEOM-Drugs are modest (e.g., GeoLDM atom stability 84.4 → 85.4, RADM 85.0 → 86.0), and without error bars or significance tests, it is difficult to assess whether these improvements are statistically reliable. (The paper's justification for omitting molecule stability on GEOM-Drugs—that it is "consistently close to 0%" for all methods following prior work convention—is reasonable and is not a weakness; the issue is specifically with the missing variance on reported metrics.)
-
-5. **Zero standard deviations on atom stability are suspicious.** Table 2 reports atom stability for EDM+DIST on QM9 as 99.2±0.0. While likely an artifact of rounding to one decimal place, this appears implausible and should be reported with more precision or explained.
+- **Corollary 3.1 (TV-contraction) is mathematically correct but carries limited weight.** It states that closeness in intermediate distribution implies closeness in final distribution under the *ideal* reverse kernel. This follows from the data processing inequality and does not directly describe the effect of correction under the *learned* kernel, which is where DIST actually operates. The genuine theoretical contribution of the paper lies in Definition 3.1, the overshoot condition (equation 7), and Proposition 3.1; Corollary 3.1 is better understood as motivational exposition rather than a substantive result.
+- **The mapping from the formal construction (q_t^c as a reweighted mixture, equation 9) to the algorithmic steps (duplicate, perturb, pilot-infer, filter) could be more explicit.** The "Corrective Sampling" paragraph describes the procedure in prose, but the precise relationship between batch filtering with threshold τ and the probabilistic reweighting of equation 9 is not spelled out. A short pseudocode block would resolve this and let the reader directly assess whether the algorithm instantiates the claimed theoretical guarantees.
+- **GEOM-Drugs results in Table 2 do not report standard deviations,** unlike the QM9 results. Since some improvements on GEOM-Drugs are modest in absolute terms (e.g., RADM+DIST atom stability improves from 85.0 to 86.0), knowing the variance would strengthen interpretation, though the consistency of improvement across all backbones and metrics mitigates this concern.
+- **The main text does not name the specific pilot score function used in experiments.** It lists possible candidates ("round-trip residual, self-consistency, ensemble variance, or chemistry-based penalty") and defers to Appendix F for detailed settings. This is a presentation clarity issue — the full specification exists in the original submission but is not summarized in the main text.
 
 ### Trivial
-- The "first to highlight" claim in the contributions list is somewhat overstated given that prior work (Choi et al., 2025; Bohde et al., 2025) discusses related geometric constraints, though the *formalization* (Definition 3.1) is genuinely novel.
-- No dedicated limitations section; the paper briefly mentions future work directions but does not discuss failure modes of DIST (e.g., when pilot evaluations are unreliable, threshold sensitivity, diversity reduction risk).
+None.
 
 ## Nice-to-Haves
-- A comparison against a diversity-preserving baseline (e.g., DIST vs. standard sampling with post-hoc rejection) would strengthen the claim that intermediate steering is beneficial.
-- Reporting standalone uniqueness on GEOM-Drugs (rather than only validity × uniqueness) would help verify that DIST does not collapse diversity.
-- A sensitivity analysis for the key hyperparameters (threshold τ, intermediate timestep t, perturbation intensity) in the main paper body would be helpful; the paper defers this to Appendix H.
+- An ablation comparing different pilot score definitions (e.g., round-trip residual vs. a simple heuristic vs. random scoring as a negative control) would strengthen the evidence that the specific score signal matters and is not merely acting as a variance-reduction mechanism.
+- The relationship of DIST to existing corrective methods (predictor-corrector samplers, resampling schemes, rejection-sampling-based diffusion corrections) is discussed in Appendix B; a one-sentence positioning in the main text would help readers situate the contribution.
 
 ## Removed Points
-The following points from the harsh critic were removed per the filtering rules:
-- **"Method is insufficiently specified (pilot score not identified)"** — Removed because the paper explicitly states "please refer to Appendix F" for detailed settings. The appendix was stripped by the parser; the rule states to remove weaknesses about missing appendix content.
-- **"Missing molecule stability on GEOM-Drugs is significant omission"** — Removed because the paper explicitly justifies this by citing prior work conventions (it is close to 0% for all methods). The paper does report atom stability and validity on GEOM-Drugs.
-- **"Theory is decorative rather than instrumental"** — Downgraded from the critic's framing. The theory is genuinely connected: the DC-structure motivates the need for correction, and the TV-contraction and error bound provide guarantees. The looseness is real but minor (see Minor weakness 3).
-- **"No limitations discussion"** — The paper concludes with future work directions that acknowledge limitations implicitly, though a dedicated limitations section would be nice. This is a minor presentation preference, not a weakness.
+These points are flagged to be removed, treat them with caution:
+
+- **Harsh Critic: "The pilot score function is critically underspecified"** — The paper explicitly defers to Appendix F for detailed settings. The system instructions state that stripped appendix content exists in the original submission and weaknesses about missing appendix material should be removed. The specification exists; it is a presentation choice, not a methodological gap.
+- **Harsh Critic: "The ablation is minimal; an ablation comparing different score definitions would be far more informative"** — The paper states that additional hyperparameter ablations (batch score threshold, intermediate timestep, perturbation intensity) are in Appendix H. This content exists in the original submission.
+- **Harsh Critic: "The 'first to highlight' claim should be checked against prior literature"** — System instructions prohibit speculating about missing related works or unverifiable prior art. This is reviewer speculation, not a paper flaw.
+- **Harsh Critic: "The 're-entry' claim would benefit from a citation beyond Cao et al. (2023)"** — This is a suggestion about citation thoroughness, not a weakness. The claim is plausible and supported by the cited work plus Appendix D analysis.
+- **Strength Finder: "Corollary 3.1 provides theoretical justification for intermediate correction"** — The corollary is too generic to carry weight as a theoretical contribution; the real strength is in Definition 3.1 and Proposition 3.1. Kept the latter, dropped the former per the rule that when a strength and weakness conflict, the weakness wins.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+The paper's most novel insight is the quantitative connection between molecular distribution geometry and diffusion fragility formalized in the overshoot condition (equation 7): because molecular peaks are narrow (small σ*), the reverse step magnitude β_t · Δ/σ*² easily exceeds the peak radius cσ*, causing trajectories to cross entirely through valid regions into low-density space. This provides a principled, domain-specific explanation — not just an empirical observation — for why diffusion underperforms on molecules relative to images, and it directly motivates *where* and *why* intermediate correction helps. The batch-filtering framework built on this diagnosis is a natural and effective operationalization.
 
 ## Suggestions
-- Clarify in the main text whether the reported timestep counts in Table 3 include pilot overhead, and if not, provide a revised table that does.
-- Add a simple baseline: run standard sampling for each backbone, then post-hoc filter by validity. This directly tests whether DIST's intermediate correction is superior to end-of-pipe rejection.
-- Report error bars or standard deviations for GEOM-Drugs results, or at minimum describe the number of runs and why variance is omitted.
-- Add a brief limitations paragraph discussing potential failure modes: when the pilot evaluation is unreliable, risk of diversity loss from aggressive filtering, and threshold sensitivity.
+- Add a concise pseudocode block (5–8 lines) in Section 3.2 showing the DIST sampling procedure: candidate generation, duplication/perturbation, pilot inference, scoring, and filtering. This would resolve the theory-to-algorithm mapping concern at minimal space cost.
+- In the main text, name the specific pilot score function used (e.g., "we use molecule stability of the fully-reversed pilot samples as the score s_j") rather than only listing candidates.
+- Add standard deviations for the GEOM-Drugs results in Table 2 to match the QM9 reporting standard.
+- Consider moving Corollary 3.1 to a remark or explicitly noting its illustrative role, so readers do not over-weight it relative to the more substantive Proposition 3.1.
 
 ## Score and Decision
 
-**Calibration report:**
+**Round 1 bracket:** 6.5–8.5 based on comparison with weak anchors (3.0 reject papers), middle anchors (Lift Your Molecules 6.50, EQGAT-diff 5.75), and strong anchors (GeoBFN 8.00, ShEPhERD 8.00).
 
-Round 1 bracket: [5.5, 7.0]
+**Round 2 narrowing:** Compared against TFG-Flow (6.25), Lipschitz Singularities (7.50), and GeoBFN (8.00). DIST is stronger than TFG-Flow (clearer theory, broader validation, efficiency gains). DIST is comparable to Lipschitz Singularities (7.50) — both identify a theoretical fragility in diffusion models, propose a simple fix, and validate empirically — but DIST has a slight presentation weakness (pilot score naming deferred to appendix, Corollary 3.1 is thin). DIST is below GeoBFN (8.00), which introduces an entirely new generative modeling framework with SOTA results.
 
-| Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| kKXIYUi8ff (DynamicsDiffusion) | 3.00 | 1 (weak) | Much weaker — fundamental method issues, no theoretical grounding |
-| rwmWd2rjP1 (MoreRed) | 4.75 | 1 (middle) | Weaker — limited evaluation, no model-agnostic demonstration |
-| jZPqf2G9Sw (Protein Design) | 5.50 | 1 (middle) | Slightly weaker — evaluation largely qualitative, less empirical rigor |
-| kzGuiRXZrQ (EQGAT-diff) | 5.75 | 1 (middle) | Comparable but different type — empirical design exploration; DIST has stronger theory |
-| 5YLsnsjgeC (VFDiff) | 6.00 | 2 (narrow) | Comparable — both are corrective/guidance methods with clear improvements |
-| 4dAgG8ma3B (Chemistry-Inspired) | 6.00 | 2 (narrow) | Comparable — similar level of contribution; DIST has better model-agnostic evidence |
-| GK5ni7tIHp (TFG-Flow) | 6.25 | 2 (narrow) | Comparable — both are training-free guidance methods; DIST stronger on theory |
-| CSj72Rr2PB (Bias Mitigation) | 6.50 | 2 (narrow) | Slightly stronger — cleaner story, more datasets; DIST has stronger theory but weaker presentation |
-| pq1WUegkza (Score-Based Discrete) | 7.00 | 2 (narrow) | Stronger — pure theory paper with rigorous proofs; different genre |
-| NSVtmmzeRB (GeoBFN) | 8.00 | 1 (strong) | Stronger — full end-to-end system with SOTA on all metrics |
+**Final placement:** DIST is a strong paper with a crisp theoretical diagnosis, a practical plug-in solution, and broad empirical validation. The weaknesses are presentation-level and do not threaten the core contribution. Score: 7.5.
 
-The paper is strongest among the 4.75–6.0 range and comparable to the 6.00–6.25 anchors, while slightly weaker than the 6.50 anchor (Bias Mitigation) due to less complete efficiency accounting and missing variance on GEOM-Drugs.
+**Anchor comparison summary:**
+- kKXIYUi8ff (3.00, R1): DynamicsDiffusion — clearly weaker; DIST has a stronger theory and broader validation.
+- uNomADvF3s (6.50, R1): Lift Your Molecules — DIST is stronger; DIST's empirical results are more consistent and its theory more focused.
+- kzGuiRXZrQ (5.75, R1): EQGAT-diff — DIST is stronger; EQGAT-diff is primarily an empirical exploration, while DIST has novel theoretical framing.
+- NSVtmmzeRB (8.00, R1/R2): GeoBFN — DIST is below; GeoBFN introduces a new generative framework, while DIST is a corrective module.
+- GK5ni7tIHp (6.25, R2): TFG-Flow — DIST is stronger; more coherent theory-to-method pipeline and broader validation.
+- WNkW0cOwiz (7.50, R2): Lipschitz Singularities — DIST is comparable; similar structure (identify fragility → propose fix → validate), comparable empirical quality.
 
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>7.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,81 +1,97 @@
-Now let me synthesize my analysis into the final review.
+Now I have a thorough understanding of the paper and its calibration context. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces MolMiner, a fragment-based, geometry-aware, order-agnostic autoregressive model for controllable molecular generation. The model supports conditioning on up to twelve molecular properties simultaneously, using a GMM-based mechanism to handle partial property specification. Key architectural innovations include a symmetry-aware fragment attachment protocol, a geometry-aware attention mechanism with dynamic forcefield relaxation, and order-agnostic rollout training. The paper evaluates both unconditional generation (via Wasserstein distances against HierVAE) and conditional generation (via calibration plots), showing reasonable control across most properties.
-
----
+MolMiner is a fragment-based autoregressive generative model for molecules that unifies dynamic 3D geometry (via forcefield relaxation during generation), symmetry-aware fragment attachment, order-agnostic rollout, and multi-property conditioning over 12 physicochemical properties. The model is evaluated on a ~200K subset of ZINC, with unconditional benchmarking against HierVAE using Wasserstein distances and conditional evaluation via calibration plots. The core claim is that this is the first model to unify all four capabilities within a single framework.
 
 ## Strengths
 
-1. **Unified framework combining underexplored capabilities**: MolMiner is the first model, to this reviewer's knowledge, to simultaneously incorporate (A) dynamic 3D geometry during generation (via forcefield relaxation at each step), (B) a systematic symmetry-aware protocol for fragment attachment (Section 3.2), (C) order-agnostic rollout training, and (D) conditioning on up to twelve molecular properties. The architectural design is well-motivated and each component addresses a genuine gap in prior work.
+- **Genuine architectural unification**: The model combines several individually known ideas (fragment-based generation, geometry-aware attention, order-agnostic rollout, GMM-based conditioning) into a single coherent framework. Section 3 provides a clear description of how these components interact — the Gaussian-decayed distance kernel in Equation 2, the uniform rollout expectation in Equation 3, and the symmetry-aware standardization procedure in Section 3.2 are each concrete and well-specified.
 
-2. **Conditional calibration demonstrated across most properties**: Figure 2 shows that for ~9 of the 12 properties, the mean predicted value tracks the prompted value reasonably well across the dynamic range. Properties like logP, SAS, FractionCSP3, and the discrete properties (ring count, rotatable bonds, chiral centers) show clear calibration. The confusion matrices for discrete properties show strong diagonal alignment. This provides meaningful evidence of conditional control at a scale (12 properties) not previously demonstrated.
+- **Multi-property conditioning across 12 properties**: Figure 2 demonstrates that for most continuous properties (logP, SAS, FractionCSP3, TPSA, HBD, HBA), the mean predicted values track prompted targets across the μ±2σ range, and the discrete-property confusion matrices show reasonable diagonal alignment. This is a non-trivial engineering achievement and a genuine demonstration of simultaneous multi-target control at a scale not commonly shown.
 
-3. **Principled symmetry-aware attachment modeling (Section 3.2)**: The paper identifies and addresses a specific technical problem — that fragment canonicalization (e.g., for benzene) destroys atom-index correspondence needed for attachment prediction. The solution (using Morgan fingerprints and Tanimoto similarity to resolve cyclic permutations after canonicalization) is technically sound and fills a gap unaddressed by prior fragment-based models like MoLeR.
+- **Rigorous unconditional distributional comparison**: Table 1 reports 1D Wasserstein distances for all 12 properties against HierVAE, going beyond the standard uniqueness/novelty/diversity triad. This provides a fine-grained, property-by-property view of generative fidelity.
 
-4. **Rigorous evaluation methodology**: The use of 1D Wasserstein distance for distributional comparison (rather than less discriminative metrics like KL divergence) and calibration plots with ±1σ bands for conditional evaluation sets a higher standard than typical for this area. The ablation studies (Section 4.1) quantitatively isolate the effect of conditioning richness, geometry bias direction, and rollout resampling.
-
----
+- **Clearly articulated limitations**: Section 5 honestly acknowledges the termination bias toward smaller molecules, the unconditional performance gap on molWt/TPSA/MR, and hypothesizes mechanisms. This transparency strengthens rather than weakens the paper.
 
 ## Weaknesses
 
 ### Major
 
-1. **Multi-property conditioning claim not fully validated by the experiments**. The paper advertises "conditioning on any subset of twelve properties" (Abstract, Introduction), but the conditional evaluation (Section 4.3) varies *one property at a time* while the remaining eleven are filled via the GMM. The calibration plots show that the model responds correctly when a single property is set to a non-typical value while the rest are at GMM-sampled "typical" values. This does not test whether the model can simultaneously respect two or more user-specified properties that are both non-typical. A user who needs molecules with logP ∈ [2,3] **and** MW ∈ [350,400] has no evidence from the current experiments that MolMiner would satisfy both constraints. This gap sits at the core of the paper's advertised capability.
+- **No conditional baselines**: The paper's headline contribution is multi-property conditional generation — the abstract and introduction frame this as the key advance. Yet Section 4.3 provides only self-evaluation via calibration plots with no comparison against any conditional model, whether single-target or multi-target (e.g., a conditional VAE, CGVAE, or an adapted HierVAE with property embeddings). The unconditional comparison with HierVAE (Table 1) shows that MolMiner's distributional fidelity is weaker on several properties; this gap does not automatically disappear in the conditional setting. Without a conditional baseline, the reader cannot assess whether MolMiner's conditioning accuracy is competitive or merely reflects property-fragment correlations the model memorizes. This is an evidential gap at the core of the paper's claimed contribution.
 
-2. **No comparison against any conditional baseline**. The unconditional comparison against HierVAE (Table 1) is reasonable, but for the paper's main claimed contribution — controllable conditional generation — there is no baseline. Models such as conditional G-SchNet, CVAE-based conditional generators, or even a simple property-conditioned latent model could provide a reference point. The paper justifies excluding MARS (oracle-guided) and notes MoLeR's poor performance, but this does not excuse the absence of any conditional comparison. Without a baseline, the calibration plots are purely descriptive — the reader cannot assess whether the observed deviations (e.g., systematic gaps for molWt, TPSA, MR) represent a meaningful advance or are typical for conditional models operating at this property count.
-
-3. **QED control is notably poor and not adequately explained**. Figure 2 shows that the QED calibration curve is nearly flat across the prompted range, indicating the model does not respond to QED conditioning. The paper acknowledges this in a single sentence ("QED is a notable exception, where control accuracy degrades") but provides no analysis of *why* QED fails or what structural properties cause the degradation. Since QED is a widely used drug-likeness metric, this is not a trivial outlier. The conclusion still claims "calibrated conditional generation across most properties," which is technically correct (8-9/12 properties work) but the failure on a key metric deserves deeper investigation.
+- **No diversity/novelty metrics for conditional generation**: The paper reports uniqueness, novelty, and diversity for unconditional generation (Table 1) but omits them entirely for conditional generation (Section 4.3). Calibration plots measure only alignment between prompted and predicted values; a model that outputs the same handful of molecules matching a target range could produce perfect calibration. Combined with the acknowledged tendency to generate smaller molecules (Section 5) and the systematic deviations for molWt and MR in Figure 2, the absence of diversity metrics in the conditional setting leaves open the concern that calibration may come at the cost of collapsed variety. This undermines the claim of "flexible, multi-property control" for practical design.
 
 ### Minor
 
-4. **No ablation isolating the order-agnostic strategy**. Section 4.1 shows that "rollout resampling serves as effective regularization," but this ablates *resampling* (i.e., whether multiple rollouts are used during training), not the *order-agnostic* choice itself. The paper claims order-agnostic rollouts as a contribution that "maximize[s] the flexibility and diversity of possible rollouts" (Section 3.3), but no experiment compares order-agnostic vs. a fixed-order baseline (e.g., always growing from the largest fragment first or a breadth-first traversal). Similarly, the symmetry-aware handling (Section 3.2) is described in detail but never ablated (e.g., comparing attachment prediction accuracy with vs. without symmetry alignment).
+- **Ablation results not quantified in main text**: Section 4.1 summarizes three ablation findings (topographic effect, geometry-aware attention, rollout resampling) in qualitative terms only — no table, no quantitative comparison, no loss or metric differences are reported in the main paper. While the appendix (not available for review) may contain these numbers, the main text's architectural claims would be stronger with at least a summary table showing the marginal contribution of each component.
 
-5. **Validity not reported with a quantitative figure**. The paper states "We omit validity, as our model enforces valence constraints during generation and consistently produces valid molecules" (Section 4.2). While fragment-based models can achieve high validity by design, it is standard practice to report the exact rate (e.g., 99.8%). Early termination bias (discussed in Limitations) could plausibly produce incomplete or disconnected structures, making a quantitative validity figure necessary.
+- **Unconditional performance gap vs. HierVAE**: Table 1 shows MolMinerD underperforms HierVAE substantially on molWt (47 vs. 15), TPSA (7.6 vs. 2.3), and MR (11.9 vs. 3.8). The paper acknowledges this (Section 5) and attributes it to termination bias, which is plausible, but the hypothesis is not empirically verified and the same bias likely affects conditional generation for these properties — indeed molWt and MR already show systematic deviation in Figure 2. This signals a structural weakness in the generative backbone that is not fully resolved.
 
-6. **Unconditional generation underperforms HierVAE on 8 of 12 Wasserstein distances** (Table 1), with notable gaps on molWt (47 vs. 15), TPSA (7.6 vs. 2.3), and MR (11.9 vs. 3.8). The paper attributes this to early termination and GMM approximation error, but these are acknowledged rather than resolved. The early termination hypothesis is presented without supporting evidence (e.g., average fragment count per generated molecule vs. dataset average).
+- **Overclaiming in introduction and conclusion**: The introduction promises "human-in-the-loop design" and the conclusion claims potential to "accelerate discovery in domains of high environmental and biomedical relevance" (sustainable energy, drug discovery, green chemistry). None of these application scenarios are evaluated or even illustrated with a case study. While common in ML papers, such overstatement weakens credibility and should be scaled to match what was actually demonstrated.
+
+- **GMM conditioning and focalized readout underspecified**: The GMM-based completion of conditioning vectors (Section 3.6) is stated but the mechanism is not described — does the GMM condition on the provided subset via Gaussian conditional distributions, or sample unconditionally? Similarly, the focalized readout (Section 3.4) mentions "attention scores further biased by distances to the hit location" but the exact aggregation mechanism is not formalized. These are important implementation details for reproducibility.
 
 ### Trivial
 
-7. The auxiliary fragment predictor (Section 3.5) is described but its accuracy (top-1, top-5) is never reported. If the starting fragment is systematically wrong, errors could compound.
-
----
+- 30 generations per conditioning target value is stated but the rationale for this number (vs. larger sample sizes for extreme targets where support is sparser) is not discussed.
 
 ## Nice-to-Haves
 
-- A targeted multi-property experiment: condition on two or three properties simultaneously (e.g., fix logP and MW at a few joint value pairs) and show the joint distribution is concentrated around the targets. Even a small-scale test would substantially strengthen the central claim.
-- Quantitative calibration error metrics (e.g., slope, MAE, R²) alongside the calibration plots, and comparison to a simple baseline such as nearest-neighbor retrieval from the training set.
-- Report the average number of fragments per generated molecule vs. the dataset average to support the early-termination hypothesis.
-- GMM quality validation: compare the distribution of GMM-completed property vectors with the true data distribution on held-out molecules.
+- A conditional baseline — even a simple MLP-conditioned VAE or adapted HierVAE — would immediately contextualize the calibration results and strengthen the paper considerably.
+- Diversity/novelty metrics as a function of target value would verify that property control does not collapse generation diversity.
+- An experiment testing the termination-bias hypothesis (e.g., reweighting termination actions during training and measuring the effect on molWt distribution) would strengthen the limitation analysis.
+- Discussion of sensitivity to forcefield choice (UFF vs. alternatives) and its effect on the geometry-aware attention bias.
 
----
+## Removed Points
+
+These points were flagged by reviewers but removed from the final assessment:
+
+- **MolLeR exclusion is weakly argued**: The paper documents attempting to run MolLeR for 7 days, obtaining poor results consistent with known VAE sampling issues, and includes the results in Appendix A.9. This is a reasonable justification — the authors tried and documented the outcome. Removed.
+
+- **Symmetry protocol may fail for unusual ring systems**: The paper's SSSR-based decomposition extracts individual rings and bonds ("both of which are single cycles"), which is correct for the method described. Acyclic functional groups become individual bond fragments. The concern about polycyclic systems is addressed by SSSR decomposition into constituent rings. Removed as a misunderstanding of the method.
+
+- **"30 generations per target value may be too few"**: The calibration plots show individual data points and ±1σ bands across the full property range; 30 per target × many targets across the range provides a sufficient picture of calibration behavior. This is a nitpick. Removed.
+
+- **Request for human-in-the-loop experiments**: The paper's scope is generative modeling, not interactive systems evaluation. While the introduction mentions this aspiration, evaluating it is outside the paper's stated contribution. Moved to the overclaiming discussion rather than treated as a missing experiment.
+
+- **Strength about "important problem"**: Generic, removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
-
----
+Beyond the paper's own contributions, the review process surfaces an important methodological observation: the field lacks standardized protocols for evaluating conditional molecular generation. While unconditional generation has converged on metrics like uniqueness/novelty/diversity plus distributional comparisons, conditional evaluation remains ad hoc — calibration plots are informative but insufficient alone. A standard that combines calibration accuracy with conditional diversity and comparisons against conditional baselines would benefit the community. MolMiner's evaluation gap is partly a reflection of this broader methodological immaturity.
 
 ## Suggestions
 
-1. Add a multi-property conditional experiment: fix two or three properties simultaneously, generate, and show joint calibration. This directly validates the paper's core advertised capability.
-2. Add at least one conditional baseline — e.g., a simple property-conditioned latent model or conditional G-SchNet — to contextualize the calibration results.
-3. Report validity rate and starting-fragment predictor accuracy numerically, even if they are high.
-4. Add ablations for the order-agnostic rollout (compare against a fixed-order variant on diversity and property distribution metrics) and symmetry handling (attachment accuracy with vs. without alignment).
-
----
+- Add at least one conditional baseline (a property-conditioned VAE or adapted HierVAE) and compare calibration accuracy and diversity across a representative subset of properties (e.g., logP, QED, molWt). This is the single highest-impact change.
+- Report uniqueness, novelty, and internal diversity for conditional generation, ideally stratified by target value ranges.
+- Move a summary ablation table into the main text showing quantitative impact of each component (geometry-aware attention, rollout resampling, conditioning dimensionality).
+- Tone down unsupported application claims in the introduction and conclusion to match what was actually demonstrated.
 
 ## Score and Decision
 
-**Round 1 — Bracketing:** I queried three bands on topics similar to this paper (fragment-based molecular generation, conditional property control, autoregressive evaluation). Low-band anchors (score < 3.5) averaged 3.00; middle-band anchors (3.5–7.5) ranged from 5.25 to 7.25; high-band anchors (> 7.5) clustered at 8.00. The plausible bracket for this paper is **4.5–6.5**.
+### Calibration Anchors
 
-**Round 2 — Narrowing:** I read five anchors in full from the middle band: GEAM (6.33, Reject, fragment-based drug discovery), Frag2Seq (5.75, Accept, fragment tokenization for SBDD with mixed reviews 8/3/6/6), TFG-Flow (6.25, Accept, training-free guidance), GODD (5.25, Reject, OOD 3D generation with significant concerns), and Reframing SBDD Evaluation (6.50, Accept, evaluation framework paper).
+| Anchor ID | Paper | Avg Score | Round | Comparison |
+|---|---|---|---|---|
+| hrMNbdxcqL | G2T-LLM | 3.00 | 1 | Weaker — simple LM-based generation, limited evaluation |
+| G536mmC2HL | TorSeq | 3.00 | 1 | Weaker — narrow scope (conformer generation only) |
+| B6B6EhC1bW | High-Order Substructure | 2.50 | 1 | Weaker — representation learning, not generative |
+| mMhZS7qt0U | Frag2Seq | 5.75 | 2 | Similar level — fragment-based generation, but with stronger baselines and protein-context evaluation |
+| an3kPpce6b | Steering 3D Generation | 5.25 | 2 | Similar level — OOD generation with evaluation gaps |
+| p5VDaa8aIY | Small Molecule Opt w/ LLMs | 5.75 | 2 | Slightly stronger — large-scale LLM-based generation with optimization benchmarks |
+| sLGliHckR8 | GEAM (Dynamic Fragments) | 6.33 | 2 | Stronger — comprehensive experiments, ablation studies, clear evaluation |
+| g3VCIM94ke | DrugFlow | 6.67 | 2 | Clearly stronger — multiple innovations with comprehensive baselines and ablation studies |
+| GK5ni7tIHp | TFG-Flow | 6.25 | 1-2 | Stronger — training-free guidance with rigorous evaluation |
+| NSVtmmzeRB | GeoBFN | 8.00 | 1 | Significantly stronger — SOTA with rigorous theory and evaluation |
 
-Compared to Frag2Seq (5.75), MolMiner shows stronger architectural novelty (geometry-aware attention, symmetry handling, order-agnostic training) and broader property conditioning scope, but Frag2Seq has cleaner experimental validation including baseline comparisons. Compared to GEAM (6.33), both papers propose fragment-based frameworks with significant evaluation gaps that divide reviewers. MolMiner's evaluation gap (multi-property claim not fully tested) is roughly comparable in severity to GEAM's novelty concerns.
+**Round 1 bracket**: 3.0 – 7.0 (wide bracket — the paper sits above weak anchors like G2T-LLM at 3.0 and below strong anchors like GeoBFN at 8.0)
 
-Given that the core claim (multi-property conditioning) is partially supported by single-property-at-a-time calibration but lacks the multi-property simultaneous test and conditional baseline that would fully substantiate it, I place this paper slightly below the stronger middle-band anchors. The technical contributions are genuine but the experimental validation has an important gap.
+**Round 2 narrowing**: The paper is most comparable to Frag2Seq (5.75) in contribution scope — both are fragment-based generative models with geometric awareness. However, MolMiner has weaker evaluation (no conditional baselines vs. Frag2Seq's comprehensive SBDD baselines) and its unconditional results lag its own baseline. It sits below GEAM (6.33) which has more comprehensive experiments and ablation studies despite also being rejected. Compared to Steering 3D Generation (5.25), MolMiner has a more coherent and well-motivated method but similar evaluation gaps.
 
-**Final score: 6.0 — This is a borderline case. The paper has genuine technical contributions (unified framework, symmetry handling, geometry-aware attention) and shows convincing calibration for most properties in a single-property-at-a-time setting. However, the central claim of multi-property conditioning on "any subset" lacks the direct experiment that would validate it, and the absence of any conditional baseline makes it hard to assess significance. These gaps are addressable but non-trivial.**
+**Final score**: 5.0. The architectural unification is genuinely novel and the calibration plots demonstrate multi-property control, but the absence of conditional baselines and conditional diversity metrics are major evidential gaps that prevent the paper from fully substantiating its headline claim. The method is sound and the direction is promising, but the evaluation as presented does not rise to the level of a strong accept. The paper falls between Frag2Seq (5.75, stronger evaluation) and Steering 3D Generation (5.25, weaker method) — I place it at 5.0.
 
-**Decision: Reject** — in the current form, the evaluation does not fully support the paper's advertised capabilities. The paper would benefit from major revisions targeting the gaps above, after which it could be a solid contribution.
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

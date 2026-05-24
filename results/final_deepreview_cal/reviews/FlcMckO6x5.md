@@ -1,96 +1,86 @@
-Now let me finalize with the calibration report.
-
-## Calibration Report
-
-**Round 1 — Bracketing:**
-- Weak band (avg < 3.5): G2Lnqs4eMJ (2.50), fUz6Qefe5z (3.00), 2NwHLAffZZ (2.33), IqaQZ1Jdky (2.50) — topically related to NTK/KAN/approximation but not strong topically to SepNNs. The paper under review is clearly stronger.
-- Middle band (3.5 < avg < 7.5): TNYLCF7vZA (4.75, spectral bias/INR preconditioning), 2C3CWCPxNS (5.00, PINN preconditioning), FK8tl47xpP (6.25, greedy L2O), b6juTJZ1I9 (5.00, preconditioned matrix sensing).
-- Strong band (avg > 7.5): STUGfUz8ob (7.60, transformer reasoning), AoraWUmpLU (8.00, neural ODE NTK), 4xWQS2z77v (8.00, loss landscape), P7KIGdgW8S (8.00, graph separation).
-
-**Initial bracket: 4.5 – 6.5.**
-
-**Round 2 — Narrowing (same session):**
-Anchors read in full:
-- **TNYLCF7vZA (4.75)** — Rejected INR spectral bias paper (Shi et al. 2025, cited in the paper). Stronger experiments than the SepNN paper but weaker theory. The SepNN paper has more substantial theoretical contributions but poorer complexity justification. Comparable on balance, slight edge to SepNN paper.
-- **2C3CWCPxNS (5.00)** — Rejected PINN preconditioning paper. The SepNN paper has broader theoretical scope (approximation + NTK + method) and better clarity. Slightly stronger.
-- **8wAL9ywQNB (6.00)** — Accepted generalization bounds paper. The SepNN paper has comparable theoretical novelty and stronger empirical validation, but the unresolved complexity issue pulls it below this anchor.
-- **Q0TEVKV2cp (6.75)** — Accepted debiasing paper. Stronger experimental rigor; the SepNN paper is weaker overall.
-
-**Narrowed bracket: 5.0 – 6.0.** The paper is stronger than the 4.75 and 5.00 anchors, comparable to 5.50–5.75 anchors, and weaker than the 6.00 anchor.
-
-**Final score: 5.5.** The paper has solid theoretical contributions (universal approximation theorem extending prior bivariate-only results, NTK regimes for SepNNs) and interesting algorithmic ideas (SepPGD with Kronecker/preconditioner connections). However, the O(nD) complexity analysis is underdeveloped — the described operations involve n^D residuals and n^{D-1} intermediates whose cost is not adequately accounted for — and the "provable" spectral adjustment is only established for D=2. These gaps prevent acceptance in current form but are addressable in revision.
-
----
-
 ## Summary
 
-This paper makes three contributions to separable neural networks (SepNNs): (1) a universal approximation theorem for CP, TT, and Tucker SepNNs; (2) NTK regime analysis (deterministic and random limiting kernels); and (3) a separable preconditioned gradient descent (SepPGD) method. The approximation theory fills a genuine gap (prior work was bivariate-only) and the NTK analysis is novel. However, the core efficiency claim of SepPGD — O(nD) complexity for n^D training samples — is not adequately justified given that the operations in (8) involve an n^D residual tensor and n^{D-1} intermediate matrices whose costs are not fully accounted for. The "provably adjusts" claim is established only for D=2. These gaps undermine the central algorithmic contribution in its current form.
+This paper establishes theoretical foundations for separable neural networks (SepNNs), an architecture class that factorizes multivariate functions into linear combinations of univariate factor networks. It makes three contributions: (1) a universal approximation theorem for CP, TT, and Tucker SepNNs using Stone–Weierstrass plus universal approximation; (2) a neural tangent kernel (NTK) analysis characterizing the training dynamics under different asymptotic regimes (infinite vs. fixed width/rank); and (3) SepPGD, a separable preconditioned gradient descent method that exploits the factorized structure to apply preconditioners with \(\mathcal{O}(n D)\) per-iteration cost for \(n^D\) grid samples, along with experiments on KRR, INR image/surface representation, and PINNs demonstrating faster convergence.
 
 ## Strengths
 
-- **Universal approximation theorem for multi-dimensional SepNNs (Theorem 1).** Prior work (Cho et al., 2023) covered only the bivariate case. This paper proves that CP, TT, and Tucker SepNNs can approximate any continuous multivariate function on compact sets, using a clean Stone–Weierstrass argument combined with vector-valued universal approximation. The proof sketch in the main text is clear.
-
-- **NTK regimes with deterministic and random limits (Theorem 2, Corollary 1).** The paper derives the NTK formula for CP SepNNs (Lemma 1) and establishes that under W→∞, R→∞ the NTK converges almost surely to a deterministic kernel; under W→∞, fixed R it converges to a random kernel. The empirical verification (Fig. 1) confirms the predicted asymptotic behavior across multiple seeds. This is a novel extension of NTK theory to separable architectures.
-
-- **Practical demonstration across multiple tasks.** SepPGD shows faster wall-clock convergence on KRR, image/surface INRs, and PINNs compared to baselines (Figs. 2–4). Visual results (Fig. 3) show meaningful quality improvements (PSNR 26.48→33.30 dB on image representation, IoU 0.983→0.992 on surface representation).
+- **Universal approximation theorem (Theorem 1):** Proves rigorously that CP, TT, and Tucker SepNNs with non-polynomial activations can approximate any continuous multivariate function on compact sets. The Stone–Weierstrass approach is clean and applies uniformly across all three decomposition forms, filling a genuine theoretical gap.
+- **NTK characterization (Lemma 1, Theorem 2, Corollary 1):** Derives a closed-form NTK for CP SepNNs as a weighted sum of factor NTKs (Lemma 1, Eq. 4), proves convergence to a deterministic kernel under infinite width *and* infinite rank (Theorem 2), and identifies a stochastic kernel limit under fixed rank (Corollary 1). The empirical validation in Figure 1 confirms these predictions across multiple seeds.
+- **SepPGD algorithm (Definition 1, Lemma 2):** Lemma 2 cleanly connects SepPGD to classical NTK-based PGD via a Kronecker-structured preconditioner \(\tilde{\mathbf{S}} = \mathbf{S}_1 \otimes \mathbf{I} + \mathbf{I} \otimes \mathbf{S}_2\) for the \(D=2\) case. The decomposition of a large \(n^2 \times n^2\) preconditioner into smaller \(n \times n\) factor-level operations is a genuine efficiency insight.
+- **Consistent empirical speed-up across diverse tasks:** Figures 2–4 show SepPGD converging faster than MLP, SepNN, and MSK baselines in wall-clock time for KRR, image/surface INR representation, and PINN-based PDE solving, with visual quality improvements (Figure 3).
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **The O(nD) complexity claim for SepPGD is not adequately justified and appears inconsistent with the described operations.** Remark 4 and Table 1 claim O(nD) complexity for SepPGD. However, computing M_d in (8) involves: (i) the residual tensor ℛ = 𝒵_Θ − 𝒴 ∈ ℝ^{n×⋯×n}, which is not low-rank because 𝒴 is arbitrary — the mode-d products ℛ ×_d 𝐒_d therefore cost O(n^D) for arbitrary labels; (ii) a matrix construction (⊕_r ⊗_{d′≠d}) that yields an R × n^{D-1} matrix multiplied by an n^{D-1} × n unfolded tensor, naively O(R n^D). Footnote 3 acknowledges "a matrix product with complexity O(n^{D-1})" for (8), which for D>2 already exceeds O(nD) (e.g., D=3 gives O(n²) vs O(3n)). The paper does not explain how these operations avoid materializing O(n^D) intermediates. Additionally, Remark 4 describes M_d as "n-by-n" while Definition 1 gives M_d ∈ ℝ^{R × n}. This dimensional inconsistency further obscures the complexity analysis. The SepPGD algorithm may still offer practical gains (especially for D=2 as the experiments suggest), but the claimed asymptotic advantage is not substantiated.
-
-- **"Provably adjusts" is demonstrated only for D=2; extension to D>2 is conjectural.** The abstract and introduction claim SepPGD "provably adjusts" the NTK spectrum. However, Lemma 2 (the equivalence with classical PGD) and the subsequent spectral analysis are established only for D=2. The paper states "It is believed that the result in Lemma 2 (and the analysis following) can be readily extended to multivariate cases D > 2" (p. 8)—which is a conjecture, not a proof. While Section 4 is transparent about this, the high-level framing in the abstract and introduction overstates the scope of the theoretical guarantee.
+- **Missing Lemma 3 leaves a gap in the spectral-adjustment claim.** The abstract and Section 4 state that SepPGD "provably adjusts the NTK spectrum." This depends on the assertion that the factor-NTK proxy \(\tilde{\mathbf{K}} = \mathbf{K}_{\Theta_1} \otimes \mathbf{I} + \mathbf{I} \otimes \mathbf{K}_{\Theta_2}\) is close to the true SepNN NTK \(\mathbf{K}\). Lemma 3 is referenced for this ("Suppose that \(\tilde{\mathbf{K}}\) is close to the true NTK matrix \(\mathbf{K}\) which can be verified using the NTK matrix formulation in Lemma 3") but its statement, bounds, or conditions do not appear anywhere in the main text. Without Lemma 3, the theoretical chain from Lemma 2 (equivalence to classical PGD) to "provably adjusts the spectrum" is incomplete. This is the paper's most significant weakness and must be addressed — at minimum by stating Lemma 3's claim in the main text, even if the proof is deferred to the appendix.
 
 ### Minor
 
-- **The forward pass complexity claim (O(nD) per epoch) conflates factor MLP evaluation cost with loss computation cost.** The SepNN output on a grid is a CP-rank-R tensor of size n^D. Computing the MSE loss ⟨𝒵_Θ − 𝒴, 𝒵_Θ − 𝒴⟩ requires an inner product with 𝒴 which, for arbitrary labels, involves all n^D entries. The O(nD) claim (inherited from prior SepNN literature) counts only the nD factor MLP forward passes, not the tensor operations needed to compute the loss. This issue propagates to SepPGD because the residual and its mode products inherit the same scaling.
-
-- **Convergence reported only in wall-clock time.** Figures 2–4 plot loss vs. execution time. Without per-iteration convergence curves, it is unclear whether SepPGD converges faster because it improves the condition number (algorithmic improvement) or simply because each iteration is cheaper (implementation improvement). These should be separated.
-
-- **Error bars missing from main experiments.** Only Fig. 1 (NTK verification) reports variance across multiple seeds; Figs. 2–4 show single-run convergence. This limits the statistical grounding of the empirical claims.
+- **Abstract overstates complexity advantage.** The abstract claims "efficient \(\mathcal{O}(n D)\) complexity" without qualification. Footnote 3 acknowledges that constructing the mode-\(d\) preconditioner \(\mathbf{M}_d\) via Eq. (8) involves an \(\mathcal{O}(n^{D-1})\) matrix product. For large \(D\) this term can be significant. The table is correctly scoped to "applying the preconditioner," but the abstract should reflect the full picture.
+- **Spectral bias alleviation is not directly measured.** The experiments (Figures 2–4) show faster MSE convergence but do not decompose the residual onto NTK eigenmodes to verify that small-eigenvalue components are specifically accelerated. The empirical evidence for spectral bias alleviation is therefore indirect.
+- **Theorem 1 proof sketch omits the multiplication-closure step.** The main text says "We carefully examine that \(\mathcal{A}\) meets these requirements" for the Stone–Weierstrass conditions, but provides no hint of how the product of two CP-form functions yields another CP-form function. The full proof is in Appendix A.5 (stripped by the parser), but a one-line algebraic demonstration in the main text would make the theorem's credibility self-contained.
 
 ### Trivial
-
-- Dimensional inconsistency: M_d is ℝ^{R×n} in Definition 1 (8) and Table 1, but Remark 4 calls it "n-by-n" and the D=2 discussion states M_d ∈ ℝ^{n×n} (p. 8). These should be reconciled.
-- No algorithm pseudocode for SepPGD, which would help clarify the computational steps.
+None.
 
 ## Nice-to-Haves
 
-- A rigorous complexity analysis separating preconditioner construction (S_d), M_d computation, and gradient backpropagation, with explicit scaling in n and D.
-- Empirical scaling plots (wall-clock time vs. n for fixed D, vs. D for fixed n) to verify the claimed O(nD) scaling.
-- Extension of Lemma 2 to D>2, or explicit qualification in high-level claims that the provable spectral adjustment is limited to D=2.
-- Per-iteration convergence curves alongside wall-clock time plots.
-- Error bars in all experimental figures.
+- An ablation study varying the decomposition rank \(R\) and factor-MLP width \(W\) would clarify how SepPGD's effectiveness depends on proximity to the infinite-width/rank regime.
+- A direct eigenmode decomposition of the residual error, showing that small-eigenvalue components converge faster under SepPGD, would strengthen the spectral-bias narrative.
 
 ## Removed Points
 
-- *"The proof sketch for approximation theory does not clarify whether TT/Tucker forms are closed under addition and multiplication"* — The paper states the appendix handles these cases; the main text focuses on CP form and notes TT/Tucker contain CP as a special case. This is standard practice for deferring detailed proofs to the appendix.
-- *"Missing algorithm pseudocode"* and *"NTK matrix computation cost details"* — These are presentation preferences or standard implementation details, not technical weaknesses.
-- Various formatting/typo nitpicks and speculation about appendix contents removed per the filtering rules.
+*These points were flagged for removal; treat them with caution.*
+
+- **Harsh critic's claim that the per-iteration complexity is "misleading"** — The paper addresses the \(\mathcal{O}(n^{D-1})\) preconditioner construction cost in Footnote 3, and Table 1 is explicitly scoped to the "gradient formulation" / preconditioner application cost. The concern is valid as a qualification (retained as Minor above) but the framing as "misleading" is too strong.
+- **Harsh critic's demand for full closure-under-multiplication verification in the main text** — The full proof is in Appendix A.5. This is an exposition preference, not a flaw in the result. Retained as Minor above for presentation clarity.
+- **Strength Finder's claim about "provable complexity reduction"** — The complexity advantage for gradient application is genuine and verified by Lemma 2; the "provable" qualifier for spectral adjustment is what's weakened by the missing Lemma 3.
+- **Strength Finder's generic strength about "important problem"** — Removed as superficial; the paper's strengths are grounded in specific results, not problem importance.
+- **Harsh critic's concern that experiments "only cover infinite-width/rank phenomena qualitatively"** — Figure 1 is explicitly a qualitative verification of the asymptotic theory, which is appropriate for its purpose.
 
 ## Novel Insights
 
-The cleanest insight is the connection between SepPGD and Kronecker-product structure for D=2 (Lemma 2): SepPGD is equivalent to classical PGD with preconditioner 𝐒̃ = 𝐒₁⊗𝐈 + 𝐈⊗𝐒₂, but the computation can leverage the vec-trick vec(𝐀𝐁𝐂) in O(n)-dimensional space rather than forming (𝐂ᵀ⊗𝐀)vec(𝐁) in O(n²)-dimensional space. This correctly identifies why separable structure can reduce preconditioner application cost. The limitation is that this exact equivalence exploits D=2 Kronecker structure, and the paper does not provide an analogous argument for D>2.
+The NTK decomposition in Lemma 1 — expressing the SepNN's NTK as \(K_\Theta(\mathbf{x}, \mathbf{x}') = \frac{1}{R} \sum_{d=1}^D \mathbf{a}_d(\mathbf{x})^\top \mathbf{K}_{\Theta_d}(x_d, x'_d) \mathbf{a}_d(\mathbf{x}')\) where the factor NTKs \(\mathbf{K}_{\Theta_d}\) are modulated by cross-factor products \(\mathbf{a}_d\) — is elegant and non-obvious. It reveals that the SepNN's training dynamics are governed by a structured combination of factor-level kernels, which directly motivates the separable preconditioner design. This structural insight may generalize to other factorized architectures beyond the CP/TT/Tucker forms considered here.
 
 ## Suggestions
 
-1. Provide a rigorous per-iteration complexity analysis for SepPGD accounting for all tensor operations, clarifying which steps scale as O(n^D), O(n^{D-1}), and O(nD). Justify or correct the claim in Footnote 3.
-2. Qualify the "provably adjusts" claim in the abstract/introduction to reflect the D=2 scope, or extend the proof to general D.
-3. Add per-iteration convergence plots alongside wall-clock time. Include error bars from multiple seeds in all experimental figures.
-4. Resolve the dimensional inconsistency for M_d and add a clear pseudocode listing.
+- **State Lemma 3 explicitly in Section 4**, even as a one-sentence claim: "Under conditions X, \(\|\tilde{\mathbf{K}} - \mathbf{K}\| \leq \epsilon\) with \(\epsilon\) bounded by Y." The full proof can remain in the appendix, but the statement must appear in the main text to close the theoretical gap.
+- **Add a one-line algebraic demonstration** of how the product of two CP-form functions yields another CP-form function (e.g., expanding the double sum and re-indexing), making the Stone–Weierstrass closure step self-evident.
+- **Qualify the complexity claim in the abstract**, e.g., "\(\mathcal{O}(n D)\) per-iteration cost for applying the preconditioner (with an \(\mathcal{O}(n^{D-1})\) one-time construction cost)."
+- **Add an eigenmode convergence plot** to one experiment (e.g., KRR noiseless) showing that residual components aligned with small NTK eigenvalues converge faster under SepPGD than under standard gradient descent.
 
 ## Score and Decision
 
-**Round-1 bracket:** 4.5 – 6.5 (based on weak anchors around 2.3–3.0 for NTK/approximation theory, middle anchors 4.75–6.25 for spectral bias/preconditioning work, and strong anchors 7.6–8.0 for high-impact theoretical work).
+**Round 1 bracket:** 5.0–7.0. The paper is clearly stronger than the weak-band anchors (2.3–3.4) and clearly weaker than the strong-band anchors (7.6–8.0). It compares most closely with middle-band anchors like ydlDRUuGm9 (KAN expressiveness/spectral bias, avg 6.25) and O6znYvxC1U (Bayesian NTK spectrum, avg 6.33).
 
-**Round-2 narrowing to 5.0 – 6.0** based on reading:
-- TNYLCF7vZA (4.75) — weaker theory, comparable experiments → SepNN paper is stronger
-- 2C3CWCPxNS (5.00) — narrower scope → SepNN paper is slightly stronger
-- 8wAL9ywQNB (6.00, Accept) — cleaner claims, no unresolved complexity gap → SepNN paper is slightly weaker
-- Q0TEVKV2cp (6.75, Accept) — stronger empirical rigor → SepNN paper is notably weaker
+**Round 2 narrowing:** Compared directly with TNYLCF7vZA (4.75, the IGA/Shi et al. paper this work builds on and cites), this paper is substantially stronger — it provides more comprehensive theory (universal approximation + NTK regimes), a novel architecture-specific algorithm, and cleaner experiments. Compared with 5xwx1Myosu (6.50, expressivity of random-weight networks) and ydlDRUuGm9 (6.25), this paper is comparable in theoretical depth but adds a practical algorithm with empirical validation. The missing Lemma 3 is a genuine gap that prevents it from reaching the 7+ range, but it is likely addressable in rebuttal.
 
-The paper is positioned between the 5.00 and 6.00 anchors. The unresolved complexity analysis prevents it from reaching acceptance-level confidence, but the theoretical contributions (approximation theorem, NTK regimes) are genuine and novel.
+**Anchor summary:**
+| Anchor | Score | Round | Comparison |
+|---|---|---|---|
+| fUz6Qefe5z | 3.00 | R1 | Much weaker — narrow NTK scope, no algorithm |
+| 2NwHLAffZZ | 2.33 | R1 | Much weaker — speculative theory, no experiments |
+| xpmDc76RN2 | 2.33 | R1 | Much weaker — limited theoretical contribution |
+| kkVTeMvC9D | 3.40 | R1 | Weaker — empirical study of Jacobian, no algorithm |
+| YN4uWzcbtt | 4.25 | R1 | Weaker — single NTK property result |
+| TNYLCF7vZA | 4.75 | R2 | Clearly weaker — same research lineage, less comprehensive |
+| mMjSc5fspq | 5.25 | R2 | Weaker — application-focused, less theoretical depth |
+| Ge7okBGZYi | 5.25 | R2 | Weaker — narrower scope |
+| GqI4fTVUXC | 6.00 | R2 | Slightly weaker — mainly critical analysis |
+| PJjHILiQHC | 6.25 | R1/R2 | Comparable — empirical approach to spectral dynamics |
+| ydlDRUuGm9 | 6.25 | R1 | Most comparable — this paper adds algorithm contribution |
+| 1Wi0Ys33Nm | 6.25 | R2 | Comparable — theoretical extension of NTK theory |
+| O6znYvxC1U | 6.33 | R1 | Comparable — strong theory, weaker experiments |
+| 92btneN9Wm | 6.33 | R2 | Comparable — architecture design for INRs |
+| 5xwx1Myosu | 6.50 | R2 | Comparable — this paper has broader empirical scope |
+| STUGfUz8ob | 7.60 | R1 | Stronger — more complete theory+experiments |
+| AoraWUmpLU | 8.00 | R1 | Stronger — more polished contribution |
+| TTrzgEZt9s | 8.00 | R1 | Much stronger — different domain |
+| OeQE9zsztS | 8.00 | R1 | Stronger — more complete theoretical framework |
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

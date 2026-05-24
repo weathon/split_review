@@ -1,79 +1,81 @@
-Now I have sufficient anchoring data. Let me write the consolidated review.
-
-**Calibration Round 1 bracket:** The paper falls between weak anchors (~3.0) and strong anchors (~7.6-8.67), placing it in the middle band (roughly 4.5-7.0).
-
-**Calibration Round 2 comparison:**
-- "The Cost of Scaling Down LLMs" (6.00) — similar study on how pruning affects fact recall vs ICL. The current paper is broader (covers quantization + distillation + pruning) and adds interpretability, though with slightly more methodological concerns. Comparable quality.
-- "Fine-Tuning Enhances Existing Mechanisms" (5.67) — interpretability study of fine-tuning effects, similar methodology. The current paper has more practical implications and broader scope.
-- "Evaluating Generalization of Quantized LLMs" (4.75, rejected) — purely a benchmarking study without interpretability; the current paper's interpretability component puts it clearly above.
-- "Activation Patching Best Practices" (6.67) — focused on methodological refinement of the same technique, cleaner but narrower contribution.
-- "Mechanistically Analyzing Fine-Tuning Effects" (6.67) — thorough but synthetic setting; the current paper works on real models with real compression methods.
-
-**Final score rationale:** The paper is comparable to "The Cost of Scaling Down LLMs" (6.0) in terms of contribution quality and weakness severity. Both have real but addressable weaknesses. The current paper has the edge in breadth (multiple compression methods + interpretability) but has somewhat more specific methodological concerns. Score: **6.0**.
+Now I have a thorough understanding of the paper. Let me synthesize the final review.
 
 ---
 
 ## Summary
-
-This paper investigates how three compression paradigms — quantization, distillation, and pruning — affect the reasoning capabilities of large reasoning models (LRMs), specifically DeepSeek-R1 and its distilled variants. The contribution is two-fold: (1) a comprehensive benchmarking of compressed R1 models across four reasoning datasets (AIME 2024, FOLIO, Temporal Sequences, MuSiQue) at multiple bit-widths and sparsity levels, and (2) a fine-grained mechanistic interpretability framework that adapts difference of means and attribution patching to compute module-level importance scores, identifying which weight matrices are most affected by compression. The key findings — that the final-layer MLP up_projection is a critical component, and that current quantization methods over-compress final-layer modules and gate projections — are validated through selective quantization and protection experiments, where protecting just ~2% of weights recovers 6.57% average accuracy.
+This paper investigates how compression (quantization, distillation, pruning) affects the reasoning capabilities of Large Reasoning Models (LRMs) through both performance benchmarking on DeepSeek-R1 variants across four reasoning datasets, and fine-grained mechanistic interpretability using adapted difference-of-means and attribution patching. The key empirical findings are that (1) weight count impacts knowledge memorization more than reasoning, (2) the `mlp.up_proj` in the final layer becomes critically important after distillation, and (3) current quantization methods overly compress final-layer and gate-projection modules — and protecting only ~2% of weights yields a 6.57% average accuracy gain on 3-bit AWQ. The paper combines systematic benchmarking with causal weight-importance analysis, validated through selective quantization and protection experiments.
 
 ## Strengths
-
-- **Comprehensive multi-method benchmarking on LRMs.** Table 1 systematically compares dynamic quantization, distillation, pruning (SparseGPT, AlphaPruning), and post-training quantization (AWQ, GPTQ, GPTAQ, ANY4/3) on four reasoning datasets. Table 2 sweeps sparsity from 10%–80% on two model sizes, identifying collapse points and their correlation with benchmark difficulty. This fills a concrete gap, as prior work had not benchmarked all three compression paradigms together on LRMs with reasoning-intensive tasks.
-
-- **Novel application of mechanistic interpretability to compression effects.** The paper adapts difference of means and attribution patching to compute module-level importance scores (I^c_{mℓ} and RI^c_{mℓ}) for every linear component across all layers of compressed LRMs (Section 2.2, Equations 1–3). This goes beyond prior layer-wise analysis and enables fine-grained tracing of how compression alters causal contributions of individual weight matrices. The heatmaps (Figures 2, 3, 6, 7) provide interpretable, visual evidence for the compression effects.
-
-- **Empirically validated actionable findings.** The identification of the final-layer up_proj as most important is validated by selectively quantizing it to 3-bit, which drops average accuracy by 16.3% (Table 3). The finding that current quantization over-compresses final-layer and gate projections is validated by protecting just 2% of weights (final-layer MLP) in 3-bit AWQ, raising average accuracy by 6.57% and outperforming all 3-bit baselines by up to 23.17% (Table 4). This direct validation-prediction loop is the paper's strongest evidence.
-
-- **Generalization across model families (Llama and Qwen) demonstrated in the main text.** Key findings about the final-layer up_proj and gate projection over-compression are consistently observed in both R1-Distill-Llama-8B and R1-Distill-Qwen-7B (Figures 2, 4, 5, 6), showing the patterns are not specific to one architecture.
+- **Fine-grained mechanistic interpretation applied to compression**: The paper adapts difference-of-means and attribution patching to compute per-module importance scores for every linear component in LRMs. This goes well beyond prior layer-wise analyses and enables precise localization of which specific weight matrices are most affected by compression (Section 2.2, Figures 2–3). The approach is methodologically novel for the compression setting.
+- **Causal validation of identified critical weights**: The authors do not stop at correlational importance scores. The selective quantization experiment (Table 3) shows that quantizing only the final-layer `up_proj` (0.7% of weights) to 3-bit drops average accuracy by 16.3%, and the accuracy drop correlates with the component's importance rank. This causal intervention provides strong evidence for the claim that specific modules are disproportionately important.
+- **Compelling protection experiment**: Keeping only the final-layer MLP modules at full precision (~2% of weights) during 3-bit AWQ quantization raises average accuracy by 6.57%, surpassing all 3-bit baselines by 4.77–23.17% (Table 4). This directly validates the paper's diagnostic finding and provides an actionable insight for future compression methods.
+- **Systematic benchmarking across compression strategies**: The paper benchmarks dynamic quantization, distillation, pruning (SparseGPT, AlphaPruning), and multiple PTQ methods (AWQ, GPTQ, GPTAQ, ANY4/3) on the same model family across four diverse reasoning datasets of varying difficulty (Tables 1–2). The collapse-point analysis and the finding that weight count impacts knowledge more than reasoning are well-supported by this data.
 
 ## Weaknesses
 
-### Major
+### Fatal
+None.
 
-- **The knowledge-versus-reasoning claim is partially supported by a confounded cross-architecture comparison.** Finding (1) in the abstract states that "weight count has a greater impact on LRMs' knowledge memorization than their reasoning capabilities." The main evidence (Section 3.3) compares R1-Distill-Qwen-32B vs. R1-Distill-Llama-70B, where Qwen-32B scores higher on reasoning but much lower on MuSiQue (knowledge). However, these models differ not only in parameter count (32B vs. 70B) but also in base architecture (Qwen vs. Llama), training data, and tokenizer — parameter count is not isolated. The additional evidence from pruning (knowledge collapses earlier than reasoning under increasing sparsity) independently supports the narrower claim about pruning effects, but does not cleanly support the broader "weight count" claim. The takeaway boxes (Takeaway 3.3) wisely frame this as "Pruning and distillation compress knowledge retention more than reasoning capabilities," which is better supported. The abstract's "weight count" framing overclaims relative to the controlled evidence.
+### Major
+- **Generality claims outpace evidence in the main text**: The abstract and conclusion state that the key interpretive findings "generalize across both R1 and non-R1 LRMs." In the main text, the importance-score analysis, heatmap visualizations, and the critical protection experiment (Table 4) are demonstrated on R1-Distill-Llama-8B and (partially) R1-Distill-Qwen-7B. The non-R1 generalization is deferred to Appendix J, and no results on larger distilled models (32B, 70B) are presented for the interpretive analysis. While the benchmarking covers all scales, the central mechanistic findings — that `mlp.up_proj` in the final layer is the most important module and that protecting it yields large gains — are shown convincingly only at the 7–8B scale. This limits confidence that the identified modules are critical at the scales where compression matters most. The paper would be substantially stronger with selective-protection results on at least one larger model.
 
 ### Minor
-
-- **Validation of importance scores tests only 5 of 224 components.** Table 3 validates the importance ranking by quantizing 5 components out of 7×32=224 total. While the selection strategy (1st overall, 2nd column, last column, 2nd row, last row) is principled, the small sample leaves open the question of how well the ranking generalizes. Additionally, on AIME 2024, quantizing 1_up (ranked last) produces a lower accuracy (6.7) than quantizing 32_up (ranked 1st, 20.0), showing task-specificity that the paper acknowledges but does not fully resolve. The paper points to Appendix N for additional AIME validation (stripped by the parser), so the main text alone lacks sufficient evidence that the ranking is stable across tasks.
-
-- **Pruning interpretability analysis is deferred to the appendix.** The paper lists pruning as one of three studied compression paradigms, and the title promises understanding compression effects broadly. However, the main interpretability results (Sections 4–5) cover only distillation and quantization. Pruning effects on weight importance are deferred to Appendix I with the note that "pruning effect based on AlphaPruning appears very similar to quantization effect" (line 263). While the paper is transparent about this, the main text's scope feels narrower than advertised.
-
-- **Selective protection experiment is demonstrated on only one model and one quantization method.** The key validation in Table 4 (protecting 2% of weights recovers 6.57% accuracy) is performed only on R1-Distill-Llama-8B with 3-bit AWQ. Replicating on at least one other model (e.g., Qwen-7B) or another quantization method (e.g., GPTQ) would significantly strengthen the claim that the identified bottlenecks are general.
-
-- **First-order attribution patching approximation is not discussed.** The attribution patching in Equation 2 uses a first-order (gradient) approximation of the actual effect of patching. This linearity assumption can miss non-linear interactions, especially in deep transformers. The paper does not acknowledge this limitation or provide any small-scale check (e.g., comparing the first-order ranking with actual activation patching for a few components).
+- **Single-pass evaluation for dynamic quantization models**: Table 1 reports dynamic quantization results with a single pass (marked with superscripts) while all other models are averaged over three passes. This is noted in the paper, but it makes the ranking of compression strategies less reliable in a narrow band where differences are small (e.g., 2.51-bit R1 avg 84.8 vs. original R1 avg 83.1). The paper does not hinge on these small differences, so this is a minor evidential concern.
+- **Importance-shift metric justification relegated to appendix**: The choice to zero all increases in relative importance (Section 2.3) is reasonable — since relative importances sum to one, increases are compensatory. However, the full justification is in Appendix H and the main-text explanation is brief. A short supplementary analysis showing absolute (un-normalized) importance changes would strengthen confidence that the "overly compressed" diagnosis is not an artifact of the normalization.
 
 ### Trivial
-
-- Figure captions and table formatting are dense and occasionally difficult to parse (e.g., the scaling note about heatmaps in Figure 2 is helpful but easy to miss). The paper would benefit from more self-contained captions.
+- The connection between the benchmarking results (Section 3) and the interpretation (Sections 4–5) reads as somewhat juxtaposed rather than integrated. Explicitly linking the observed collapse points to the identified module-importance patterns would tighten the narrative.
+- No discussion of the computational cost of the interpretation pipeline (steering vector extraction, attribution patching) on larger models, which is relevant for assessing practical applicability.
 
 ## Nice-to-Haves
-
-- The selective protection experiment could be extended to Qwen-7B and/or GPTQ to demonstrate the finding is not specific to Llama-8B + AWQ.
-- Including variance or confidence intervals for the main results (Table 1 reports three-run averages but no variance) would help assess stability, especially for differences of a few percentage points.
-- The 1_up anomaly on AIME 2024 (Table 3) could be investigated: does this component serve a specific sub-capability needed for mathematical reasoning that is not captured by the average?
+- Extending the selective protection experiment to at least one additional quantization method (e.g., GPTQ) and one additional model (e.g., Qwen-7B or a 32B model) would substantially increase confidence in generality.
+- Reporting the absolute (un-normalized) importance changes alongside the relative-importance-shift analysis would provide a useful robustness check on the "zeroing increases" choice.
+- A summarizing table of dataset statistics would help readers quickly grasp the benchmark scope.
 
 ## Removed Points
-
 These points are flagged to be removed; treat them with caution.
 
-1. **Claim that generalization to non-R1 models is unsubstantiated.** The paper references Appendix J for the non-R1 generalization results. The parser strips all appendix content from the extracted text. Per policy, this is not a valid criticism of the paper as submitted.
-2. **Claim about missing related works.** No external sources are available to verify what works should have been cited.
-3. **Formatting/style nitpicks about the introduction framing.** Minor presentational preferences that do not affect the paper's contribution.
+- **"Oversimplification in the importance-shift metric"** (from Harsh Critic): The paper's reasoning for zeroing increases is mathematically well-founded — when relative importances are normalized to sum to one, increases are necessarily compensatory. The justification is provided in Section 2.3 and Appendix H. This is a valid methodological choice, not a flaw.
+- **"Missing appendices make claims unverifiable"** (from Harsh Critic): Per review policy, appendices are stripped by the parser but exist in the original submission. The paper's references to Appendices H, J, and M should not be treated as missing evidence.
+- **"No results on larger models or full DeepSeek-R1" for benchmarking** (implied by Harsh Critic sweep): The benchmarking (Tables 1–2) does cover 32B and 70B models comprehensively. The interpretive analysis is the part limited to smaller models, which is captured in the Major weakness above.
+- **"Could the importance metric be measuring a proxy?"** (speculative concern): No evidence in the paper suggests proxy measurement; the selective quantization validation in Table 3 directly tests the importance metric causally.
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The paper's most distinctive insight is that distillation concentrates reasoning-critical computation into a small set of weights — specifically the final-layer `mlp.up_proj` — and that this concentration creates a vulnerability that existing quantization methods do not account for. This provides a mechanistic explanation for *why* protecting a tiny fraction of weights produces outsized accuracy gains, and suggests that future compression methods should incorporate importance-aware protection of identified critical modules.
 
 ## Suggestions
-
-1. **Tighten the knowledge-versus-reasoning claim.** Either (a) add a controlled comparison within the same model family (e.g., Llama-8B vs. Llama-70B, both distilled from R1), or (b) reframe the abstract to match what is actually shown: "pruning and distillation compress knowledge retention more than reasoning capabilities" rather than "weight count has a greater impact on knowledge."
-2. **Expand the importance score validation** to include more components (e.g., 10–15 components spanning different ranks) and verify that the ranking from importance scores correlates monotonically with accuracy drop upon quantization.
-3. **Replicate the selective protection experiment** on at least one additional model (Qwen-7B) or quantization method (GPTQ) to demonstrate generality.
-4. **Acknowledge the first-order approximation limitation** in the main text and, if feasible, include a small-scale sanity check comparing first-order importance rankings against actual activation patching results.
-5. **Move a brief pruning interpretability result into the main text** (or explicitly narrow the scope in the title/abstract to "quantization and distillation effects").
+- Temper the generality language in the abstract and conclusion to match the evidential scope in the main text. For example, state that findings are demonstrated on R1-distilled models and that preliminary evidence suggests generalization (with Appendix J supporting the non-R1 extension), rather than asserting they "generalize across both R1 and non-R1 LRMs" as an established fact.
+- Extend the critical-module identification and protection experiment to at least one larger distilled model (e.g., R1-Distill-Qwen-32B) or one non-R1 LRM family. Even a single additional data point at larger scale would substantially strengthen the core contribution.
 
 ## Score and Decision
 
-MY FINAL SCORE: <score>6.0</score>
+**Anchor comparison across rounds:**
+
+| Anchor ID | Avg Score | Round | Comparison to paper under review |
+|---|---|---|---|
+| 0T8vCKa7yu | 3.00 | 1 (bracket) | Pure quantization algorithm paper; our paper is clearly stronger in scope and contribution |
+| vw0NurJ7UX | 3.00 | 1 (bracket) | Static quantization method; much narrower than our paper |
+| 6Mdvq0bPyG | 3.00 | 1 (bracket) | QAT algorithm paper; lacks the benchmarking and interpretability of our paper |
+| 4QWPCTLq20 | 3.00 | 1 (bracket) | KV cache compression; different topic, weaker contribution |
+| B9klVS7Ddk | 6.75 | 1, 2 | "Compressing LLMs: The Truth is Rarely Pure and Never Simple" — closest comparator: benchmarking compressed LLMs, revealing evaluation gaps. Our paper adds mechanistic interpretability and actionable findings (protection experiment). Our paper is moderately stronger. |
+| ldJXXxPE0L | 6.00 | 1, 2 | "The Cost of Scaling Down" — studies pruning's effect on fact recall vs ICL. Similar finding about knowledge vs reasoning. Our paper is clearly stronger: broader compression methods, adds interpretability, actionable insights. |
+| ClkfwM3STw | 4.75 | 1 | Benchmark of quantized LLMs; more surface-level. Our paper is significantly stronger. |
+| Usa4pF1e5I | 3.67 | 1 | Sparse+low-rank compression method; much narrower. |
+| eW4yh6HKz4 | 7.60 | 1 (bracket) | CBQ quantization method; novel algorithm. Compares in contribution quality but different focus (method vs analysis). |
+| wg1PCg3CUP | 8.00 | 1 (bracket) | Scaling Laws for Precision; stronger theoretical contribution. Our paper is below this level. |
+| tcsZt9ZNKD | 8.20 | 1 (bracket) | Sparse autoencoders; clearly stronger contribution. |
+| TJo6aQb7mK | 7.60 | 1 (bracket) | Ternary LLM pretraining; novel method + comprehensive evaluation. Slightly above our paper. |
+| ngmEcEer8a | 6.50 | 2 | Layer pruning study; narrower scope. Our paper is clearly stronger. |
+| A0HKeKl4Nl | 6.67 | 2 | Mechanistic interpretability of fine-tuning; similar analytical depth. Our paper adds benchmarking and actionable compression insights. Comparable to slightly stronger. |
+| LC6ZtQV6u2 | 6.50 | 2 | Vision model compression; different domain. |
+| 1RrOtCmuKr | 6.33 | 2 | Codebook quantization; narrower method contribution. |
+| BifeBRhikU | 6.75 | 2 | Partially-binarized LLMs with salient weight protection. Comparable in identifying important weights for compression. Our paper is comparable: less novel method but broader scope (3 compression paradigms) with deeper analysis. |
+
+**Round 1 bracket:** 5.5 – 7.5, anchored by ldJXXxPE0L (6.0) on the low side and B9klVS7Ddk (6.75) / BifeBRhikU (6.75) in the middle. The paper is clearly stronger than ldJXXxPE0L and compares favorably against B9klVS7Ddk and BifeBRhikU by adding mechanistic interpretability and actionable protection experiments to comprehensive benchmarking.
+
+**Round 2 narrowing:** The paper lands between B9klVS7Ddk (6.75) and eW4yh6HKz4 (7.60). It is stronger than the 6.75 anchors (more comprehensive, deeper analysis) but below the 7.60+ anchors (less novel algorithmic contribution, interpretive findings limited in scale). The generality overclaim in the abstract pulls the score slightly below the top of the bracket.
+
+**Final score:** 7.0, reflecting a paper that combines comprehensive benchmarking with novel mechanistic interpretability and actionable findings — a strong contribution with a well-scoped weakness in generality claims.
+
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

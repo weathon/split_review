@@ -1,86 +1,76 @@
-Now I have sufficient calibration. Let me construct the final review.
-
-**Calibration Summary:**
-
-Round 1 bracket: (4, 7) — narrowed after reading X-ALMA (7.33), XTransplant (4.75), TransLLM (6.25), Babel Tower (5.25)
-
-Round 2 anchors read in full: Tool Decoding (6.00), UniDetox (6.25), The Same but Different (6.60)
-
-LCG is stronger than Tool Decoding (6.00) — both are plug-and-play decoding interventions but LCG's norm-adjusted self-distillation is a genuinely novel contribution backed by mechanistic evidence, whereas Tool Decoding's constrained decoding is more straightforward. LCG is comparable to UniDetox (6.25) and The Same but Different (6.60). LCG is clearly above XTransplant (4.75), TransLLM (6.25), and Babel Tower (5.25) in terms of novelty and practical impact, but below X-ALMA (7.33) in experimental rigor and completeness. I anchor LCG at **6.5**.
+Now I have a thorough understanding of the paper and have calibrated against human-reviewed anchors. Let me write the final consolidated review.
 
 ---
 
 ## Summary
-
-This paper introduces the Language Confusion Gate (LCG), a lightweight two-layer MLP that filters tokens during decoding to reduce language confusion in multilingual LLMs. LCG takes the model's hidden state, predicts which of four language families (CJ, Latin, Symbols, Low-Res) are permissible at each step, and masks disallowed logits. It is trained via norm-adjusted self-distillation, where pseudo-targets are derived from the model's own norm-debiased top-k/p predictions. Evaluated across Qwen3, Llama3.1, Gemma3, and GPT-OSS on translation (FLORES) and code generation (Humaneval-XL), LCG reduces confusion by an order of magnitude (e.g., Qwen3-30B CJ confusion 1.0%→0.0%, Latin 4.4%→0.4%) with 0.4% latency overhead while preserving legitimate code-switching.
+This paper introduces the Language Confusion Gate (LCG), a lightweight, plug-in MLP that sits atop a frozen LLM's hidden states and dynamically masks tokens from disallowed language families during decoding to suppress unintended language mixing. The method is motivated by a crisp mechanistic analysis showing that (1) output token embedding norms are systematically larger for high-resource languages, biasing sampling toward them at confusion points, and (2) norm-adjusted logits recover the correct-language token as the top prediction. LCG is trained via norm-adjusted self-distillation using the base model's own debiased predictions as pseudo-labels, requires no model retraining, and adds only 0.4% inference overhead. Evaluated across seven models (no-think and thinking), LCG reduces CJ and Latin confusion by roughly an order of magnitude while preserving task performance and legitimate code-switching.
 
 ## Strengths
-
-1. **Novel and well-motivated approach grounded in mechanistic evidence**: The paper's core insight — that output token embedding norms are imbalanced across language families and that adjusting logits by these norms produces cleaner distillation targets — is original and supported by quantitative analysis (Table 1, Figure 2). Norm-adjusted self-distillation outperforms the unadjusted variant consistently (Table 3, e.g., Llama3.1-8B Latin confusion drops from 5.7% to 2.9%), confirming the geometric insight translates into a genuine algorithmic improvement.
-
-2. **Empirically motivated intervention logic**: Section 3.1's finding that at confusion points, correct-language tokens appear within top-3 in 99.29% of cases while confusion tokens are top-1 56.74% of the time directly motivates masking over retraining. This is concrete, quantitative evidence that the model "knows" the right answer but samples wrong — a finding with implications beyond this paper.
-
-3. **Comprehensive multi-model evaluation with consistent gains**: LCG is evaluated on five models spanning different architectures, scales (8B–30B), and modes (no-think and thinking). The pattern of confusion reduction holds across all (Tables 3, 4), including on Gemma3-12B and GPT-OSS where training was on different model families than the base Qwen3-8B used for gate training. The INCLUDE accuracy metric shows no degradation, unlike ORPO which drops accuracy (Figure 3).
-
-4. **Practical overhead is quantified and negligible**: Section 6 reports a benchmark with 0.4% latency increase (15.95ms → 15.99ms per step) at 8-way concurrency. Combined with the 0.33–0.38% intervention rate (523/139,354 tokens for Qwen3-8B), this establishes that LCG is deployable in production settings.
-
-5. **Code-switching preservation is demonstrated with two complementary analyses**: The token-level analysis (86.7% permission at human-validated code-switch points) and the response-level analysis (Table 5, post-intervention rates above Claude Sonnet 4 baseline) provide converging evidence that LCG does not suppress legitimate mixing. The comparison against a strong commercial model (Claude Sonnet 4) as an anchor is a useful reference.
+- **Strong mechanistic motivation**: The norm analysis (Table 1, Figure 2) convincingly demonstrates that high-resource-language tokens dominate the high-norm tail of output embeddings, directly motivating the norm-adjusted self-distillation training. This is a genuine insight that distinguishes LCG from ad-hoc decoding interventions.
+- **Broad and clean empirical results**: Across four no-think models (Table 3) and three thinking models (Table 4), LCG consistently reduces both CJ and Latin confusion rates—often dramatically (e.g., Qwen3-30B CJ% 1.0→0.0, Latin% 4.4→0.4)—while BLEU, accuracy, and Pass@k remain stable or improve slightly.
+- **Convincing ablation**: The LCG-adjusted vs. LCG-unadjusted comparison (Table 3) cleanly isolates the value of norm debiasing; e.g., Llama3.1-8B Latin% drops from 5.7% (unadjusted) to 2.9% (adjusted).
+- **Thoughtful evaluation design**: The FLORES-NO-LATIN / FLORES-WITH-LATIN partition (Section 5.2) elegantly solves the problem of distinguishing erroneous Latin confusion from legitimate code-switching, and the rationale for avoiding LCB is sound and honest.
+- **Code-switching preservation**: The 86.7% token-level preservation rate on human-validated code-switch examples, plus Table 5 showing post-intervention rates remain above the Claude Sonnet 4 baseline, demonstrates that LCG does not indiscriminately suppress multilingual behavior.
+- **Practical deployability**: The 0.4% per-step overhead measurement (15.95ms→15.99ms) on a production benchmark makes a concrete case that LCG is production-ready, and compatibility with speculative decoding is noted.
+- **Fair baseline comparisons**: Figure 3 shows LCG outperforming ICL, greedy decoding, and ORPO tuning; the ORPO result (INCLUDE accuracy drops from 61.4→57.3 on Qwen3-8B) usefully demonstrates the risk of retraining-based approaches that LCG avoids.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
+- **Unaddressed potential overlap between FLORES+ training data and FLORES-NO-LATIN evaluation**: The gate is trained on a composite 78k-sample dataset that includes the FLORES+ Dataset (Section 5.1), and the headline evaluation results (Table 3, FLORES-NO-LATIN) use a filtered subset of FLORES+ for five language pairs. The paper does not describe any train/test split ensuring the training and evaluation sentences are disjoint, nor does it assert they are. If hidden states from the same translation pairs appear in both training and evaluation, the reported confusion reductions on FLORES-NO-LATIN could be partially inflated by memorization of sentence-specific patterns rather than genuine generalization of the gate. This concern is mitigated—but not fully resolved—by the fact that (a) the gate is a small 2-layer MLP with limited memorization capacity, (b) training data draws from four sources, not only FLORES+, and (c) LCG shows clear gains on the fully independent INCLUDE and Humaneval-XL benchmarks. Nonetheless, since the paper's strongest numerical claims (e.g., Qwen3-8B CJ% 4.5→0.1, Qwen3-30B CJ% 1.0→0.0) are from the FLORES benchmark, this omission weakens confidence in the headline numbers. The authors should clarify the exact relationship between training and evaluation FLORES+ data and, if overlap exists, re-evaluate on a held-out subset.
 
-1. **Potential training/evaluation data overlap is not addressed**: The training data for LCG includes the FLORES+ Dataset (Section 5.1, "aggregated from several sources, including…FLORES+ Dataset"), while the primary evaluation benchmark FLORES-NO-LATIN is explicitly a subset of FLORES+. The paper does not state whether evaluation sentences were excluded from training. Because the gate is trained on the frozen model's hidden states collected from training samples, overlap could inflate results — the gate might have learned to recognize the correct language family for specific inputs it saw during training. This concern is partially mitigated by (a) the gate's training objective (predicting language families from norm-adjusted logits, not memorizing translations), (b) the evaluation metric (character-level confusion rate, different from the BCE training loss), and (c) generalization across model families. However, the paper must clarify whether training and evaluation sets are disjoint, or provide results on a held-out subset. Without this clarification, a core claim — that LCG generalizes to unseen confusion points — rests on an unverified assumption.
-
-2. **Gate training details are underspecified**: The paper does not report the hidden dimension, activation function, learning rate, batch size, number of training epochs, optimizer, or the procedure for collecting the 78,000 training samples (e.g., how confusion points were located for training). The binarization threshold for converting the gate's sigmoid outputs to binary language-family predictions at inference is also not specified. These omissions hurt reproducibility and make it difficult for other researchers to adopt or compare against the method. While the 2-layer MLP architecture is stated, a paper introducing a trained component should provide sufficient detail for independent reimplementation.
+- **Missing specification of pseudo-label generation hyperparameters**: Section 4.2 describes constructing pseudo-targets by applying top-k and top-p filtering to norm-adjusted logits, but the specific values of k and p used during training are never stated. These hyperparameters directly determine which language families appear in the pseudo-label set and thus shape the gate's training signal. Without them, the training pipeline cannot be fully reproduced. This is easily fixable but represents a gap in the current manuscript.
 
 ### Minor
-
-3. **Limited task diversity**: Evaluation is restricted to translation (FLORES) and code generation (Humaneval-XL). For a method claiming to mitigate language confusion "generically," testing on additional tasks (e.g., multilingual summarization, instruction following, open-ended QA) would strengthen the findings. The paper acknowledges this implicitly by testing only tasks where confusion is measurable, but the scope of claims (e.g., "LCG decreases language confusion significantly" in the abstract) suggests broader applicability than what is tested.
-
-4. **No confidence intervals or significance tests**: BLEU differences in Table 3 are often less than 1 point (e.g., 13.2→13.4 for Qwen3-30B). Without confidence intervals or significance tests, it is unclear whether these differences are meaningful given the noise in LLM generation. This is common for systems papers at this scale, but the paper should at minimum acknowledge the lack of statistical rigor.
-
-5. **Human evaluation protocol for code-switching analysis is underspecified**: The paper states that human annotators judged code-switch cases as "natural, appropriate" but does not report the number of annotators, inter-annotator agreement, or selection criteria. While this analysis is secondary (measuring gate behavior on pre-selected examples, not the annotators' judgment as a metric), the lack of detail prevents assessment of the 86.7% figure's reliability.
-
-6. **No held-out gate accuracy metric**: The paper reports intervention frequency (0.38%) but never directly evaluates the gate's own classification accuracy, precision, or recall on a held-out set of confusion points. How often does the gate correctly predict the allowed language family? How often does it incorrectly mask a permissible token? Without this, the gate is a black box whose behavior is only indirectly observed through downstream confusion rates.
+- **MLP architecture details absent from main text**: The gate is described only as "a two layer MLP" (Section 4.1). Hidden size and activation function are not stated in the main paper. Even if present in the appendix (stripped here), these belong in the method section for self-contained readability.
+- **Norm adjustment partially but incompletely recovers the target language in Figure 2**: After norm adjustment, the top-1 token is the correct Hebrew character (נ, 43.75%), but ranks 2–10 are all Latin "n" tokens. The paper is honest that "norm bias cannot fully explain language confusion," but readers skimming Figure 2 may overestimate how cleanly norm adjustment resolves the confusion. The text is appropriately cautious; the figure's visual impression could be clarified.
+- **"Order of magnitude" framing deserves context**: Some of the most dramatic reductions start from very small absolute rates (e.g., Gemma3-12B CJ% 0.2→0.1, GPT-OSS CJ% 0.38→0.06). While the abstract does not mislead, a reader focusing only on the abstract could over-interpret the magnitude claim. The body of the paper is appropriately specific.
 
 ### Trivial
-
-7. Naming inconsistency: The introduction refers to "Qwen3-235B-A22B-Instruct-2507" but Table 2 lists "Qwen3-235B-Instruct."
-
-8. The heuristic thresholds for intervention rules (top-k=5/p=0.999 and top-k=20/p=0.95 in Section 4.3) are stated without justification or sensitivity analysis. A brief note on how these were chosen would improve clarity.
+- The efficiency measurement (Section 6) would benefit from noting the hardware used, for reproducibility of the latency claim.
 
 ## Nice-to-Haves
-
-- A "rules-only" ablation (intervention rules without the gate) would clarify how much of the confusion reduction comes from the learned gate versus the safety rules. The "No Rule" ablation in Figure 3 shows the gate without rules; the reverse (rules without gate) would complete the picture.
-- Extending the confusion point analysis (Section 3.1) beyond Qwen3-8B to at least one other model would strengthen the claim that the 99.29% top-3 finding generalizes.
-- A sensitivity analysis of the binarization threshold (if one is used) showing the trade-off between confusion reduction and code-switch preservation would be informative.
+- **Statistical significance**: For confusion rates reported as low as 0.0% or 0.1%, confidence intervals or results across multiple random seeds would strengthen confidence that these are stable estimates rather than artifacts of a single generation run. That said, single-run evaluation is standard practice for large-scale LLM benchmarks.
+- **Direct gate accuracy metrics**: Reporting precision/recall of the gate's binary language-family predictions (against pseudo-labels or ground-truth tags) would complement the indirect confusion-rate metrics and help debug residual errors.
+- **Training data scaling ablation**: An analysis of how gate performance varies with training data size or language coverage would provide insight into generalization behavior.
+- **False-positive masking analysis**: Examples or statistics on cases where LCG masks a token that would have been a legitimate output would further validate the claim of minimal side effects.
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution.
 
-- **Criticism about FLORES-NO-LATIN being a filtered subset of FLORES+ making Latin confusion evaluation unreliable**: This is factually wrong. The paper explicitly designed FLORES-NO-LATIN to filter out translations where Latin characters are legitimate, which is a careful and correct methodological decision. The subset is used precisely to avoid false positives, not to cause them.
-- **Criticism that the paper claims "generalization to unseen confusion points" without evidence**: The paper's confusion point analysis (Section 3.1) is on Qwen3-8B, but LCG is evaluated on other models (Llama3.1, Gemma3, GPT-OSS) that were not used for confusion point analysis, which does demonstrate cross-model generalization.
-- **Critique of token-level 86.7% figure as "unverifiable"**: The paper describes the procedure (human annotators selected natural code-switch cases, then gate was applied). While more detail on annotator count and agreement would be welcome, the figure is clearly described as a behavioral test of the gate, not a human evaluation of output quality.
-- **"Missing related work"** type criticism.
-- **Formatting/style nitpicks** (parser artifacts).
+- **Harsh critic claim that Figure 2 "is not a pure recovery of the target language" as a significant weakness**: The paper explicitly states norm adjustment "cannot fully explain language confusion" and does not claim pure recovery. The critique overstates what the paper asserts. The top-1 token after adjustment is the correct Hebrew character, which is precisely what the paper needs to motivate using norm-adjusted pseudo-labels. Retained only as a minor note about figure interpretation, not as a methodological flaw.
+- **Harsh critic speculative framing of data leakage as potentially "artificially inflated by memorisation"**: The concern about train/test overlap is legitimate (retained as Major), but the harsh critic's stronger claim that results "cannot be trusted" relies on assuming overlap exists without evidence. The paper's silence on the split is the verifiable flaw; the inflation claim is speculation. The Major framing above focuses on the missing specification, not the assumed consequence.
+- **Strength Finder generic claims about "important problem"**: Removed; problem importance is self-evident and not a paper-specific contribution.
 
 ## Novel Insights
-
-The reviews surface one point that the paper does not fully explore: the norm-adjusted self-distillation approach could be viewed more broadly as a method for distilling a classifier from the geometric properties of a frozen LM's output embeddings. The fact that the 2-layer MLP gate trained on one model (Qwen3-8B) generalizes to other model families (Llama3.1, Gemma3) suggests that the mapping from hidden states to permissible language families is partly model-agnostic — a finding that, if pursued, could lead to a universal language-confusion gate trained once and applied to any LLM. The paper's current framing focuses on the specific application, but the method's cross-model transferability is arguably its most surprising and potentially impactful property.
+Beyond the paper's own contributions, the review process surfaces an interesting methodological tension: the norm-adjusted self-distillation training strategy is clever precisely because it exploits a property of the *base model's own representations* (embedding norm bias) to create a training signal for the gate, without needing external labels or a separate model. This self-referential training loop—using the frozen model both as the source of the problem (norm bias) and the source of the solution (debiased pseudo-labels)—is a design pattern that could generalize to other "model knows the answer but can't express it" failure modes in LLMs.
 
 ## Suggestions
-
-1. **Clarify the train/eval split**: Add a sentence specifying whether any FLORES+ sentences used for evaluation were excluded from the 78k training samples. If they were not excluded, re-evaluate on a truly held-out subset (e.g., languages or sentences not in the training data) and report whether confusion reductions hold.
-
-2. **Add training details**: Specify the gate's hidden dimension, activation, optimizer, learning rate, batch size, epochs, and the binarization threshold (or decision rule) for gate predictions at inference. Even a brief paragraph would substantially improve reproducibility.
-
-3. **Report gate accuracy metrics**: Add precision, recall, and F1 for the gate's language-family predictions on a held-out set of confusion points. This would help readers calibrate trust in the gate's outputs independently of downstream confusion rates.
-
-4. **Add confidence intervals**: For the main confusion-rate comparisons (Table 3), report bootstrap confidence intervals or note the number of independent generations used to estimate variance.
+- **Highest priority**: Clarify the FLORES+ train/evaluation split. If disjoint, state it explicitly with the partitioning method. If not, re-run FLORES-NO-LATIN evaluation on a held-out language or sentence subset and report both original and held-out results.
+- Specify the top-k and top-p values used for pseudo-label construction in Section 4.2.
+- Add a one-line specification of the MLP hidden size and activation function to Section 4.1.
+- Consider adding a brief note in the Figure 2 caption clarifying that while the top token is correct, the remaining top-10 still contain Latin tokens—consistent with the paper's own caveat that norm adjustment alone does not fully resolve confusion.
 
 ## Score and Decision
 
-I assign a score of **6.5**. The paper makes a genuinely novel contribution — norm-adjusted self-distillation for language-aware decoding is a clever and principled idea backed by mechanistic evidence and solid empirical results across diverse models. The method is practical (0.4% overhead, sparse intervention) and addresses a real problem. The weaknesses are real but not fatal: the data-overlap concern needs clarification (not correction — the mitigated factors suggest results would hold), and the missing training details hurt reproducibility but can be addressed in a revision. Relative to calibration anchors, this paper sits above Tool Decoding (6.00) and TransLLM (6.25) due to its stronger originality, and below top-tier papers like X-ALMA (7.33) due to evaluation gaps. **Decision: Accept**, contingent on the authors clarifying the train/eval data split.
+**Calibration summary**:
 
-<score>6.5</score>
-<decision>Accept</decision>
+Round 1 (bracketing): Retrieved anchors across three bands, placing the paper plausibly in the 5.5–7.5 range.
+
+Round 2 (narrowing): Compared against:
+- `jY5oml9fe9` (SASA, 6.00): Lightweight controlled decoding for detoxification. LCG is stronger—deeper mechanistic motivation, broader evaluation, practical deployment data.
+- `4z3IguA4Zg` (6.00): Dynamic correction decoding for hallucination. Similar tier of contribution, but LCG's evaluation is more comprehensive.
+- `HgAS03GU4J` (6.00): Token-level inference-time alignment. LCG's method is better motivated and evaluated.
+- `NCrFA7dq8T` (6.60): Multilingual model interpretability case study. Well-executed but narrower scope; LCG has broader practical impact with comparable execution quality.
+- `DayPQKXaQk` (CODEC, 7.00): Constrained decoding for cross-lingual label projection. Strong paper with good evaluation. LCG is comparable in contribution quality but has the FLORES data-split concern dragging it slightly lower.
+- `7xCSK9BLPy` (7.33): MBR decoding for instruction following. LCG is not at this level—MBR paper has stronger theoretical grounding and more comprehensive evaluation.
+
+**Bracket from Round 1**: 5.5–7.5. **Narrowed by Round 2**: The paper sits between NCrFA7dq8T (6.60) and DayPQKXaQk (7.00), closer to NCrFA7dq8T due to the unresolved data-split concern on the headline benchmark. The independent-benchmark results and the method's practical impact prevent it from falling below 6.0, but the missing FLORES split specification on the most prominently cited numbers prevents it from matching the cleaner 7.0+ papers.
+
+**Final score**: 6.5 — a solid, well-motivated contribution with strong empirical results; one addressable major weakness (FLORES data-split clarity) that weakens confidence in the headline numbers but does not undermine the core contribution.
+
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

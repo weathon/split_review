@@ -100,6 +100,40 @@ review 内容显示旧 prompt DeepSeek 和 905381a prompt DeepSeek 的差异不�
 
 教训：OpenRouter 上同一个模型名不等于同一个实际服务质量。第三方 provider routing 可以造成明显的拒答、截断、prompt 泄漏和格式不稳定，进而显著影响 corr / MAE / failure rate。这不是说对应 run 一律作废；而是分析 run 差异时必须把 provider 作为独立变量记录下来，不能把 provider 造成的退化误归因到 prompt 或模型本身。
 
+## best DeepSeek run 的 Weave / provider 追查
+
+为了追查 `results/sweep_v1_905prompts` 为什么后来难以复现，从 Codex session 里找到了当时的 Weave trace：
+
+- run 启动时间：`2026-05-22T04:26:03.550Z`
+- Weave project: `https://wandb.ai/3dsmile/openai-agents/weave`
+- first Harsh workflow: `019e4def-44bc-7689-a5cf-3f0b84a025b0`
+- first inspected Merger workflow: `019e4def-aec3-7752-a1e2-d81265fb748e`
+- first inspected Merger agent call: `019e4def-aec4-787d-81ce-c06f0e392dd3`
+- trace artifact: `results/weave_trace_sweep_v1_905prompts/`
+
+Weave 确认当时实际状态是混合的：prompt 文字里仍有 `read_file` 文案，但实际 tool schema 已经是 id-based 的 `read_anchor(anchor_id)`；Merger 实际调用了 `read_paper`、多次 `grep_paper`、两轮 `calibration_search`，每轮后调用 `read_anchor`。也就是说，当时不是干净的 905 prompt/code snapshot，而是一个 prompt/tool hybrid 状态。
+
+但这个 hybrid 状态后来已经基本复现过，仍然没复现出当时的效果；模型后缀也不是解释，因为新旧都解析到 `deepseek/deepseek-v4-flash-20260423`。
+
+进一步用 OpenRouter generation API 反查当时 895 个 `openai.responses.create` generation id，provider 分布是：
+
+| Provider | Count |
+|---|---:|
+| GMICloud | 833 |
+| DeepSeek | 62 |
+
+endpoint 分布：
+
+| Provider | endpoint_id | Count |
+|---|---|---:|
+| GMICloud | `e9b742d8-f524-4795-8d84-0d5815e9b73b` | 833 |
+| DeepSeek | `722e0746-2034-4d6e-a08f-e6271849ee9e` | 53 |
+| DeepSeek | `e9b742d8-f524-4795-8d84-0d5815e9b73b` | 9 |
+
+结论：best-ish run 本身也是 provider-mixed，而且绝大多数请求不是 DeepSeek 官方，而是 GMICloud。既然 prompt/tool hybrid、model suffix、config 都已经被检查或复现过，剩下最合理的解释是后端随机性：同一个 OpenRouter model slug 在不同时间、不同 provider、不同 provider 内部 serving 状态下，不保证实际 checkpoint、quantization、sampling/kernel、batching/cache 行为完全一致。`temperature=1.0`、`CONCURRENCY=50`、未 pin provider 会放大这个问题。
+
+教训：实验记录必须保存 Weave/OpenRouter generation id 和 provider distribution。只保存 model slug、prompt、git commit 不够；这些不能确定真实后端。对于需要可复现的 evaluator run，应该 pin provider，降低并发，保存 generation metadata，并把 provider/backend stochasticity 当成独立实验变量。
+
 ## Opus / DeepSeek / Human 的最终比较
 
 后续把 DeepSeek flash 和 Opus 对齐到 249 篇 overlap 后，结论变得更清楚：

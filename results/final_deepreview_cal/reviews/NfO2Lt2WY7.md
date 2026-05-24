@@ -1,98 +1,79 @@
-Here is my consolidated final review.
-
----
-
 ## Summary
 
-This paper systematically ablates the GRPO loss function, testing whether PPO-style clipping, group-relative advantage estimation, and negative feedback signals are each necessary for post-training LLMs on math reasoning. The authors propose RGR (REINFORCE with Group Relative Advantage), a simplified variant that removes clipping and policy ratios while retaining group-relative advantage estimation and KL regularization. Experiments on three small models (0.5B–1.5B) trained on GSM8K and evaluated across nine math/STEM benchmarks show that (1) negative feedback is essential for stable training, (2) advantage estimation is indispensable, and (3) PPO-style clipping can be removed without harming stability or benchmark performance.
+This paper systematically decomposes the GRPO (Group Relative Policy Optimization) loss function for post-training LLMs on mathematical reasoning. Through controlled ablations, the authors find that (1) negative feedback (not masking out negative-advantage actions) is important for stable training, (2) group-relative advantage estimation is crucial, and (3) PPO-style policy ratio clipping is unnecessary. From these observations they propose RGR (REINFORCE with Group Relative Advantage), which retains group-relative advantage and KL regularization while discarding clipping. Experiments on 0.5B–1.5B models trained on 1800 GSM8K problems evaluate RGR against GRPO, positive-only GRPO, REINFORCE, RAFT, and supervised fine-tuning across nine math and STEM benchmarks.
 
 ## Strengths
 
-- **Clean ablation design isolating component necessity.** The paper tests positive-only advantages, REINFORCE with raw rewards, and the simplified RGR variant against full GRPO. The training dynamics in Figure 1 are the strongest evidence: they clearly show that positive-only GRPO and RAFT collapse (reward and response length drop to near zero for the 0.5B model by step 20), while methods using negative feedback and advantage estimation (GRPO and RGR) maintain stable learning. This directly supports the claim that negative feedback is essential and that clipping is not needed for stable optimization.
+- **Clean, well-motivated ablation design.** The paper systematically isolates three components of GRPO (negative feedback, advantage estimation, and clipping) in a principled way. The positive-only GRPO variant and the direct-reward REINFORCE baseline cleanly demonstrate what happens when each component is removed, and the experiments are interpretable throughout.
 
-- **PPO-style clipping removal does not harm stability.** Figure 1 shows nearly identical reward and response-length trajectories for GRPO and RGR across all three model scales (e.g., reward ~0.9 for Qwen 1.5B, response length ~150). This is a clean, visually convincing result that supports the paper's core thesis that GRPO's complexity can be reduced.
+- **Convincing demonstration that clipping is unnecessary.** Across all three models and nine benchmarks, RGR (which removes clipping) trains stably and never substantially underperforms GRPO. The training curves (Figure 1) show near-identical dynamics between GRPO and RGR, and aggregate performance across Tables 1–3 is comparable or slightly favors RGR. This is a practically useful simplification.
 
-- **Multi-benchmark evaluation across languages and domains.** The paper evaluates on five English math benchmarks (GSM8K, MATH, Gaokao2023-Math-En, OlympiadBench, AMC23), two Chinese math benchmarks (CMATH, CN-Middle-School), and two STEM benchmarks (MMLU-STEM, Gaokao2024). RGR achieves the highest average on the Math-English benchmarks for all three models and shows strong results on Chinese math and STEM benchmarks, suggesting the simplified approach generalizes beyond the training distribution.
+- **Multi-lingual, multi-domain evaluation.** The paper evaluates on English math (5 benchmarks), Chinese math (2 benchmarks), and STEM (2 benchmarks) across three model families (Qwen2.5 0.5B, Qwen2.5 1.5B, Llama3.2 1B). This breadth strengthens the generality of the findings beyond a single benchmark or language.
 
-- **Well-motivated and clearly written.** The paper situates itself clearly within the recent GRPO-variant literature and positions its contribution as a systematic simplification rather than yet another modification.
+- **Clear and well-organized exposition.** The background section provides accessible derivations of PPO, GRPO, and the proposed RGR. The experimental design is transparent about training data, models, and reward structure. Code is provided.
 
 ## Weaknesses
 
 ### Major
 
-- **No statistical uncertainty quantification for central performance claim.** All benchmark results are single-run point estimates. The paper claims RGR "surpasses GRPO on 17 over 27 tasks" (conclusion) and "outperforms GRPO in most settings" (Section 4), but the reported differences are often within a few percentage points (e.g., GRPO 71.0 vs. RGR 72.7 on Qwen2.5-1.5B GSM8K; GRPO 44.2 vs. RGR 46.7 on MATH). Without multiple seeds, standard deviations, or confidence intervals, these differences cannot be distinguished from noise. Given the known variance of RL-based LLM training, this is an evidential gap that undermines the stated performance comparison. The training dynamics evidence (Figure 1) supports the stability claims well, but the benchmark superiority claim requires statistical support.
+- **No statistical validation or variance reporting.** All benchmark tables (Tables 1–3) report single-number accuracies without error bars, confidence intervals, or multi-seed averages. The key comparative claim — that RGR "surpasses GRPO" (Section 5) — rests on margins that are often 1–2 percentage points (e.g., GSM8K: RGR 72.7 vs. GRPO 71.0 on Qwen2.5-1.5B; MATH: 46.7 vs. 44.2). With 0.5B–1.5B models trained on only 1800 examples, run-to-run stochastic variation could easily account for differences of this magnitude. Without variance estimates, the reader cannot assess whether RGR genuinely outperforms GRPO or merely performs comparably. This undermines the paper's strongest empirical claim. The training curves (Figure 1), while informative about stability, do not substitute for statistical rigor on the benchmark evaluations.
 
-- **Narrow experimental scope relative to the paper's broad framing.** The title asks whether complicated loss functions are necessary for "teaching LLMs to reason," but experiments use only small models (0.5B–1.5B), train on a single dataset (GSM8K, 1,800 instances), and evaluate exclusively on mathematical/STEM reasoning. Whether the findings generalize to larger models (7B+), other reasoning domains (logical reasoning, code generation, multi-hop QA), or non-math training data is unknown. The paper acknowledges this limitation in one sentence in the future-work section, but the abstract and introduction frame the conclusions far more broadly.
-
-- **Performance claim is overstated relative to the evidence.** The conclusion states that RGR "surpasses GRPO on 17 over 27 tasks," which invites a level of scrutiny that single-run results cannot withstand. The paper's actual strength is showing that RGR performs *comparably* to GRPO while being simpler. The language throughout (abstract: "has the potential to achieve stronger performance"; conclusion: "surpasses") should be moderated to match the evidential basis.
+- **The "negative feedback is indispensable" conclusion is overstated relative to the evidence.** The paper's conclusion states that "negative feedback is indispensable: methods that ignore it… exhibit instability, collapse, and consistently degraded performance" (Section 5). However, the data tells a more nuanced story. On the Qwen2.5-1.5B model, GRPO-pos (positive-only) achieves 35.7 avg on Math-English vs. GRPO's 37.3 — a small gap. On Llama3.2-1B, GRPO-pos scores 19.8 vs. GRPO's 20.1 — negligible. The paper does acknowledge in Section 4 that "the 1.5B and 1B models… avoid immediate collapse," but the concluding language erases this nuance. The evidence supports a finding that negative feedback is important for smaller models and beneficial at larger scales, not that it is universally indispensable. This overclaim weakens an otherwise well-supported point.
 
 ### Minor
 
-- **REINFORCE baseline under-specified.** The "REINFORCE with Direct Rewards" variant is described as starting from RGR A and removing group-relative advantage estimation. It is not stated whether this variant still samples 8 completions per prompt (and if so, how the gradient is aggregated across them) or uses a single rollout. The tables label it simply "REINFORCE," conflating it with Williams (1992)'s standard algorithm, but it may be a non-standard group-sampled variant. This ambiguity weakens the ablation's interpretability.
+- **Hyperparameter handling across methods is unspecified in the main text.** The paper references Appendix A for hyperparameters (which is stripped in the provided PDF) but does not state whether learning rates, KL coefficients, and other settings were tuned independently per method or held constant. Since RGR and GRPO have different gradient structures, using identical hyperparameters could disadvantage GRPO or favor RGR. Clarifying the tuning procedure would strengthen confidence in the fairness of the comparison.
 
-- **Naming inconsistency.** Section 3.2 introduces the method as "RGR A," Table 1 uses "RGR," the conclusion uses "RGRA," and Figure 1 uses "RGRa." While the referent is clear, this inconsistency is noticeable.
+- **Limited training data and model scale.** Training is performed on only 1800 examples from a single dataset (GSM8K). While the evaluation spans nine benchmarks, the narrow training distribution may exaggerate sensitivity to loss components. The paper acknowledges hardware constraints and suggests larger-model experiments as future work, but the findings may not extrapolate to the data scales and model sizes typical of production GRPO usage (e.g., DeepSeek-R1 scale).
 
-- **No ablation of the KL regularization coefficient β.** Given that the paper's framing is about identifying which GRPO components are necessary, omitting an ablation of the KL penalty coefficient is a gap. The paper shows clipping is unnecessary but never tests whether the KL regularization strength could also be simplified.
+- **"Efficient" claim is unsupported.** The abstract and introduction describe RGR as a "more transparent and efficient alternative to GRPO," but no wall-clock time, memory, or throughput measurements are reported. Since RGR removes the policy ratio computation, there is likely a modest computational saving, but the paper should either provide measurements or replace "efficient" with "simpler."
 
-- **Training stop point unexplained.** Figure 1 shows a vertical dashed line at step 65 labeled "Stop" in a paper that states 70 steps of training. The reason for early stopping is not explained, and it is unclear whether training had converged.
+- **Qualitative reasoning analysis is anecdotal.** The "emergence of reasoning behaviors" (Figure 2) is based on a single example from the Countdown dataset. While illustrative, one example does not constitute systematic evidence that "robust training regimes… foster the development of interpretable reasoning strategies." This claim should be tempered or supported with quantitative analysis of reasoning traces.
 
-- **Countdown dataset appears without description.** Section 4 introduces results "On the Countdown dataset" but this dataset is not listed in the benchmarks described in Section 3.1. The reader cannot assess what task this is or whether it is an appropriate evaluation.
-
-- **Qualitative reasoning analysis is anecdotal.** Figure 2 shows a single example of an RGR/GRPO model producing reasoning traces vs. a positive-only model producing a direct answer. This is presented as evidence that these models "exhibit emergent reasoning" but no systematic analysis (e.g., proportion of responses with reasoning traces, average chain length) is provided.
-
-- **LoRA rank (r=128, ~10% parameters) is not discussed as a potential confound.** Since LoRA constrains the effective parameter update per step, it could reduce the relevance of PPO-style clipping. The paper does not consider whether the finding that "clipping is unnecessary" might interact with the use of low-rank adapters.
+- **RAFT training-curve reporting is unusual.** Figure 1 tracks "average reward" for RAFT, which is an offline SFT method that selects top-ranked responses and trains with cross-entropy. How RAFT's "average reward" is computed during training is not explained, and presenting a reward drop as evidence of instability conflates the training objective (cross-entropy) with an evaluation metric (reward of generated outputs). This needs clarification.
 
 ### Trivial
 
-None.
+- The paper uses inconsistent naming: "RGR" in abstract and introduction, "RGR A" and "RGRA" in experiments and figures. Settling on one name would improve clarity.
 
 ## Nice-to-Haves
 
-- Add multiple random seeds (at least 3) and report mean ± std for all benchmark scores.
-- Provide a direct measure of simplicity (training wall-clock time per step, memory usage, or number of hyperparameters).
-- Quantify the emergence of reasoning behaviors systematically (proportion of responses containing explicit reasoning traces before and after training).
-- Include a proper single-rollout REINFORCE baseline for completeness.
+- **Include an ablation removing KL from RGR.** Since RGR retains the KL penalty, it is unclear whether stability derives from group advantage alone or from continued KL regularization. An experiment removing KL from RGR (or adding KL to plain REINFORCE) would sharpen the contribution.
+- **Report a small sensitivity analysis** varying the learning rate or KL coefficient to demonstrate that the RGR advantage is not brittle to hyperparameter choice.
+- **Discuss scale dependence of the negative-feedback finding** more explicitly, hypothesizing why larger models tolerate positive-only training better.
 
 ## Removed Points
 
-These points were considered but removed per filtering rules (see below for rationale):
+These points from the Harsh Critic were considered but removed or downgraded:
 
-- **Criticism that Countdown dataset is "never described":** The appendix (stripped by parser) likely contains details. However, Countdown is indeed not listed in the Section 3.1 benchmark table, which is a genuine presentation gap kept as a minor weakness above.
-- **Criticism about "no discussion of training budget or convergence":** The 70-step/65-step discrepancy is real but minor; kept above as minor weakness.
-- **Criticism about "paper claims GRPO is complex but never defines complexity":** The concept of complexity is clear enough from context (additional components in the loss function), and defining it formally is not essential to the paper's contribution.
-- **Criticism that positive-only variant notation is "confusing":** The description is reasonably clear given the equations.
-- **Strength that "RGR outperforms GRPO on most benchmarks":** This conflicts with the verified weakness about lack of statistical support; the weakness wins. The strength is re-framed in the review under "comparable or slightly better" language.
-- **Strength about "qualitative evidence of emergent reasoning":** The single-example evidence is too thin to constitute a meaningful strength; kept as a weakness (anecdotal) instead.
-- **Criticism about "missing error bars" framed as fatal:** The training dynamics (Figure 1) strongly support the stability claims even without error bars; the performance comparison claim is where the lack of error bars is damaging, not the ablation claims.
+- **"RAF training curve collection confuses the narrative about stability"** — Kept as a minor point but the harsh critic's suggestion that this is a critical flaw was downgraded; it is a presentation clarity issue, not a threat to the core claims.
+- **"The paper does not state whether hyperparameters were tuned independently"** — Kept as minor rather than major because the paper references Appendix A; the stripped PDF prevents verification, making this a documentation gap, not a demonstrated unfairness.
+- **"Could the metric be measuring a proxy?" / "Are confounders controlled?"** — The harsh critic raised these as generic area-of-concern sweeps. No specific confounder was identified in the paper, so these are removed.
+- **"Absence of Appendix A"** — The parser strips appendices; this is not an author error. Removed.
+- **"The ablation should also consider a simple value-function baseline"** — This is scope creep; the paper studies group-relative methods and already includes a direct-reward REINFORCE baseline. Removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The paper's most interesting and underemphasized finding is the *scale-dependent* nature of negative feedback necessity. The 0.5B model collapses under positive-only training while the 1B and 1.5B models largely tolerate it. This suggests that smaller models may rely more heavily on negative signals to avoid representation collapse or reward hacking, while larger models' stronger initial policies provide enough signal from positive examples alone. This scale dependence is noted in the results but dismissed in the conclusions, and it deserves more attention as a genuinely novel observation about how RL training dynamics interact with model capacity.
 
 ## Suggestions
 
-- **Moderate all claims about RGR "surpassing" or "outperforming" GRPO.** Replace with language like "RGR achieves comparable or slightly higher average scores while being substantially simpler" throughout the abstract, conclusion, and Section 4. The paper's strongest contribution is the ablation finding that clipping is unnecessary — let that take center stage.
-- **Add a variance analysis.** Even a small-scale multiple-seed comparison (e.g., 3 seeds for the primary condition pairs) would transform the paper's credibility on the performance comparison claim.
-- **Acknowledge the LoRA confound explicitly.** Discuss whether the use of low-rank adapters (10% parameter updates) could reduce the effective policy ratio change and thus make clipping less relevant.
-- **Describe the REINFORCE baseline implementation precisely.** State whether it uses group sampling and how gradients are aggregated.
-- **Fix the method naming inconsistency** (RGR A / RGR / RGRA / RGRa) throughout the paper.
+- Run each configuration with at least 3 seeds and report mean ± standard deviation for the main benchmark tables. This alone would substantially strengthen the comparative claims.
+- Replace "negative feedback is indispensable" with a more precise claim, e.g., "negative feedback is critical for stable training in smaller models and beneficial at larger scales."
+- Either measure and report computational efficiency (wall-clock time, memory) or replace "efficient" with "simpler" throughout.
+- Clarify how RAFT's training reward is computed in Figure 1, or consider removing RAFT from the training-curve plots and presenting it only in the benchmark tables.
 
 ## Score and Decision
 
-### Calibration Report
+**Round-1 bracket:** After comparing against weak-band anchors (avg scores 2.50–3.00) and strong-band anchors (avg score 8.00, e.g., WizardMath), this paper plausibly sits in the 5.0–7.0 range.
 
-**Round 1 — Bracketing:**
-- Weak anchors (<3.5): ZK1NnjpjEs (3.00, PPO for NLU), 28TLorTMnP (2.50, listwise rewards), jOuHjFw71C (3.00, planning evaluation), FaOeBrlPst (3.00, explainable rewards). These papers have clear fatal flaws or narrow scope; this paper is substantially stronger.
-- Middle anchors (3.5–7.5): F0GNv13ojF (5.17, RL reward design), gdzpnRBP4F (4.50, RLSF), ZRDa2IT1sQ (6.00, Step-Controlled DPO), O0sQ9CPzai (6.33, TPO). The paper under review sits within this band.
-- Strong anchors (>7.5): rfdblE10qm (8.00, reward modeling theory), mMPMHWOdOy (8.00, WizardMath). These papers have larger-scale experiments and/or theoretical contributions; this paper is weaker.
+**Round-2 narrowing:** Anchors inside the bracket:
+- F0GNv13ojF (5.17, Reject): "On Designing Effective RL Reward at Training Time for LLM Reasoning" — similar RL-for-reasoning domain but less systematic ablation, weaker baselines. Our paper is clearly stronger.
+- ZRDa2IT1sQ (6.00, Reject): "Step-Controlled DPO" — proposes a new DPO variant with stepwise error supervision; both papers share systematic design but SCDPO has stronger statistical presentation. Our paper is similar in quality.
+- RFqeoVfLHa (6.50, Accept): "Progress or Regress? Self-Improvement Reversal in Post-training" — thorough evaluation framework, important phenomenon. Our paper is somewhat weaker due to less rigorous evaluation.
+- s5N7p5UjgR (6.75, Reject): "Markovian Transformers" — novel architecture, strong gains on GSM8K, but limited evaluation scope. Our paper has broader evaluation but less novelty.
 
-**Round 2 — Narrowing (bracket 4.5–6.0):**
-- F0GNv13ojF (5.17, RL reward design): Similar in scope (math reasoning RL, small models). The anchor paper has mixed reviews on novelty and generality; this paper has a cleaner conceptual contribution (systematic ablation vs. reward clipping tricks) but similar empirical limitations. Comparable or slightly better.
-- cijO0f8u35 (5.25, scaling relationships): Limited to GSM8K only. This paper uses more benchmarks (9 vs. 1) but the anchor had larger model scale. Comparable quality.
-- OD9pwKQzXl (5.25, VerifierQ): Similar model scales and datasets, similar writing issues. The paper under review has a stronger conceptual contribution. Comparable.
-- ZRDa2IT1sQ (6.00, SCDPO): Larger models (20B), more thorough evaluation, cleaner experiments. This paper is weaker than SCDPO.
+The paper is better than the 5.17 anchor but does not reach the 6.50 anchor's level of evaluation rigor. It sits closest to the 6.00 anchor ZRDa2ITs1Q. The lack of statistical validation and the overstated negative-feedback claim pull it slightly below 6.0. Score: **5.5**.
 
-**Final score determination:** The paper falls between the 5.17–5.25 anchors and the 6.00 anchor — closer to the lower end. The ablation methodology is a genuine strength, but the lack of error bars on the central performance claim, narrow scope (small models, one training dataset), and overclaiming prevent it from reaching the 6.0 level. Score: **5.0**.
-
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

@@ -1,96 +1,103 @@
-Now I have all the information I need. Let me construct the final consolidated review.
-
 ## Summary
 
-This paper introduces Influence-Aware Time Series Forecasting (IATSF), a paradigm that models external textual influences (e.g., weather forecasts, developer logs) to overcome what the authors term the "self-stimulation barrier"—the irreducible error incurred by models that predict the future using only historical time series values. The authors provide a control-theoretic analysis formalizing this barrier (Proposition 2.1), a leak-free benchmark with textual influences across three categories (toy, physical, and market systems), and FIATS, a lightweight LLM-free model with channel-aware cross-attention (CASM) and an influence-modulated decoder (CAPS). Experiments on synthetic and real-world datasets show FIATS consistently outperforms self-stimulated baselines including large foundation models.
+This paper argues that time series forecasting has plateaued because standard models ignore external influences ("self-stimulation"). The authors provide a control-theoretic analysis proving that ignoring influences imposes an irreducible error bound, introduce a new paradigm (IATSF) that explicitly models textual influences, present a leak-free benchmark with temporally-synced text across three dataset categories, and develop FIATS, a lightweight model with channel-aware cross-attention mechanisms (CASM/CAPS) that operationalizes the paradigm. Experiments show FIATS substantially outperforming self-stimulated baselines—including billion-parameter foundation models—on synthetic, physics, traffic, and market datasets.
 
 ## Strengths
 
-- **Control-theoretic formalization of the self-stimulation barrier.** Proposition 2.1 provides a clean mathematical argument (Eqs. 3–4) showing that any model using only historical observations is bounded by an irreducible error floor determined by the covariance of unobserved influences. While the result is a standard consequence of conditional expectation, its application to frame the limits of conventional time series forecasting is genuinely novel and provides a principled motivation for the IATSF paradigm.
+- **Strong theoretical framing with empirical validation**: Proposition 2.1 and 3.1 provide a clean control-theoretic formalization of why ignoring influences creates an irreducible error floor, and Proposition 3.1 shows that incorporating any measurable influence reduces it. The FM Toy experiment directly validates this: FIATS achieves near-zero MSE (0.003) while all self-stimulated baselines—including large pretrained models—fail, demonstrating the theory in a controlled setting.
 
-- **FM Toy experiment directly validates the core theoretical claim.** On the Frequency Modulated Toy dataset (Table 1), FIATS achieves near-zero MSE (0.003 at horizon 14) while every self-stimulated baseline—including billion-parameter foundation models Chronos-L, MOIRAI-L, and Time-MoE-U—produces substantially higher errors (0.006–0.151). This controlled setting isolates the self-stimulation assumption as the bottleneck, exactly as the theory predicts, and is the paper's single most compelling piece of evidence.
+- **Well-constructed, purpose-built benchmark**: The IATSF benchmark is carefully designed to be leak-free, temporally synchronized, and to use independently evolving influences (weather forecasts, developer logs). The inclusion of three distinct categories—toy systems, complex real-world systems, and human-driven business systems—provides a meaningful testbed spanning different influence types and difficulty levels.
 
-- **Leak-free benchmark design is a practical methodological contribution.** The benchmark's temporal-synchronization and independence requirements (Section 4.1) explicitly prevent future-state leakage common in prior multimodal datasets. The diversity across toy physics systems, real weather-affected measurements, and human-driven business data provides a useful testbed for the field.
+- **Consistent and substantial empirical gains**: FIATS achieves a 36% average MSE reduction on Atmospheric Physics and 44.3% on NYC Traffic Speed compared to the best self-stimulated baseline (PatchTST), gains that persist across all prediction lengths. This holds even against billion-parameter foundation models (Chronos-L, MOIRAI-L), making a compelling case that influence information, not model scale, drives the improvement.
 
-- **Ablations credibly attribute gains to influence information.** The "Zero News" ablation (removing all influence inputs) collapses FIATS performance to self-stimulated levels (Table 3), proving the gains come from the influences themselves. The "Zero Desc." ablation confirms the CASM mechanism's role. The noise robustness experiment (Figure 6) directly supports Proposition 3.1's prediction that influence quality matters.
+- **Interpretable architecture with meaningful ablations**: The CASM attention maps (Figs. 3, 5) reveal that the model learns channel-specific sensitivity to different influence sentences. The "Zero News" ablation collapses performance to self-stimulated levels, confirming influences drive the gains, and "Zero Desc." degradation confirms channel descriptions matter. The embedding model robustness check (OpenAI vs. MiniLLM vs. mpnet) is a positive sign of architectural stability.
+
+- **Lightweight, LLM-free design isolates the contribution**: Unlike prior text-informed forecasters that rely on large language models, FIATS uses standard text embeddings and a modest architecture, making it clear that gains come from influence modeling rather than from scaling up model capacity.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **The main empirical comparison conflates "influence information helps" with "FIATS's specific architecture is superior."** The headline results (Table 1) compare FIATS, which receives textual influences, against standard baselines (DLinear, PatchTST, Chronos-L, etc.) that receive only historical time series. This asymmetry is fundamentally appropriate for validating the IATSF *paradigm* (the core claim that external textual information improves forecasting). However, the paper also makes architectural claims about CASM and CAPS being superior mechanisms for processing influences. To support these stronger claims, the paper would need a controlled comparison where baselines receive the *same external information*—e.g., weather text converted to numerical features and fed as additional channels into PatchTST or DLinear. The comparison against TimeLLM (which uses text) partially addresses this, but TimeLLM is an LLM-based method with fundamentally different capacity and data requirements, making the comparison noisy. Without fairer controls, the paper cannot distinguish between "influence information is valuable" (well-supported) and "FIATS's specific architectural design is the best way to use it" (less supported).
+- **No simple influence-aware baselines isolate the architecture from the information**: The paper ablates *Zero News* (showing influences matter) and *Zero Desc.* (showing channel descriptions matter), but never tests whether a trivial baseline—e.g., concatenating text embeddings with time-series patches and feeding the result to a standard PatchTST or DLinear encoder-decoder—could achieve comparable gains from the same influence information. TimeLLM is the only multimodal comparator, and it is an LLM-based reprogramming approach, not a simple integration. Without such a baseline, the claim that FIATS's *principled CASM/CAPS architecture* is necessary for the gains (rather than merely having access to influence text in *any* form) remains unsubstantiated. This is a structural evidential gap that cuts across all experimental sections.
 
-- **No statistical significance, variance, or multiple-run reporting.** Every table reports a single MSE per configuration. Without multiple seeds or confidence intervals, the reader cannot assess whether observed differences are reliable. This is especially problematic where gaps are small (e.g., FM Toy horizon 14: FIATS 0.003 vs. PatchTST 0.006; Atmospheric Physics 2014-24 horizon 96: FIATS 0.410 vs. FIITS 0.436). Given the simplicity of the toy datasets, multiple runs are trivially feasible. This omission weakens confidence in all quantitative claims.
+- **No statistical variation reported**: Every table and figure reports a single MSE value with no error bars, standard deviations, confidence intervals, or mention of multiple seeds. On the Electricity Utility dataset, differences between methods are often in the third decimal place (e.g., FIATS 0.124 vs. TimeLLM 0.131 at pred. len 96), where it is impossible to judge whether the ordering is meaningful without variance estimates. Even the larger gaps (e.g., Atmospheric Physics) would benefit from uncertainty quantification to support the strong conclusions drawn. This is a basic methodological requirement in empirical ML.
 
 ### Minor
 
-- **Theoretical propositions are correctly framed but mathematically straightforward.** Proposition 2.1 (error bound from ignoring influences) effectively translates the definition of conditional expectation into a control-theoretic setting, and Proposition 3.1 (adding influence information reduces the bound) is similarly a standard variance-reduction result. The paper would benefit from explicitly acknowledging that these are reframings of known statistical principles applied to the TSF context, rather than claiming them as new theoretical results per se.
+- **Insufficient comparison with existing text-informed forecasting methods**: The paper cites several recent text-informed forecasting works (Aksu et al., 2024; Williams et al., 2025; Wang et al., 2024a; Liu et al., 2024a) but only includes TimeLLM as a multimodal baseline. The argument that existing multimodal datasets are unsuitable for influence-aware evaluation is reasonable, but the paper should explain why those methods cannot be adapted to the IATSF benchmark, or at minimum discuss their relationship more concretely.
 
-- **The influence independence assumption is imperfectly satisfied for the Atmospheric Physics dataset.** The paper claims influences must be "independently evolving—external factors that influence the system but are not themselves outcomes of it." Weather forecasts, however, describe the same physical system that the sensor measurements track (solar radiation, pressure, etc.), creating a causal entanglement that blurs the independence criterion. The paper acknowledges this connection (e.g., "clear skies implies high solar radiation") and frames it as a feature, which is reasonable for demonstrating the paradigm's potential. However, it weakens the theoretical purity of the benchmark's claim to being "leak-free."
+- **Claims of lightweight/efficient design are unsubstantiated**: The paper brands FIATS as "lightweight" and "LLM-free" but provides no parameter counts, runtime measurements, or memory comparisons against baselines. Without this data, the efficiency claim is purely rhetorical.
 
-- **Overclaiming in language about baseline failures.** The statement that "all self-stimulated methods fail spectacularly" (Section 6.1) is contradicted by PatchTST achieving 0.006 MSE on the FM Toy (horizon 14), which is remarkably low and only 2× FIATS's 0.003. While the gap widens at longer horizons (0.168 vs. 0.027 at horizon 120), the short-horizon results show that a good self-stimulated model can come surprisingly close. The language should be calibrated to reflect the actual magnitude of improvement.
+- **FIITS is undefined in the main text**: FIITS appears prominently in Table 1 (and often places second) but is never explained. Its values closely match the "Zero News" ablation, suggesting it is FIATS without influence, but the reader should not have to guess.
 
-- **CASM ablation does not isolate the channel-specific query design.** The "Zero Desc." ablation removes channel descriptions entirely, which removes the entire CASM mechanism. A cleaner ablation would replace CASM with standard cross-attention using a fixed learned query (same for all channels) while keeping everything else identical. Without this, the paper cannot fully attribute the gains to channel-specific sensitivity rather than to having cross-attention at all.
+- **Theoretical contribution is somewhat oversold**: Proposition 2.1 formalizes the well-known fact that omitting an influential variable induces irreducible error; the control-theoretic framing adds structure but the "missing foundation" rhetoric ("breaking a barrier," "primary path forward") overstates the novelty of the theoretical insight. Similarly, the full-observability assumption ($X = Z$) is acknowledged but its implications for the bound's real-world applicability are not revisited, weakening the link between theory and the practical architecture.
+
+- **Hyperparameter and training details absent**: No information is provided about optimizers, learning rates, schedules, batch sizes, or early stopping criteria. These are standard for reproducibility even if code is available.
 
 ### Trivial
 
-- **FIITS is listed in Table 1 but never defined in the paper text.** This appears to be an important ablation (FIATS without some component), and its omission from the description is confusing.
-- The code link references "TGForecaster" rather than "FIATS," suggesting a naming inconsistency across the codebase and paper.
-- The ethics statement ("none which we feel must be specifically highlighted here") is too brief for a paper collecting API-generated text data, though no actual ethical concerns are evident from the content.
+- The paper repeatedly uses phrases like "breaking the barrier" and "primary path forward," which come across as overclaiming and distract from the otherwise solid contributions.
 
 ## Nice-to-Haves
 
-- A comparison where influence text is converted to numerical features (e.g., binary weather indicators or averaged embeddings) and fed as additional channels to self-stimulated baselines (PatchTST, DLinear) would cleanly separate the value of influence information from the value of FIATS's architectural design.
-- A deployment-realistic evaluation where future influences are replaced by their own forecasts (e.g., using yesterday's weather forecast) would test robustness to the inevitable gap between perfect-laboratory and real-world influence availability.
-- Reporting parameter counts and inference speed for FIATS vs. baselines would substantiate the "lightweight" and "LLM-free" efficiency claims.
+- **Computational cost comparison**: Reporting wall-clock time, parameter counts, or memory usage for FIATS vs. baselines would substantiate the lightweight claim and aid practitioners.
+- **Discussion of when channel descriptions are unavailable**: The model requires natural-language channel descriptions; acknowledging this constraint and discussing fallback strategies (e.g., learned channel embeddings) would strengthen the limitations section.
 
 ## Removed Points
 
-- **Criticism about CASM descriptions being "poetic not precise" (Harsh Critic, Section 5):** The CASM description is reasonably precise: Q=channel descriptions projected as queries, K=news embeddings projected as keys, V=news embeddings projected as values. The critic's concern about constant attention weights is unfounded—attention weights vary per sample because news embeddings vary per sample, even if channel descriptions are fixed.
-- **Criticism about weather forecasts causing target leakage:** Removed as an overstatement. The paper explicitly addresses the independence criterion (Section 4.1), and weather forecasts are indeed external predictions generated by weather models, not outputs of the measurement sensors. The entanglement the critic describes is a feature of the physical world, not a leakage issue.
-- **Criticism about "billion-parameter foundation models struggle" claim not being demonstrated:** This claim is cited to existing work and is well-established in the TSF literature; the paper is not required to re-demonstrate it on its own benchmarks.
-- **Criticism about GAUD developer logs needing more analysis:** Reasonable but minor; the paper's description is at the same level of detail as typical dataset introductions in this area.
-- **Several nitpicks about formatting, missing appendices, and reproducibility details that the parser stripped.**
+These points are flagged to be removed; treat them with caution.
+
+- **Benchmark documentation deferred to appendix (from harsh critic)**: The harsh critic noted that weather forecast text generation details and leak-free verification are relegated to Appendices N and O, which the reviewer could not see. Per review guidelines, missing appendix content is a parser artifact (the original submission includes those appendices) and cannot be held against the paper.
+
+- **Harsh critic's claim that Proposition 2.1 is just a restatement of omitted-variable bias**: While the core insight is indeed well-known, the control-theoretic formalization and the specific bound derivation in a forecasting context constitute a genuine (if modest) contribution. This is retained as Minor under "theoretical contribution oversold" rather than removed entirely.
+
+- **Harsh critic's request for more multimodal baselines beyond those cited**: The paper already includes TimeLLM as a multimodal baseline. Demanding adaptation of every cited text-informed method to the new benchmark is scope creep. Retained only as a Minor observation that more discussion would help.
+
+- **Strength Finder's claim that the paper "rigorously" proves a "fundamental" barrier**: The theory is well-structured but not groundbreaking; the word "rigorous" is appropriate but "fundamental" overstates the novelty. This strength is retained with moderated language.
+
+- **Strength Finder's framing of gains as "decisively validating" the paradigm**: The gains are real and impressive, but the missing error bars and simple baselines prevent "decisive" validation. The strength is retained but the language is tempered.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The paper's most genuinely novel observation is the explicit mapping between linear control systems and cross-attention mechanisms: channel-specific sensitivity to influences ($\frac{d x_f^i}{d U_f^j} = c^i B^j$) maps naturally to queries-as-channel-descriptors and keys-as-influence-filters. This connection—while the paper only sketches it for the linear case—is an elegant bridge between classical systems theory and modern transformer architectures that could inspire further work beyond time series forecasting. The CASM block's residual stacking with self-attention also provides a template for how to incorporate structured domain knowledge (sensitivity matrices) into learned attention patterns without sacrificing the flexibility of deep networks.
 
 ## Suggestions
 
-1. Add a controlled experimental setting where baselines receive the same influence information in numerical form (e.g., PatchTST with weather text encoded as additional input channels). This would directly test whether FIATS's cross-attention mechanism adds value beyond simply having the extra data.
-2. Report means and standard deviations over at least 3 random seeds for all main results.
-3. Add an ablation replacing CASM with standard cross-attention (same query for all channels) to isolate the channel-specific contribution.
-4. Tone down overclaiming language where differences are small or baselines perform respectably.
-5. Define FIITS in the paper text (it appears in the table but is never explained).
-6. Include a deployment-realistic setting where future influences are replaced by their own forecasts, to test robustness to imperfect influence knowledge.
+- Add at least one simple influence-aware baseline: concatenate text embeddings to time-series patches and feed to PatchTST or DLinear. This would cleanly separate the value of *having* influence information from the value of the *specific architecture* used to integrate it.
+- Run each model with ≥3 random seeds and report mean ± std in tables, or at minimum note that results are stable across runs. This is standard practice and would immediately strengthen all quantitative claims.
+- Define FIITS explicitly in the main text.
+- Include parameter counts and a brief runtime comparison to substantiate the "lightweight" claim.
+- Tone down the "breaking the barrier" rhetoric in the abstract and introduction to better match the actual contribution level.
 
 ## Score and Decision
 
-**Calibration Report:**
+**Bracket (Round 1)**: The paper sits between 4.5–7.0. Weak anchors (LST-Bench at 2.50, BenchStock at 2.60, TimeRAG at 3.00) are clearly below this paper. Middle anchors (CiK at 5.00, TGForecaster at 5.00, GIFT-Eval at 5.25) provide the closest comparison—FIATS has substantially stronger theory, a more carefully constructed benchmark, and more compelling results than these related works. Strong anchors (FITS at 8.00, TimeMixer++ at 8.00, ModernTCN at 8.00) are clearly above this paper in execution polish and experimental rigor.
 
-Round 1 — Bracketing: Initial search anchored three bands on topics related to time series forecasting with external information, foundation model evaluation, and control-theoretic methods.
-- Low band (avg < 3.5): TimeRAG (3.00), Hyper-Complex MLP (2.50), Hybrid Loss (2.00), Lookback Window Limitation (3.25)
-- Middle band (3.5 < avg < 7.5): GIFT-Eval (5.25), Needles in Haystack (3.75), Financial TSF (4.50), In-context Fine-tuning (5.60)
-- High band (avg > 7.5): Amortized Control (8.00), Oscillatory SSM (8.00), FITS (8.00), Feedback Neural ODEs (8.00)
+**Narrowing (Round 2)**: Compared to Time-LLM (7.00, Accept) and DAM (7.00, Accept), FIATS has stronger theoretical grounding and a more purposefully designed benchmark, but weaker experimental rigor (no error bars, no simple baselines). These experimental gaps prevent the paper from reaching the 7.0 tier. Compared to TGForecaster (5.00, Reject)—a closely related prior work on the same core idea—FIATS adds substantial value through control-theoretic formalization, leak-free benchmark design, and more sophisticated architecture. The paper clearly exceeds the 5.0 tier.
 
-Initial bracket: 4.0–6.5 (clearly above the weak anchors, clearly below the 8.0 accept-quality papers).
+**Anchor comparison summary**:
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| LST-Bench (2wwPG1wpsu) | 2.50 | 1 | FIATS much stronger |
+| BenchStock (bsXxNkhvm6) | 2.60 | 1 | FIATS much stronger |
+| TimeRAG (GvzL4LuycW) | 3.00 | 1 | FIATS much stronger |
+| CiK (4F1a8nNFGK) | 5.00 | 1 | FIATS stronger (better theory, more rigorous benchmark) |
+| TGForecaster (mfc6FKgtQA) | 5.00 | 1 | FIATS clearly stronger (theory, architecture, experiments) |
+| GIFT-Eval (9EBSEkFSje) | 5.25 | 1 | Different focus; FIATS more novel |
+| Dual-Forecaster (QE1ClsZjOQ) | 4.50 | 1 | FIATS stronger |
+| Hybrid Modeling (v9Sfo2hMJl) | 5.67 | 2 | FIATS comparable; more novel direction |
+| Simple Baseline (oANkBaVci5) | 6.75 | 2 | Different focus; FIATS comparable in contribution |
+| Time-LLM (Unb5CVPtae) | 7.00 | 2 | FIATS has better theory but weaker experimental rigor |
+| DAM (4NhMhElWqP) | 7.00 | 2 | Comparable ambition; DAM slightly more polished experiments |
+| Time-MoE (e1wDDFmlVu) | 7.33 | 2 | Different focus; FIATS below |
+| FITS (bWcnvZ3qMb) | 8.00 | 1 | FIATS clearly below in execution polish |
+| TimeMixer++ (1CLzLXSFNn) | 8.00 | 1 | FIATS clearly below |
 
-Round 2 — Narrowing: Search within the bracket on multimodal/text-guided TSF topics:
-- TGTSF/TGForecaster (5.00, sim 0.78) — Most similar anchor. Same task, similar model design (cross-attention for text+TS fusion), similar benchmark construction. Rejected. Current paper adds theoretical grounding (control theory) that TGTSF lacks, making it ~0.5 points stronger, but shares similar experimental concerns.
-- Context is Key / CiK (5.00, sim 0.77) — Benchmark with text+TS fusion. Rejected. Current paper is methodologically more complete.
-- MoAT (5.00, sim 0.75) — Multi-modal augmented TSF. Rejected.
-- Metadata Matters (4.67, sim 0.73) — Similar text+TS fusion idea. Rejected.
-- TimeInf (5.80, sim 0.67) — Influence function method for TSF. Accepted. More rigorous theoretically but different sub-area.
-- Transparent TSF (5.75, sim 0.67) — Framework paper. Accepted. Comparable in methodological ambition to the current paper.
+The paper makes genuine and well-motivated contributions (theory, benchmark, model) with strong empirical results, but two major experimental gaps—absence of simple influence-aware baselines and lack of statistical variance reporting—prevent the evidence from being fully conclusive. The paper lands at **6.0**: clearly above the reject-tier papers on this topic, but below the accept-tier papers that demonstrate more rigorous evaluation.
 
-The paper sits above TGTSF (5.00, most directly comparable) and below TimeInf (5.80, accepted with stronger experiments). Paper is comparable to Transparent TSF (5.75, accepted) in terms of novel framework, but the experimental evaluation is weaker.
-
-Final score: **5.5**
-
-This score reflects the paper's genuine contributions—the control-theoretic framing is novel, the leak-free benchmark is a careful contribution, and the FM Toy experiment convincingly validates the core thesis—balanced against the significant experimental limitations: the main comparison lacks a controlled baseline that also receives influence information, and the absence of statistical rigor undermines confidence in the reported gains.
-
-## Score and Decision
-
-MY FINAL SCORE: <score>5.5</score>
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

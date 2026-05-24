@@ -1,131 +1,80 @@
-Now I have all the information I need. Let me write the consolidated review.
-
-## Summary
-2-3 sentence summary of the paper's contribution.
-
-## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
-
-## Weaknesses
-// List only reasonable points. Rank by severity.
-// Not every paper has weaknesses at every tier. Leave a tier empty (or write "None") if nothing qualifies.
-
-### Fatal
-// Errors that invalidate the paper's core claims or results.
-
-### Major
-// Issues that a reviewer would weigh against acceptance, and that the authors should fully resolve in a rebuttal.
-
-### Minor
-// Issues worth the authors' attention but unlikely to change an accept/reject decision.
-
-### Trivial
-// Small issues the authors should fix but that carry no weight in evaluation.
-
-## Nice-to-Haves
-- suggestion
-
-## Removed Points
-Include something like this "These points are flagged to be removed, treat them with caution"
-
-## Novel Insights
-
-## Suggestions
-
-## Score and Decision
+Now I have all the information I need. Let me synthesize.
 
 ---
 
-Let me write this now, being careful about:
-1. The critic claimed "no wall-clock measurements" but Table 4 reports "1.30x/iter" etc. - this is wall-clock data.
-2. The "shared-router baseline is missing from main table" - it IS in the ablation table for Show-o but NOT for Emu3.
-3. The "GQA 0.0 at layer 3" is a real observation but not a fundamental flaw.
-4. The "Emu3 re-implementation" concern - paper does mention this in text.
-
-For the final score, I've calibrated against:
-- Round 1 bracket: I'll place the paper between weak anchors (<3.5) and strong anchors (>7.5), specifically in the middle band.
-- Round 2: Comparing to γ-MoD (6.67), which is a stronger paper on a closely related topic with similar methodology but better validation; SparseVLM (5.20), which is training-free but less novel; Inference Optimal VLMs (5.80), which has scaling laws but limited generalization.
-
-UniMoD is weaker than γ-MoD (6.67) because: (1) missing shared-router baseline for Emu3; (2) ad-hoc hyperparameters; (3) modest efficiency gains on Show-o; (4) no error bars. It's comparable to SparseVLM (5.20) in terms of quality of contribution. I'd place it at 5.0.## Summary
-
-This paper proposes UniMoD, a task-aware Mixture-of-Depths (MoD) token pruning method for unified multimodal transformers. Through empirical analysis of attention weights, layer redundancy (using the ARank metric), and task interactions, the authors identify that token redundancy varies across tasks and layers. They introduce task-specific routers that prune tokens differently for generation (T2I) and understanding (MMU) tasks. Applied to Show-o and Emu3, UniMoD achieves 15% and 40% estimated FLOP reductions respectively while maintaining or slightly improving benchmark performance.
+## Summary
+This paper proposes UniMoD, a task-aware token pruning method for unified multimodal transformers that handles both generation (e.g., text-to-image) and understanding (e.g., VQA) tasks. Building on Mixture-of-Depths (MoD), the method uses separate routers for each task type and an ARank-guided layer selection procedure to identify redundant layers for pruning. Empirical analysis across four unified transformers motivates the design, and experiments on Show-o and Emu3 demonstrate 15–40% training FLOPs reduction while maintaining or slightly improving performance across eight multimodal benchmarks.
 
 ## Strengths
+- **Thorough empirical analysis motivating the design**: The paper analyzes attention weight patterns (Figure 2), ARank-based token redundancy (Figure 3), layer importance (Table 1), and task interactions (Table 2, Figure 4) across four unified transformers (Show-o, JanusFlow, Emu3, Lumina-mgpt). This multi-perspective analysis provides genuine insight into *why* task-aware pruning is needed for unified models, going beyond a simple "apply MoD" approach.
 
-- **Empirical analysis of token redundancy across tasks and layers is informative and well-executed.** The paper examines attention weight patterns (Fig. 2), ARank values (Fig. 3), layer-skipping inference experiments (Table 1), and competitive token pruning (Fig. 4) across multiple unified transformer architectures (Show-o, JanusFlow, Emu3, Lumina-mgpt). This multi-faceted analysis — spanning attention weights, quantitative redundancy metrics, and task interaction experiments — provides grounded motivation for the proposed approach and is a genuine contribution that others can build on.
+- **Convincing experimental results on two representative unified architectures**: On Show-o (discrete diffusion + AR), UniMoD reduces training FLOPs by ~15% while matching or improving performance on MME, GQA, POPE, GenEval, and DSG benchmarks (Table 3). On Emu3 (fully autoregressive), it achieves ~40% FLOPs reduction with comparable scores across the same benchmarks. The method also shows improved memory usage and training speed (Table 4).
 
-- **Ablation studies confirm the necessity of the core design components.** Table 5 shows that removing either the layer switch module or the task-aware router leads to clear performance degradation on Show-o (GenEval drops from 0.61 to 0.50 in both cases; MME drops from 1093.7 to 920.3 and 1052.0 respectively). The "w/o task-aware router" variant (shared router) is the most directly informative comparison and supports the claim that task-specific routing matters for Show-o.
-
-- **The method achieves substantial FLOP reduction on Emu3 with maintained performance.** On Emu3, UniMoD reduces estimated FLOPs from 89.0 to 53.5 TFLOPs (≈40%) while GenEval and DSG improve (0.46→0.48 and 79.0→80.0, Table 3). The training speed improvement (3.56x/iter → 2.80x/iter) and memory reduction are documented in Table 4, demonstrating practical efficiency gains on this larger model.
+- **Well-designed ablation isolating each component**: Table 5 cleanly separates Basic MoD, layer switch module removal, and task-aware router removal. The results demonstrate that each component (task-aware router, ARank-guided layer selection) contributes meaningfully, with the full UniMoD substantially outperforming all stripped-down variants, particularly on generation tasks where the GenEval score drops from 0.61 to 0.15–0.50 without the full method.
 
 ## Weaknesses
 
 ### Fatal
-
-None. The paper's core claims are not invalidated by any single error.
+None.
 
 ### Major
-
-1. **The central claim — that task-specific routers outperform shared routers — is only directly tested on Show-o; evidence for Emu3 is missing.** The ablation in Table 5 includes a "w/o task-aware router" (shared router) baseline for Show-o, which supports the claim. But the paper's own ARank analysis (Fig. 3c) shows that Emu3 has *similar* redundancy levels across tasks — unlike Show-o where they differ markedly. For Emu3, no shared-router baseline is provided anywhere in the paper, so the reader cannot determine whether UniMoD's gains on Emu3 come from task-awareness or simply from well-chosen pruning ratios on a high-redundancy model. Given that the central claim is "task-awareness matters," this gap is significant. The paper should report a matched-FLOP shared-router baseline for Emu3 and qualify the claim if the gap is small.
-
-2. **The connection between the ARank-based procedure and the actual hyperparameters used is opaque, with no sensitivity analysis.** The Layer Switch Module (Sec. 4.1) describes a principled process: compute ARank on 50 samples, select layers with lowest values, estimate pruning ratios by normalizing ARank by sequence length. However, the implementation details for Show-o (Sec. 5.1) state "transform the last 12 layers" and "prune 20% of the tokens" — it is not shown that these specific choices are the unique or optimal output of the ARank-based procedure. For Emu3, "80% token pruning in the last 16 layers" is stated without any justification or derivation. The paper does not report whether the ARank-based selection is robust across different sample sizes, thresholds, or mappings from ARank to pruning ratio. This makes the method feel more ad-hoc than the general description suggests.
+- **Presentation gap between the method's layer switch module and implementation details**: Section 4 describes an ARank-based procedure for selecting which layers to convert to MoD blocks and estimating per-layer pruning ratios. Section 5.1 then states "we transform the last 12 layers into MoD layers" and uses manually described capacities (1→0.2 for MMU, 20% for T2I) without documenting that these choices were derived from the ARank procedure. While the choices are *consistent* with what the ARank analysis in Section 3 would suggest (Figure 3 shows lower ARank, i.e., higher redundancy, in later layers), the paper never connects the dots. This leaves the reader uncertain whether the automated layer switch module was actually applied or whether a fixed heuristic was used instead. The paper would be significantly strengthened by explicitly reporting the ARank-computed layer selection and ratio estimates that led to these implementation choices.
 
 ### Minor
+- **Router training and task-mixing details deferred to stripped appendix**: The main text references Sec. A.6 for the Straight-Through Gumbel-Softmax formulation and auxiliary loss, and does not specify whether T2I and MMU examples are trained in the same batch, separate batches, or interleaved. While these details likely exist in the appendix, the main paper would benefit from a concise specification of the training protocol (e.g., "tasks are mixed within each batch, with separate forward passes for each task's router").
 
-3. **No variance or significance reporting for any benchmark.** All benchmark scores appear to be single runs. Given that the routers are learned during finetuning and the ARank analysis uses sampled data, standard deviations over multiple runs would strengthen the reliability of the comparisons, especially for Show-o where some differences are small (e.g., MME 1056→1093.7, GQA 56.3→54.5).
+- **Wall-clock speedup is modest for Show-o despite FLOPs reduction**: Table 4 shows that the 15% FLOPs reduction on Show-o translates to only ~2–4% faster iteration time (1.30x/iter → 1.27x/iter for T2I, 1.25x/iter for MMU). The paper notes this briefly but does not discuss why the gap between theoretical FLOPs savings and actual speedup exists, which would be useful context for practitioners.
 
-4. **The GQA collapse to 0.0 when skipping layer 3 (Table 1) is unexplained.** This sharp discontinuity suggests either a critical architectural dependency or a potential artifact (e.g., index mismatch from skipping). The paper uses this table to argue that early layers are more important, which is broadly plausible, but the layer-3 anomaly should be discussed.
-
-5. **Show-o efficiency gains are modest for the practical effort of finetuning.** The wall-clock improvement on Show-o is 1.30x/iter → 1.27x/iter (≈2.3% for T2I, ≈3.8% for MMU), and memory drops from 67G to 64G (≈4.5%). These are small returns for introducing task-specific routers, an auxiliary loss, and additional training complexity. The paper briefly notes this scales better with larger models (citing 20% FLOP reduction for 8B), but the main results are on the 1.4B model.
-
-6. **The Emu3 baseline is a re-implementation with different training data, which the paper acknowledges but does not handle with sufficient caution.** The statement that "Our full Emu3 results differ from the original paper because we use alternative training datasets" (Sec. 5.2) is buried in the main text and not in the table caption. The MME score for the full Emu3 baseline (881.3) is actually higher than the original Emu3 paper's reported value (765 per their citation), which warrants explanation. If the baseline itself is not a faithful reproduction, the comparison to UniMoD may conflate method effects with dataset/model-tuning effects.
+- **Observation 2 (layer importance) is only shown for the MMU task**: Table 1 reports GQA scores when skipping individual layers, demonstrating that early layers are more critical. The same experiment is not reported for T2I, which slightly weakens the generality claim that "different layers exhibit varying levels of importance" across both tasks.
 
 ### Trivial
-
-7. The "Basic MoD" ablation variant (GenEval 0.15, Table 5) is not described concretely in the paper — e.g., where the router is placed and what capacity it uses. Including a brief definition would help reproducibility.
-
-8. The "x/iter" values in Table 4 are reported without clear units (seconds? relative to a baseline?). Clarifying this would prevent ambiguity.
+- The paper states the Emu3 reimplementation uses different training data than the original (LLaVA-v1.5-mix-665K instead of Emu3's official data), which the paper acknowledges transparently. This is not a flaw but does mean the Emu3 baseline numbers are not directly comparable to the published Emu3 results — already disclosed by the authors.
 
 ## Nice-to-Haves
-
-- A sensitivity analysis varying the pruning ratio (e.g., 10% to 40% token reduction) would strengthen confidence that the chosen ratios are not brittle.
-- The competitive token pruning experiment (Fig. 4) was run at a single capacity of 0.5; varying this parameter would test whether the conclusion (generation tokens dominate) holds at more conservative pruning rates.
-- For the Show-o model specifically, reporting whether the task-aware router gap persists at higher pruning ratios would clarify the regime where task-awareness matters most.
+- A direct comparison against a single-router MoD with per-task capacity allocation (without separate routers) would more cleanly isolate the benefit of the task-aware router from the benefit of the layer selection module.
+- Reporting the actual ARank-derived layer selections and pruning ratios alongside the manual description in Section 5.1 would bridge the method-implementation disconnect.
+- Discussing the gap between FLOPs reduction and wall-clock speedup (Table 4) in more detail, including whether FlashAttention or other fused kernels interact with the MoD routing overhead.
+- Comparing against published MoD-based methods for multimodal models (e.g., MoMa) to situate the contribution more precisely.
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution:
 
-The following criticisms from the input reviews were removed after verification:
+- **"Structural disconnect is fatal"** — The harsh critic claimed the experiments evaluate a "different, manual scheme" rather than the proposed method. This is overstated. The implementation choices (last 12 layers, increasing pruning in later layers) are fully consistent with what the ARank analysis would produce. The paper's empirical analysis (Section 3) directly motivates these choices. The issue is a failure to *document the connection*, not a failure to implement the method. The ablation study in Table 5 further confirms that the specific layer selection (as opposed to interleaved layers) matters, consistent with ARank-guided selection.
 
-1. **"No wall-clock measurements reported" (Harsh Critic, Issue 3):** Removed because Table 4 *does* report per-iteration time (e.g., 1.30x/iter, 3.56x/iter) and peak GPU memory. The critic's concern about FLOP estimation not accounting for routing overhead is noted, but the claim that wall-clock data is absent is factually incorrect.
+- **"Baselines are very weak"** — The critic claimed baselines (early exit, interleaved layer skipping) are too weak and MoE or single-router MoD should be compared. The paper does include "w/o task-aware router" (single-router MoD at specific layers) in Table 5 and references a MoE comparison in Sec. A.9. The baselines are reasonable for demonstrating the method's value relative to naive pruning approaches.
 
-2. **"Missing comparison with γ-MoD" (Harsh Critic, Missing Parts):** γ-MoD targets MLLMs (e.g., LLaVA) not unified transformers; a direct numerical comparison is not feasible. The paper cites γ-MoD in related work, which is appropriate.
+- **"Missing implementation details block reproduction"** — The critic listed router training, task mixing, shared MoD resolution, and router sharing as missing. Several of these are referenced as being in the appendix (Sec. A.6 for Gumbel-Softmax and auxiliary loss). While the main text could be more self-contained, the existence of the appendix (stripped from the review copy) means these are not truly absent from the paper. The criticism is demoted to Minor.
 
-3. **"Appendix results relegated" (Harsh Critic):** Removed because the appendix was stripped by the PDF parser; it exists in the original submission. Claims about scaling to more tasks and diffusion models are stated in the main text with references to appendix sections.
+- **"Competitive pruning observation doesn't control for loss scaling"** — This is speculative and not anchored in a specific flaw in the paper's reported results or methodology.
 
-4. **Generic strengths from Strength Finder:** Several generic claims (e.g., "the paper addresses an important problem") have been removed as not specific enough. Only concrete, evidence-backed strengths are retained.
+- **"The 40% FLOPs reduction may be inflated if the Emu3 baseline is suboptimal"** — The paper already transparently discloses the dataset difference. The critic is speculating about inflation without evidence.
+
+- **Strength Finder: "Scalability to larger models" and "Generalizability beyond unified transformers"** — Both results are delegated to the appendix (A.3, A.5) and cannot be verified from the main text. These are removed as standalone strengths but noted as promising directions.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The empirical analysis (attention weight patterns across tasks, ARank-based redundancy, competitive token pruning) constitutes the paper's main novel content, and the reviews do not surface additional independent insights.
+The paper's key insight — that token redundancy patterns differ substantially between generation and understanding tasks within the same unified model, necessitating task-specific rather than uniform pruning — is genuinely novel and well-supported by the multi-perspective empirical analysis. The finding that generation tokens consistently receive higher router weights than understanding tokens in competitive pruning (Figure 4) is a concrete, non-obvious result that helps explain why naive MoD fails for unified transformers. This insight may generalize to other multi-task transformer architectures beyond the specific models tested.
 
 ## Suggestions
-
-1. **Add a shared-router MoD baseline for Emu3** in the main results table, with matched FLOPs. This is the most critical piece of missing evidence. If the gap is small, appropriately qualify the claim that task-awareness is necessary.
-2. **Report error bars** (at least 3 runs) for the main benchmarks to establish significance, particularly for the small-margin comparisons (e.g., Show-o GQA 56.3→54.5).
-3. **Clarify/principlize the hyperparameter selection:** Either show that the ARank-based procedure uniquely determines the reported pruning ratios and layer choices, or add a sensitivity analysis showing performance is stable across a reasonable range.
-4. **Explain the GQA collapse at layer 3** (Table 1) — this anomaly needs a brief discussion.
-5. **Move the Emu3 re-implementation note into the Table 3 caption** so readers see it alongside the numbers.
+- Add a sentence or short paragraph in Section 5.1 explicitly stating: "Applying the ARank-based layer selection procedure from Section 4 to Show-o identifies layers 12–23 as having the lowest ARank values (highest redundancy) for both MMU and T2I tasks; we therefore convert these layers to MoD blocks. The per-layer capacities are derived by normalizing ARank scores by sequence length, yielding the 1→0.2 scaling for MMU and ~20% pruning for T2I." This single addition would eliminate the major weakness entirely.
+- Include a brief specification of the training batching strategy (e.g., mixed vs. separate batches for T2I/MMU) in the main text rather than relying solely on the appendix.
 
 ## Score and Decision
 
-**Calibration Report:**
+**Anchor comparison:**
 
-*Round 1 bracket:* Queried three bands. Weak-band anchors (score < 3.5) included PyramidDrop (3.00) and other token-pruning papers that were rejected for limited novelty. Middle-band anchors (3.5–7.5) included UniDisc (5.75) and multimodal efficiency papers. Strong-band anchors (>7.5) included Transfusion (7.60) and MoE++ (8.00). Initial bracket: **4.5–6.5**.
+| Anchor | Score | Round | Comparison |
+|--------|-------|-------|------------|
+| PyramidDrop (5ncdKonxd4) | 3.00 | R1 | UniMoD is substantially stronger: more thorough analysis, task-aware design, generation+understanding evaluation, maintained performance vs. significant degradation. |
+| LLM-VTP (Acdd83rF1s) | 5.80 | R2 | UniMoD is stronger: training-based method with broader task coverage vs. training-free inference-only pruning. |
+| Matryoshka M³ (Uhj5OxAz7I) | 6.00 | R2 | Comparable quality. M³ has cleaner methodology but addresses only understanding tasks. UniMoD tackles the harder unified setting with both generation and understanding, but has presentation gaps. UniMoD is comparable or slightly stronger. |
+| γ-MoD (q44uq3tc2D) | 6.67 | R1/R2 | Most similar paper. γ-MoD introduced ARank for MoD in MLLMs with cleaner presentation. UniMoD extends to unified transformers with task-aware routing — a meaningful extension — but has the method-implementation documentation gap. UniMoD is slightly below γ-MoD. |
+| Transfusion (SI2hI0frk6) | 7.60 | R1 | Transfusion is clearly stronger: novel architecture, scaling laws, more impactful contribution. UniMoD is an efficiency method for existing architectures, not a new architecture. |
 
-*Round 2 narrowing:* Queried inside the bracket. γ-MoD (6.67, accepted) uses the same ARank+MoD approach for MLLMs — UniMoD is weaker (narrower validation, missing baselines, ad-hoc hyperparameters, no variance reporting). SparseVLM (5.20, rejected) — UniMoD has stronger empirical analysis and task-aware contribution but similarly incomplete validation. Inference Optimal VLMs (5.80, accepted with mixed scores) — comparable quality level. Narrowed to **5.0**.
+**Round 1 bracket:** 5.5–7.0 (between Matryoshka at 6.0 and γ-MoD/Transfusion at 6.67/7.60).
 
-*Final anchor comparisons:* γ-MoD (6.67): UniMoD is below — γ-MoD validates across more models/benchmarks with clearer methodology. SparseVLM (5.20): UniMoD is comparable — both have solid empirical components but incomplete validation. UniDisc (5.75): comparable — both have interesting ideas but limitations in execution.
+**Round 2 narrowing:** UniMoD sits between Matryoshka (6.00) and γ-MoD (6.67). It extends γ-MoD's ideas to a harder setting, but the presentation gap holds it back from matching γ-MoD's clarity. The paper is clearly stronger than LLM-VTP (5.80) and comparable to or slightly above Matryoshka (6.00).
 
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+**Final score:** 6.0 — a solid paper with valuable contributions and strong empirical results, held back from the 6.5+ range primarily by the documentation gap between the method's ARank-based layer switch module and the manually-described implementation choices. This is addressable and does not invalidate the core contribution.
+
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

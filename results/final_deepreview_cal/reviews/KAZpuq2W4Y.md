@@ -1,97 +1,102 @@
-Now I have all the information I need. Let me construct the final review.
+Now I have all the information I need to write the final review. Let me synthesize everything.
+
+---
 
 ## Summary
 
-The paper proposes HOMIL (Higher-Order Multi-Instance Learning), a framework for whole-slide image classification that augments standard attention-based MIL (first-order moment) with a second-order moment (covariance matrix of cluster features). DBSCAN clustering is used to group locally similar patches, improving computational efficiency. Experiments on CAMELYON16 and TCGA-NSCLC show consistent improvements over nine baselines, along with substantial runtime reductions.
+This paper proposes HOMIL, a multi-instance learning framework for whole-slide image classification that extends standard attention-based MIL (ABMIL) by incorporating a second-order (covariance) representation alongside the first-order (attention-weighted mean) representation, and uses DBSCAN clustering to reduce computational cost. The method is evaluated on CAMELYON16 and TCGA-NSCLC, where it achieves the highest reported accuracy, AUC, and F1 among nine baselines, with notably lower runtime than heavier models. The core idea—enriching slide-level representations with second-order statistics—is well-motivated, and the paper is clearly written.
 
 ## Strengths
 
-- **Novel application of second-order statistics in MIL for WSIs.** The paper makes a conceptually clean connection between MIL aggregation and statistical moments, and extending to the covariance matrix is well-motivated by the observation that first-order (mean) aggregation discards feature variability and correlation structure. This framing is a genuine addition to the WSI-MIL toolbox.
+- **Clear, well-motivated methodological contribution**: The paper recasts ABMIL as first-order moment estimation and naturally extends it to include a second-order (covariance) representation. This statistical framing is intuitive and provides a principled basis for the method (Sections 3–4).
 
-- **Substantial and well-documented computational efficiency gains.** The DBSCAN clustering reduces per-slide patches to ~16–18% of the original count, resulting in a 5-fold runtime of 310s on CAMELYON16 — faster than ABMIL (455s), CLAM (640–1115s), and orders of magnitude faster than Transformer/SSM-based methods (TransMIL 5175s, MambaMIL 7200s). On TCGA-NSCLC the same pattern holds (3685s vs. 32400s+). This is a practically meaningful engineering contribution.
+- **Strong efficiency advantage**: HOMIL achieves a 5-fold total runtime of 310s on CAMELYON16 versus 455s–10800s for competitive baselines (Table 1), with compression ratios of 0.16–0.18. The runtime note states that HOMIL's time *includes* clustering overhead while baselines are measured as training+inference only, making the efficiency advantage conservative. This is a genuine practical benefit.
 
-- **Unified and fair baseline comparison.** All nine baselines are implemented in a shared codebase with identical input specifications and patient-level 5-fold CV, reducing implementation-driven variance. The baseline performances are competitive with or above typical literature values, suggesting the comparisons are not artificially favorable.
+- **Well-structured ablation study**: Table 3 cleanly isolates the contributions of the clustering module and second-order moment module, showing that removing each component degrades performance (ACC drops from 96.98% to 95.72% and 95.98% respectively) and that removing both reduces to ABMIL-level performance. This provides credible evidence that both components contribute.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Performance gains are modest, particularly on the more challenging dataset, and no statistical significance is reported.** On TCGA-NSCLC, HOMIL's ACC is 93.24±2.47 vs. HMIL's 92.89±1.45 — a 0.35% difference far smaller than either standard error. The AUC improvement over the strongest competitor (MambaMIL's 96.68 vs. HOMIL's 97.41) is more notable but still without confidence measures. On CAMELYON16 the gains over ABMIL are larger (ACC: +2.26%, F1: +2.94%), but here too the reported standard errors overlap substantially. The paper claims "significantly improves the state-of-the-art" without any statistical test (paired t-test, signed-rank, or bootstrapped intervals). Given that 5-fold CV produces paired observations, a per-fold paired test would be straightforward to compute and would meaningfully strengthen the evidence. Without it, the reader cannot distinguish signal from noise.
-
-- **Ablation study does not conclusively attribute gains to the proposed components.** In Table 3, the differences between the full model and its ablated variants (w/o CM: −1.26% ACC; w/o SOM: −1.00% ACC) are all within overlapping standard errors (e.g., full model 96.98±2.43 vs. w/o SOM 95.98±2.68). The removal of SOM on AUC actually increases the gap from ABMIL's baseline (98.88) rather than shrinking it. While a consistent degradation trend is visible across three metrics, the lack of error-bar separation or paired testing weakens the claim that each component is essential. This is especially problematic because the fusion weight analysis (Figure 2b) shows the model increasingly relies on first-order information over training, raising the question of how much the second-order stream actually contributes after convergence.
+- **Performance gains are marginal and lack statistical backing, yet language overstates results**: On CAMELYON16, HOMIL leads MambaMIL by 0.5 pp ACC (96.98 vs 96.48) with overlapping standard errors (2.43 vs 1.37); on TCGA-NSCLC, the lead over HMIL is 0.35 pp ACC (93.24 vs 92.89, SE 2.47 vs 1.45). No hypothesis tests or confidence intervals on differences are reported. The paper nevertheless uses language such as "greatly enhance" (Abstract) and "significantly improves the state-of-the-art performance" (Abstract, Conclusion). The central comparative claim of the paper is not robustly supported by the presented evidence. This is a structural evidential weakness — the differences are equally consistent with sampling noise, and the rhetorical framing is not commensurate with the numbers.
 
 ### Minor
 
-- **"Attention-weighted covariance" terminology is imprecise.** The paper describes the covariance matrix as "attention-weighted" (Section 4.3.3), but the formula C = Σ \~g_k \~g_k^T contains no attention weights — only the centering uses the attention-weighted mean v^(1) = Σ a_k g_k. A properly weighted covariance would be Σ a_k (g_k − v^(1))(g_k − v^(1))^T. The centering is indeed attention-informed, but calling the matrix itself "weighted" overstates what the equation implements. This is a terminology issue, not a methodological flaw, but it should be corrected.
+- **The covariance matrix is described as "attention-weighted" but the computation is unweighted**: Section 4.3.3 defines $\mathbf{C} = \sum_{k=1}^K \tilde{\mathbf{g}}_k \tilde{\mathbf{g}}_k^\top$ — an unweighted sum of outer products. The text refers to this as an "attention-weighted covariance matrix," but the cluster attention weights $a_k$ do not appear in the sum. The centering uses the attention-weighted mean $\mathbf{v}^{(1)}$, providing indirect attention dependence, but the formulation does not match the description. This is a presentation imprecision rather than a fatal methodological error, but it should be corrected.
 
-- **No qualitative or quantitative validation of the claimed adaptive clustering behavior.** The paper asserts that DBSCAN forms "small clusters for rare pathological regions and large clusters for abundant normal tissues" (Section 4.2), which is a central motivation for using DBSCAN. Yet no visualization of cluster assignments on actual WSIs, no cluster-size distribution analysis, and no comparison of cluster granularity across diagnostic classes is provided. The clustering's adaptive behavior is assumed but not demonstrated.
+- **Within-cluster variability is discarded before computing the second-order moment**: The paper motivates the second-order representation as capturing "the heterogeneity of pathological patterns" and "variability and structural dependencies across patches" (Introduction, Section 3.2). However, patches are first averaged within DBSCAN clusters ($\mathbf{g}_k = \text{mean}(\{\mathbf{h}_i \in C_k\})$), after which the covariance is computed over cluster means. This means only inter-cluster correlations survive; within-cluster patch-level variation is explicitly discarded. The paper does not acknowledge or discuss this tradeoff.
 
-- **Covariance vectorization via Conv1D+max-pooling lacks ablation or motivation.** The paper compresses the d×d covariance matrix to a d-dimensional vector using 1D convolution with four kernels followed by hierarchical max-pooling. This specific design is not compared with simpler alternatives (flatten+linear, eigenvalue extraction, or bilinear pooling), making it unclear whether the vectorization itself contributes to performance or is merely a dimensionality reduction step.
-
-- **Fusion weight analysis raises an unanswered question.** Figure 2b shows the first-order fusion weight α^(1) stabilizing at ~0.6 and the second-order weight α^(2) at ~0.4. The paper interprets this as the model "retaining" second-order information, but it also shows the second-order contribution diminishing during training. Combined with the overlapping ablation error bars, this pattern makes the marginal value of the second-order stream ambiguous rather than complementary.
+- **The adaptive-granularity clustering claim is asserted but never verified empirically**: The paper repeatedly claims that DBSCAN produces "small clusters for rare pathological regions and large clusters for abundant normal tissues" (Sections 1, 4.1, 4.2). This claim rests entirely on the theoretical properties of DBSCAN; no analysis of actual cluster composition against tissue labels is provided. The claim is plausible but unsubstantiated.
 
 ### Trivial
 
-- None that are not parser artifacts.
+- **Fusion weight dynamics are reported but not discussed as a limitation**: Figure 2b shows the second-order fusion weight $\alpha^{(2)}$ stabilizes around 0.45 while the first-order weight stabilizes around 0.6, indicating the model predominantly relies on first-order information. The paper acknowledges this in Section 5.5 but frames it positively. A brief acknowledgment that the second-order contribution, while real, is secondary would provide a more balanced picture.
 
 ## Nice-to-Haves
 
-- Reporting paired statistical tests (per-fold) for the main comparisons and ablations would substantially strengthen the empirical claims.
-- A qualitative figure showing DBSCAN cluster assignments overlaid on a WSI, with cluster sizes labeled, would validate the adaptive granularity claim.
-- An ablation comparing the Conv1D vectorization against a simple flatten+linear baseline would clarify whether the vectorization design matters.
-- Adding a baseline that directly computes a flattened patch-level covariance (without clustering) and concatenates it with ABMIL features would cleanly isolate the contribution of the clustering vs. the covariance.
+- Statistical significance testing (e.g., corrected paired tests over the 5 folds) for the main comparisons would substantially strengthen the central performance claim.
+- A diagnostic analysis of what correlations the covariance matrix actually captures (e.g., which feature dimensions covary, and whether these correspond to known tissue-architecture patterns) would give substance to the claim that second-order moments provide complementary information.
+- An analysis of cluster composition versus ground-truth tissue regions would verify the adaptive-granularity hypothesis.
+- Discussion of DBSCAN sensitivity to the $\epsilon$ parameter choice (the main text only mentions the 65th-percentile heuristic; sensitivity analysis is deferred to the appendix).
 
 ## Removed Points
 
-These points were raised by reviewers but removed or demoted for the following reasons:
+These points were flagged by reviewers but removed after verification against the paper:
 
-- **"The covariance formula inconsistency is a fatal structural flaw"** (Harsh Critic) — Demoted to Minor. The centering uses the attention-weighted mean v^(1), so the covariance is attention-informed even if the outer product sum lacks explicit a_k weights. Calling it "attention-weighted" is imprecise but not structurally invalid; the method as implemented is clear from the equations.
-- **"The paper does not discuss prior second-order work like bilinear CNNs"** — Removed. The paper is focused on MIL for WSIs, not general covariance pooling in vision. The relevant prior work on MIL is adequately covered. Criticizing the omission of a tangentially related sub-field is scope creep.
-- **"Baseline hyperparameter tuning may bias comparisons"** — Weakened from concern to non-issue. The unified codebase and competitive baseline numbers (ABMIL at 94.72% ACC on CAMELYON16 is at or above typical literature values) suggest the baselines are reasonably tuned.
-- **"The claim of SOTA improvement is not supported"** — Retained but reframed: the evidence is suggestive but not conclusive due to missing significance tests. The claim itself is standard and the data directionally supports it; the weakness is in the strength of the evidence, not the claim's validity.
-- **Strength Finder's claim that "ablation study isolates contribution of second-order moments"** — Weakened. The ablation shows consistent degradation but the differences are within overlapping standard errors, making the isolation less clean than claimed.
+1. **"Runtime reporting could affect fairness"** — The paper explicitly states that HOMIL's time *includes* clustering while baselines are measured as "training+inference only." This makes the comparison conservative (favoring baselines, not HOMIL). The criticism is factually inverted. REMOVED.
+
+2. **"The vectorization of the covariance matrix via 1-D convolutions has no clear interpretation"** — This is a generic "area-of-concern sweep" rather than a specific identified problem. Convolution+pooling over matrix rows is a standard compression technique; requiring a theoretical interpretation of this design choice is scope creep. REMOVED.
+
+3. **"The ablation differences are within standard error ranges, weakening the claim"** — While numerically true, the ablation shows consistent directional effects across all metrics, and the full pattern (both components matter, removing both degrades to ABMIL) is coherent. This criticism conflates "could be stronger with more data" with "is invalid." REMOVED as a standalone weakness; the broader point about statistical significance is captured under the Major weakness.
+
+4. **"Missing discussion of prior uses of second-order statistics in MIL"** — The related work section is expected to cover prior MIL methods, which it does. The harsh critic's framing of missing "bilinear pooling, covariance descriptors" references is a reviewer knowledge claim without external verification. REMOVED per the rule against citing missing related works.
+
+5. **"The paper lacks any discussion of limitations"** — The paper does discuss learning dynamics and fusion weights in Section 5.5, and mentions sensitivity analysis in the appendix. While a dedicated limitations section would strengthen the paper, the claim that limitations are entirely absent is overstated. REMOVED as a standalone weakness; key unaddressed limitations are captured individually above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The reviewers' observation that the fusion weight curves (Figure 2b) show the second-order moment stabilizing at a subdominant ~0.45 weight is interesting and underexplored. This pattern holds across training and suggests that while the covariance representation contributes complementary information (as the ablation confirms), the first-order mean remains the primary signal for WSI classification. This raises a question the paper does not address: under what slide-level conditions does the covariance branch actually carry the most diagnostic weight? Answering this could sharpen the contribution beyond "adding second-order helps a little."
 
 ## Suggestions
 
-- Add a statistical significance test (paired across the 5 folds) comparing HOMIL against ABMIL and the next-best baseline for each metric. Report p-values or denote which comparisons pass standard thresholds.
-- Clarify the covariance terminology: either rename it "covariance centered by the attention-weighted mean" or introduce explicit weights a_k in the outer product sum to genuinely implement a weighted covariance.
-- Include a visual or quantitative analysis of DBSCAN cluster sizes (e.g., histogram of cluster sizes, or a side-by-side WSI patch with cluster labels color-coded) to validate the adaptive granularity claim.
-- Add a simple ablation comparing the Conv1D vectorization against flatten+linear to confirm the vectorization design is not arbitrary.
+- Tone down the claims language: replace "greatly enhance" and "significantly improves" with language that matches the magnitude of the observed gains (e.g., "modestly improves," "yields consistent gains").
+- Provide paired significance tests (or at minimum confidence intervals on pairwise differences) for the main comparisons against MambaMIL and HMIL — this is the single highest-impact revision.
+- Either correct the "attention-weighted covariance" description to match the formula (i.e., call it "covariance centered on the attention-weighted mean") or incorporate $a_k$ into the outer-product sum.
+- Add a brief discussion of what information is lost by computing covariance over cluster means rather than over individual patches, even if the argument is that clustered patches are similar enough that the loss is negligible.
 
 ## Score and Decision
 
-**Round 1 bracket (initial):** Between 4.0 and 6.0. The paper is substantially stronger than the weak-anchor papers at 2.5–3.25 (Mamba-HMIL, Pg-GAT) which had serious novelty/writing issues, but clearly below the 8.0 anchors which represent top-tier contributions.
+**Round 1 bracketing**: Queried weak (score < 3.5), middle (3.5–7.5), and strong (>7.5) WSI/MIL papers. The paper clearly sits above the weak band (3.0–3.4, all rejected) and below the strong band (7.6–8.0, different topics). Initial bracket: **5.0–6.5**.
 
-**Round 2 narrowing:** Compared against three anchors in the 4.5–6.0 range:
-- SMIL (4.50, rejected): HOMIL has clearer motivation and a more concrete contribution, placing it above 4.50.
-- MI-PLL (5.00, rejected): HOMIL's presentation is cleaner, though MI-PLL had substantial theory. Comparable quality but different genres.
-- MFC (6.00, accepted): HOMIL is less ambitious and has weaker experimental validation (no significance tests, smaller gains), placing it below 6.00.
+**Round 2 narrowing**: Retrieved anchors inside (4.5, 7.0). Key comparisons:
+- `anek0q7QPL` (5.00, Reject): Covariance+Hessian for classification — HOMIL is substantially better executed and better evidenced.
+- `trj2Jq8riA` (5.67, Accept): Vision-language WSI survival analysis — comparable novelty level and similar issues with marginal gains; HOMIL is cleaner but less ambitious.
+- `6xrDPHhwD3` (6.00, Accept): Multi-scale causal WSI framework — HOMIL is better executed but less conceptually novel.
+- `q1t0Lmvhty` (6.00, Accept): Covariance pooling theory — deeper theoretical contribution; HOMIL is more applied but less rigorous.
 
-The paper provides a well-motivated and clearly described method with a novel (in the WSI-MIL context) idea, fair baselines, and genuine efficiency gains. However, the experimental evidence for the core claim — that second-order moments improve accuracy — is weakened by modest effect sizes, overlapping error bars, and the absence of statistical significance testing. The ablation does not cleanly attribute gains to the proposed components.
+HOMIL sits between the 5.00 reject anchor (clearly worse than HOMIL) and the 5.67/6.00 accept anchors (comparable or slightly stronger than HOMIL). The paper's core weakness — marginal performance gains without significance testing, combined with overclaiming — prevents it from reaching the 6.00 tier. The clean methodology, genuine efficiency advantage, and coherent ablation keep it above the 5.00 tier.
 
-**Final score: 5.0**
+**Final score: 5.5**.
 
-**Decision: Reject** — The core idea has merit and the paper is clearly written, but the experimental validation does not meet the standard required to confidently support the claimed improvements. The weaknesses are evidential rather than structural: with rigorous significance testing, corrected terminology, and validation of the clustering behavior, the paper could become publishable. A major revision is warranted.
+**All anchors referenced**:
+| Anchor | Score | Round | Comparison |
+|--------|-------|-------|------------|
+| `0yVP49SDg0` | 3.25 | R1 | HOMIL clearly stronger |
+| `MOCEoNsjEx` | 3.00 | R1 | HOMIL clearly stronger |
+| `jHdsZCOouv` | 3.40 | R1 | HOMIL clearly stronger |
+| `Ng4HaH4L6P` | 3.40 | R1 | HOMIL clearly stronger |
+| `6xrDPHhwD3` | 6.00 | R1/R2 | MFC more novel but sloppier; HOMIL cleaner but less ambitious |
+| `trj2Jq8riA` | 5.67 | R1/R2 | Similar tier; HOMIL comparable novelty, better ablation, similar marginal-gain issues |
+| `q1t0Lmvhty` | 6.00 | R1 | Deeper theory; HOMIL more applied but less rigorous |
+| `AZW3qlCGTe` | 5.67 | R1/R2 | Different problem; comparable quality |
+| `anek0q7QPL` | 5.00 | R2 | HOMIL substantially better executed |
+| `T7ZVzuObcj` | 5.50 | R2 | Similar score; HOMIL somewhat better evidenced |
+| `Y0QqruhqIa` | 6.25 | R2 | Stronger paper; HOMIL below this |
+| `YH4M1Tbxfz` | 6.00 | R2 | Dataset paper; different contribution type |
 
-### All calibration anchors consulted
-
-| Anchor ID | Avg Score | Round | Comparison |
-|-----------|-----------|-------|------------|
-| 0yVP49SDg0 (Mamba-HMIL) | 3.25 | 1 (weak) | Weaker: less clear contribution, major novelty concerns |
-| i4ouG6Kc8M (Dual-Metric SSL) | 2.50 | 1 (weak) | Weaker: different topic, lower quality |
-| MOCEoNsjEx (Pg-GAT) | 3.00 | 1 (weak) | Weaker: unclear methodology |
-| jHdsZCOouv (SHAP-CAT) | 3.40 | 1 (weak) | Weaker: different topic (multimodal), lower quality |
-| 6xrDPHhwD3 (MFC) | 6.00 | 1 (middle), 2 | Stronger: more ambitious, more comprehensive validation |
-| trj2Jq8riA (VLSA) | 5.67 | 1 (middle), 2 | Slightly stronger: clearer novelty, more thorough experiments |
-| AZW3qlCGTe (Set-Level Labels) | 5.67 | 1 (middle), 2 | Similar quality but different topic |
-| lo9HMoGNwQ (SMIL) | 4.50 | 1 (middle), 2 | Weaker: unclear clinical motivation, limited novelty |
-| xriGRsoAza (Inherently Interpretable TSC) | 8.00 | 1 (strong) | Much stronger: not directly comparable (time series) |
-| 3b9SKkRAKw (LeFusion) | 8.00 | 1 (strong) | Much stronger: not comparable (diffusion models) |
-| oZdaEiDBpF (MI-PLL) | 5.00 | 2 | Slightly weaker: poor presentation, but strong theory |
-
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

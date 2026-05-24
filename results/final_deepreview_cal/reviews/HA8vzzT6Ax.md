@@ -1,83 +1,85 @@
-Now I have sufficient calibration data. Let me compile the final review.
+Now I have all the information I need. Let me write the consolidated review.
+
+---
 
 ## Summary
 
-This paper studies the trade-off between watermark strength and speculative sampling efficiency in LLMs. It introduces a continuous measure of watermark strength (expected KL divergence between watermarked and original distributions), formalizes the trade-off as a Pareto optimization problem, and proposes Algorithm 1 — a mechanism that replaces the random acceptance coin in speculative sampling with a pseudorandom variable. Theorem 4.1 proves that, for degenerate watermarks (e.g., Gumbel-max), the algorithm simultaneously achieves maximal watermark strength and maximal sampling efficiency. Experiments on Llama and Gemma model pairs show that the method improves detectability (TPR@FPR=1%) for both Gumbel-max and SynthID watermarks while preserving acceptance rates.
+This paper revisits a recently identified trade-off between watermark strength and speculative-sampling efficiency in LLMs. It makes three contributions: (1) a quantitative definition of watermark strength based on expected KL divergence between watermarked and original token distributions, which governs statistical detectability; (2) a characterization of the trade-off as a Pareto frontier, with explicit curves derived for two watermarking families; and (3) a mechanism (Algorithm 1) that injects pseudorandomness into draft-token acceptance decisions, provably attaining maximal watermark strength while preserving maximal speculative-sampling efficiency. Experiments on Llama and Gemma model pairs confirm maintained acceptance rates and improved watermark detectability.
 
 ## Strengths
 
-- **Quantitative watermark strength measure linked to detectability.** Definition 3.1 (WS as expected KL divergence) and Theorem 3.1 (connecting WS to the p‑value decay rate of the uniformly most powerful test) provide a principled, continuous foundation for analyzing watermark strength, moving beyond the binary definition used in prior work.
+- **Clean, well-motivated quantitative watermark strength measure (Def. 3.1):** The expected KL divergence between watermarked and original distributions is shown to be upper-bounded by entropy (Theorem 3.2) and maximal precisely when the watermarked distribution is degenerate. This moves beyond the prior binary notion of strength, enabling a continuous trade-off analysis.
 
-- **Complete Pareto characterization of the trade‑off.** Definition 3.2 casts the trade-off as a constrained optimization problem, and the derivation of explicit trade-off curves (Eq. 8/10, Figure 1) for Gumbel‑max, SynthID, and linear-interpolation classes gives a clear picture of how existing schemes populate the frontier.
+- **Rigorous trade-off characterization as a Pareto frontier (Def. 3.2, Eq. 8–10):** The paper casts the trade-off as a constrained optimization problem and derives explicit Pareto curves for linearly watermarked classes. The comparison across Hu's class and Google's class (Figure 1) is informative and demonstrates the framework's generality.
 
-- **Elegant algorithmic mechanism with a clean proof.** Algorithm 1 is simple and well-motivated: making the acceptance decision pseudorandom (line 8) rather than truly random renders the entire generation deterministic in the pseudorandom variables. Theorem 4.1 shows that under this algorithm, unbiasedness, maximal sampling efficiency (1 − TV(Q,P)), and maximal watermark strength (Ent(P)) are simultaneously achievable for degenerate watermarks — a direct contradiction of the previously claimed "inevitable" trade-off.
+- **Elegant and effective core mechanism (Algorithm 1, Theorem 4.1):** Making acceptance decisions pseudorandom so the entire generation becomes a deterministic function of the watermark keys is a simple, principled idea. Theorem 4.1 proves that this mechanism simultaneously achieves (a) unbiasedness, (b) maximum sampling efficiency (1 − TV(Q, P)), and (c) maximum watermark strength (Ent(P)) — directly overcoming the prior impossibility claim.
 
-- **Empirical verification that efficiency is preserved.** The left panel of Figure 2 confirms that AATPS for Algorithm 1 closely matches standard speculative sampling across K∈{2,3,4} for both watermark schemes, with 95% confidence intervals overlapping the baseline.
+- **Empirical validation that supports the theory:** Figure 2 shows that acceptance rates (AATPS) are essentially unchanged from standard speculative sampling while detectability (TPR at 1% FPR) improves for both Gumbel-max and SynthID watermarks. The oracle gap is small, indicating near-optimal practical detection. Results on both Llama-68M/7B and Gemma-2B/7B (Appendix) support generality.
 
-- **Improved detectability demonstrated with error bars.** The middle and right panels of Figure 2 show clear improvements in TPR@FPR=1% for both Ars‑τ (Gumbel‑max) and Bayes‑MLP (SynthID) over the prior-based detectors, with the gap to the oracle shrinking at 200 tokens. ROC curves and per-token-time/perplexity tables in the appendix provide additional support.
+- **Unification of existing watermarking schemes:** Theorem 3.3 shows that both Gumbel-max and SynthID (as m→∞) achieve the theoretical maximum strength, providing a consistent basis for comparison and clarifying their optimality.
 
 ## Weaknesses
 
-### Major
-- **Theory applies strictly to degenerate watermarks; experiments include a non-degenerate case.** Theorem 4.1 requires the decoder to be degenerate (a.s. point mass), which holds for Gumbel‑max but not for SynthID with finite rounds (m=30). The paper is honest about this gap (it states "our current work directly applies to unbiased degenerate watermarks" in the conclusion), and the SynthID experiments are presented as empirical improvements rather than provably optimal. Nevertheless, the central claim of "breaking the trade-off" is technically proven only for the Gumbel‑max case; the paper would benefit from sharper language in the abstract and contributions to distinguish the proven optimality from the empirical improvement.
+### Fatal
 
-- **Trade‑off curves (Figure 1) are illustrated only on simulated distributions and are not validated experimentally.** The Pareto curves derived in Section 3.2 use synthetic (Q,P) pairs described in Appendix C.1, and the experiments never revisit these curves — they instead measure detectability (TPR) as a proxy. Showing that Algorithm 1 lies on or above the empirical Pareto frontier in a real experimental setting would substantially strengthen the connection between the theory and the reported improvements.
+None.
+
+### Major
+
+None.
 
 ### Minor
-- **Missing SynthID detection baseline that isolates the benefit of uₜ.** For SynthID, Bayes‑MLP uses an MLP trained on (yᵖ, yᵀ, uₜ) while Bayes‑Prior uses a simple weighted average. A natural control is an MLP trained on (yᵖ, yᵀ) *without* uₜ, which would isolate whether the improvement comes from access to uₜ or from the nonlinear MLP fusion. The current comparison conflates these two factors.
 
-- **Temperature choice limits generality.** Experiments use temperatures of 0.5 (Gumbel‑max) and 0.7 (SynthID) to "make the results more pronounced." Watermarking is often used at temperature 1.0 for creative generation; the paper should at least discuss whether the detectability improvements persist at higher temperatures.
+- **Theorem 3.1 assumes i.i.d. tokens, which does not hold in autoregressive generation.** The theorem proves that watermark strength governs the decay rate of p-values under independent tokens with fixed, known distributions. In practice, tokens are generated sequentially with context-dependent distributions, so the theorem does not directly apply to the setting studied in the rest of the paper. The paper acknowledges this distinction in Remark 3.1, but the framing in Section 3.1 could be more careful about the gap between the i.i.d. model and autoregressive reality. This does not undermine the core contributions — the definition of watermark strength is independently useful, and the rest of the paper does not depend on this theorem — but it weakens the claimed direct link between the strength measure and practical detection guarantees.
 
-- **Theorem 4.1's "sampling efficiency" claim and the bonus step.** Theorem 4.1(b) states SE = 1 − TV(Q,P), which Definition 2.1 defines as the expected acceptance rate. The algorithm's bonus step (line 16) adds an extra token when all K drafts are accepted, so the actual AATPS exceeds 1 − TV(Q,P) (as seen in the experiments). Clarifying that the theorem refers to the per-step acceptance rate (not AATPS) would avoid confusion.
+- **Ars-τ detection uses a single global threshold τ calibrated on held-out data, whose sensitivity is not analyzed.** The true acceptance boundary in speculative sampling is token-dependent (min{1, P_w / Q_w}), so a single scalar τ is a simplification. While the reported improvement over Ars-Prior is clear, the paper would benefit from a discussion of how τ varies with model pairs and generation parameters, or from an adaptive rule. This is a practical detection concern, not a flaw in the main theoretical contribution.
+
+- **The MLP-based detector for SynthID (Bayes-MLP) is somewhat of a black box.** An ablation against a simpler rule-based selector (analogous to Ars-τ) would help isolate whether the improvement comes from having access to u_t or from the capacity of the learned classifier. The comparison against the oracle (Figure 2, right panel) partially mitigates this concern.
 
 ### Trivial
-- Tables 1 and 2 (PTT, LOGPPL) appear only in the appendix despite being referenced in the main text. Moving at least a summary of the efficiency/perplexity numbers to the main paper would better support the claims of preserved quality and latency.
+
+- **Temperature sensitivity not discussed in main text.** The experiments use temperatures 0.5 (Gumbel-max) and 0.7 (SynthID), stated as chosen "to make the results more pronounced." A brief comment on whether the gains persist at temperature 1.0 would improve completeness, though Appendix results may cover this.
+
+- **Theorem 4.1 proof sketch absent from main text.** Given its centrality, a one-paragraph sketch of the unbiasedness argument in the main body would improve self-containedness. Currently all proofs are deferred to the appendix.
 
 ## Nice-to-Haves
-- Validate the theoretical Pareto curve (Definition 3.2) empirically by computing watermark strength and sampling efficiency for multiple watermark configurations and showing that Algorithm 1 lies above the empirical frontier.
-- Investigate whether the detectability improvement holds at higher temperatures (e.g., temperature 1.0).
-- Provide a theoretical analysis of how much uₜ contributes to detection improvement in a simplified setting (e.g., two-token vocabulary).
+
+- Reframe Theorem 3.1 explicitly as a result for a simplified i.i.d. model, then discuss (perhaps with a martingale argument or reference) why expected per-step KL divergence remains a reasonable proxy for detection difficulty in the autoregressive case.
+- Analyze the sensitivity of τ in Ars-τ to model pairs and generation parameters, possibly proposing an adaptive rule.
+- Ablate the MLP in Bayes-MLP against a simpler threshold-based selector.
+- Discuss extensions to tree-based speculative decoding variants.
 
 ## Removed Points
-- **"Fairness of detection comparison" (Ars‑τ calibrates τ on validation set vs. Ars‑Prior estimates p from rates).** This comparison is inherent to the two settings: the prior method lacks access to uₜ and cannot use τ‑based selection. The asymmetry is not a flaw — it reflects the fundamental difference between having uₜ and not having it. The improvement magnitude is large enough that any residual calibration effect would not erase the gap. *Removal justification: strawman weakness — the criticism misunderstands the inherent asymmetry between the compared settings.*
 
-- **"The paper does not discuss overhead of training the MLP or calibrating τ."** The paper states the training set size (1,000 texts) and the MLP architecture (three-layer). Calibration is a grid search on a validation set. These are standard operations with negligible overhead. *Removal justification: trivial nongap — asking for documentation of trivial implementation details.*
+These points are flagged to be removed; treat them with caution.
 
-- **"Missing related works" / reproducibility concerns about cited models.** The paper cites Gumbel‑max (Aaronson, 2023), SynthID (Dathathri et al., 2024), Llama, Gemma, EL15, C4 — all publicly released entities. *Removal justification: hard rule — do not question existence of cited references.*
+- **"Section 3.2 convexity could be made slightly more precise"** — The paper already explicitly notes that "entropy is concave, so the feasible set of (10) is not convex in general" and provides a degenerate-target simplification. The self-awareness is sufficient; demanding more precision would be a nitpick that does not affect any claim.
+
+- **General criticism about "detection experiments requiring more analysis"** — already covered under the retained minor weakness about τ sensitivity.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The key insight — that pseudorandomness can be injected into the *acceptance decision itself* to make the entire speculative decoding process a deterministic function of the watermark keys — is genuinely novel and non-obvious. Prior work treated the acceptance coin flip as a source of irreducible randomness that weakens watermarks; this paper shows that by making that flip pseudorandom, the apparent impossibility can be circumvented. This reveals a deeper principle: when the full generation process is viewed as a deterministic transformation of pseudorandom inputs, the binary notion of watermark preservation (exact distributional match) becomes unnecessarily restrictive, and a continuous strength measure opens the path to simultaneously optimizing both objectives. This insight may generalize beyond the watermarking context to other settings where speculative-sampling efficiency and output determinism interact.
 
 ## Suggestions
 
-1. In the abstract and contributions, clarify that the theoretical guarantee of "breaking the trade-off" (maximal WS and maximal SE simultaneously) applies to degenerate watermarks (e.g., Gumbel‑max; SynthID only in the m→∞ limit), and that the SynthID‑m=30 results are empirical improvements rather than provably optimal.
-2. Move a concise summary of the Per Token Time and Log Perplexity results (at least the numbers from Tables 1 and 2) into the main paper body.
-3. For the SynthID detection experiments, add an MLP baseline trained on (yᵖ, yᵀ) without uₜ to isolate the benefit of the pseudorandom acceptance variable.
-4. Address the bonus step in Theorem 4.1 explicitly, noting that the proven SE is the per-step acceptance rate and that the bonus step adds a bounded extra term to AATPS.
+- Include a brief proof sketch for Theorem 4.1 in the main text (a few sentences on why unbiasedness holds, given how central this result is).
+- Add a sentence in Section 5 commenting on whether the detectability gains are expected to persist at temperature 1.0 (or point to Appendix results covering this).
+- Clarify the language around Theorem 3.1 — explicitly frame it as a result for the idealized i.i.d. setting and briefly discuss why the KL-based strength measure remains a well-motivated proxy under autoregressive generation.
 
-## Calibration
+## Score and Decision
 
-| Anchor ID | Title | Score | Round | Comparison |
-|-----------|-------|-------|-------|------------|
-| jbfDg4DgAk | Sparse Watermarking in LLMs | 3.00 | R1 bracketing (low) | Much weaker: lacks theoretical depth and clean characterization |
-| xFezgECSLa | On the Design and Analysis of LLM-Based Algorithms | 3.00 | R1 bracketing (low) | Not directly comparable, but significantly below |
-| 4y3GDTFv70 | Latent Space Theory for Emergent Abilities | 3.25 | R1 bracketing (low) | Not directly comparable |
-| yx8bU8T5ZN | Unified View of Delta Parameter Editing | 2.33 | R1 bracketing (low) | Not comparable |
-| LdIlnsePNt | Watermarking using Semantic-aware Speculative Sampling (SEAL) | 6.00 | R1 bracketing (mid), R2 narrowing | Very topically similar; our paper has cleaner theory, more coherent narrative, and better experiments |
-| eKGEsFdpin | I Know You Did Not Write That! (Sampling-based watermark) | 3.67 | R1 bracketing (mid) | Less theoretically grounded; below ours |
-| 0koPj0cJV6 | Watermark for Black-Box Language Models | 4.60 | R1 bracketing (mid) | Solid but less ambitious in scope; below ours |
-| E4LAVLXAHW | Black-Box Detection of Language Model Watermarks | 7.00 | R1 bracketing (mid), R2 narrowing | More comprehensive experiments but less theoretical novelty; slightly above ours |
-| j7b4mm7Ec9 | Towards Lightweight Deep Watermarking Framework | 7.60 | R1 bracketing (high) | Image watermarking; less comparable |
-| SnDmPkOJ0T | REEF: Representation Encoding Fingerprints | 8.00 | R1 bracketing (high) | Different task (IP protection); higher scope/impact |
-| WJaUkwci9o | Self-Improvement in Language Models: The Sharpening Mechanism | 8.00 | R1 bracketing (high) | Different topic; higher |
-| syThiTmWWm | Cheating Automatic LLM Benchmarks | 7.75 | R1 bracketing (high) | Different topic; higher |
-| 9k0krNzvlV | On the Learnability of Watermarks | 5.75 | R2 narrowing | Accepted but more empirical and less theoretically deep; below ours |
-| DEJIDCmWOz | On the Reliability of Watermarks | 6.00 | R2 narrowing | Accepted; solid empirical study but less theoretical contribution; slightly below ours |
-| jlhBFm7T2J | Undetectable watermark for generative image models | 6.50 | R2 narrowing | Image domain; similar score level; our paper has stronger theory |
-| 16O8GCm8Wn | Robust Watermarking Using Generative Priors | 6.40 | R2 narrowing | Image domain; less comparable |
+**Round 1 bracket:** The paper sits above the LdIlnsePNt anchor (6.00, SEAL paper on watermarking + speculative sampling, which had significant theory-practice gaps and missing comparisons) and is comparable to or slightly stronger than the E4LAVLXAHW (7.00) and ujpAYpFDEA (7.50) anchors. Initial bracket: **6.5–8.0**.
 
-**Round 1 bracket:** 5.5–7.5. **Round 2 narrowing:** After comparing with the SEAL paper (6.00, weaker theory/experiments), the Learnability paper (5.75, less theoretical depth), the Reliability paper (6.00, less theory), and the Black-Box Detection paper (7.00, above ours in empirical scope), plus the closely related 6.50 image watermark paper, the paper sits at **6.5**. It is a clear contribution with genuine theoretical advances and solid empirical support, but has a verifiable gap between the optimality theory (degenerate watermarks) and the headline empirical setting (SynthID with finite rounds).
+**Round 2 narrowing:** The paper is clearly stronger than LdIlnsePNt (6.00) — it has cleaner theory, better theory-practice alignment, and a more elegant core mechanism. Compared to E4LAVLXAHW (7.00, black-box watermark detection), our paper has a broader contribution (quantitative theory + constructive mechanism + empirical validation). Compared to ujpAYpFDEA (7.50, watermark imperceptibility), the contribution is comparably strong but with deeper theoretical grounding. The paper lands at approximately **7.5**.
 
-MY FINAL SCORE: <score>6.5</score>
+**Anchor papers referenced:**
+- `jbfDg4DgAk` (3.00, Round 1): Sparse watermarking — unrelated in quality tier, our paper is substantially stronger.
+- `LdIlnsePNt` (6.00, Round 1/2): SEAL — closest topical match; our paper is clearly superior in clarity, theory-practice connection, and completeness.
+- `E4LAVLXAHW` (7.00, Round 2): Black-box watermark detection — our paper is comparable or slightly stronger with broader contributions.
+- `ujpAYpFDEA` (7.50, Round 2): Watermark imperceptibility — our paper is comparable in quality, with deeper theoretical grounding.
+
+The weaknesses are all minor and addressable; none undermine the core contributions. The paper is well-executed, theoretically sound, and practically useful.
+
+MY FINAL SCORE: <score>7.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

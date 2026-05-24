@@ -1,98 +1,79 @@
-Now I have a thorough understanding of the paper and the calibration anchors. Let me synthesize everything into a final review.
-
-**My round-1 bracket: 5.0–7.0.** The paper is an incremental but meaningful contribution over DeComFL (score 6.25, Accept). It improves on DeComFL with a clever Hessian-learning trick and shows consistent speedups. However, the theoretical claims are more conditional and less verified than DeComFL's.
-
-**Round 2 narrowing:** Comparing against HiZOO (5.67, Accept) — which is the single-node Hessian-informed ZO method — HiSo has a more challenging FL setting, more rigorous theory, and comparable empirical scope. HiSo is stronger than HiZOO. Against DeComFL (6.25), HiSo is comparable in quality: the algorithmic innovation is real but incremental, the theory is more fragile, and the empirical improvement is meaningful but modest in terms of final accuracy.
-
-**Final score: 6.0** — a solid paper with a clever algorithmic idea, honest about its theoretical limitations, and with consistent (though modest) empirical evidence.
+Now I have sufficient context to write the final review. Let me synthesize my analysis.
 
 ---
 
 ## Summary
 
-This paper proposes HiSo, a federated zeroth-order (ZO) optimization method that integrates global diagonal Hessian approximations to accelerate convergence while preserving the scalar-only, dimension-free communication paradigm of DeComFL. The key algorithmic insight is that the already-communicated gradient scalars and random seeds suffice to reconstruct a diagonal Hessian approximation on both server and clients without any extra communication. The paper provides convergence analysis showing that under a "well-approximated condition" the rate can become independent of dimension \(d\) and the Lipschitz constant \(L\), and empirically demonstrates 1.4–5.4× speedups in communication rounds over DeComFL across OPT-350M to OPT-2.7B models on SST-2, QQP, and SQuAD.
+The paper proposes **HiSo**, a federated zeroth-order optimization method that integrates a diagonal preconditioner (motivated as a Hessian approximation) into the scalar-only communication framework of DeComFL. The key idea is to use an exponential moving average of squared update vectors to learn a per-coordinate scaling matrix \(H_r\), then sample perturbation directions from \(\mathcal{N}(0, H_r^{-1})\) so that the expected update approximates a Newton-style preconditioned gradient — all while preserving dimension-free (scalar-only) communication. The authors provide convergence analysis under a "well-approximated Hessian" condition and demonstrate 1.4–5.4× communication-round speedups over DeComFL on LLM fine-tuning benchmarks (OPT-125M through OPT-2.7B, on SST-2, QQP, SQuAD).
 
 ## Strengths
 
-- **Clever Hessian learning without extra communication (Section 4.2, Eq. 12).** The central algorithmic idea — using the already-communicated \(\Delta x\) vectors (which are representable by scalars) to build a global diagonal Hessian via \(\text{Diag}([\Delta x]^2)\) and exponential moving averaging — is genuinely elegant. Both server and clients can reconstruct \(H\) locally from the same scalar quantities already exchanged, so dimension-free communication is strictly preserved while curvature information is incorporated.
-
-- **Generalized scalar-only framework (Algorithm 1).** The paper correctly identifies that scalar-only communication is not dependent on ZO-SGD specifically but on the use of scalar representations, and provides Algorithm 1 as a flexible framework that supports a broader class of optimizers. This is a clean conceptual contribution that may enable future work beyond HiSo.
-
-- **Convergence analysis for \(\tau > 1\) (Corollary 3).** The analysis extends to multiple local updates, showing that HiSo's rate remains dimension-independent under the well-approximated condition, while DeComFL's rate (under the low-effective-rank assumption) becomes dimension-dependent again for \(\tau > 1\). This resolves an open limitation from DeComFL.
-
-- **Consistent empirical speedups (Table 2).** Across all 9 model–task combinations, HiSo reaches DeComFL's best test accuracy in fewer rounds, yielding speedups of 1.4–5.4× with 29%–80% communication savings. The largest gains (5.4× on OPT-350M SQuAD) are substantial.
-
-- **Robustness to the Hessian smoothing parameter \(\nu\) (Figure 5, left).** The ablation shows that varying \(\nu\) over {0.9, 0.95, 0.99} has negligible impact on convergence and final accuracy, which simplifies practical usage.
+- **Generalized scalar-only FL framework (Section 3.3, Algorithm 1):** The paper decouples scalar-only communication from the specific choice of ZO-SGD, showing that any optimizer whose update can be expressed via scalars and shared random seeds fits the paradigm. This abstraction is clean and enables the design of HiSo and potentially future methods.
+- **Empirical speedup over the direct predecessor DeComFL (Table 2):** HiSo reduces communication rounds by 29–80% across nine model/task configurations, with speedups of 1.4–5.4×. The experiments are conducted on realistic LLM fine-tuning tasks (SST-2, QQP, SQuAD) at scales from 125M to 2.7B parameters.
+- **Extended convergence theory with multiple local steps (Corollary 3):** The analysis extends DeComFL's results to the \(\tau > 1\) case with Hessian preconditioning, showing that under the low whitening rank assumption the rate remains independent of \(d\), while DeComFL's rate would degrade. This resolves a gap left open by prior work.
+- **Robustness and ablation evidence (Figure 5):** The method shows insensitivity to the Hessian smoothing parameter \(\nu \in \{0.9, 0.95, 0.99\}\) on MNIST, and the learned diagonal entries exhibit a long-tail distribution consistent with the low effective rank intuition.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The harsh critic's claim of a "fatal inconsistency" (that the Hessian update rule drives \(H_r\) to a multiple of the identity matrix) is based on a mathematical error: it treats the gradient scalar \(g = \frac{1}{\mu}(f(x+\mu H^{-1/2}u) - f(x))\) as constant with respect to the random direction \(u\), when in fact \(g \approx u^\top H^{-1/2}\nabla f\) depends strongly on \(u\). A correct expectation calculation yields \(\mathbb{E}[(\Delta x)_i^2] = (H^{-1})_{ii} \cdot (2(H^{-1})_{ii}(\nabla f)_i^2 + \|H^{-1/2}\nabla f\|^2)\), which does not reduce to a simple multiple of \((H^{-1})_{ii}\) and does not force \(H\) toward identity. The algorithm does not suffer from the claimed structural contradiction.
 
 ### Major
 
-- **The central theoretical claim of dimension-free convergence depends on an unverified and hard-to-verify condition.** The rate \(\mathcal{O}(\sqrt{\zeta/mR})\) in Corollary 1 depends on the "well-approximated condition" (Eq. 17): \(\mathrm{Tr}(H^{-1/2}\Sigma H^{-1/2}) \leq \zeta\) with \(\zeta \ll d\). The paper provides no empirical evidence that this condition holds for the LLMs and tasks in its experiments. The toy eigenvalue simulation (Figure 4) uses a log-normal distribution chosen for convenience, not actual neural network Hessians. The CNN experiment (Figure 5, right) shows a long-tailed distribution of learned \(H\) values, which is suggestive but does not compute or bound \(\zeta\). The paper honestly states "it is hard to determine if this approximation holds in the context of LLMs" — but this admission means the headline theoretical result (the first dimension-free convergence rate for ZO methods in FL) remains a conditional statement whose premise is unsupported. Without this condition, HiSo's rate degenerates to DeComFL's. **The theory explains *what would happen if* the approximation were good, but does not establish that it *is* good in the claimed setting.**
+- **The connection between the Hessian update rule (Eq. 12) and the theoretical "well-approximated" condition (Eq. 17) is not established.** The update \(H_{r+1} = (1-\nu)H_r + \nu\,\text{Diag}(|\Delta x|^2)\) is presented as a heuristic — analogous to how Adam/RMSProp use squared gradients to estimate second moments — but the paper provides no derivation, proof, or even informal argument that this EMA converges to a quantity resembling the Hessian diagonal. The theoretical corollaries that yield dimension- and \(L\)-independent rates all depend on the well-approximated condition. The paper acknowledges this gap in the Remarks (end of Section 5.2) and notes that at worst HiSo degenerates to DeComFL, but it remains a significant disconnect between the algorithm's claimed mechanism and the theory that supports it. This should be addressed in a rebuttal: either by providing analysis of what the EMA actually estimates, or by repositioning the theory as an "oracle" analysis of what would happen *if* a good Hessian approximation were available.
+
+- **No empirical validation that the learned \(H_r\) actually approximates the Hessian (rather than, e.g., an RMSProp-style variance estimate).** Section 6 and Figure 5 show the distribution of learned \(H\) values and note a long tail, but a long-tailed distribution of squared-update magnitudes is expected from *any* EMA of squared quantities in deep networks and does not distinguish Hessian structure from gradient second-moment structure. A comparison against a finite-difference Hessian-diagonal estimate on a small-scale problem, or an experiment that ablates whether using the learned \(H\) as a sampling covariance yields better-conditioned updates than using a comparable RMSProp-style preconditioner, would strengthen the central mechanistic claim. The paper references Appendix F.7.2 for "more direct evidences," but the appendix is not available in the submission.
 
 ### Minor
 
-- **The "90 million times communication savings" claim in the abstract is not directly supported by the tables.** The largest savings calculable from Table 3 is ~34.6 million (OPT-1.3B FedAdam SQuAD vs HiSo). The 90 million figure would require a comparison with OPT-2.7B first-order methods, but those numbers are not reported. The claim should cite the specific comparison that yields this number.
-
-- **Hyperparameter tuning details are insufficient.** The paper states methods were "tuned using their optimal learning rates" but does not report the grid, ranges searched, or number of values tried. Without this information, it is difficult to assess whether the comparison is fair to all methods.
-
-- **No wall-clock timing is reported.** All speedup comparisons use communication rounds, which is the right primary metric when communication is the bottleneck. However, HiSo incurs additional local computation per round (Hessian update, model reconstruction from missed rounds). Reporting wall-clock time (or at least per-round computation overhead) would give a more complete picture.
-
-- **The "safety factor of 2" in the well-approximated definition (Eq. 17) is ad hoc.** The definition lumps the \(L\)-smoothness and low-effective-rank cases into a single inequality with a factor of 2, which is not clearly motivated. A cleaner framing would separate the two regimes.
-
-- **The "90 million times" and "5×" speedup claims in the abstract slightly overstate what the tables show.** Table 2 shows speedups ranging from 1.4× to 5.4× (so "1–5×" in the abstract is approximately correct, and the 5.4× entry supports "up to 5×"). This is not a substantial issue but the framing is slightly inflated.
+- **The paper's exposition somewhat over-claims what is being learned.** The update rule is repeatedly referred to as learning a "global diagonal Hessian approximation," but the mechanism (EMA of squared \(\Delta x\) entries) is structurally identical to Adam/RMSProp's second-moment estimator, which estimates gradient variance, not the Hessian. The actual role of \(H_r\) is better described as an adaptive diagonal preconditioner whose relationship to curvature is aspirational rather than derived. The paper's own footnote acknowledges the RMSProp resemblance, but the main text language could be more precise.
+- **The DeComFL comparison in Table 2 uses an asymmetric metric:** DeComFL's rounds are counted to "full convergence" while HiSo's are counted to "match DeComFL's best test accuracy." While this is a reasonable way to show acceleration, the asymmetry should be explicitly justified and both methods' full convergence behavior compared as well.
 
 ### Trivial
-None.
+
+- Several equation references and notation details are slightly inconsistent (e.g., the shift between Eq. (12) and the preceding inline version, the use of \(H_{r,\tau}\) vs. \(H_r\)). These do not affect comprehension.
 
 ## Nice-to-Haves
 
-- **Direct validation of the well-approximated condition on a smaller model.** For a model like OPT-125M, the paper could approximate the true Hessian diagonal (via Hutchinson trace estimation) and compute a numerical approximation to \(\zeta = \mathrm{Tr}(H^{-1/2}\Sigma H^{-1/2})\), showing whether \(\zeta \ll d\) actually holds. This would ground the theoretical contribution.
-- **Ablation of the Hessian update structure itself** (e.g., how many rounds before \(H\) becomes useful, whether stale Hessian information hurts after a large model change).
-- **Additional model architectures beyond OPT** (e.g., LLaMA, Pythia) to demonstrate generality.
-- **Wall-clock timing** to complement round-based comparisons.
-- **Comparison with a ZO version of FedAvg** using adaptive scaling without Hessian information, to isolate the benefit specifically attributable to curvature versus any adaptive scaling.
+- Including a LoRA-based FL baseline (as the paper itself briefly acknowledges) would help contextualize the absolute communication savings, since LoRA is the practical standard for parameter-efficient federated fine-tuning.
+- An ablation comparing HiSo against a variant that uses the same \(H_r\) update but samples \(u \sim \mathcal{N}(0,I)\) (i.e., an RMSProp-style scaling without Hessian-informed search directions) would help disentangle the benefit of curvature-informed sampling from the benefit of adaptive per-coordinate learning rates.
 
 ## Removed Points
 
-- Criticism about model reconstruction cost scaling with missed rounds (Section 3): This is a theoretical concern that amounts to transmitting a handful of additional scalar floats for missed rounds — negligible in practice. Removed as noise.
-- Criticism about \(\Theta(d)\) memory for Hessian storage (Section 4.2): The paper correctly states this avoids \(d^2\) storage, and \(\Theta(d)\) is the baseline for any method that maintains state per parameter. Removed as not a genuine weakness.
-- Criticism about comparison with uncompressed first-order methods: The paper appropriately contextualizes this as a comparison with "naive transmission," and compressed FL is outside its scope. Removed as scope creep.
-- Several strength-finder claims about "important problem" and "well-written" — generic and not specific to this paper's evidence. Removed.
-- Criticism that only OPT models were used: Valid suggestion but clearly outside the paper's stated scope. Moved to Nice-to-Have.
+These points were flagged by reviewers but are removed from the final review with justification:
+
+- **"Fatal inconsistency: the Hessian update drives H toward identity" (Harsh Critic):** Removed. The mathematical claim is incorrect; it treats \(g\) as independent of \(u\) when computing \(\mathbb{E}[(\Delta x)_i^2]\). The actual expectation does not force \(H\) toward identity.
+- **"The theoretical analysis is for an oracle method not realized by HiSo" (Harsh Critic):** Softened and moved to Major. The paper acknowledges the gap and Theorem 1 does not require the well-approximated condition; only the corollaries do. The theory is conditional, not invalid.
+- **"The algorithm does not learn a Hessian approximation at all" (Harsh Critic):** Softened. The update rule is heuristic and its connection to the Hessian is not proven, but the critic's claim that it *cannot* learn anything curvature-related is based on flawed math. What it actually learns is an open question.
+- **"Should include confidence intervals / more baselines / different experimental setups" (various):** Moved to Nice-to-Haves where appropriate; these are scope preferences, not flaws.
+- **"Missing related work on [X]" (implicit):** Removed per hard rules — we do not fabricate missing references.
+- **"Formatting/typo concerns":** Removed per hard rules — these are parser artifacts.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The paper's use of the "low whitening rank" \(\zeta = \text{Tr}(H^{-1/2}\Sigma H^{-1/2})\) as a quantity controlling ZO gradient variance is a clean conceptual contribution. By recognizing that a diagonal preconditioner can whiten the Hessian and compress the effective dimensionality of the ZO variance term, the analysis provides a unified explanation for why ZO methods can converge much faster than the pessimistic \(\mathcal{O}(d)\) bound — an observation that had been made empirically but not theoretically articulated in this way. The extension of this idea to the federated setting with multiple local steps is technically non-trivial and resolves a gap from prior work.
 
 ## Suggestions
 
-1. **Temper the theoretical framing.** The paper would be more credible if it presented the well-approximated condition as a plausible mechanism for acceleration rather than a proven guarantee. The current framing ("marking the first such result") overpromises given the unverified premise. Reframing as a rate bound that depends on the quality of Hessian approximation, with the dimension-free corollary as an idealized special case, would be more honest and strengthen the paper.
-2. **Support or qualify the "90 million times" claim.** Either compute the exact comparison that gives this number from Table 3 data, or change the claim to a verifiable number.
-3. **Report wall-clock or per-round overhead.** Even a single table comparing computation time per round between HiSo and DeComFL would resolve concerns about the practical cost of Hessian updates.
-4. **Report the hyperparameter search grid.** A brief table or sentence describing the learning rate ranges tried and whether the same \(P=5\) was optimal for all methods would significantly strengthen the empirical evaluation.
+- The authors should compute the actual expectation \(\mathbb{E}[(\Delta x)_i^2]\) (as a function of \(\nabla f\) and \(H\)) and analyze what the EMA in Eq. (12) converges to under stationarity assumptions. This would either (a) validate the Hessian-approximation claim or (b) reposition \(H_r\) as an adaptive preconditioner whose benefits are explained through a different mechanism than Hessian approximation. Either outcome would strengthen the paper.
+- A small-scale experiment comparing the learned \(H_r\) entries against finite-difference Hessian-diagonal estimates would directly address the Major weakness and is feasible for the MNIST CNN experiment already in the paper.
 
 ## Score and Decision
 
-Calibration anchors used across rounds:
+**Bracketing (Round 1):**
+- Weak band (score < 3.5): `ZAMoxm86KV` (FZooS, 3.67 — rejected), `Jl0aEFrp11` (2.75), `Og7ZZd7hDm` (3.25). HiSo is clearly stronger than these — it has cleaner theory, better empirical results, and a more practical algorithm.
+- Middle band (3.5–7.5): `omrLHFzC37` (DeComFL, 6.25 — accepted), `bEqI61iBue` (HiZOO, 5.67 — accepted), `AbJWZp4THG` (FedAda², 5.00 — rejected), `Cy5IKvYbR3` (5.75), `DJRd4IQHGQ` (5.25). The DeComFL paper (6.25) is the direct predecessor. HiSo extends it with Hessian-informed preconditioning and stronger empirical results.
+- Strong band (>7.5): `ZuazHmXTns` (7.60 — unrelated problem-parameter-free FL), `5t57omGVMw` (8.00 — unrelated linear solvers). These are not topically comparable.
 
-| Anchor ID | Avg Score | Round | Comparison to this paper |
-|-----------|-----------|-------|------------------------|
-| omrLHFzC37 (DeComFL) | 6.25 | 1, 2 | Direct predecessor. HiSo is an incremental but meaningful improvement with cleverer algorithm and comparable empirical support, though with more fragile theory. Slightly weaker overall. |
-| ZAMoxm86KV (FZooS) | 3.67 | 1 | A weaker ZO-FL paper with GP-based gradient estimation. HiSo is substantially stronger across all dimensions. |
-| uaGNerHa1J (FedNewton) | 4.67 | 1, 2 | A second-order FL method limited to KRR. HiSo is more broadly applicable and empirically stronger. |
-| bEqI61iBue (HiZOO) | 5.67 | 2 | Single-node Hessian-informed ZO. HiSo extends the idea to the more challenging FL setting with more rigorous theory. Stronger overall. |
-| FK8tl47xpP (Greedy L2O) | 6.25 | 2 | Unrelated topic (L2O). Not directly comparable; included for general calibration. |
-| AfhNyr73Ma (General Stability ZO) | 7.00 | 2 | Unrelated topic (stability analysis). Higher score reflects a different type of contribution. |
+**Initial bracket:** HiSo sits in the 5.5–6.75 range, likely above HiZOO (5.67) and at or above DeComFL (6.25).
 
-**Round-1 bracket:** 5.0–7.0 (anchored by DeComFL at 6.25 on the high end, and weaker ZO-FL papers around 3.5–4.5 on the low end).
+**Narrowing (Round 2):**
+- `bEqI61iBue` (HiZOO, 5.67): HiZOO proposes Hessian-informed ZO for single-node LLM fine-tuning. HiSo extends this idea to federated learning, adds the scalar-only communication framework, provides more sophisticated theory (low whitening rank, τ>1 analysis), and has stronger empirical evaluation. **HiSo is clearly stronger than HiZOO.**
+- `omrLHFzC37` (DeComFL, 6.25): The direct predecessor. HiSo adds a nontrivial algorithmic layer (Hessian-informed preconditioning) and shows 1.4–5.4× speedup. The theory is extended. The main weakness (gap between heuristic H-update and theoretical assumption) is comparable in severity to DeComFL's weaknesses (questions about whether ZO is needed at all, limited baselines). **HiSo is at least as strong as DeComFL, with a slight edge from the additional algorithmic contribution.**
+- `cznqgb4DNv` (Decentralized Sporadic FL, 7.00): A strong paper with a unified framework and convergence guarantees. HiSo is less theoretically complete (the heuristic-to-theory gap) and targets a narrower problem, so HiSo is somewhat below this anchor. **HiSo < 7.00.**
 
-**Round-2 narrowing:** Compared against DeComFL (6.25), HiSo adds a genuine algorithmic innovation but has more fragile theoretical claims and comparable empirical evidence. Compared against HiZOO (5.67), HiSo operates in a more challenging setting with more comprehensive theory. The paper sits between these two anchors, slightly closer to DeComFL.
+**Final placement:** HiSo is stronger than HiZOO (5.67) and at least on par with DeComFL (6.25). The additional contributions (generalized framework, Hessian-informed ZO-FL, τ>1 theory) merit a score slightly above DeComFL. I assign **6.5**.
 
-**Final score: 6.0** — a solid paper with a clever algorithmic contribution and honest treatment of limitations. The empirical evidence is positive and consistent. The theoretical contribution would be strengthened by empirical validation of its central condition, but the paper's transparency about this limitation is commendable.
-
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

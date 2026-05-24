@@ -1,18 +1,16 @@
-Now I have enough material for a thorough calibration. Let me produce the final consolidated review.
+Now I have all the information I need. Let me synthesize the final review.
+
+---
 
 ## Summary
-
-This paper identifies and formalizes the "underthinking" problem in LongCoT LLMs—where models prematurely abandon promising reasoning paths by switching thoughts too frequently. It proposes SmartSwitch, a training-free, plug-and-play inference framework that detects thought switches via linguistic cues, evaluates the abandoned thought's potential using a Process Reward Model (PRM), and intervenes by backtracking and injecting a "deepen prompt" to encourage further exploration. Evaluated on five mathematical reasoning benchmarks across five model sizes (1.5B–32B), SmartSwitch achieves consistent accuracy gains (up to +23.3% on AIME25 for the 7B model) while simultaneously reducing inference time and token usage.
+The paper identifies and characterizes "underthinking" — the tendency of Long Chain-of-Thought (LongCoT) LLMs to prematurely switch between reasoning paths without fully exploring promising ideas. To mitigate this, the authors propose SmartSwitch, a training-free inference framework that monitors generation for thought switches, evaluates abandoned thoughts using a Process Reward Model (PRM), and injects a "deepen prompt" to encourage further exploration of prematurely discarded but promising reasoning. Evaluated across five math benchmarks and five models (1.5B–32B), SmartSwitch yields consistent accuracy gains (e.g., +23.3 points on AIME25 for a 7B model, +10.0 for QwQ-32B) while also reducing response length and inference time.
 
 ## Strengths
-
-1. **Consistent and substantial gains across a wide evaluation grid.** Table 1 shows positive accuracy deltas on all 5 models × 5 benchmarks = 25 comparisons. Gains are large for small models (e.g., 1.5B: +16.7% on AIME25) and meaningful even for strong baselines like QwQ-32B (e.g., +10.0% on AIME25). This breadth and consistency is the paper's strongest evidence.
-
-2. **Inference efficiency improves despite encouraging deeper thinking.** Tables 2 and 3 show that SmartSwitch reduces average response length (e.g., −14.2% for 32B on AIME24) and wall-clock inference time (e.g., −35.3% for 7B on AIME24). This is a distinctive advantage over prior underthinking-mitigation approaches (e.g., TIP) and suggests the framework prunes wasteful exploration while fostering productive depth.
-
-3. **Ablation cleanly isolates the value of PRM-guided selectivity.** Table 4's "Always Intervene" baseline (18.9%) degrades below the vanilla baseline (20.0%), while PRM-guided SmartSwitch achieves 36.7%. This demonstrates that simply telling the model to think deeper is harmful—the PRM's selective judgment is what makes the intervention beneficial.
-
-4. **Well-characterized problem formulation.** Section 3 provides quantitative evidence (Underthinking Frequency metric, correlation with difficulty and correctness) that underthinking is a real, measurable phenomenon. This framing is a genuine contribution independent of the proposed method.
+- **Consistent, substantial accuracy gains across models and benchmarks**: Table 1 shows pass@1 improvements on every benchmark for all five models tested, including large gains like +16.7 on AIME25 for the 1.5B model, +23.3 for the 7B model, and +10.0 for the already-strong QwQ-32B. The gains span competition-level (AIME24, AIME25, AMC23) and standard-level (MATH-500, GaoKao2023en) benchmarks.
+- **Efficiency improvements alongside depth**: Tables 2–3 demonstrate that SmartSwitch reduces both average response length (e.g., −14.2% for the 32B model on AIME24) and wall-clock inference time (e.g., −35.3% for the 7B model on AIME24) — the method prunes wasteful reasoning rather than simply spending more compute.
+- **Direct mitigation of underthinking**: Figure 4 shows SmartSwitch dramatically reduces both the Underthinking Frequency metric (e.g., UF_100 drops from 35.0 to 4.6 for the 32B model) and the number of thought switches (52.47 → 17.47 for the same model), directly validating the core claim.
+- **Thorough, informative ablations**: Tables 4–8 systematically isolate the effects of PRM choice, process division strategy, score aggregation, and the score threshold, providing an honest picture of the design space and validating each architectural choice.
+- **Plug-and-play without fine-tuning**: The framework applies identically across five models (1.5B–32B) with no retraining, and the paper provides clear algorithmic details.
 
 ## Weaknesses
 
@@ -20,62 +18,58 @@ This paper identifies and formalizes the "underthinking" problem in LongCoT LLMs
 None.
 
 ### Major
-
-1. **No statistical significance or confidence intervals.** AIME24 has 30 problems and AIME25 has 15. While pass@1 is averaged over 32 responses per problem, the effective sample at the problem level is small. The paper reports no confidence intervals, standard errors, or paired significance tests. Some large-looking deltas (e.g., 7B on AIME25: 30.0% → 53.3%) correspond to roughly 3.5 more problems solved out of 15. Given the small problem counts, it is not possible to assess reliability. The consistency of gains across 25 comparisons partly mitigates this, but per-benchmark significance is still needed.
-
-2. **Threshold sensitivity is discussed but not adequately explained.** Table 8 shows that accuracy peaks sharply at threshold 0.70 for all five models, with gains collapsing at 0.68/0.69 and 0.71. The paper does not state whether 0.70 was selected on a held-out validation set or on the AIME24 test set itself. If the latter, this constitutes an optimism bias. The fact that the *same* threshold happens to work across models is suggestive of a genuine effect rather than overfitting, but the paper should clarify how the threshold was chosen and validate it on held-out data.
+- **PRM dependence limits practical plug-and-play claims**: Table 4 reveals that weaker PRMs nearly erase the benefit — Qwen2.5-Math-PRM-7B yields only +1.1 on AIME25 vs. +16.7 for Universal-PRM-7B, and the "Always Intervene" baseline degrades below vanilla. While the paper acknowledges this limitation (Section 6), the practical implication is that SmartSwitch requires a strong, domain-appropriate PRM — it is not a fully drop-in solution independent of external quality.
+- **Sharp threshold sensitivity**: Table 8 shows that moving the score threshold by just 0.01–0.02 can cause large performance swings. For the 7B model, thresholds of 0.69 and 0.71 drop accuracy to 43.3% (below the vanilla 55.5%), while 0.70 yields 66.7%. This pattern holds across all five models. The paper is transparent about this but does not provide guidance on how to select the threshold without overfitting to a held-out set, which is a practical barrier to adoption.
 
 ### Minor
-
-1. **PRM comparison anomaly is plausible but not fully analyzed.** Universal-PRM-7B (7B, 36.7%) far outperforms Qwen2.5-Math-PRM-72B (72B, 24.8%) on AIME25. The paper attributes this to the 72B model's 4K-token context limit vs. Universal-PRM-7B's 32K limit. This explanation is reasonable—truncation of LongCoT traces could indeed cripple scoring—but the paper provides no direct evidence (e.g., how many PRM calls were truncated, analysis of score distributions) to confirm it. Given that the method's performance is entirely bounded by the PRM's quality, this gap merits attention.
-
-2. **Thought-switch detection is heuristic and unvalidated.** Detection relies on a list of linguistic cues (appendix D.2). The paper acknowledges this limitation but provides no analysis of recall or precision. Missing subtle switches (those without explicit markers) would make the method blind to some underthinking episodes; false positives could trigger harmful interventions. The paper's main results show the method works overall, so the detection is clearly adequate, but its limitations are uncharacterized.
-
-3. **Only evaluated on mathematical reasoning.** While this is common practice and the paper is honest about the scope, the underthinking phenomenon and the proposed intervention could manifest differently in other domains (code generation, scientific QA). The paper's claims of broad applicability would be strengthened by even a small proof-of-concept in a non-math domain.
+- **Missing best-of-N PRM baseline**: The paper compares against vanilla generation, standard prompting, and TIP, but does not compare against using the same PRM to score completed solutions and select the best (holding PRM call budget comparable). Such a baseline would help isolate the value of the intervention-and-backtrack architecture from the value of the PRM itself. This does not invalidate the contribution but leaves the comparative evidence incomplete.
+- **Connection between the UF metric (length-based) and the intervention mechanism (PRM-based) could be more explicit**: The UF metric characterizes underthinking via thought length (a proxy for shallow exploration), while the intervention uses PRM scores (a quality signal). The paper would benefit from explicitly analyzing the relationship — e.g., whether high-PRM-score thoughts also tend to be short, or how the PRM-based intervention specifically addresses the length-correlated underthinking pattern.
+- **All experiments in mathematics**: The method is evaluated exclusively on math benchmarks. While this is a natural starting point and the paper lists cross-domain extension as future work, the generality claim would be strengthened by even pilot results in another domain.
 
 ### Trivial
-
-- The "deepen prompt" is a single fixed string with no ablation or sensitivity analysis.
-- Figure 1(b) shows "Ours" as a curve in the UF plot, but the caption does not clarify which base model this corresponds to.
+- The definition of the UF metric relies on a heuristic length threshold L and binary classification of thoughts as "underthought," which the paper could acknowledge more directly as a proxy rather than a ground-truth measure of shallow reasoning.
 
 ## Nice-to-Haves
-
-- Add a breakdown of PRM scoring overhead vs. generation time vs. backtracking cost in the efficiency analysis.
-- Ablate alternative deepen prompts (generic vs. specific encouragement) to measure sensitivity to phrasing.
-- Report the rate at which SmartSwitch intervenes on problems already answered correctly, to quantify the risk of harming correct reasoning.
+- Reporting variance or confidence intervals alongside pass@1 point estimates (though 32 samples per question is standard).
+- A failure analysis correlating SmartSwitch failures with PRM errors, missed switch detections, or deepen-prompt misguidance.
+- Testing robustness under different sampling parameters (temperature, top-p).
+- Extending comparison with TIP beyond a single model and benchmark.
 
 ## Removed Points
-
-- *Hyperparameter sensitivity suggests possible overfitting* (Harsh Critic #1): Demoted from Major to the threshold discussion above (Major #2). The critic's framing of "overfitting" is weakened by the fact that the *same* threshold 0.70 peaks for all five independently scaled models—this pattern is more consistent with a genuine effect than with overfitting to a specific model. The concern about validation-set selection is valid and retained as Major #2.
-- *Underthinking metric conflates length with quality* (Harsh Critic #4): Removed. The paper's primary evaluation (Table 1) uses accuracy, not UF. The UF metric is used only as a diagnostic tool in Figure 4. There is no circularity because the main claims are established via an independent measure (pass@1).
-- *"Plug-and-play" claim overstated* (Harsh Critic): The method requires no training and can be applied to any LLM with an off-the-shelf PRM. The PRM is external, but this does not contradict "plug-and-play," which refers to the main LLM.
-- *Table 5 comparison is limited* (Harsh Critic): The comparison includes Standard Prompting and TIP, which are the most relevant baselines for the underthinking setting. Adding more baselines would be nice but is not a weakness.
+These points are flagged to be removed, treat them with caution:
+- **Statistical significance criticism**: The harsh critic flagged the absence of variance/confidence intervals. With 32 samples per question for pass@1 estimation, this is standard practice in the field and not a weakness.
+- **"Broader-domain experiments" as a weakness**: The paper explicitly scopes to math and lists cross-domain work as future research. Criticizing the absence is scope creep.
+- **Criticism about appendix contents (cue list, PRM configuration)**: The parser strips appendices; these exist in the original submission. Cannot flag as missing.
+- **Framing Table 6 as "sensitivity to implementation details"**: Table 6 is an ablation comparing division strategies, and v4 (the proposed method) consistently wins. This is a positive validation, not evidence of fragility.
+- **"100% accuracy on previously correct answers is unchecked by statistical test"**: This is a specific observation for one model/benchmark and is mathematically plausible (interventions only activate on detected switches). Not a meaningful weakness.
+- **Criticism about interaction with temperature/sampling**: These are Nice-to-Have extensions, not weaknesses.
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+Beyond the paper's own contributions, the review process highlights an interesting tension: the paper's underthinking diagnosis uses a length-based proxy (short thoughts = shallow), but its remedy uses a quality-based signal (PRM scores). The fact that this mismatch does not prevent the method from working — and indeed it reduces both underthinking frequency and thought-switch counts — suggests that length and quality are correlated enough in practice that intervening on one (quality) addresses the other (brevity). This pattern may generalize to other reasoning pathologies where the observable symptom and the underlying cause are operationalized differently.
 
 ## Suggestions
-
-1. **Add bootstrapped 95% confidence intervals** to all accuracy numbers in Table 1, computed over 10,000 resamples of the problem set. For AIME24 and AIME25 specifically, also run a per-problem paired test (e.g., McNemar's or sign test) comparing SmartSwitch against vanilla inference.
-2. **Clarify how threshold 0.70 was selected.** If it was chosen on a held-out subset of AIME24, say so. If it was the test set itself, report results with threshold 0.69 and 0.71 on AIME25, AMC23, MATH-500, and GaoKao2023en to demonstrate robustness.
-3. **Add a small proof-of-concept in a non-math domain** (e.g., one code generation or science QA benchmark) to support the claim of broad applicability.
-4. **Analyze thought-switch detection quality** by manually annotating 50–100 responses for premature switches and measuring recall/precision of the linguistic-cue detector.
+- Add a best-of-N baseline using the same PRM with comparable call budget. This would directly address the question of whether the intervention architecture adds value beyond simply scoring and selecting.
+- Provide a calibration strategy or heuristic for selecting the score threshold (e.g., using a small validation split or reporting performance as a function of threshold percentile rather than absolute score).
+- Include a brief analysis that bridges the UF metric (length-based) and the PRM-based intervention — for instance, showing the correlation between thought length and PRM score, or analyzing whether SmartSwitch specifically rescues short, high-scoring thoughts.
 
 ## Score and Decision
 
-**Calibration report:**
+**Calibration:**
 
-Round 1 (bracketing) — three queries covering bands <3.5, 3.5–7.5, and >7.5. The paper clearly falls in the middle band: it is substantially stronger than the weak-band anchors (avg 2.0–3.0) but lacks the scope, polish, or theoretical depth of the top-band anchors (avg 8.0).
+Round 1 bracket: The paper sits between the weak anchors (2.50–3.00, irrelevant topics) and strong anchors (8.00–9.00, primarily theoretical or very high-impact empirical work). The middle band (5.00–7.33) contains the most comparable work.
 
-Round 2 (narrowing) — two queries targeting (4.5, 6.5) and (6.0, 7.5). Key anchors read in full:
-- *Inference Scaling Laws* (5.75, Accept): Broader task scope but weaker empirical consistency (some insignificant results). SmartSwitch has cleaner, more consistent gains but narrower domain.
-- *Deliberate Reasoning / SWAP* (5.50, Reject): Similar intervention-based approach but with more technical complexity and comparable evaluation breadth. SmartSwitch's training-free nature and cleaner ablations put it slightly ahead.
-- *Learning How Hard to Think* (6.50, Accept): Stronger cross-domain evaluation (code, math, dialog) and broader applicability. SmartSwitch is comparable in methodological clarity but limited to math.
-- *ARGS* (7.00, Accept): Cleaner execution and broader domain scope. SmartSwitch's problem framing (underthinking) is more novel, but the empirical support is weaker.
-- *TSMC* (6.60, Accept): Similar math-only scope, similar evaluation size. TSMC has stronger theoretical backing; SmartSwitch has stronger empirical consistency across more model sizes and benchmarks.
+Round 2 narrowed to comparable anchors:
+| Anchor | Avg Score | Comparison |
+|---|---|---|
+| fGIqGfmgkW (OpenPRM) | 6.00 | Different focus (building PRMs vs using them); SmartSwitch is stronger |
+| VNckp7JEHn (Inference Scaling Laws) | 5.75 | Related in studying inference strategies; SmartSwitch is stronger empirically |
+| W6yIKliMot (FAI) | 6.50 | Most similar (inference-time intervention for CoT reasoning); SmartSwitch has broader benchmarks, larger models, more substantial gains, and better ablations — **SmartSwitch is clearly stronger** |
+| IssPhpUsKt (Rep. Engineering) | 6.80 | Inference-time intervention for reasoning; SmartSwitch uses harder benchmarks (competition math vs. IOI/bAbI), larger models (up to 32B vs. 7B), and shows more consistent gains — **SmartSwitch is meaningfully stronger** |
+| AmEgWDhmTr (Sparse Attention CoT) | 7.00 | Theory paper, different contribution type; both solid in their categories |
+| Tigr1kMDZy (Overthinking) | 7.33 | Strong mechanistic analysis with higher conceptual novelty; SmartSwitch is more applied — **SmartSwitch is slightly weaker** |
+| 3bq3jsvcQ1 (Take a Step Back) | 8.00 | Simple, elegant prompting technique with broad impact; SmartSwitch is more engineering-heavy — **SmartSwitch is weaker** |
 
-Final score: **6.0**. The paper identifies a genuine and well-characterized problem, proposes a clean training-free solution, and provides consistent evidence across a broad evaluation grid. The main weaknesses—lack of statistical significance, threshold selection methodology, and limited domain scope—are addressable and do not undermine the core contribution. The paper sits slightly below the stronger 6.5–7.0 anchors due to these empirical gaps, but is clearly above the 5.0–5.5 anchors.
+SmartSwitch is clearly stronger than the 6.50 and 6.80 anchors, comparable to (though slightly below) the 7.33 anchor in a different contribution style, and below the 8.00 anchor. The paper's substantial empirical results, thorough ablations, and dual efficiency-accuracy improvements place it solidly at **7.0**.
 
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

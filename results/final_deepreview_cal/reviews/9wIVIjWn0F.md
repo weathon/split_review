@@ -1,80 +1,85 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a thorough understanding of both the paper and the calibration landscape. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes Regression-based Test-time Adaptation (RTA), which trains a lightweight LightGBM decision tree on 1,000 pseudo-labeled samples from ImageVal-12k to map CLIP's view logits to predicted cross-entropy loss, then selects augmented views with the smallest predicted loss for ensembling at test time. The core discovery—that ground-truth cross-entropy loss (LCE) is dramatically more effective than Shannon entropy for view selection—is well-demonstrated in ceiling experiments (Tables 1–2) and motivates the approach.
+This paper proposes Regression-based Test-Time Adaptation (RTA), which trains a lightweight decision tree (LightGBM) offline on pseudo-labeled diverse data to predict per-view cross-entropy loss from CLIP logits, then uses this predictor at test time to select confident augmented views. The core insight—motivated by a compelling ceiling analysis showing that true label-cross-entropy loss selection vastly outperforms entropy-based selection—is that a regression mapping between logit patterns and loss generalizes across distributions. RTA requires no online model updates and consistently outperforms state-of-the-art TTA methods across single-label, multi-label, and cross-domain benchmarks.
 
 ## Strengths
 
-- **Well-motivated core observation.** The ceiling experiments (Tables 1–2) cleanly show that selecting views by true-label cross-entropy loss far exceeds entropy-based selection (e.g., RN50 on ImageNet-A at 64 views: LCE 70.9% vs. SE 35.7%). This gap is large and consistent across all datasets and backbones, providing strong motivation for learning a logit-to-loss regression mapping.
+- **Compelling ceiling TTA analysis (Tables 1–2):** The demonstration that using ground-truth LCE for view selection yields 20–30% absolute accuracy gains over entropy selection on distribution-shifted benchmarks (e.g., ViT-B/16 on IN-A: 90.2% LCE vs. 64.3% SE at 64 views) provides strong motivation and sets a clear target for the regression approach.
 
-- **Consistent empirical gains on ImageNet and its variants.** On the five ImageNet-family datasets (Table 3), RTA achieves the highest accuracy on almost every metric for both RN50 and ViT-B/16, with OOD average gains of 2–3 points over the strongest prior method (BCA). These results share the same 1000-class label space as the regression training data and are therefore internally consistent and credible.
+- **Well-evidenced logits-loss relationship (Figures 2–3):** The t-SNE visualizations reveal clear clustering of view logits by LCE value across multiple datasets, and the Spearman correlation analysis confirms statistically significant monotonic relationships between top logit features and loss. This directly supports the feasibility of learning a regression mapping.
 
-- **Lightweight and practical design.** The regression model (LightGBM, max depth 5, 16 leaves, 100 rounds) is trained once offline on just 1,000 samples and applied without per-instance fine-tuning, memory caches, or distribution-specific retraining. This is a genuine practical advantage over methods that require per-instance prompt updates or diffusion generation.
+- **Broad and consistent empirical validation (Tables 3–6):** RTA outperforms recent TTA methods (TPT, DiffTPT, TDA, Zero, BCA, ML-TTA, etc.) across 15+ datasets spanning single-label ImageNet variants, 10 cross-domain datasets, and multi-label benchmarks (MSCOCO, VOC, NUSWIDE) on both RN50 and ViT-B/16 backbones. The gains are modest but consistent.
 
-- **t-SNE and Spearman correlation analyses (Figures 2–3)** provide visual evidence for the non-linear structural relationship between logits and loss, supporting the choice of a tree-based regressor over linear alternatives.
+- **Practical efficiency:** The regression model (LightGBM tree, max depth 5, 16 leaves) is trained once on only 1,000 pseudo-labeled samples and requires no per-instance gradient updates, prompt tuning, or cache maintenance at test time—a genuine practical advantage over competing TTA methods.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Unexplained handling of varying class-set dimensionality.** The regression tree is trained on 1000-dimensional logits from ImageNet classes (ImageVal-12k). For cross-domain datasets with different numbers of classes (Pets: 37, Flowers: 102, Aircraft: 100, etc.) and multi-label datasets, the paper never explains how the dimensionality mismatch is resolved. Algorithm 2 computes logits over `j = 1, …, L` classes without specifying whether `L` refers to the ImageNet class count or the target dataset's class count. If the tree receives logits of a different dimension than it was trained on, it would silently fail. This ambiguity makes the cross-domain (Table 4) and multi-label (Tables 5–6) results unverifiable as reported. The paper must either (a) confirm that 1000-d ImageNet logits are used for all datasets as regression input (with the target dataset's class prompts used only for final classification), or (b) describe the actual procedure. In the paper's current form, a significant fraction of the experimental claims rest on an unspecified or potentially broken protocol.
-
-- **Comparison setting is not apples-to-apples with baselines.** RTA uses an offline training stage on ImageVal-12k (pseudo-labeled data), while all baselines (TPT, Zero, BCA, etc.) restrict themselves to the current unlabeled test instance alone. The paper frames this as a "free lunch," but the regression model obtains auxiliary information about the logit-to-loss mapping that entropy-based methods cannot access. The advantage may partly reflect this additional data rather than the superiority of the regression approach itself. The paper should at minimum acknowledge this setting difference explicitly and, ideally, compare with methods that also use source-domain data (e.g., CoOp, MaPLe) to isolate the contribution of the regression idea.
-
-- **No variance or confidence intervals reported.** The paper reports single runs without standard deviations or confidence intervals across multiple trials. This is standard practice for TTA evaluations, especially given that augmentation-based view selection can have stochastic variation. Without this, it is unclear whether RTA's margins over the strongest baselines (often 1–2 points) are statistically significant.
+- **Undisclosed regression set composition hinders fairness assessment:** The paper states only that it uses "ImageVal-12k as the regression mapping data" (Section 5.1) with no description of what this dataset contains, how it was constructed, or its relationship to the test benchmarks. While the cross-domain results (Table 4) provide evidence that the learned mapping generalizes beyond any single domain, the paper's central claim that the regression mapping is learned from "diverse data independent of downstream tasks" cannot be fully evaluated without transparency about the regression set. This is addressable through clarification.
 
 ### Minor
 
-- **No analysis of pseudo-label quality propagation.** The regression model is trained on CLIP-generated pseudo-labels filtered at confidence ≥ 0.8, but the paper never analyzes how pseudo-label errors affect the regression target and, subsequently, view selection quality. An ablation training the regression with true labels (where available on ImageVal-12k) versus pseudo-labels would quantify this effect.
+- **No direct quantification of predicted-loss vs. true-loss correlation on test sets:** The paper establishes a ceiling with true LCE (Tables 1–2) and shows final RTA accuracy (Tables 3–6), but never reports how well the tree's predicted pseudo-loss correlates with true label cross-entropy loss on the test benchmarks. Reporting Spearman correlation between f(logits) and true LCE would directly validate the core mechanism.
 
-- **Ablation studies limited to ImageNet variants.** Figures 4–5 show sensitivity to the number of views and regression samples only on ImageNet and its variants. The cross-domain and multi-label settings, where the class-set issue arises, are not ablated.
+- **"Arbitrary distributions" claim is overstated (Section 1, Abstract):** The paper claims RTA "can adapt to test instances with arbitrary distributions" and "directly adapt to test instances with arbitrary distributions," but the empirical evidence covers specific benchmark distribution shifts, not truly arbitrary ones. The language should be tempered.
+
+- **No explicit limitations section:** The paper would benefit from discussing when RTA might fail—e.g., when CLIP's pseudo-label confidence is poorly calibrated on a target domain, or when the regression set's logit distribution differs substantially from test logits.
 
 ### Trivial
 
-- Equation (8) uses the superscript "reg" in the context of test-time inference (should be "test").
-- The paper does not specify how the "confidence-based filtering ratio 0.1" (Section 5.1) maps to the top-k selection in Equation (10).
+- The method description in Section 4.3 uses inconsistent notation: Equation 8 refers to $s_{ij}^{x_i^{\text{reg}}}$ but the surrounding text describes test-time adaptation ($\mathbf{x}^{\text{test}}$). This is a minor copy-paste error that does not affect understanding.
 
 ## Nice-to-Haves
 
-- Include inference-time comparison (latency/FLOPs) with baselines to substantiate the "negligible additional cost" claim.
-- Show results with different regression models (e.g., MLP, random forest) to demonstrate that the choice of LightGBM is not critical.
-- Test whether the regression model transfers across backbones (trained on RN50, tested on ViT-B/16).
+- An experiment training the regression tree on a clearly distinct dataset (e.g., LAION or Conceptual Captions subset) to directly demonstrate that the logits-to-loss mapping transfers across dataset boundaries would strengthen the independence claim.
+- Reporting the correlation between predicted loss and ground-truth LCE on test sets.
+- A brief discussion of scenarios where the approach may underperform (e.g., domains where CLIP has poor zero-shot calibration).
 
 ## Removed Points
 
-- **"Structural flaw — regression tree cannot be applied to different class sets."** This point is retained but downgraded from "fatal" to "major." The dimensionality issue is genuine and significant, but calling it structural/fatal assumes that no plausible resolution exists. A plausible resolution exists (always using 1000-d ImageNet logits for regression input), and the paper's ImageNet-family results are unaffected. The weakness stands as a major unaddressed ambiguity rather than a fatal error invalidating all results.
+These points are flagged to be removed; treat them with caution.
 
-- **Criticism about "missing related works."** Removed per instructions — I cannot verify whether specific works are missing from the references.
+- **"Unfair experimental advantage due to domain-overlapping regression set" (from Harsh Critic):** The claim that this amounts to a "structural flaw invalidating main experimental results" is speculative. The paper does not describe ImageVal-12k's composition, so whether it overlaps with test distributions cannot be verified from the text. Moreover, the regression tree learns a mapping from logits to pseudo-CE loss—a function of CLIP's own prediction behavior—not from images to class labels. The consistent gains on cross-domain benchmarks (Cars, Aircraft, etc., Table 4), which are far from ImageNet, provide affirmative evidence that the mapping generalizes. Demoted from "fatal" to an acknowledged limitation about transparency.
 
-- **Criticism about the pseudo-label threshold not being in the method section.** The pseudo-label threshold is in Section 5.1 (Implementation Details), which is acceptable placement.
+- **"The baseline TTA methods operate purely on the test instance without any offline data" (from Harsh Critic):** This mischaracterizes several baselines. TDA and BCA maintain caches of test samples, and Zero uses a theoretically derived entropy threshold—none are purely single-instance in the sense implied. The criticism exaggerates the asymmetry.
 
-- **"Method departs from standard TTA setting" framed as a fatal/structural issue.** This is retained but downgraded to a major weakness because it's a genuine concern about comparison fairness, but not fatal — the paper could be reframed as a different setting.
+- **"The leap from ground-truth loss to pseudo-loss predictor is not adequately justified" (from Harsh Critic):** The paper dedicates Section 4.1 entirely to this justification with visualizations (Figure 2), correlation analysis (Figure 3), and the ceiling experiments. The justification exists; the reviewer may want more, but the claim that it is absent is incorrect.
 
-- **Strength Finder's generic claims about "important problem" and "addressed interesting question."** Removed as generic/superficial.
-
-- **"The paper could benefit from additional visualizations"** type comments. Removed as nice-to-have rather than weakness.
+- **Strength Finder's generic statement about "addressing an important problem":** Removed as generic. Replaced with specific, evidence-backed strengths.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The observation that logit-to-loss regression can be learned once and transferred across distributions (within the same class set) is itself the most novel insight.
+The paper's most genuinely novel observation is that a simple regression model trained once on diverse pseudo-labeled data can learn a logits-to-loss mapping that transfers across distribution shifts, enabling confident view selection without any per-instance adaptation. This inverts the standard TTA assumption that confidence estimation must be derived from the test instance alone, and the ceiling TTA experiment provides a crisp, quantified upper bound that prior work had not established.
 
 ## Suggestions
 
-1. **Clarify the class-set dimensionality handling.** In the rebuttal, state explicitly: (a) what class prompts are used when computing logits for the regression model at test time, and (b) how the final classification is done. If 1000-d ImageNet logits are always used for regression input, state this clearly in the method and algorithm.
-2. **Acknowledge and discuss the setting difference.** RTA uses offline data; baselines do not. Discuss how this might affect comparisons and consider adding a baseline that also uses source data (e.g., CoOp).
-3. **Report variance** over at least 3 runs for the main tables.
-4. **Add pseudo-label quality ablation** showing regression accuracy with true labels vs. pseudo-labels on ImageVal-12k.
+- Clarify the composition and construction of ImageVal-12k. If it overlaps with any test set, disclose this and ideally re-run key experiments with a disjoint regression set. If it does not overlap, state this explicitly.
+- Report the Spearman or Pearson correlation between the tree's predicted pseudo-loss and true LCE on each test set—this would directly validate whether the regression mechanism works as claimed.
+- Tone down claims about "arbitrary distributions" to match the empirical scope ("diverse benchmark distribution shifts" would be accurate).
+- Add a brief limitations paragraph discussing dependence on CLIP's pseudo-label quality.
 
 ## Score and Decision
 
-**Bracket (Round 1):** The paper sits between the weak anchors (avg ~3.0: papers with fundamental errors or poor execution) and the strong anchors (avg ~8.0: well-polished papers with clean execution and broad evaluation). The most topically similar papers—RLCF (6.67, Accept), ML-TTA (6.25, Accept), DOTA (6.0, Reject)—form a band between 6.0–6.7. Initial bracket: **5.0–6.5**.
+### Calibration Anchors
 
-**Narrowing (Round 2):** BaFTA (5.50, Reject) and BAT-CLIP (5.50, Reject) provide closer anchors. Both have interesting core ideas but were rejected due to significant methodological gaps or insufficiently clean execution. RTA is comparable to these: a genuinely interesting core observation (LCE regression), but with a significant unresolved ambiguity (class-set dimensionality) and a comparison-fairness concern that its closest peers (RLCF, ML-TTA) do not share. RTA is weaker than RLCF (6.67) and ML-TTA (6.25), which have no analogous dimensionality gaps and whose experimental protocols are clearly specified. RTA is somewhat stronger than BaFTA and BAT-CLIP in terms of the strength of its central evidence (the LCE ceiling) but has a more significant unexplained gap in its evaluation.
+| Anchor | Path | Avg Score | Round | Comparison |
+|--------|------|-----------|-------|------------|
+| ML-TTA (BEM) | 75PhjtbBdr | 6.25 | R1/R2 | RTA surpasses ML-TTA on shared benchmarks and has broader evaluation; clearly stronger |
+| RLCF | kIP0duasBb | 6.67 | R2 | Comparable in novelty and execution; RLCF extends to more tasks (retrieval, captioning) while RTA is more focused and efficient within classification |
+| TTE | 4wk2eOKGvh | 6.50 | R2 | RTA has more novel core mechanism; TTE has cleaner methodology description |
+| DeYO | 9w3iw8wDuE | 7.00 | R1/R2 | DeYO has deeper theoretical grounding and equally strong experiments; RTA is below this level |
+| DOTA | yD2JMeKumt | 6.00 | R1 | RTA is significantly stronger in experimental breadth and methodological clarity |
+| BAT-CLIP | z7PhIgVmZU | 5.50 | R2 | RTA is clearly stronger across all dimensions |
+| Weak anchors | various | 2.50 | R1 | Not comparable—these are rejected papers with fundamental flaws |
 
-**Final Score: 5.0.** The core idea has merit and the ImageNet-family results are credible, but the unresolved class-set dimensionality issue and the comparison-fairness concern are significant enough to place this below the acceptance threshold in its current form. A revised version that clarifies the class-set handling, reports variance, and discusses the setting difference fairly could be reconsidered.
+**Bracket from Round 1:** 5.5–7.0. Round 2 narrowed this by placing RTA above ML-TTA (6.25) and TTE (6.50), comparable to RLCF (6.67), and below DeYO (7.0). The paper's core innovation (regression-based loss prediction for TTA), compelling ceiling analysis, and comprehensive evaluation merit a score near RLCF but with a slight deduction for the undisclosed regression set and missing loss-correlation analysis. Final score: **6.5**.
 
-**Decision: Reject.**
-
-MY FINAL SCORE: <score>5.0</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>
