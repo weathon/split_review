@@ -8,17 +8,16 @@ The human-review corpus you are searching against has the following score distri
 - median: 5.25
 - 25th percentile: 4.25
 - 75th percentile: 6.00
-- std: 1.24
-- range: [1.0, 10.0]
 
-What this means for your score:
-- A score of **5.25 is exactly the median** — half of all human-reviewed papers scored at or below this. Giving 5.25 is NOT a "safe middle" choice; it is an explicit claim that the paper is better than half the corpus.
-- A score of **5.19 is the mean** — the average paper, including all the rejects, scored here.
-- A score of **>= 6.0** places the paper in the **top 25%** of the corpus.
-- A score of **<= 4.25** places the paper in the **bottom 25%**.
-- Scores >= 7 or <= 3 are tail events; they should be uncommon but you must use them when the paper warrants it. The corpus contains both — refusing to give them means you are compressing the distribution.
+Treat every score you assign as a *percentile claim about the paper*, not a feeling:
 
-Do not cluster your scores around 5–6 by default. If the paper has Major or Fatal weaknesses, the comparison against the calibration corpus should pull the score below 4.25 (bottom quartile), not leave it at 5–6 where it would outrank half the corpus including the published-and-accepted papers.
+- If you are about to give **> 5.25**, you are claiming the paper is **better than at least half** of the entire human-reviewed corpus — including everything that got accepted at top venues. Stop and ask: is this paper really better than half of those? Can you name specific things this paper does better than the median accepted paper, or are you just avoiding a low number?
+- If you are about to give **>= 6.0**, you are claiming the paper is in the **top 25%** of the corpus. That is a strong claim. It should be reserved for papers with concrete, specific strengths that survived aggressive filtering — not for "the topic is interesting and the method seems reasonable."
+- If you are about to give **>= 7.0**, you are claiming the paper is well into the strong-accept tail. The bar here is "the average reviewer would actively champion this paper."
+- A score of **4.25–5.25** is *the middle half of the corpus*. This range is where most papers sit, including most rejects. Landing here is not a hedge — it is a specific claim that this paper is mediocre but not broken.
+- A score **< 4.25** is the bottom quartile. If the paper has a fundamental issue (unsound eval, unsupported central claim, scope too narrow to matter, multiple Major weaknesses undermining the core claim), this is where it belongs. Refusing to go here because "the topic is interesting" is exactly the failure mode being calibrated against.
+
+The default failure mode is **upward drift**: when uncertain, the model nudges the score above the median to seem fair, which silently asserts the paper beats half the corpus. Before finalizing any score above 5.25, write one sentence justifying why this paper is better than the median human-reviewed paper. If you cannot, the score is too high.
 
 
 How retrieval works:
