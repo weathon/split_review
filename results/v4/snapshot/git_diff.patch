@@ -1,0 +1,743 @@
+diff --git a/code/main.py b/code/main.py
+index e23918d14..8910e19ba 100644
+--- a/code/main.py
++++ b/code/main.py
+@@ -169,6 +169,14 @@ with open(prompt_path("cal_with.md"), "r") as _f:
+ with open(prompt_path("cal_without.md"), "r") as _f:
+     CAL_INSTRUCTION_WITHOUT = _f.read()
+ 
++with open(prompt_path("meta_check.md"), "r") as _f:
++    META_CHECK_PROMPT = _f.read()
++
++
++class MetaCheckResult(BaseModel):
++    valid: bool
++    reason: str
++
+ 
+ def load_prompts(path, paper_access: str = PAPER_ACCESS_INJECTION, no_cal: bool = False):
+     with open(prompt_path(path), "r") as f:
+@@ -316,6 +324,28 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
+     _review_template = REVIEW_PROMPT_POSITION if _POSITION_MODE else REVIEW_PROMPT
+     review_prompt = _review_template.format(paper_id=paper_id, paper_content=paper_content)
+ 
++    print(f"  Phase 0: Meta-check ...")
++    meta_resp = await custom_client.chat.completions.parse(
++        model=HARSH_MODEL,
++        messages=[
++            {"role": "system", "content": META_CHECK_PROMPT},
++            {"role": "user", "content": f"Paper id: {paper_id}\n\n--- PAPER CONTENT START ---\n{paper_content}\n--- PAPER CONTENT END (parser strips appendix and references) ---"},
++        ],
++        response_format=MetaCheckResult,
++        extra_body={"reasoning": {"enabled": False}},
++    )
++    meta = meta_resp.choices[0].message.parsed
++    print(f"  [meta-check] valid={meta.valid} reason={meta.reason!r}")
++    if not meta.valid:
++        print(f"  ⛔ Desk reject: {meta.reason}")
++        desk_review = (
++            f"# Desk Reject (meta-check)\n\n"
++            f"**Reason:** {meta.reason}\n\n"
++            f"MY FINAL SCORE: <score>0.0</score>\n"
++            f"MY FINAL DECISION: <decision>Reject</decision>"
++        )
++        return {"merged_review": desk_review, "scorer_output": 0.0, "decision": "Reject", "sdk_usages": {}}
++
+     # Harsh Critic input: when running via Claude SDK, replace the inline paper
+     # content with a directive to read it from disk (SDK has a CLI input length
+     # limit). Otherwise, pass the full paper inline as before.
+diff --git a/code/metric.py b/code/metric.py
+index fc1fbf073..9afb61cb5 100644
+--- a/code/metric.py
++++ b/code/metric.py
+@@ -4,15 +4,42 @@ import sys
+ import matplotlib.pyplot as plt
+ import numpy as np
+ import pandas as pd
+-from scipy.stats import pearsonr
++from scipy.stats import pearsonr, rankdata, spearmanr
+ from sklearn.linear_model import LinearRegression
+ from sklearn.metrics import mean_absolute_error, roc_auc_score
+ 
+ 
+-BOOTSTRAP_N = 10000
++BOOTSTRAP_N = 5000
+ RANDOM_SEED = 0
+ 
+ 
++def vectorized_pearson(x_matrix, y_matrix):
++    x_centered = x_matrix - x_matrix.mean(axis=1, keepdims=True)
++    y_centered = y_matrix - y_matrix.mean(axis=1, keepdims=True)
++    numerator = (x_centered * y_centered).sum(axis=1)
++    denom = np.sqrt((x_centered ** 2).sum(axis=1) * (y_centered ** 2).sum(axis=1))
++    return numerator / denom
++
++
++def vectorized_spearman(x_matrix, y_matrix):
++    x_ranks = np.apply_along_axis(rankdata, 1, x_matrix)
++    y_ranks = np.apply_along_axis(rankdata, 1, y_matrix)
++    return vectorized_pearson(x_ranks, y_ranks)
++
++
++def fast_auroc(labels, scores):
++    order = np.argsort(scores, kind="mergesort")
++    sorted_labels = labels[order]
++    sorted_scores = scores[order]
++    ranks = rankdata(sorted_scores)
++    n_pos = sorted_labels.sum()
++    n_neg = len(sorted_labels) - n_pos
++    if n_pos == 0 or n_neg == 0:
++        return float("nan")
++    sum_ranks_pos = ranks[sorted_labels == 1].sum()
++    return float((sum_ranks_pos - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
++
++
+ csv_path = Path(sys.argv[1])
+ output_dir = csv_path.parent / "metrics"
+ output_dir.mkdir(parents=True, exist_ok=True)
+@@ -85,17 +112,32 @@ human_rest_y = np.asarray(human_rest_y, dtype=float)
+ human_rest_decisions = np.asarray(human_rest_decisions)
+ human_rest_paper_indices = np.asarray(human_rest_paper_indices, dtype=int)
+ 
+-ai_corr = float(pearsonr(pred_score, gt_avg_score).statistic)
+-human_pair_corr = float(pearsonr(human_pair_x, human_pair_y).statistic)
+-human_rest_corr = float(pearsonr(human_rest_x, human_rest_y).statistic)
+-
+-ai_calibrated = np.empty(len(df), dtype=float)
+-for paper_index in paper_indices:
+-    train_mask = paper_indices != paper_index
+-    model = LinearRegression()
+-    model.fit(pred_score[train_mask].reshape(-1, 1), gt_avg_score[train_mask])
+-    ai_calibrated[paper_index] = model.predict(pred_score[[paper_index]].reshape(-1, 1))[0]
+-ai_calibrated = np.clip(ai_calibrated, 0, 10)
++ai_rho = float(spearmanr(pred_score, gt_avg_score).statistic)
++human_pair_rho = float(spearmanr(human_pair_x, human_pair_y).statistic)
++human_rest_rho = float(spearmanr(human_rest_x, human_rest_y).statistic)
++ai_r = float(pearsonr(pred_score, gt_avg_score).statistic)
++human_pair_r = float(pearsonr(human_pair_x, human_pair_y).statistic)
++human_rest_r = float(pearsonr(human_rest_x, human_rest_y).statistic)
++
++
++def loo_linear_calibration(x, y):
++    n = len(x)
++    sum_x = x.sum()
++    sum_y = y.sum()
++    sum_xy = (x * y).sum()
++    sum_x2 = (x * x).sum()
++    loo_sum_x = sum_x - x
++    loo_sum_y = sum_y - y
++    loo_sum_xy = sum_xy - x * y
++    loo_sum_x2 = sum_x2 - x * x
++    loo_n = n - 1
++    denom = loo_n * loo_sum_x2 - loo_sum_x ** 2
++    slope = (loo_n * loo_sum_xy - loo_sum_x * loo_sum_y) / denom
++    intercept = (loo_sum_y - slope * loo_sum_x) / loo_n
++    return slope * x + intercept
++
++
++ai_calibrated = np.clip(loo_linear_calibration(pred_score, gt_avg_score), 0, 10)
+ 
+ human_calibrated = np.empty(len(human_scores), dtype=float)
+ for paper_index in paper_indices:
+@@ -106,7 +148,8 @@ for paper_index in paper_indices:
+     human_calibrated[test_mask] = model.predict(human_scores[test_mask].reshape(-1, 1))
+ human_calibrated = np.clip(human_calibrated, 0, 10)
+ 
+-ai_calibrated_corr = float(pearsonr(ai_calibrated, gt_avg_score).statistic)
++ai_calibrated_rho = float(spearmanr(ai_calibrated, gt_avg_score).statistic)
++ai_calibrated_r = float(pearsonr(ai_calibrated, gt_avg_score).statistic)
+ 
+ plot_rng = np.random.default_rng(RANDOM_SEED)
+ fig, axes = plt.subplots(2, 2, figsize=(11, 10), dpi=160)
+@@ -119,7 +162,7 @@ plot_specs = [
+         "AI raw vs human mean",
+         "Human mean score",
+         "AI raw score",
+-        ai_corr,
++        ai_rho,
+     ),
+     (
+         axes[0, 1],
+@@ -129,7 +172,7 @@ plot_specs = [
+         "AI calibrated vs human mean",
+         "Human mean score",
+         "AI calibrated score",
+-        ai_calibrated_corr,
++        ai_calibrated_rho,
+     ),
+     (
+         axes[1, 0],
+@@ -139,7 +182,7 @@ plot_specs = [
+         "Human 1 vs 1",
+         "Human score",
+         "Other human score",
+-        human_pair_corr,
++        human_pair_rho,
+     ),
+     (
+         axes[1, 1],
+@@ -149,7 +192,7 @@ plot_specs = [
+         "Human 1 vs rest",
+         "Human score",
+         "Rest mean score",
+-        human_rest_corr,
++        human_rest_rho,
+     ),
+ ]
+ colors = {"Accept": "#2a9d8f", "Reject": "#d65a31"}
+@@ -185,7 +228,7 @@ for ax, x_values, y_values, plot_decisions, title, x_label, y_label, corr_value
+     ax.set_xlim(line_min - 0.4, line_max + 0.4)
+     ax.set_ylim(line_min - 0.4, line_max + 0.4)
+     ax.set_aspect("equal", adjustable="box")
+-    ax.set_title(f"{title}\nr={corr_value:.3f}")
++    ax.set_title(f"{title}\nrho={corr_value:.3f}")
+     ax.set_xlabel(x_label)
+     ax.set_ylabel(y_label)
+     ax.grid(alpha=0.25)
+@@ -206,72 +249,103 @@ human_abs_error_by_paper = np.asarray(
+ ai_auroc = float(roc_auc_score(labels, pred_score))
+ human_single_auroc = float(roc_auc_score(human_labels, human_scores))
+ 
+-human_pair_x_by_paper = [
+-    human_pair_x[human_pair_paper_indices == paper_index] for paper_index in paper_indices
+-]
+-human_pair_y_by_paper = [
+-    human_pair_y[human_pair_paper_indices == paper_index] for paper_index in paper_indices
+-]
+-human_rest_x_by_paper = [
+-    human_rest_x[human_rest_paper_indices == paper_index] for paper_index in paper_indices
+-]
+-human_rest_y_by_paper = [
+-    human_rest_y[human_rest_paper_indices == paper_index] for paper_index in paper_indices
+-]
+-human_scores_by_paper = [
+-    human_scores[human_paper_indices == paper_index] for paper_index in paper_indices
+-]
+-human_labels_by_paper = [
+-    human_labels[human_paper_indices == paper_index] for paper_index in paper_indices
+-]
++
++def group_by_paper(values, paper_index_array, n_papers):
++    order = np.argsort(paper_index_array, kind="stable")
++    sorted_values = values[order]
++    sorted_papers = paper_index_array[order]
++    counts = np.bincount(sorted_papers, minlength=n_papers)
++    splits = np.cumsum(counts)[:-1]
++    return np.split(sorted_values, splits), counts
++
++
++n_papers = len(df)
++human_pair_x_by_paper, pair_counts = group_by_paper(human_pair_x, human_pair_paper_indices, n_papers)
++human_pair_y_by_paper, _ = group_by_paper(human_pair_y, human_pair_paper_indices, n_papers)
++human_rest_x_by_paper, rest_counts = group_by_paper(human_rest_x, human_rest_paper_indices, n_papers)
++human_rest_y_by_paper, _ = group_by_paper(human_rest_y, human_rest_paper_indices, n_papers)
++human_scores_by_paper, score_counts = group_by_paper(human_scores, human_paper_indices, n_papers)
++human_labels_by_paper, _ = group_by_paper(human_labels, human_paper_indices, n_papers)
+ 
+ rng = np.random.default_rng(RANDOM_SEED)
+ 
+-corr_pair_deltas = np.empty(BOOTSTRAP_N, dtype=float)
+-for bootstrap_index in range(BOOTSTRAP_N):
+-    sampled_papers = rng.integers(0, len(df), size=len(df))
+-    ai_boot_corr = float(pearsonr(pred_score[sampled_papers], gt_avg_score[sampled_papers]).statistic)
+-    human_boot_x = np.concatenate(
+-        [human_pair_x_by_paper[paper_index] for paper_index in sampled_papers]
+-    )
+-    human_boot_y = np.concatenate(
+-        [human_pair_y_by_paper[paper_index] for paper_index in sampled_papers]
+-    )
+-    human_boot_corr = float(pearsonr(human_boot_x, human_boot_y).statistic)
+-    corr_pair_deltas[bootstrap_index] = ai_boot_corr - human_boot_corr
++pair_sampled_papers = rng.integers(0, n_papers, size=(BOOTSTRAP_N, n_papers))
++rest_sampled_papers = rng.integers(0, n_papers, size=(BOOTSTRAP_N, n_papers))
++
++ai_pair_boot_rho = vectorized_spearman(pred_score[pair_sampled_papers], gt_avg_score[pair_sampled_papers])
++ai_pair_boot_r = vectorized_pearson(pred_score[pair_sampled_papers], gt_avg_score[pair_sampled_papers])
++ai_rest_boot_rho = vectorized_spearman(pred_score[rest_sampled_papers], gt_avg_score[rest_sampled_papers])
++ai_rest_boot_r = vectorized_pearson(pred_score[rest_sampled_papers], gt_avg_score[rest_sampled_papers])
++
++
++def bootstrap_corr_by_paper(values_x_by_paper, values_y_by_paper, counts, sampled_papers_matrix):
++    sampled_counts = counts[sampled_papers_matrix]
++    total_per_boot = sampled_counts.sum(axis=1)
++    if total_per_boot.min() != total_per_boot.max():
++        rhos = np.empty(sampled_papers_matrix.shape[0], dtype=float)
++        rs = np.empty(sampled_papers_matrix.shape[0], dtype=float)
++        for bootstrap_index in range(sampled_papers_matrix.shape[0]):
++            xs = np.concatenate(
++                [values_x_by_paper[paper_index] for paper_index in sampled_papers_matrix[bootstrap_index]]
++            )
++            ys = np.concatenate(
++                [values_y_by_paper[paper_index] for paper_index in sampled_papers_matrix[bootstrap_index]]
++            )
++            rhos[bootstrap_index] = float(spearmanr(xs, ys).statistic)
++            rs[bootstrap_index] = float(pearsonr(xs, ys).statistic)
++        return rhos, rs
++    width = int(total_per_boot[0])
++    n_boot = sampled_papers_matrix.shape[0]
++    x_matrix = np.empty((n_boot, width), dtype=float)
++    y_matrix = np.empty((n_boot, width), dtype=float)
++    for bootstrap_index in range(n_boot):
++        x_matrix[bootstrap_index] = np.concatenate(
++            [values_x_by_paper[paper_index] for paper_index in sampled_papers_matrix[bootstrap_index]]
++        )
++        y_matrix[bootstrap_index] = np.concatenate(
++            [values_y_by_paper[paper_index] for paper_index in sampled_papers_matrix[bootstrap_index]]
++        )
++    return vectorized_spearman(x_matrix, y_matrix), vectorized_pearson(x_matrix, y_matrix)
+ 
+-corr_pair_observed_delta = ai_corr - human_pair_corr
+-corr_pair_p_value = 2 * min(
+-    float((corr_pair_deltas <= 0).mean()),
+-    float((corr_pair_deltas >= 0).mean()),
++
++human_pair_boot_rho, human_pair_boot_r = bootstrap_corr_by_paper(
++    human_pair_x_by_paper, human_pair_y_by_paper, pair_counts, pair_sampled_papers
++)
++human_rest_boot_rho, human_rest_boot_r = bootstrap_corr_by_paper(
++    human_rest_x_by_paper, human_rest_y_by_paper, rest_counts, rest_sampled_papers
+ )
+ 
+-corr_rest_deltas = np.empty(BOOTSTRAP_N, dtype=float)
+-for bootstrap_index in range(BOOTSTRAP_N):
+-    sampled_papers = rng.integers(0, len(df), size=len(df))
+-    ai_boot_corr = float(pearsonr(pred_score[sampled_papers], gt_avg_score[sampled_papers]).statistic)
+-    human_boot_x = np.concatenate(
+-        [human_rest_x_by_paper[paper_index] for paper_index in sampled_papers]
+-    )
+-    human_boot_y = np.concatenate(
+-        [human_rest_y_by_paper[paper_index] for paper_index in sampled_papers]
+-    )
+-    human_boot_corr = float(pearsonr(human_boot_x, human_boot_y).statistic)
+-    corr_rest_deltas[bootstrap_index] = ai_boot_corr - human_boot_corr
++rho_pair_deltas = ai_pair_boot_rho - human_pair_boot_rho
++r_pair_deltas = ai_pair_boot_r - human_pair_boot_r
++rho_rest_deltas = ai_rest_boot_rho - human_rest_boot_rho
++r_rest_deltas = ai_rest_boot_r - human_rest_boot_r
+ 
+-corr_rest_observed_delta = ai_corr - human_rest_corr
+-corr_rest_p_value = 2 * min(
+-    float((corr_rest_deltas <= 0).mean()),
+-    float((corr_rest_deltas >= 0).mean()),
++rho_pair_observed_delta = ai_rho - human_pair_rho
++rho_pair_p_value = 2 * min(
++    float((rho_pair_deltas <= 0).mean()),
++    float((rho_pair_deltas >= 0).mean()),
++)
++r_pair_observed_delta = ai_r - human_pair_r
++r_pair_p_value = 2 * min(
++    float((r_pair_deltas <= 0).mean()),
++    float((r_pair_deltas >= 0).mean()),
+ )
+ 
+-mae_deltas = np.empty(BOOTSTRAP_N, dtype=float)
+-for bootstrap_index in range(BOOTSTRAP_N):
+-    sampled_papers = rng.integers(0, len(df), size=len(df))
+-    mae_deltas[bootstrap_index] = (
+-        mean_absolute_error(gt_avg_score[sampled_papers], ai_calibrated[sampled_papers])
+-        - human_abs_error_by_paper[sampled_papers].mean()
+-    )
++rho_rest_observed_delta = ai_rho - human_rest_rho
++rho_rest_p_value = 2 * min(
++    float((rho_rest_deltas <= 0).mean()),
++    float((rho_rest_deltas >= 0).mean()),
++)
++r_rest_observed_delta = ai_r - human_rest_r
++r_rest_p_value = 2 * min(
++    float((r_rest_deltas <= 0).mean()),
++    float((r_rest_deltas >= 0).mean()),
++)
++
++mae_sampled_papers = rng.integers(0, n_papers, size=(BOOTSTRAP_N, n_papers))
++ai_mae_boot = np.abs(ai_calibrated[mae_sampled_papers] - gt_avg_score[mae_sampled_papers]).mean(axis=1)
++human_mae_boot = human_abs_error_by_paper[mae_sampled_papers].mean(axis=1)
++mae_deltas = ai_mae_boot - human_mae_boot
+ 
+ ai_mae = float(mean_absolute_error(gt_avg_score, ai_calibrated))
+ human_single_mae = float(human_abs_error_by_paper.mean())
+@@ -284,21 +358,23 @@ mae_p_value = 2 * min(
+ positive_papers = paper_indices[labels == 1]
+ negative_papers = paper_indices[labels == 0]
+ auroc_deltas = np.empty(BOOTSTRAP_N, dtype=float)
++auroc_sampled_papers_all = np.concatenate(
++    [
++        rng.choice(positive_papers, size=(BOOTSTRAP_N, len(positive_papers)), replace=True),
++        rng.choice(negative_papers, size=(BOOTSTRAP_N, len(negative_papers)), replace=True),
++    ],
++    axis=1,
++)
+ for bootstrap_index in range(BOOTSTRAP_N):
+-    sampled_papers = np.concatenate(
+-        [
+-            rng.choice(positive_papers, size=len(positive_papers), replace=True),
+-            rng.choice(negative_papers, size=len(negative_papers), replace=True),
+-        ]
+-    )
+-    ai_boot_auroc = float(roc_auc_score(labels[sampled_papers], pred_score[sampled_papers]))
++    sampled_papers = auroc_sampled_papers_all[bootstrap_index]
++    ai_boot_auroc = fast_auroc(labels[sampled_papers], pred_score[sampled_papers])
+     human_boot_scores = np.concatenate(
+         [human_scores_by_paper[paper_index] for paper_index in sampled_papers]
+     )
+     human_boot_labels = np.concatenate(
+         [human_labels_by_paper[paper_index] for paper_index in sampled_papers]
+     )
+-    human_boot_auroc = float(roc_auc_score(human_boot_labels, human_boot_scores))
++    human_boot_auroc = fast_auroc(human_boot_labels, human_boot_scores)
+     auroc_deltas[bootstrap_index] = ai_boot_auroc - human_boot_auroc
+ 
+ auroc_observed_delta = ai_auroc - human_single_auroc
+@@ -307,11 +383,13 @@ auroc_p_value = 2 * min(
+     float((auroc_deltas >= 0).mean()),
+ )
+ 
+-delta_names = ["corr 1v1", "corr 1vRest", "MAE", "AUROC"]
++delta_names = ["rho 1v1", "rho 1vRest", "r 1v1", "r 1vRest", "MAE", "AUROC"]
+ delta_values = np.asarray(
+     [
+-        corr_pair_observed_delta,
+-        corr_rest_observed_delta,
++        rho_pair_observed_delta,
++        rho_rest_observed_delta,
++        r_pair_observed_delta,
++        r_rest_observed_delta,
+         mae_observed_delta,
+         auroc_observed_delta,
+     ],
+@@ -319,16 +397,20 @@ delta_values = np.asarray(
+ )
+ delta_cis = np.asarray(
+     [
+-        np.percentile(corr_pair_deltas, [2.5, 97.5]),
+-        np.percentile(corr_rest_deltas, [2.5, 97.5]),
++        np.percentile(rho_pair_deltas, [2.5, 97.5]),
++        np.percentile(rho_rest_deltas, [2.5, 97.5]),
++        np.percentile(r_pair_deltas, [2.5, 97.5]),
++        np.percentile(r_rest_deltas, [2.5, 97.5]),
+         np.percentile(mae_deltas, [2.5, 97.5]),
+         np.percentile(auroc_deltas, [2.5, 97.5]),
+     ],
+     dtype=float,
+ )
+ delta_p_values = [
+-    corr_pair_p_value,
+-    corr_rest_p_value,
++    rho_pair_p_value,
++    rho_rest_p_value,
++    r_pair_p_value,
++    r_rest_p_value,
+     mae_p_value,
+     auroc_p_value,
+ ]
+@@ -342,15 +424,28 @@ lines.append(f"human pairs: {len(human_pair_x)}")
+ lines.append(f"bootstrap: {BOOTSTRAP_N}")
+ lines.append(f"corr plot: {corr_plot_path}")
+ lines.append("")
+-lines.append("Correlation")
+-lines.append("-----------")
++lines.append("Spearman correlation")
++lines.append("--------------------")
++lines.append(f"{'metric':<22} {'value':>10}")
++lines.append(f"{'-' * 22} {'-' * 10}")
++for name, value in [
++    ("AI raw vs human mean", ai_rho),
++    ("AI cal vs human mean", ai_calibrated_rho),
++    ("Human 1 vs 1", human_pair_rho),
++    ("Human 1 vs rest", human_rest_rho),
++]:
++    lines.append(f"{name:<22} {value:>10.4f}")
++
++lines.append("")
++lines.append("Pearson correlation")
++lines.append("-------------------")
+ lines.append(f"{'metric':<22} {'value':>10}")
+ lines.append(f"{'-' * 22} {'-' * 10}")
+ for name, value in [
+-    ("AI raw vs human mean", ai_corr),
+-    ("AI cal vs human mean", ai_calibrated_corr),
+-    ("Human 1 vs 1", human_pair_corr),
+-    ("Human 1 vs rest", human_rest_corr),
++    ("AI raw vs human mean", ai_r),
++    ("AI cal vs human mean", ai_calibrated_r),
++    ("Human 1 vs 1", human_pair_r),
++    ("Human 1 vs rest", human_rest_r),
+ ]:
+     lines.append(f"{name:<22} {value:>10.4f}")
+ 
+diff --git a/prompts/cal_with.md b/prompts/cal_with.md
+index 94013a4d3..18855956d 100644
+--- a/prompts/cal_with.md
++++ b/prompts/cal_with.md
+@@ -1,70 +1,63 @@
+-Use comparative scoring to calibrate your final score against human-reviewed anchors.
++Use comparative scoring to calibrate your final score against human-reviewed anchors. Retrieval is iterative: a wide bracketing pass to find which score range the paper plausibly sits in, then one or two narrowing passes to anchor inside that range.
+ 
+-## Calibration Dataset Reference Statistics
++`calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries in parallel and returns concatenated results grouped by query, each with avg human score and ~1000 chars of preview. `low_score` is an exclusive lower bound (avg > low_score); `high_score` is an exclusive upper bound (avg < high_score).
+ 
+-The human-review corpus you are searching against has the following score distribution (n = 13,379 papers):
++## Round 1 — Bracketing
+ 
+-- mean: 5.19
+-- median: 5.25
+-- 25th percentile: 4.25
+-- 75th percentile: 6.00
++Make one `calibration_search` call covering both:
+ 
+-Treat every score you assign as a *percentile claim about the paper*, not a feeling:
+-
+-- If you are about to give **> 5.25**, you are claiming the paper is **better than at least half** of the entire human-reviewed corpus — including everything that got accepted at top venues. Stop and ask: is this paper really better than half of those? Can you name specific things this paper does better than the median accepted paper, or are you just avoiding a low number?
+-- If you are about to give **>= 6.0**, you are claiming the paper is in the **top 25%** of the corpus. That is a strong claim. It should be reserved for papers with concrete, specific strengths that survived aggressive filtering — not for "the topic is interesting and the method seems reasonable."
+-- If you are about to give **>= 7.0**, you are claiming the paper is well into the strong-accept tail. The bar here is "the average reviewer would actively champion this paper."
+-- A score of **4.25–5.25** is *the middle half of the corpus*. This range is where most papers sit, including most rejects. Landing here is not a hedge — it is a specific claim that this paper is mediocre but not broken.
+-- A score **< 4.25** is the bottom quartile. If the paper has a fundamental issue (unsound eval, unsupported central claim, scope too narrow to matter, multiple Major weaknesses undermining the core claim), this is where it belongs. Refusing to go here because "the topic is interesting" is exactly the failure mode being calibrated against.
++(A) Topic-anchored quality ladder — three queries with the same topic phrasing but different score bands:
++   - "<topic of paper>" with `high_score=3.5` (weak band)
++   - "<topic of paper>" with `low_score=3.5, high_score=7.5` (middle band)
++   - "<topic of paper>" with `low_score=7.5` (strong band)
+ 
+-The default failure mode is **upward drift**: when uncertain, the model nudges the score above the median to seem fair, which silently asserts the paper beats half the corpus. Before finalizing any score above 5.25, write one sentence justifying why this paper is better than the median human-reviewed paper. If you cannot, the score is too high.
++If nothing topically similar exists in a band, still take whatever the tool returned for that band — you still need to see what each band looks like.
+ 
++(B) Weakness-anchored queries — 2–4 queries (no score filter) probing how human reviewers scored papers with the same kind of failure mode as the paper under review. Examples:
++   - "evaluation uses fixed threshold instead of EER"
++   - "metric coupled with training objective"
++   - "subgroup claims from small sample size"
++   - "missing standard baselines from the same line of work"
+ 
+-How retrieval works:
++The point of (A) is to see what bad/medium/good look like *within the topic*. The point of (B) is to see what the corpus does with the specific failure modes you identified, regardless of topic. Together they prevent two failure modes: (a) snapping to the closest topical match by keyword similarity, (b) ignoring the price of a real flaw because nearby topical anchors were stronger papers.
+ 
+-1. Make ONE call to `calibration_search` with a batch of short natural-language queries. The tool runs vector search for each query in parallel and returns, for every query, the top-K matching human-review paths with their avg human score and first ~1000 chars. All results are injected into your context in a single response. You do not iterate.
++Use `read_file` on a small number of anchors (typically 1–2 per topic band, plus 1–2 from weakness queries) to inspect full reviews. Then form an initial bracket: based on these comparisons, what is the narrowest plausible score range for this paper (e.g., "between 4 and 6", "between 6.5 and 8")? State this bracket explicitly before round 2.
+ 
+-2. From the returned list, pick a small number of anchors (typically 5-9) you actually want to read in full. Use `read_file` on each chosen path to inspect the full review. Do not re-call `calibration_search` — one batch is all you get.
++## Round 2 — Narrowing within the bracket
+ 
+-3. Score the paper relative to those anchors.
++Make a second `calibration_search` call to pull more anchors *inside* your round-1 bracket. Use 2–3 queries with `low_score` and `high_score` tuned to your bracket. For example, if round 1 placed the paper between 5 and 7, query for anchors in `(4.5, 6)` and `(6, 7.5)` on the most topically relevant aspects. Since this narrows the search pool, you can use a more lax topical term.
+ 
+-What to put in your batch of queries:
++Round 2 does NOT discard the round-1 anchors. The low-band topic anchors and weakness-anchored hits from round 1 stay in your comparison set throughout round 2. If the paper shares concrete failures with a round-1 low-band anchor scored at 2.5, that anchor remains the relevant comparison even when round-2 pulled in nicer-looking 5–6 neighbors. Round 2 sharpens within the bracket; it does not relocate the bracket upward.
+ 
+-The point of calibration is to see what high / medium / low quality look like *within the same topic*. You are NOT trying to find the single closest paper and snap to its score. You are trying to see, on this topic, what a 2-score paper failed at, what a 5-score paper looked like, and what a 7-score paper got right — then place the paper under review on that quality ladder.
++Read 2–4 of these new anchors in full with `read_file`. Compare the paper against each: is this paper better, similar, or worse than this specific anchor? Use those comparisons together with the retained round-1 anchors to set the score.
+ 
+-(A) Topic-anchored quality ladder — three queries with the same topic phrasing but different score bands:
+-   - "<topic of paper>" with avg human score > 7.5
+-   - "<topic of paper>" with avg human score >3.5 and <7.5
+-   - "<topic of paper>" with avg human score < 3.5
+-   You have to read at least one paper per bin, even if they are not closely related.
++Before writing the score, answer in 2–3 sentences: **"What did the round-1 low-band anchors and weakness-anchored hits fail at, and does the paper under review share any of those failures?"** If yes, the score must reflect that, not just the round-2 narrowed neighbors. This step happens BEFORE the score is decided, not in the final report.
+ 
+-   You can pass `low_score` / `high_score` numeric filters to `calibration_search` per-query (see tool schema). Use these exact bands. If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor — you still need to see what a low-band paper looks like even if it is off-topic.
++## Round 3 — Optional, only if still genuinely uncertain
+ 
+-(B) Weakness-anchored queries — additional queries (no score filter) that search for papers with weaknesses similar to the ones identified for the paper under review. Examples:
+-   - "evaluation uses fixed threshold instead of EER" (no score filter)
+-   - "metric coupled with training objective" (no score filter)
+-   - "subgroup claims from small sample size" (no score filter)
+-   - "missing standard baselines from the same line of work" (no score filter)
+-   Add 2-4 such queries. These reveal how human reviewers scored papers that had the same kind of problem, regardless of topic. They are often more informative than topic similarity for calibrating low scores, because they directly probe "how harshly do humans treat this failure mode."
++If after round 2 you still cannot decide between, say, 5.5 and 6.5 because all round-2 anchors clustered on one side of the paper, do one more targeted call to pull anchors from the other side. Do not do this routinely — only when the bracket has not actually narrowed.
+ 
+-Combine both: (A) tells you the topic's quality ladder, (B) tells you the price of the specific failure modes you identified. Score is informed by both, not snapped to either.
++## Hard limits
+ 
+-`calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries and returns concatenated results, grouped by query.
++- At most three `calibration_search` calls total. Stop after round 2 unless you have a concrete reason for round 3.
++- Each call is a batch of queries; do not spam single-query calls.
++- After your final retrieval, write the review and score. Do not call `calibration_search` again during the writing phase.
+ 
+-Scoring rules:
++## Scoring rules
+ 
+-- Your final score is positioned relative to the retrieved anchors as a *ladder*, not by snapping to the single most-topically-similar anchor. The topic-anchored low/medium/high band queries give you what bad/medium/good look like on this topic; place the paper on that ladder by quality, not by topical proximity.
+-- Common failure mode to avoid: "the closest topical match was a 6.0, so I gave 6.0." This collapses the ladder. The closest topical match might be a medium-band paper that happens to share keywords but is much higher quality than the paper under review. The low-band anchor — even if topically further — is the right reference when the paper shares the low-band paper's failure modes. Use the weakness-anchored queries (B) to break this tie.
++- Final score is positioned relative to the combined anchor set: round-1 anchors (both topic bands and weakness queries) plus round-2 narrowed anchors. Round 2 sharpens within the bracket but does not replace round-1 evidence.
++- Round-2 anchors are by construction closer in score than round-1 anchors, so the paper will often look "comparable" to round-2 neighbors. This is an artifact of the narrowed search range, not evidence that the paper deserves a middle-of-bracket score. Resist the pull toward the round-2 median.
+ - Do not pick a score first and then justify it. Compare to anchors first, let the comparison set the score.
+-- The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
+-- Score distribution: extreme scores are rare but valid. If the paper truly is exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
+-- Do NOT cluster scores around 5. If the weakness-anchored queries (B) show that papers with the same failure modes consistently scored < 3.5, that is direct evidence the paper under review should score there too, even if its topic-band anchors sat at 5-6.
+-- Compare the paper under review with every single anchor paper.
+-- If a Fatal weakness or fundamental issue is flagged in the merger output, the score must sit at or below the lowest topic-band anchor with the same failure mode, not above it.
+-
++- Place the paper on the quality ladder by quality, not by topical proximity. The closest topical anchor might be a medium-band paper that shares keywords but is much higher quality than the paper under review. When the paper shares the failure modes of a lower-band anchor — even if topically further or outside the round-2 bracket — that lower-band anchor is the right reference. The weakness-anchored queries (B) and round-1 low-band anchors override topical proximity.
++- The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor comparisons.
++- Extreme scores are rare but valid. If the paper is truly exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
++- Do not cluster scores around 5. If the weakness-anchored queries (B) show that papers with the same failure modes consistently scored < 3.5, that is direct evidence — score accordingly even if topic-band or round-2 anchors sat at 5–6. The weakness-anchored evidence is not a tiebreaker; it is a primary signal that overrides "but the topical neighbors looked similar."
++- If a Fatal weakness or fundamental issue is flagged in the merger output, the score must sit at or below the lowest anchor with the same failure mode. Round-2 narrowing does not override this — if the bracket excluded that anchor, the bracket was wrong and the score must drop below the bracket.
++- If the paper shares 2+ Major weaknesses with any low-band anchor (<= 3.5), the score must be within 1.0 of that anchor's score regardless of where round-2 neighbors sat.
++- The "nice to have" items should be weighed as minor weaknesses in anchor comparisons, not ignored.
+ 
+-When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, the query bucket it came from (topic-low / topic-mid / topic-high / weakness-<which>), and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
++## Reporting
+ 
+-Additionally, after the anchor list, write one paragraph explicitly answering: "What did the low-band topic anchors fail at, and does the paper under review share any of those failures?" If yes, the score must reflect that — do not place the paper above a low-band anchor it matches in failure modes.
++List every anchor paper retrieved across all rounds (not just the ones you read in full). For each anchor give the path, its avg human score, the round and query bucket it came from (round1-topic-low / round1-topic-mid / round1-topic-high / round1-weakness-<which> / round2 / round3), and one sentence on how it compares to the paper under review.
+ 
+-Hard constraint: exactly one `calibration_search` call. No iterative refining, no follow-up retrieval. After that, you may use `read_file` to read anchor files, then write your review and score.
+\ No newline at end of file
++State the round-1 bracket explicitly, then explain how round 2 (and 3, if used) narrowed it to the final score. After the anchor list, write one short paragraph answering: "What did the low-band anchors fail at, and does the paper under review share any of those failures?" If yes, the score must reflect that.
+diff --git a/prompts/cal_with.md.1 b/prompts/cal_with.md.1
+deleted file mode 100644
+index e90638e48..000000000
+--- a/prompts/cal_with.md.1
++++ /dev/null
+@@ -1,34 +0,0 @@
+-Use comparative scoring to calibrate your final score against human-reviewed anchors.
+-
+-How retrieval works:
+-
+-1. Make ONE call to `calibration_search` with a batch of short natural-language queries. The tool runs vector search for each query in parallel and returns, for every query, the top-K matching human-review paths with their avg human score and first ~1000 chars. All results are injected into your context in a single response. You do not iterate.
+-
+-2. From the returned list, pick a small number of anchors (typically 5-9) you actually want to read in full. Use `read_file` on each chosen path to inspect the full review. Do not re-call `calibration_search` — one batch is all you get.
+-
+-3. Score the paper relative to those anchors.
+-
+-What to put in your batch of queries:
+-- 3 queries that anchor each score band on a topic similar to the paper:
+-   - "<topic>" with avg human score > 7.5
+-   - "<topic>" with avg human score >3.5 and <7.5
+-   - "<topic>" with avg human score < 3.5
+-  You have to read at least one paper per bin, even if they are not closely related. 
+-
+-  You can pass `low_score` / `high_score` numeric filters to `calibration_search` per-query (see tool schema). Use these exact bands. If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
+-
+-`calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries and returns concatenated results, grouped by query.
+-
+-Scoring rules:
+-
+-- Your final score must be positioned relative to the retrieved anchors.
+-- Do not pick a score first and then justify it. Compare to anchors first, let the comparison set the score.
+-- The number of weaknesses listed is not a signal for a bad paper — focus on weakness content and anchor scores.
+-- Score distribution: extreme scores are rare but valid. If the paper truly is exceptional or truly weak, give an extreme score even if most retrieved anchors sit in the middle.
+-- Do NOT cluster scores around 5, the score should be relative to the retrieval samples. Score a good paper high and a bad paper low. 
+-- Compare the paper under review with every single anchor paper
+-
+-
+-When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
+-
+-Hard constraint: exactly one `calibration_search` call. No iterative refining, no follow-up retrieval. After that, you may use `read_file` to read anchor files, then write your review and score.
+\ No newline at end of file
+diff --git a/prompts/merger.md b/prompts/merger.md
+index 13105c881..c58ce1e2f 100644
+--- a/prompts/merger.md
++++ b/prompts/merger.md
+@@ -41,9 +41,11 @@ the baseline and not the author's method. This is intentionally asymmetric to pr
+ - DO NOT mention missing related works, as you do not have external sources to confirm
+ their existence and could be making things up.
+ 
+-- REMOVE pure formatting/style nitpicks.
++- REMOVE criticism that is purely about *parser-introduced* formatting artifacts: typos, spelling, grammar, punctuation, capitalization, whitespace, line breaks, broken characters, garbled equations, OCR-glitched tables, missing/extra symbols. These were introduced by PDF extraction, not by the authors. The original submission does not have these issues.
+ 
+-- REMOVE any criticism about typos, spelling, grammar, punctuation, capitalization, whitespace, line breaks, broken characters, garbled text, missing/extra symbols, or any other formatting artifact. These are parser errors, not author errors — the original submission does not have these issues.
++- DO NOT use this rule to remove substantive structural problems that survived parsing intact: empty sections in the paper itself (a section header followed by no content the authors wrote), narrative that fails to reference its own figures/tables, citations that point to the wrong reference, undefined acronyms used as if defined, results discussed in prose that contradict the corresponding table. These are author-introduced and must be kept as weaknesses — they are not "parser artifacts" just because they look like formatting at first glance.
++
++- Test before removing under this rule: "If a clean, original PDF were available, would this issue still exist?" Parser artifact → no, remove. Author error → yes, keep.
+ 
+ - REMOVE nitpicks about reproducibility such as undisclosed hyperparameters, trivial
+ implementation details, or large artifacts impractical to include in a submission
+@@ -57,18 +59,33 @@ implementation details, or large artifacts impractical to include in a submissio
+ 
+ - Many of the harsh reviewer's weaknesses are real but minor (presentation, appendix-deferred proofs, precision nitpicks). Rank by severity, not count: score from the worst flaw that actually threatens the core claim.
+ 
+-- Filter the Strength Finder's output AGGRESSIVELY. The Strength Finder is heavily biased toward sycophancy and will surface non-strengths. Apply ALL of the following filters and move anything that fails to Removed Points:
++- Filter the Strength Finder's output, but do NOT over-filter. Human reviewers legitimately list high-level strengths like "well-written", "novel angle", "timely problem", "elegant idea" — these contribute real positive signal when grounded. The filter should remove sycophancy, not strip the review of all qualitative praise.
++
++  Drop a strength only if it fails ALL THREE of:
++  - It points to a specific artifact in the paper (a result, table, figure, theorem, experimental setup, or concrete design choice) — high-level praise like "clear motivation" or "novel framework" counts as specific enough if it refers to an identifiable aspect.
++  - It makes a falsifiable positive claim about the paper (not a tautology like "the method is the method").
++  - It is not contradicted by any retained weakness.
++
++  Explicit allowances (do NOT auto-remove these):
++  - Clarity / writing quality / accessible exposition — when a reviewer says the paper is well-written, this is a real strength.
++  - Originality / novel angle / fresh perspective — a strength even without a specific table to point at, as long as the novelty is identifiable.
++  - Timely / important problem — keep if the importance is non-generic.
++  - Elegant or simple solution — keep when the simplicity is genuinely a contribution.
++  - Compliance/ethics — keep if it is a meaningful differentiator in the paper's specific subarea (e.g., the first consent-collected dataset in a field full of scraped ones).
++
++  Drop these:
++  - Pure sycophancy that restates the abstract's claim ("the method achieves novelty by being novel").
++  - Conditional praise ("if X holds then Y is impressive").
++  - Strengths invalidated by a retained weakness (e.g., "strong empirical results" when a Major weakness shows the eval is confounded).
++
++## Weakness overrides Strength (hard rule)
+ 
+-  - REMOVE generic strengths about problem importance, topic relevance, or motivation ("addresses an important problem", "targets a timely question", "the area is impactful"). These say nothing about the paper.
+-  - REMOVE strengths that restate the paper's contribution claim without independent evidence ("the method is novel", "the approach is principled", "the framework is general"). A strength must cite a specific result, table, figure, theorem, or experimental finding.
+-  - REMOVE strengths that depend on a weakness being false. If a verified weakness says the evaluation is confounded, do not list "strong empirical results" as a strength.
+-  - REMOVE strengths about writing quality, clarity, or presentation unless the paper is exceptionally well-written by venue standards. Adequate writing is the baseline, not a strength.
+-  - REMOVE strengths that praise ethical/legal/procedural compliance (GDPR, IRB, informed consent) unless the paper's core contribution IS the ethical framework. Compliance is a baseline expectation, not a research strength.
+-  - REMOVE strengths that praise theoretical grounding when the theory is about a known/trivial property, or when the theory does not connect to the empirical claims.
+-  - REMOVE strengths that are framed conditionally ("if X holds then Y is impressive", "could be a strong contribution if Z"). Conditional praise is not a strength.
+-  - A "strength" only survives if it (a) points to a specific artifact in the paper, (b) makes a falsifiable positive claim, and (c) does not conflict with any retained weakness.
++When a strength and a weakness disagree, the weakness wins. The presence of legitimate strengths does NOT compensate for fundamental issues. A paper with one Fatal weakness or multiple Major weaknesses is a low-scoring paper regardless of how many genuine strengths exist. Use strengths to differentiate among papers without fundamental issues; do not use them to pull a fundamentally-flawed paper up.
+ 
+-- After filtering, count the surviving strengths. If fewer than 2 survive AND there are 2+ Major or any Fatal weaknesses, this is evidence the paper is fundamentally weak — score accordingly, do not invent strengths to balance the review.
++Concretely:
++- If any Fatal weakness survives filtering → strengths cannot bring the score above 3.5.
++- If 2+ Major weaknesses survive filtering AND they undermine the core claim → strengths cannot bring the score above 4.5.
++- A paper can simultaneously be well-written, address an important problem, and propose a novel idea — and still be a clear reject because its central claim is unsupported. Do not soften the verdict to honor the strengths.
+ 
+ - FUNDAMENTAL ISSUES: A paper has a fundamental issue when ANY of the following hold, and that issue overrides all strengths:
+   - The evaluation methodology is unsound (e.g., fixed threshold where standard is EER/TAR@FAR, metric coupled with training objective, no proper baseline, single-seed claims framed as comparative findings on tiny subgroups).
+diff --git a/scripts/run_deepreview.sh b/scripts/run_deepreview.sh
+index ff671173a..1c49e7ed0 100755
+--- a/scripts/run_deepreview.sh
++++ b/scripts/run_deepreview.sh
+@@ -46,11 +46,11 @@ export OPENAI_DEFAULT_MODEL="glm-5.1"
+ export HARSH_MODEL="deepseek-v4-flash"
+ export MERGER_MODEL="deepseek-v4-flash"
+ export NEUTRAL_MODEL="deepseek-v4-flash"
+-export SWEEP_NAME="v1"
++export SWEEP_NAME="v4"
+ export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
+ export MERGE_LOG="${SWEEP_NAME}/merge.log" 
+ export CONCURRENCY="${CONCURRENCY:-20}"
+-export MAX_PAPERS="${MAX_PAPERS:-100}"
++export MAX_PAPERS="${MAX_PAPERS:-200}"
+ export CALIBRATION_SET="deepreview"
+ # export CALIBRATION_SET="deepreview"
+ export PAPERS_DIR="$HOME/split_review/datasets/iclr2026_new/papers"
+@@ -59,14 +59,22 @@ export REVIEWS_DIR="${SWEEP_NAME}/reviews"
+ LOG_FILE="results/${MERGE_LOG}"
+ mkdir -p "$(dirname "$LOG_FILE")"
+ 
+-TS="$(date '+%Y%m%dT%H%M%S')"
+-SNAPSHOT_DIR="results/${SWEEP_NAME}/snapshot/${TS}"
+-mkdir -p "$SNAPSHOT_DIR"
+-cp -r code prompts "$SNAPSHOT_DIR/"
+-cp scripts/run_deepreview.sh "$SNAPSHOT_DIR/"
+-git rev-parse HEAD > "$SNAPSHOT_DIR/git_commit.txt" 2>/dev/null || echo "not-a-git-repo" > "$SNAPSHOT_DIR/git_commit.txt"
+-git status --short > "$SNAPSHOT_DIR/git_status.txt" 2>/dev/null || true
+-git diff HEAD -- code prompts scripts/run_deepreview.sh > "$SNAPSHOT_DIR/git_diff.patch" 2>/dev/null || true
++SNAPSHOT_DIR="results/${SWEEP_NAME}/snapshot"
++if [ -e "$SNAPSHOT_DIR" ]; then
++  if [ "${BYPASS_SNAPSHOT:-0}" = "1" ]; then
++    echo "BYPASS_SNAPSHOT=1: $SNAPSHOT_DIR already exists, keeping the existing snapshot and continuing."
++  else
++    echo "ERROR: $SNAPSHOT_DIR already exists. Bump SWEEP_NAME, or rerun with BYPASS_SNAPSHOT=1 to keep the existing snapshot and continue." >&2
++    exit 1
++  fi
++else
++  mkdir -p "$SNAPSHOT_DIR"
++  cp -r code prompts "$SNAPSHOT_DIR/"
++  cp scripts/run_deepreview.sh "$SNAPSHOT_DIR/"
++  git rev-parse HEAD > "$SNAPSHOT_DIR/git_commit.txt" 2>/dev/null || echo "not-a-git-repo" > "$SNAPSHOT_DIR/git_commit.txt"
++  git status --short > "$SNAPSHOT_DIR/git_status.txt" 2>/dev/null || true
++  git diff HEAD -- code prompts scripts/run_deepreview.sh > "$SNAPSHOT_DIR/git_diff.patch" 2>/dev/null || true
++fi
+ 
+ {
+   echo "============================================================"
+@@ -87,7 +95,7 @@ git diff HEAD -- code prompts scripts/run_deepreview.sh > "$SNAPSHOT_DIR/git_dif
+   echo "REVIEWS_DIR=$REVIEWS_DIR"
+ } >> "$LOG_FILE"
+ 
+-/home/wg25r/miniconda/envs/neg/bin/python code/main.py --n_samples "$MAX_PAPERS" --no_cal --benchmark ~/split_review/datasets/iclr2026_new --seed $(cksum <<< '45678765456' | cut -f 1 -d ' ')
++/home/wg25r/miniconda/envs/neg/bin/python code/main.py --n_samples "$MAX_PAPERS" --benchmark ~/split_review/datasets/iclr2026_new --seed $(cksum <<< '45678765456' | cut -f 1 -d ' ')
+ # /home/wg25r/miniconda/envs/neg/bin/python code/main.py --n_samples "$MAX_PAPERS" --no_cal --benchmark ~/split_review/datasets/iclr2026_new --seed $(cksum <<< '384758' | cut -f 1 -d ' ')
+ 
+ # --no_cal --include_cal_papers
