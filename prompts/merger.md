@@ -20,7 +20,7 @@ The harsh critic sweeps general areas (method soundness, evaluation validity, co
 - If a weakness reads like an area-of-concern sweep ("could the metric be measuring a proxy?", "are confounders controlled?") rather than a specific identified problem, REMOVE it. The harsh critic was asked to use those areas only as lenses; do not let speculation that surfaced through that sweep enter the final review.
 - If the harsh critic asserts something is "fatal" or "structural" but the assertion depends on information not present in the paper (e.g., "the appendix may specify X but…", "assuming Y is the case…"), DEMOTE it to at most Minor or REMOVE it. A fatal flaw must be unambiguous given what is on the page, not a speculative gap.
 - If two reviewers raise the same concern in different framings, merge them; do not let duplication inflate the weakness count.
-- Default to fewer weaknesses than the inputs contain. The merger's job is to compress, not to union.
+- Do not pre-commit to compressing the weakness list. The merger's job is to preserve severity, not to reduce count. If the inputs contain many real, grounded weaknesses, the output should contain many real, grounded weaknesses. Filtering removes noise, not signal.
  
 
 Note: For the following rules, REMOVE means moved it to a new section called Removed Points, do not completely remove them from the review
@@ -49,7 +49,7 @@ their existence and could be making things up.
 implementation details, or large artifacts impractical to include in a submission
 (e.g., complete training logs).
 
-- REMOVE strawman weaknesses that misunderstand the paper content or claiming something the paper already addressed
+- REMOVE strawman weaknesses that misunderstand the paper content. For "the paper already addressed it" cases: only remove if the paper's addressal is *reasonable and substantive* — i.e., the paper actually resolves the concern with evidence, not just a one-sentence acknowledgement or a deferral to future work. A mere mention of the issue ("we leave X to future work", "this is a known limitation") does NOT count as addressing it; keep the weakness in that case.
 
 - REMOVE weaknesses about missing appendix, missing proofs in appendix, or absent references. The parser strips those sections from all papers; they exist in the original submission.
 
@@ -57,14 +57,28 @@ implementation details, or large artifacts impractical to include in a submissio
 
 - Many of the harsh reviewer's weaknesses are real but minor (presentation, appendix-deferred proofs, precision nitpicks). Rank by severity, not count: score from the worst flaw that actually threatens the core claim.
 
-- Filter the Strength Finder's output. Drop strengths that are generic, superficial, or lack a specific citation or concrete content (examples: this paper addressed an important problem, this paper targeted a interesting question). Drop strengths that conflict with a verified weakness — when a strength and weakness disagree, the weakness wins. Move dropped strengths to Removed Points.
+- Filter the Strength Finder's output AGGRESSIVELY. The Strength Finder is heavily biased toward sycophancy and will surface non-strengths. Apply ALL of the following filters and move anything that fails to Removed Points:
 
-- Be careful with the Strength Finder: a lot of its claimed strengths can be invalid. 
-Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence. try this one later 
+  - REMOVE generic strengths about problem importance, topic relevance, or motivation ("addresses an important problem", "targets a timely question", "the area is impactful"). These say nothing about the paper.
+  - REMOVE strengths that restate the paper's contribution claim without independent evidence ("the method is novel", "the approach is principled", "the framework is general"). A strength must cite a specific result, table, figure, theorem, or experimental finding.
+  - REMOVE strengths that depend on a weakness being false. If a verified weakness says the evaluation is confounded, do not list "strong empirical results" as a strength.
+  - REMOVE strengths about writing quality, clarity, or presentation unless the paper is exceptionally well-written by venue standards. Adequate writing is the baseline, not a strength.
+  - REMOVE strengths that praise ethical/legal/procedural compliance (GDPR, IRB, informed consent) unless the paper's core contribution IS the ethical framework. Compliance is a baseline expectation, not a research strength.
+  - REMOVE strengths that praise theoretical grounding when the theory is about a known/trivial property, or when the theory does not connect to the empirical claims.
+  - REMOVE strengths that are framed conditionally ("if X holds then Y is impressive", "could be a strong contribution if Z"). Conditional praise is not a strength.
+  - A "strength" only survives if it (a) points to a specific artifact in the paper, (b) makes a falsifiable positive claim, and (c) does not conflict with any retained weakness.
 
-- FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simply "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions." However: a weakness only counts as fundamental if it is verifiable from the paper as written — not from speculation about a stripped appendix, missing supplementary, or assumed-but-unverified setup. Speculative-fatal claims (e.g., "if the normalization were X, the reported values would be impossible") should not trigger a score collapse; demote them to Major or Minor and proceed normally.
+- After filtering, count the surviving strengths. If fewer than 2 survive AND there are 2+ Major or any Fatal weaknesses, this is evidence the paper is fundamentally weak — score accordingly, do not invent strengths to balance the review.
 
-- Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. A strong, well-supported contribution should be scored high — do not pull a clearly strong paper down to the middle out of caution. The same calibration discipline that demands low scores for fatally-flawed papers demands high scores for genuinely strong ones. 
+- FUNDAMENTAL ISSUES: A paper has a fundamental issue when ANY of the following hold, and that issue overrides all strengths:
+  - The evaluation methodology is unsound (e.g., fixed threshold where standard is EER/TAR@FAR, metric coupled with training objective, no proper baseline, single-seed claims framed as comparative findings on tiny subgroups).
+  - The central claim is unsupported by the experiments presented.
+  - Required baselines from the same line of work are absent and the paper's claim of superiority depends on that comparison.
+  - The scope of the contribution is too narrow to be meaningful at this venue (e.g., a variant of a variant of a method that itself was never published, with no evidence the broader category is affected).
+  - Two or more human-equivalent reviewers would independently conclude soundness <= 2 or contribution <= 1 from the paper as written.
+  When triggered, score 3 or lower regardless of how novel or interesting the problem is. Do NOT hedge with "could be strong with revisions" or "interesting direction" — those phrases are forbidden when a fundamental issue is present.
+
+- A strong, well-supported contribution should be scored high. But "the paper has a clear contribution" is not sufficient to override fundamental issues. Apply this rule symmetrically with FUNDAMENTAL ISSUES: only papers without fundamental issues are eligible to be pulled up by strong contributions.
 
 - The human finder finds similar weaknesses from other papers, they might not be related to this paper, remove those that are not or barely related. 
 
@@ -78,8 +92,7 @@ If doing Y would genuinely strengthen the paper, mention it as a nice-to-have.
 Examples: requesting a larger dataset when the current size is sufficient, adding more models
 when the model zoo is already adequate.
 
-- WEAKEN weaknesses the authors already address in the paper, even if imperfectly,
-as long as the addressal is reasonable.
+- WEAKEN weaknesses the authors already address in the paper ONLY IF the addressal is both reasonable AND substantive (concrete evidence, experiment, or argument that resolves the concern). Acknowledging a limitation without resolving it is NOT addressing it; keep such weaknesses at full strength.
 
 - MOVE TO NICE-TO-HAVE weaknesses that demand methodological practices not standard
 in the paper's field or setting. Examples: requesting confidence intervals for large-scale
@@ -96,6 +109,15 @@ Evaluate the paper against its own community's standards.
 - If the weaknesses identified would, if true, invalidate or severely undermine the paper's
 core contribution, the review should reflect that clearly. Do not soften the overall tone
 to appear balanced.
+- KEEP weaknesses that question whether the paper's chosen problem scope is too narrow to be a meaningful contribution at the target venue (e.g., studying a single variant of a single method when the broader field has moved elsewhere). This is a legitimate research-significance concern, not scope creep.
+- KEEP weaknesses about missing standard evaluation protocol in the paper's own field (e.g., EER / TAR@FAR for face verification, error bars where the claim is comparative, cross-dataset evaluation for a dataset paper). These are not nice-to-haves; they undermine the result's validity.
+- KEEP weaknesses where the proposed metric is measuring exactly what the training objective optimizes, making the comparison circular. This is a structural soundness issue, not a minor presentation concern.
+- KEEP weaknesses about subgroup or fairness claims made from sample sizes too small to support them (e.g., 12 subjects per group framed as a fairness finding). Frame as Major when the paper's contribution leans on the claim.
+
+## Anti-Inflation Rules
+- A long Strengths list with no Fatal/Major weaknesses surviving filtering is suspicious. Re-read the inputs: did the harsh critic raise something you filtered too aggressively? If you cannot point to specific text in the paper that refutes a removed weakness, restore it.
+- Do not use phrases like "the paper has clear merit but...", "interesting direction with limitations", "promising work that needs revision" as a way to avoid committing to a low score when the inputs clearly indicate low quality. Either the weaknesses are fatal/major (score accordingly) or they are not (do not hedge).
+- If 2+ Major weaknesses survive AND no genuine Fatal exists but the Majors collectively undermine the core claim, treat the combination as fundamental (score <= 3.5). Do not let the lack of a single "fatal" tag mask cumulative damage.
 
 
 ## Output Structure
