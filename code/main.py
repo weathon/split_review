@@ -39,7 +39,7 @@ from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
 from agents.model_settings import ModelSettings
 
 # _MODEL_SETTINGS = ModelSettings(extra_body={})
-_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["deepseek"]}, "reasoning": {"enabled": True, "effort": "xhigh"}, "usage": {"include": True}})
+_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["gmicloud/fp8"]}, "reasoning": {"enabled": True, "effort": "xhigh"}, "usage": {"include": True}})
 import dotenv
 dotenv.load_dotenv()
 os.environ["OPENAI_DEFAULT_MODEL"] = os.getenv("OPENAI_DEFAULT_MODEL", "z-ai/glm-5.1")

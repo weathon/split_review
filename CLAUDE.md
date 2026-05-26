@@ -24,6 +24,7 @@ This is research code, NOT a production system. Optimize for **iteration speed a
 - Keep code simple, short, and stupid.
 - Do NOT use underscore-started function naming
 
+
 ## Benchmark / batch scripts
 
 Batch, benchmark, and one-shot experiment scripts must be written like research scripts, not reusable libraries.
@@ -47,8 +48,17 @@ Batch, benchmark, and one-shot experiment scripts must be written like research 
 - Do NOT use helper function unless you really need to
 - Keep code simple, short, and stupid.
 - If you were asked to do something and it is not working, do NOT find another path, stop and ask user
+
+- This is a HARD rule. Examples of forbidden workarounds:
+  - User pointed you at a file/tool/script and it errors → don't substitute "similar" tool, don't write a new equivalent script, don't proceed with a degraded version. Stop and report the error to the user.
+  - User said "use X" and X needs config/data you don't have → don't fabricate or use a placeholder; stop and ask where to get it.
+  - A required input (guideline file, baseline, dependency) is missing → don't generate a "minimal stub" to keep going; stop and ask.
+  - An interactive prompt blocks a background script → don't pipe an answer in, don't delete state to avoid the prompt; stop and ask.
+  - A command is denied by sandbox → don't try a different tool that achieves the same forbidden effect; tell the user and ask how to proceed.
+- The cost of pausing to ask is low. The cost of an unauthorized workaround is high (wrong output, wasted compute, hidden divergence from user intent).
 - You should NEVER run code diff BEFORE you code
 - Always use library when possible, do not write your own code if you can use a library, do not assume it is not installed
+
 
 ## Comments
 

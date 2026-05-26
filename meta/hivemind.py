@@ -28,24 +28,20 @@ ROOT = Path(__file__).parent.parent
 BASELINE_DIR = ROOT / "baselines" / "consolidated_reviews_2025"
 
 METHODS = {
-    "v1_DeepReviewer_7B_TXT": {
-        "dir": BASELINE_DIR / "v1_DeepReviewer_7B_TXT_MD",
-        "kind": "multi_reviewer",
+    "baseline_v0": {
+        "dir": ROOT / "results" / "baseline_v0" / "reviews",
+        "kind": "single_md",
     },
-    "v1_DeepReviewer_14B_TXT": {
-        "dir": BASELINE_DIR / "v1_DeepReviewer_14B_TXT_MD",
-        "kind": "multi_reviewer",
+    "iter1_format": {
+        "dir": ROOT / "results" / "iter1_format" / "reviews",
+        "kind": "single_md",
     },
-    "v2_API_DeepSeek_PDF": {
-        "dir": BASELINE_DIR / "v2_API_DeepSeek_PDF",
-        "kind": "single_report",
+    "iter2_addressed": {
+        "dir": ROOT / "results" / "iter2_addressed" / "reviews",
+        "kind": "single_md",
     },
-    "v2_Local_Qwen_PDF": {
-        "dir": BASELINE_DIR / "v2_Local_Qwen_PDF",
-        "kind": "single_report",
-    },
-    "ours_wo_search": {
-        "dir": ROOT / "results" / "test_mini_wo_search",
+    "v905381a_repro": {
+        "dir": ROOT / "results" / "v905381a_repro" / "reviews",
         "kind": "single_md",
     },
 }
