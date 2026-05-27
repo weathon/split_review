@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from deepreview.adapters.markdown_parser import build_page_index, parse_preparsed_text
 from deepreview.config import get_settings
@@ -54,7 +59,7 @@ def _build_claude_mcp_server(
     review_tools: list[Any],
     usage_totals: dict[str, int],
 ) -> tuple[dict[str, Any], list[str]]:
-    from claude_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
+    from oh_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
 
     sdk_tools = []
 
@@ -129,7 +134,7 @@ async def _run_claude_agent_turn(
     usage_totals: dict[str, int],
     output_tag: str,
 ) -> str:
-    from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, TextBlock
+    from oh_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, TextBlock
 
     await client.query(prompt_text)
     output_parts: list[str] = []
@@ -260,7 +265,7 @@ async def run_job_async(job_id: str) -> None:
     if job is None:
         raise FileNotFoundError(f'Job not found: {job_id}')
 
-    api_mode = 'claude_agent_sdk'
+    api_mode = 'openharness'
     append_event(
         job_id,
         'llm_api_mode_selected',
@@ -388,7 +393,7 @@ async def run_job_async(job_id: str) -> None:
         review_tools=tools,
         usage_totals=usage_totals,
     )
-    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    from oh_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
     options = ClaudeAgentOptions(
         model=str(settings.agent_model).strip(),
