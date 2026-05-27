@@ -38,7 +38,8 @@ weave.init("openai-agents")
 from agents import Agent, OpenAIChatCompletionsModel, Runner, function_tool
 from agents.model_settings import ModelSettings
 
-_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": ["deepseek"]}, "effort": "medium"})
+_OPENROUTER_PROVIDER = os.environ.get("OPENROUTER_PROVIDER", "deepseek").strip()
+_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": [_OPENROUTER_PROVIDER]}, "effort": "medium"})
 import dotenv
 dotenv.load_dotenv()
 os.environ["OPENAI_DEFAULT_MODEL"] = os.getenv("OPENAI_DEFAULT_MODEL", "z-ai/glm-5.1")
