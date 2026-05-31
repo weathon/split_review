@@ -1,0 +1,294 @@
+
+
+{0}------------------------------------------------
+
+# ExLLM: EXPERIENCE-ENHANCED LLM OPTIMIZATION FOR MOLECULAR DESIGN AND BEYOND
+
+**Anonymous authors**
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Molecular design involves an enormous and irregular search space, where traditional optimizers such as Bayesian optimization, genetic algorithms, and generative models struggle to leverage expert knowledge or handle complex feedback. Recently, LLMs have been used as optimizers, achieving promising results on benchmarks such as PMO. However, existing approaches rely only on prompting or extra training, without mechanisms to handle complex feedback or maintain scalable memory. In particular, the common practice of appending or summarizing experiences at every query leads to redundancy, degraded exploration, and ultimately poor final outcomes under large-scale iterative search. We introduce ExLLM (Experience-Enhanced LLM optimization), an LLM-as-optimizer framework with three components: (1) a compact, evolving experience snippet tailored to large discrete spaces that distills non-redundant cues and improves convergence at low cost; (2) a simple yet effective k-offspring scheme that widens exploration per call and reduces orchestration cost; and (3) a lightweight feedback adapter that normalizes objectives for selection while formatting constraints and expert hints for iteration. ExLLM sets new state-of-the-art results on PMO and generalizes strongly—in our setup, it sets records on circle packing and stellarator design, and yields consistent gains across additional domains—requiring only a task-description template and evaluation functions to transfer.
+
+## 1 INTRODUCTION
+
+Molecular design underpins drug discovery and materials science, yet the search space is vast and highly discrete, making efficient optimization difficult. Classical machine learning approaches: Bayesian optimization (BO), genetic algorithms (GA), reinforcement learning (RL), multi-objective optimization (MOO), and MCMC, treat the problem largely as black-box search (Shin et al., 2024; Kim et al., 2024; Jensen, 2019; Nigam et al., 2019; Liu et al., 2025; Verhellen, 2022; Xie et al., 2021; Sun et al., 2022; Olivercona et al., 2017; Jin et al., 2020). Deep generative models improve proposal quality by learning molecular distributions (e.g., JTVAE, VJTNN, DST, diffusion and transformer-based models such as MOOD, MolGPT, MOLGEN) and enable latent-space search (Jin et al., 2018a;b; Fu et al., 2021; Lee et al., 2023; Bagal et al., 2021; Fang et al., 2024; Abeer et al., 2024). However, these lines typically rely on scalarized rewards and fixed pipelines, making it hard to incorporate rich priors (chemist heuristics, textual rules) and to handle heterogeneous feedback (multiple objectives, hard/soft constraints) without task-specific re-engineering; practical protocols such as PMO further highlight the need to optimize under a fixed evaluation budget due to costly oracle calls (Gao et al., 2022).
+
+Large language models (LLMs) offer a complementary opportunity: they encode broad domain knowledge, support reasoning, and can be steered with prompts (Vaswani, 2017; AI4Science & Quantum, 2023; Brown, 2020). Recent work explores LLMs as optimizers or operators within evolutionary loops (e.g., OPRO, LMEA, AlphaEvolve; reasoning—acting with ReAct) and reports encouraging results on numerical, coding, and planning tasks (Yang et al., 2024; Liu et al., 2024b; Novikov et al., 2025a; Yao et al., 2022; Wu et al., 2024a). In molecular design, systems such as ChemCrow, LICO, MolReGPT, Prompt-MolOpt, and MOLLEO demonstrate that pre-trained LLMs or LLM-GA hybrids can guide candidate generation and multi-parameter search (M. Bran et al., 2024; Nguyen & Grover, 2024; Li et al., 2024; Wu et al., 2024b; Wang et al., 2024a). Yet these efforts remain early-stage: most are heavily prompt-dependent or require additional parameter training,
+
+{1}------------------------------------------------
+
+and lack a memory mechanism tailored to molecular optimization which has large, discrete search loops. Existing memory systems were developed primarily for QA, coding, or short-horizon decision making; they append per-step summaries and retrieve them at inference (RAG, RETRO, MemoryBank, MemLLM, A-Mem, Memory-R1), which—when naively reused over long optimization runs—inflate prompts, accumulate redundancy, and bias the search (Lewis et al., 2020; Borgeaud et al., 2022; Zhong et al., 2024; Modarressi et al., 2024; Xu et al., 2025; Yan et al., 2025). Moreover, unified handling of heterogeneous feedback (multi-objective signals, constraints, and expert textual hints) remains limited in practice.
+
+We propose **ExLLM**, an LLM-as-optimizer framework designed for molecular optimization. ExLLM treats the LLM as the optimizer itself and introduces three complementary mechanisms: a *single, evolving* experience distilled from good and bad cases to avoid memory bloat; a *k-offspring* sampling scheme that leverages the autoregressive factorization to widen exploration per query; and a unified *feedback adapter* that integrates objectives, constraints and textual feedback for iterative prompting. The framework is simple to transfer: it works with only a task-description template and custom evaluation functions, and requires no training, as summarized in Figure 1.
+
+**Contributions.** (1) We introduce an **evolving experience** mechanism tailored to large discrete spaces: a compact, low-redundancy snippet updated each generation, which improves convergence and results while controlling cost and avoiding exploration collapse, contrasting with retrieval-style memories (Zhao et al., 2023; Lewis et al., 2020; Borgeaud et al., 2022). (2) We propose a **k-offspring** strategy that increases exploratory breadth per LLM call and yields consistent gains under a fixed budget, with an empirical trade-off curve for  $k$ . (3) We develop a **feedback adapter** that unifies multi-objective signals for selection and incorporates constraints/expert text as concise prompts; promoting critical, variable constraints to explicit objectives improves stability without additional training. (4) We demonstrate strong results on molecular optimization: ExLLM achieves a PMO aggregate score of **19.165** (max 23), ranking **first on 17/23** tasks and improving over the previous SOTA (17.862) by **+7.3%** (Gao et al., 2022; Wang et al., 2024a). We package these contributions into a general optimizer for large discrete spaces: with only a task-description template and evaluation functions, it sets new records in circle packing and stellator design, and delivers consistent gains across additional domains (e.g., MOTSP/MOCVRP, SACS, NK2R peptide, GCU operator design).
+
+## 2 RELATED WORK
+
+### 2.1 MOLECULAR DESIGN WITH MACHINE LEARNING
+
+Molecular optimization has long been approached as a black-box search problem using Bayesian optimization (BO), genetic algorithms (GA), reinforcement learning (RL), multi-objective optimization (MOO), and MCMC variants. Representative **GA/BO** lines include GB-GA and its extensions—e.g., diversity-aware discriminators and Tanimoto-kernel Gaussian processes—which remain competitive on classic property maximization tasks (Jensen, 2019; Nigam et al., 2019; Tripp et al., 2021; Gómez-Bombarelli et al., 2018). BO-style **MOO** with learned encoders (MLPS) (Liu et al., 2025) and graph-based MOO (Verhellen, 2022) likewise seek Pareto-optimal solutions in latent or combinatorial spaces. Sampling-based methods such as MARS (MCMC) and Monte-Carlo tree search further explore chemical spaces probabilistically to identify molecules with desired properties (Xie et al., 2021; Sun et al., 2022). **RL** pipelines train generative policies from reward signals (e.g., REINVENT and rationale-guided GNNs) (Olivecrona et al., 2017; Jin et al., 2020), with recent variants such as DyMol, Augmented Memory and Genetic-GFN improving multi-objective handling, utilize data augmentation and experience replaying, or blending evolutionary operators with flow-based generators (Shin et al., 2024; Guo & Schwaller, 2024; Kim et al., 2024). While these families achieve strong results on several PMO tasks (Gao et al., 2022), they typically optimize only via function evaluations, making it difficult to incorporate domain priors (chemist heuristics, expert constraints) beyond hand-crafted rewards, and requiring nontrivial re-engineering or additional training when objectives or constraints change.
+
+**Deep generative models** advanced the field by learning molecular distributions and enabling higher-quality proposals. Autoencoding and structured-latent approaches (e.g., JTVAE, VJTNN, DST) capture scaffold and substructure regularities (Jin et al., 2018a,b; Fu et al., 2021), and diffusion and transformer-based models (MOOD, MolGPT, MOLGEN) further improve sample fidelity and cross-domain applicability (Lee et al., 2023; Bagal et al., 2021; Fang et al., 2024). Latent-space
+
+{2}------------------------------------------------
+
+![Figure 1: ExLLM architecture and applications. The diagram shows a user providing a task description and a scorer to a central LLM optimizer. The optimizer iterates through evolving experience, GPT, Gemini, K-Opt Strategy, and a Unified Feedback Adaptor. It then applies these to various generalized applications including Molecular Optimization, Peptide Drug Design, Circle Packing, Stellarator Design, Traditional Multi-Objective, Offshore Platform Jackets, and GCU Operator Optimization.](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+The diagram illustrates the ExLLM workflow. On the left, a user provides a task description and a scorer to a central LLM optimizer. The optimizer consists of several components: 'EVOLVING EXPERIENCE FOR DISCRETE PROBLEMS', 'GPT', 'Gemini', 'K-OPT STRATEGY (Prompt + Learning)', and 'UNIFIED FEEDBACK ADAPTOR'. These components are connected in a circular flow. The optimizer then applies these capabilities to various 'GENERALIZED APPLICATIONS', including Molecular Optimization, Peptide Drug Design (Protein), Circle Packing in a Square, Stellarator Design, Traditional Multi-Objective (MOTSP, MOCVRP), Offshore Platform Jackets, and GCU Operator Optimization.
+
+Figure 1: ExLLM architecture and applications. The diagram shows a user providing a task description and a scorer to a central LLM optimizer. The optimizer iterates through evolving experience, GPT, Gemini, K-Opt Strategy, and a Unified Feedback Adaptor. It then applies these to various generalized applications including Molecular Optimization, Peptide Drug Design, Circle Packing, Stellarator Design, Traditional Multi-Objective, Offshore Platform Jackets, and GCU Operator Optimization.
+
+Figure 1: ExLLM requires only two user inputs: a task-description template and evaluation functions, and operates without domain-specific training or tuning. The figure shows how a single unified workflow transfers seamlessly across different discrete problem optimization classes (chemical, geometric, combinatorial, physical, and code-generation tasks), achieving state-of-the-art or record-level performance under domain shift.
+
+optimization (LSO) shows that multi-objective search in the learned space can be effective for deep generators (Abeer et al., 2024). However, limitations exist: (1) Models largely learn from data and scalar rewards; codifying rich textual heuristics, design rules, or exception-heavy lab wisdom into training signals is cumbersome and brittle. (2) Combining multiple objectives, hard/soft constraints, and heuristic rules in a single training loop often requires bespoke reward shaping, delicate weighting, or separate pipelines. Many systems require task-specific fine-tuning or reward engineering when the optimization goal changes, limiting plug-and-play transfer to new objectives or domains (Gao et al., 2022; Liu et al., 2025; Verhellen, 2022).
+
+### 2.2 MOLECULAR DESIGN WITH LLM
+
+LLMs with domain knowledge are increasingly explored for drug and materials discovery (AI4Science & Quantum, 2023). Agentic tool-use systems such as ChemCrow show that LLMs can plan, call external chemistry tools, and iteratively refine candidates (M. Bran et al., 2024). In LICO (Nguyen & Grover, 2024), in-context learning is strengthened by pretraining with separated embedding and prediction layers to improve molecule generation; later Moayedpour et al. (2024) extends this idea to multi-objective settings. MolReGPT targets few-shot molecular optimization with additional parameterization for rapid adaptation (Li et al., 2024). MOLLEO integrates LLMs with a genetic algorithm to guide mutations/edits during search, illustrating a viable LLM-as-optimizer pattern (Wang et al., 2024a), but it lacks an explicit experience-reuse mechanism, explores this framework at a relatively early stage, and is mainly scoped to molecular-design benchmarks. Prompt-MolOpt explicitly leverages the domain knowledge of LLMs via property-specific prompt embeddings and a sequence-to-sequence Transformer trained on substructure-annotated pairs, demonstrating strong zero-/few-shot behavior on property-driven tasks (Wu et al., 2024b). However, existing LLM-based molecular design approaches are still highly prompt-dependent or need additional training, and lack an experience mechanism tailored to vast exploration spaces that can distill and reuse knowledge during optimization. The ability to handle complex feedback is still limited.
+
+### 2.3 LLM-AS-OPTIMIZER AND MEMORY MECHANISM
+
+Recent work tends to use LLM as optimizer to utilize domain knowledge and reasoning ability to guide efficient high-dimensional exploration without training (AI4Science & Quantum, 2023; Wu et al., 2024a; Brown, 2020). OPRO and LMEA cast LLMs as crossover/mutation operators within GA-style loops, balancing exploitation-exploration via prompt design and temperature control (Yang et al., 2024; Liu et al., 2024b); AlphaEvolve further systematizes this LLM-in-the-loop evolutionary pattern,
+
+{3}------------------------------------------------
+
+and ReAct exemplifies reasoning-acting procedures that can guide decision making (Novikov et al., 2025a; Yao et al., 2022). In molecular settings, constrained prompt engineering shows encouraging alignment effects (Wang et al., 2024b), while several studies report that GA+LLM pipelines can be efficient and competitive against standalone LLMs and traditional MOO when coupled with well-structured workflows (Liu et al., 2023; 2024a,c; Huang et al., 2024; Brahmachary et al., 2024), indicating LLM as a promising optimizer for numerical optimizations, coding and planning problems.
+
+External memory is widely used to inject up-to-date knowledge and reduce parametric forgetting—ranging from RAG (retrieve-then-concatenate) (Lewis et al., 2020) and RETRO (cross-attending to retrieved neighbors) (Borgeaud et al., 2022) to persistent, editable stores such as MemoryBank (human-like forgetting/refresh) and MemLLM (explicit read/write) (Zhong et al., 2024; Modarressi et al., 2024). Hybrid controllers like A-Mem and RL-trained Memory-R1 further learn when to add/update/delete/consume memories (Xu et al., 2025; Yan et al., 2025). While effective for QA, code and planning tasks, these designs are not tailored to large discrete optimization: massive iteration counts and huge candidate spaces make append-only or dense-retrieval memories prone to memory bloat and redundancy, drive up per-query prompt cost, and bias exploration when similar histories are repeatedly injected, as shown in table 1. We address this by a compact, low-redundancy experience pool that is both efficient and effective with much lower costs.
+
+## 3 METHODOLOGY
+
+![Figure 2: Overall framework of ExLLM. The diagram illustrates an evolutionary optimization process. It starts with an 'Initial population' of molecules. An 'LLM' block (containing task description, requirements, objective description, parent information, mutation/crossover instruction, output instructions, and other constraints) generates 'Multiple molecules per query' (Offspring G). These are evaluated by a 'Rewarding system & Feedback adapter' which provides objectives (f1, f2, f3, ...), constraints (g1, g2, g3, ...), and textual feedback (c1, c2, ...). The offspring are then injected with probability P_inj into a 'New experience E_t' block, which also receives 'Old experience E', 'Best candidates G', and 'Instructions'. This leads to 'Evolving experience'. A 'Hybrid selection' block (combining 'Fitness-based selector (Best in fitness)' and 'Pareto front-based selector (Diverse in objectives)') selects the 'Next population'. The process repeats until 'Termination' (Best molecules) is reached.](d3ca266c298aeb34b019960c6c36f187_img.jpg)
+
+Figure 2: Overall framework of ExLLM. The diagram illustrates an evolutionary optimization process. It starts with an 'Initial population' of molecules. An 'LLM' block (containing task description, requirements, objective description, parent information, mutation/crossover instruction, output instructions, and other constraints) generates 'Multiple molecules per query' (Offspring G). These are evaluated by a 'Rewarding system & Feedback adapter' which provides objectives (f1, f2, f3, ...), constraints (g1, g2, g3, ...), and textual feedback (c1, c2, ...). The offspring are then injected with probability P\_inj into a 'New experience E\_t' block, which also receives 'Old experience E', 'Best candidates G', and 'Instructions'. This leads to 'Evolving experience'. A 'Hybrid selection' block (combining 'Fitness-based selector (Best in fitness)' and 'Pareto front-based selector (Diverse in objectives)') selects the 'Next population'. The process repeats until 'Termination' (Best molecules) is reached.
+
+Figure 2: Overall framework of ExLLM. The process begins with an initialized population, followed by LLM-based  $k$ -offspring generation, evaluation and feedback aggregation, hybrid selection (fitness + Pareto), and experience update. These steps repeat until the evaluation budget is exhausted.
+
+We first provide an overview of our framework, also shown in Figure 2, and then give detailed elaborations of the key components. We cast the LLM as an evolutionary optimizer under a fixed evaluation budget  $B$  following PMO benchmark settings (Gao et al., 2022). Let  $P_t$  denote the population at generation  $t$ :
+
+**Initialization.** Construct the initial population  $P_0$  (e.g., random seeds, scaffold templates, or domain priors).
+
+**LLM-as-optimizer with  $k$ -offspring.** For every randomly selected pair of parents  $(x_i, x_j) \subseteq P_t$ , a proprietary commercial LLM (e.g., GPT, Gemini) proposes  $k$  candidate offspring:
+
+$$C_t(x_i, x_j) = \{y^{(1)}, \dots, y^{(k)}\}, \quad y^{(i)} \sim p_{\theta}(\cdot \mid (x_i, x_j), \text{task template}, E_t),$$
+
+{4}------------------------------------------------
+
+where  $p_\theta$  is the autoregressive distribution and  $E_t$  is the distilled experience from the previous generation (Section 3.1). The complete candidate set at iteration  $t$  is then
+
+$$C_t = \bigcup_{(x_i, x_j) \in \mathcal{M}(P_t)} C_t(x_i, x_j),$$
+
+where  $\mathcal{M}(P_t)$  denotes the set of parent pairs selected from the current population  $P_t$ . The prompt is constructed using a designed template that includes the task description, requirements, objective specifications, parent information, mutation/crossover instructions, output guidelines, and other constraints.
+
+**Feedback aggregation.** Each  $y \in C_t$  is evaluated to obtain: (i) a vector of objective values  $\mathbf{f}(y) = [f_1(y), \dots, f_M(y)]$ ; the raw objective values are preserved so that they can be explicitly included in the prompt, which facilitates the LLM’s understanding of task semantics. All objectives form a unified vector representation that is subsequently employed for Pareto-based selection. (ii) constraint values  $\mathbf{g}(y) = [g_1(y), \dots, g_J(y)]$ ; (iii) optional expert/textual feedback  $\xi(y)$ . The feedback adapter (Section 3.3) normalizes objectives into a comparable vector used for selection, and formats  $\mathbf{g}(y)$  and  $\xi(y)$  into compact, structured text that can be injected back to the LLM in the next generation.
+
+**Selection (Fitness + Pareto).** To construct the next generation, we employ a hybrid strategy: half of the candidates are selected by ranking according to the scalar fitness value
+
+$$F(y) = \sum_{i=1}^M w_i \hat{f}_i(y), \quad \sum_i w_i = 1, \quad (1)$$
+
+where weights are equal in our experiments, the remaining half are drawn from the Pareto front based on dominance relations over the normalized objective vectors. This design balances exploitation of high-performing individuals with preservation of diversity across the multi-objective space. Because some molecules may achieve relatively high fitness values and exhibit structural diversity with good potential, but share similar objective distributions which make them dominated by many other points, fitness-based selection ensures these candidates are retained. Meanwhile, molecules with lower fitness may still excel on specific objectives and remain non-dominated; such molecules are preserved by Pareto-front selection for their potential.
+
+**Experience update.** From all historically evaluated candidates up to generation  $t$ , we identify a set of *good* examples  $G_t$  (top- $r$  by  $F$ ) and sample a set of *bad* examples  $B_t$  uniformly from the lower half of the fitness ranking. We then update the experience  $E_{t+1}$  by combining  $E_t$  with distilled insights from  $G_t \cup B_t$  and discarding stale content; see Section 3.1. Then it jumps to LLM-as-optimizer with k-offspring and repeats until the total evaluation calls reach  $B$  (PMO protocol) (Gao et al., 2022).
+
+### 3.1 EVOLVING EXPERIENCE
+
+| Memory Method | Hypervolume | Top10 AUC | Uniqueness | LLM queries | Cost (USD) | Running time (h) | Memory (MB) |
+|-|-|-|-|-|-|-|-|
+| Retrieval-style | 0.427 $\pm$ 0.155 | 3.904 $\pm$ 0.427 | 0.139 $\pm$ 0.043 | 18055 $\pm$ 567 | > 100 | > 24 | $\approx$ 350 |
+| No memory | 0.545 $\pm$ 0.189 | 3.974 $\pm$ 0.061 | 0.511 $\pm$ 0.062 | 3625 $\pm$ 1036 | 6.246 $\pm$ 0.731 | 0.262 $\pm$ 0.069 | 0.000 $\pm$ 0.000 |
+| Our design | 0.750 $\pm$ 0.007 | 4.070 $\pm$ 0.026 | 0.615 $\pm$ 0.035 | 3312 $\pm$ 725 | 6.938 $\pm$ 0.796 | 0.393 $\pm$ 0.114 | 0.002 $\pm$ 0.000 |
+
+Table 1: Experiments with different memory mechanisms on a 5-objective molecular optimization task, identical to the task in Table 2, using Gemini-2.5-flash without thinking mode.
+
+**Why not a retrieval-style memory.** As discussed in Section 2.3, traditional memories maintain *per-query* summaries and then *re-inject* many of them at every LLM call. We implemented this variant as a control: after each generation, we summarize the new LLM outputs, rank the pool, and insert the top- $K$  ( $K \leq 100$ ) entries into every subsequent prompt (Table 1). In large discrete search, this leads to (i) **memory bloat** and higher prompt cost, (ii) **exploration collapse** with repeated proposals. Some runs of retrieval style memory were terminated early after repeatedly failing to produce novel valid candidates. Accordingly, the reported cost and runtime are lower bounds measured at termination, and memory is the approximate peak usage. We also observed a marked drop in uniqueness (sometimes
+
+{5}------------------------------------------------
+
+even below 10%) and hypervolume, large LLM query costs, significantly longer running time and much larger storage space used compared to no memory and our design.
+
+Prior work such as ReEvo or ExpeL uses summary-style memories for short-horizon reasoning. However, these designs are not suitable for large discrete optimization, where redundancy accumulation and exploration collapse are major problems. Here, we keep one continually updated experience  $E_t$  into few hundreds of words. It captures actionable, transferable cues (e.g., frequently binding constraints, robust edit patterns, common invalid cases) without retrieving multiple entries. This avoids prompt bloat and reduces the risk of over-constraining exploration. From all historically evaluated candidates up to generation  $t$ , form an evidence set  $D_t = G_t \cup B_t$ , where  $G_t$  are the top- $r$  candidates by fitness  $F$  and  $B_t$  are uniformly sampled from the lower-half of the fitness ranking. Let  $S_\theta(\cdot)$  denote the *same* LLM used by the optimizer, prompted to produce a single concise memo (a few hundred words) that merges new evidence with prior experience. We update:  $E_{t+1} = S_\theta(E_t, D_t)$  Operationally,  $S_\theta$  folds in “good” and “bad” cases to reduce bias, promotes non-redundant micro-insights, and overwrites outdated content so that  $E_t$  remains compact, general and up-to-date. At generation  $t+1$ ,  $E_{t+1}$  is inserted directly into the LLM context without retrievals. To prevent over-exploitation, the experience is included in the prompt with probability  $p_{\text{exp}} \in [0, 1]$ , sampled independently per call:
+
+$$\mathbb{I}\{\text{inject } E_t\} \sim \text{Bernoulli}(p_{\text{exp}}).$$
+
+This mechanism keeps prompts short on average, amortizes summarization cost (one update per generation), and maintains exploration headroom. We ablate  $p_{\text{exp}}$  in Section 6.3 and observe that intermediate values yield the best trade-off between sample efficiency and diversity.
+
+### 3.2 UTILIZE AUTOREGRESSIVE EXPLORATION BY $k$ -OFFSPRING
+
+How can we increase exploration within a closed-source LLM without finetuning? We exploit their autoregressive factorization to sample  $k$  offspring per parent in a single call. Because later proposals can condition on earlier samples within the same context, this yields *diverse-but-plausible* edits with low orchestration overhead. This strategy provides a simple way to strengthen exploratory breadth: under a fixed evaluation budget, generating the same number of candidates requires fewer LLM queries, fewer prompt tokens overall, and less running time than issuing one-off calls. However, overly large  $k$  may over-explore a local region and reduce marginal gains. We therefore study the trade-off by varying  $k$  and report the resulting gains and generalization under both single- and multi-objective settings in the ablations.
+
+### 3.3 HANDLING COMPLEX FEEDBACK AND GENERALIZATION
+
+The adapter normalizes all objectives to  $[0, 1]$  to prevent any large-magnitude objective from dominating the fitness; because our fitness follows a “larger-is-better” convention, we convert minimization goals to maximization by taking 1 minus their normalized values. (ii) Constraints and textual feedback are converted into a concise, formatted message that highlights violations, near-feasible margins, and expert hints. When a constraint is critical and variable, we optionally promote it to an explicit objective (e.g., minimize scaffold similarity or stellarator error), improving stability without parameter updates. We empirically validate these design choices and their impact on optimization in Appendix 6.2.2.
+
+Based on the efficient and effective evolving experience designed for large discrete search spaces, as well as the easy-to-scale  $k$ -offspring mechanism and the unified feedback adapter, our framework can be readily transferred to other problems and domains while maintaining strong performance. To facilitate adoption, we provide a simple template in which users only need to prepare two files: one specifying the task description and another defining the evaluation functions that return complex feedback. We demonstrate the strong performance of our framework across many problems and domains in Appendix 6.2.
+
+## 4 EXPERIMENT
+
+**Task Settings Five-objective optimization.** Following Wang et al. (2024a), we consider a five-objective molecular optimization task with a fixed evaluation budget of  $B=5,000$  oracle calls. The objectives are: minimize SA (Synthetic Accessibility), DRD2 (Dopamine Receptor D2 affinity),
+
+{6}------------------------------------------------
+
+and GSK3 $\beta$  (Glycogen Synthase Kinase 3 Beta); and maximize QED (Quantitative Estimate of Drug-likeness) and JNK3 (c-Jun N-terminal kinase 3). Although PMO (Gao et al., 2022) tasks are closely related to GuacaMol (Brown et al., 2019), PMO explicitly emphasizes budgeted evaluation due to the practical cost of property assessment (e.g., simulations or wet-lab proxies). A fixed budget thus encourages efficient exploration and enables fair comparison. While under a fixed budget, the initial population can substantially affect outcomes, yet this factor is often under-specified in evolution-based methods, and complete motivation is elaborated in Appendix 6.8. To control for it, we compute fitness over ZINC250K (Irwin et al., 2012) and construct three fixed initial populations (size 100 each): **Best-init**: top-100 by fitness; **Worst-init**: bottom-100; **Random-init**: 100 uniformly sampled molecules. All algorithms are run from the same three initial populations, yielding a fair and comprehensive comparison. Best- and random-initialization reflect common practical use, whereas worst-initialization stresses robustness on a harder search. Beyond this five-objective setting, we follow the official PMO protocols and evaluate the full PMO benchmark to assess overall generality. For all experiments unless otherwise noted, ExLLM uses a fixed set of parameters with fixed proprietary LLM, experience injection probability  $p_{\text{exp}}=0.5$ ,  $k=2$ , crossover probability 0.8, mutation probability 0.2, and population size 50. For the five-objective experiments, we reproduce MOLLEO using their code and use GPT-4o-2024-05-13 for both MOLLEO and our model.
+
+**Metrics** Objectives are normalized and direction-unified as in Sec. 3.3; fitness  $F$  follows Eq. equation 1 with equal weights, consistent with Wang et al. (2024a). **Hypervolume**. Multi-objective coverage on the normalized (maximization) objective vectors using the reference point  $\mathbf{r} = (1.1, \dots, 1.1)$ ; larger values indicate better Pareto coverage. **AUC** Area under the curve of  $F$  versus oracle evaluations up to budget  $B$ ; this rewards methods that reach high values with fewer oracle calls (Gao et al., 2022). **Validity**: fraction passing RDKit parsing. **Uniqueness**: fraction of unique molecules proposed. **Novelty**: fraction absent from ZINC250K. **Diversity**: average pairwise Tanimoto distance between the Morgan fingerprints within the top-100. **Efficiency** LLM queries, API cost (USD), wall-clock time (hours) under the same budget.
+
+**Baselines** We compare against strong baselines spanning GA, BO, MCMC, RL, DL, and LLM-based methods: GB-GA, GB-BO, JT-VAE, MARS, REINVENT, MOLLEO, DyMol, and Genetic-GFN. For PMO-provided implementations (GB-GA, GB-BO, JT-VAE, MARS, REINVENT), we use the official PMO code and its default hyperparameters. For MOLLEO, DyMol, and Genetic-GFN, we use the authors’ public code with their default settings as documented in code/papers. For RL-based baselines (REINVENT, DyMol, Genetic-GFN), we use the scalar fitness  $F$  as the reward signal during training.
+
+### 4.1 FIVE-OBJECTIVE EXPERIMENT RESULTS
+
+| Metric | Initial | GB-GA | JT-VAE | GB-BO | MARS | REINVENT | MOLLEO | DyMol | Genetic-GFN | ExLLM(ours) |
+|-|-|-|-|-|-|-|-|-|-|-|
+| (Worst initial) |  |  |  |  |  |  |  |  |  |  |
+| Top1 F | 2.689 | 4.048 $\pm$ 0.114 | 3.838 $\pm$ 0.042 | 3.665 $\pm$ 0.129 | 3.891 $\pm$ 0.018 | N/A | 4.096 $\pm$ 0.155 | N/A | N/A | 4.229 $\pm$ 0.050 |
+| Top10 F | 2.683 | 4.019 $\pm$ 0.101 | 3.784 $\pm$ 0.027 | 3.647 $\pm$ 0.135 | 3.852 $\pm$ 0.019 | N/A | 4.044 $\pm$ 0.157 | N/A | N/A | 4.186 $\pm$ 0.029 |
+| AUC-Top10 | N/A | 3.789 $\pm$ 0.079 | 3.712 $\pm$ 0.027 | 3.489 $\pm$ 0.104 | 3.740 $\pm$ 0.010 | N/A | 3.825 $\pm$ 0.102 | N/A | N/A | 3.915 $\pm$ 0.010 |
+| Hypervolume | 0.163 | 0.474 $\pm$ 0.190 | 0.364 $\pm$ 0.075 | 0.167 $\pm$ 0.050 | 0.488 $\pm$ 0.110 | N/A | 0.720 $\pm$ 0.172 | N/A | N/A | 0.737 $\pm$ 0.038 |
+| Diversity | 0.876 | 0.583 $\pm$ 0.032 | 0.847 $\pm$ 0.007 | 0.657 $\pm$ 0.033 | 0.826 $\pm$ 0.011 | N/A | 0.656 $\pm$ 0.111 | N/A | N/A | 0.603 $\pm$ 0.055 |
+| Uniqueness | N/A | 0.786 $\pm$ 0.032 | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 0.488 $\pm$ 0.128 | N/A | 0.672 $\pm$ 0.032 | N/A | N/A | 0.829 $\pm$ 0.021 |
+| Validity | N/A | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | N/A | 0.930 $\pm$ 0.075 | N/A | N/A | 0.937 $\pm$ 0.010 |
+| (Random initial) |  |  |  |  |  |  |  |  |  |  |
+| Top1 F | 3.804 | 4.017 $\pm$ 0.095 | 3.874 $\pm$ 0.067 | 4.003 $\pm$ 0.121 | 3.931 $\pm$ 0.055 | 4.230 $\pm$ 0.196 | 4.190 $\pm$ 0.076 | 4.232 $\pm$ 0.170 | 4.243 $\pm$ 0.253 | 4.336 $\pm$ 0.246 |
+| Top10 F | 3.741 | 3.975 $\pm$ 0.095 | 3.831 $\pm$ 0.019 | 3.968 $\pm$ 0.104 | 3.868 $\pm$ 0.025 | 4.136 $\pm$ 0.219 | 4.076 $\pm$ 0.020 | 4.164 $\pm$ 0.132 | 4.202 $\pm$ 0.213 | 4.300 $\pm$ 0.164 |
+| AUC-Top10 | N/A | 3.861 $\pm$ 0.052 | 3.771 $\pm$ 0.011 | 3.802 $\pm$ 0.057 | 3.789 $\pm$ 0.011 | 3.930 $\pm$ 0.133 | 3.949 $\pm$ 0.021 | 4.001 $\pm$ 0.054 | 4.078 $\pm$ 0.150 | 4.116 $\pm$ 0.040 |
+| Hypervolume | 0.236 | 0.643 $\pm$ 0.268 | 0.428 $\pm$ 0.127 | 0.507 $\pm$ 0.287 | 0.409 $\pm$ 0.111 | 0.742 $\pm$ 0.259 | 0.860 $\pm$ 0.088 | 0.868 $\pm$ 0.146 | 0.871 $\pm$ 0.288 | 0.905 $\pm$ 0.200 |
+| Diversity | 0.884 | 0.623 $\pm$ 0.047 | 0.778 $\pm$ 0.012 | 0.717 $\pm$ 0.017 | 0.819 $\pm$ 0.015 | 0.640 $\pm$ 0.111 | 0.670 $\pm$ 0.015 | 0.581 $\pm$ 0.069 | 0.633 $\pm$ 0.066 | 0.494 $\pm$ 0.032 |
+| Uniqueness | N/A | 0.821 $\pm$ 0.032 | 0.956 $\pm$ 0.005 | 1.000 $\pm$ 0.000 | 0.477 $\pm$ 0.120 | 0.690 $\pm$ 0.132 | 0.575 $\pm$ 0.075 | 0.986 $\pm$ 0.005 | 0.349 $\pm$ 0.004 | 0.872 $\pm$ 0.015 |
+| Validity | N/A | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 0.999 $\pm$ 0.000 | 0.979 $\pm$ 0.002 | 0.938 $\pm$ 0.007 | 1.000 $\pm$ 0.000 | 0.998 $\pm$ 0.000 | 0.908 $\pm$ 0.019 |
+| (Best initial) |  |  |  |  |  |  |  |  |  |  |
+| Top1 F | 4.329 | 4.583 $\pm$ 0.154 | 4.329 $\pm$ 0.000 | 4.605 $\pm$ 0.047 | 4.419 $\pm$ 0.074 | N/A | 4.699 $\pm$ 0.000 | N/A | N/A | 4.699 $\pm$ 0.000 |
+| Top10 F | 4.132 | 4.583 $\pm$ 0.167 | 4.132 $\pm$ 0.000 | 4.467 $\pm$ 0.066 | 4.181 $\pm$ 0.029 | N/A | 4.564 $\pm$ 0.064 | N/A | N/A | 4.626 $\pm$ 0.043 |
+| AUC-Top10 | N/A | 4.130 $\pm$ 0.088 | 4.091 $\pm$ 0.000 | 4.237 $\pm$ 0.112 | 4.137 $\pm$ 0.028 | N/A | 4.362 $\pm$ 0.075 | N/A | N/A | 4.481 $\pm$ 0.055 |
+| Hypervolume | 0.917 | 0.968 $\pm$ 0.183 | 0.917 $\pm$ 0.000 | 1.275 $\pm$ 0.027 | 0.975 $\pm$ 0.041 | N/A | 1.168 $\pm$ 0.106 | N/A | N/A | 1.175 $\pm$ 0.067 |
+| Diversity | 0.793 | 0.424 $\pm$ 0.070 | 0.792 $\pm$ 0.001 | 0.630 $\pm$ 0.024 | 0.788 $\pm$ 0.002 | N/A | 0.600 $\pm$ 0.052 | N/A | N/A | 0.491 $\pm$ 0.057 |
+| Uniqueness | N/A | 0.729 $\pm$ 0.041 | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 0.432 $\pm$ 0.053 | N/A | 0.678 $\pm$ 0.000 | N/A | N/A | 0.942 $\pm$ 0.006 |
+| Validity | N/A | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 1.000 $\pm$ 0.000 | 0.999 $\pm$ 0.000 | N/A | 0.913 $\pm$ 0.022 | N/A | N/A | 0.790 $\pm$ 0.024 |
+
+Table 2: Unconstrained molecular design results, objectives: QED $\uparrow$  + SA $\downarrow$  + DRD2 $\downarrow$  + GSK3 $\beta$   $\downarrow$  + JNK3 $\uparrow$
+
+{7}------------------------------------------------
+
+Table 2 reports mean  $\pm$  std over five seeds; best scores are **bold** and second best are underlined. RL-based baselines (REINVENT, DyMol, Genetic-GFN) do not expose a mechanism to fix the initial population, so they are included only in the random-init condition. ExLLM attains the best  $F$  and AUC across all settings. For hypervolume, ExLLM is best under **worst-init** and **random-init**, and second best under **best-init**. In both random- and worst-initialization, the **mean Top-10**  $F$  of ExLLM exceeds the **Top-1**  $F$  of the second-best method, indicating strong improvement under the same budget. Novelty w.r.t. ZINC 250K is near 100% across models and settings; since this offers little differentiation for our objectives, we omit it from the table for space. Under best-init, MOLLEO matches ExLLM on Top-1  $F$ , but ExLLM’s mean Top-10  $F$  and AUC remain higher than all other methods, suggesting more reliable batch-level gains. ExLLM maintains **80–95% uniqueness** across three settings, while MOLLEO is typically **55–70%**, because they use the same LLM, this indicates our framework has higher exploration ability. Validity is slightly lower than some baselines because we generate SMILES and discard invalid strings rather than post-hoc repairing them; this has negligible impact on final outcomes, and PMO notes SMILES is not necessarily inferior to 100%-valid representations (Gao et al., 2022). The diversity of the final top-100 set is somewhat lower, which reflects a common fitness–diversity trade-off: tighter, high-value exploration can reduce spread. Notably, ExLLM delivers substantial gains over the initial populations in all three init schemes, while trading some diversity for finer exploitation; coverage remains competitive as evidenced by strong hypervolume.
+
+### 4.2 RESULTS ON PMO
+
+| Task type | Objective(?) | REINVENT | Augmented Memory | Graph GA | GP BO | MOLLEO | Genetic GFN | ExLLM (Ours) |
+|-|-|-|-|-|-|-|-|-|
+| Property optimization | QED | 0.941 $\pm$ 0.000 | 0.941 $\pm$ 0.000 | 0.940 $\pm$ 0.000 | 0.937 $\pm$ 0.000 | <b>0.948<math>\pm</math>0.000</b> | 0.942 $\pm$ 0.000 | 0.943 $\pm$ 0.000 |
+|  | JNKC1 | 0.783 $\pm$ 0.023 | 0.773 $\pm$ 0.073 | 0.553 $\pm$ 0.136 | 0.564 $\pm$ 0.155 | <b>0.790<math>\pm</math>0.027</b> | 0.764 $\pm$ 0.060 | 0.732 $\pm$ 0.078 |
+|  | DRD2 | 0.945 $\pm$ 0.007 | 0.962 $\pm$ 0.005 | 0.964 $\pm$ 0.012 | 0.923 $\pm$ 0.017 | 0.968 $\pm$ 0.012 | 0.974 $\pm$ 0.006 | <b>0.980<math>\pm</math>0.003</b> |
+|  | GSK3 $\beta$ | <b>0.865<math>\pm</math>0.043</b> | <b>0.889<math>\pm</math>0.027</b> | 0.788 $\pm$ 0.070 | 0.851 $\pm$ 0.041 | 0.863 $\pm$ 0.047 | <b>0.881<math>\pm</math>0.050</b> | 0.818 $\pm$ 0.050 |
+|  | mestranol_similarity | 0.618 $\pm$ 0.048 | 0.764 $\pm$ 0.035 | 0.579 $\pm$ 0.022 | 0.627 $\pm$ 0.089 | 0.972 $\pm$ 0.009 | 0.708 $\pm$ 0.057 | <b>0.980<math>\pm</math>0.005</b> |
+| Name-based optimization | albuterol_similarity | 0.896 $\pm$ 0.008 | 0.918 $\pm$ 0.026 | 0.874 $\pm$ 0.020 | 0.902 $\pm$ 0.019 | 0.985 $\pm$ 0.024 | 0.949 $\pm$ 0.010 | <b>0.989<math>\pm</math>0.000</b> |
+|  | thiothixene_rediscovcry | 0.534 $\pm$ 0.013 | 0.562 $\pm$ 0.028 | 0.479 $\pm$ 0.025 | 0.559 $\pm$ 0.027 | <b>0.727<math>\pm</math>0.052</b> | 0.583 $\pm$ 0.034 | <b>0.910<math>\pm</math>0.004</b> |
+|  | celecoxib_rediscovcry | 0.716 $\pm$ 0.084 | 0.784 $\pm$ 0.011 | 0.582 $\pm$ 0.057 | 0.728 $\pm$ 0.048 | <b>0.864<math>\pm</math>0.034</b> | <b>0.891<math>\pm</math>0.033</b> | <b>0.891<math>\pm</math>0.033</b> |
+|  | trogiluzone_rediscovcry | 0.452 $\pm$ 0.048 | 0.556 $\pm$ 0.052 | 0.377 $\pm$ 0.019 | 0.405 $\pm$ 0.007 | 0.562 $\pm$ 0.019 | 0.511 $\pm$ 0.054 | <b>0.726<math>\pm</math>0.111</b> |
+|  | perindopril_mpo | 0.537 $\pm$ 0.016 | 0.598 $\pm$ 0.008 | 0.538 $\pm$ 0.009 | 0.493 $\pm$ 0.011 | 0.600 $\pm$ 0.031 | 0.595 $\pm$ 0.014 | <b>0.797<math>\pm</math>0.016</b> |
+|  | ranolazine_mpo | 0.760 $\pm$ 0.009 | <b>0.802<math>\pm</math>0.003</b> | 0.728 $\pm$ 0.012 | 0.735 $\pm$ 0.013 | 0.769 $\pm$ 0.022 | 0.819 $\pm$ 0.018 | <b>0.855<math>\pm</math>0.021</b> |
+|  | sitagliptin_mpo | 0.021 $\pm$ 0.003 | 0.479 $\pm$ 0.039 | 0.433 $\pm$ 0.075 | 0.186 $\pm$ 0.055 | 0.584 $\pm$ 0.067 | <b>0.634<math>\pm</math>0.039</b> | <b>0.555<math>\pm</math>0.048</b> |
+|  | amlodipine_mpo | 0.642 $\pm$ 0.044 | 0.686 $\pm$ 0.046 | 0.625 $\pm$ 0.040 | 0.552 $\pm$ 0.025 | <b>0.773<math>\pm</math>0.037</b> | 0.761 $\pm$ 0.019 | <b>0.874<math>\pm</math>0.010</b> |
+|  | feofenadine_mpo | 0.769 $\pm$ 0.009 | 0.686 $\pm$ 0.010 | 0.779 $\pm$ 0.025 | 0.745 $\pm$ 0.009 | <b>0.847<math>\pm</math>0.018</b> | 0.856 $\pm$ 0.035 | <b>0.984<math>\pm</math>0.006</b> |
+|  | osimertinib_mpo | 0.834 $\pm$ 0.046 | 0.856 $\pm$ 0.013 | 0.808 $\pm$ 0.012 | 0.762 $\pm$ 0.029 | 0.835 $\pm$ 0.024 | 0.860 $\pm$ 0.008 | <b>0.902<math>\pm</math>0.018</b> |
+|  | zaleplon_mpo | 0.347 $\pm$ 0.049 | 0.438 $\pm$ 0.082 | 0.456 $\pm$ 0.007 | 0.272 $\pm$ 0.026 | 0.510 $\pm$ 0.031 | 0.552 $\pm$ 0.033 | <b>0.723<math>\pm</math>0.007</b> |
+|  | medan1 | <b>0.372<math>\pm</math>0.015</b> | 0.335 $\pm$ 0.012 | 0.287 $\pm$ 0.008 | 0.325 $\pm$ 0.012 | 0.352 $\pm$ 0.024 | 0.379 $\pm$ 0.010 | <b>0.384<math>\pm</math>0.007</b> |
+|  | medan2 | 0.294 $\pm$ 0.006 | 0.290 $\pm$ 0.006 | 0.229 $\pm$ 0.017 | <b>0.308<math>\pm</math>0.034</b> | 0.275 $\pm$ 0.045 | <b>0.294<math>\pm</math>0.007</b> | <b>0.475<math>\pm</math>0.002</b> |
+|  | isomers_c7h8n2o2 | 0.842 $\pm$ 0.029 | 0.954 $\pm$ 0.033 | 0.949 $\pm$ 0.036 | 0.662 $\pm$ 0.071 | <b>0.984<math>\pm</math>0.008</b> | 0.969 $\pm$ 0.003 | <b>0.984<math>\pm</math>0.001</b> |
+|  | isomers_c9h10n2o2p2cl | 0.642 $\pm$ 0.054 | 0.830 $\pm$ 0.016 | 0.719 $\pm$ 0.047 | 0.469 $\pm$ 0.180 | <b>0.874<math>\pm</math>0.053</b> | 0.897 $\pm$ 0.007 | <b>0.961<math>\pm</math>0.028</b> |
+|  | deco_hop | 0.666 $\pm$ 0.044 | 0.688 $\pm$ 0.060 | 0.619 $\pm$ 0.004 | 0.629 $\pm$ 0.018 | <b>0.942<math>\pm</math>0.013</b> | 0.733 $\pm$ 0.109 | <b>0.856<math>\pm</math>0.014</b> |
+|  | scaffold_hop | 0.560 $\pm$ 0.019 | 0.565 $\pm$ 0.008 | 0.517 $\pm$ 0.007 | 0.548 $\pm$ 0.019 | <b>0.971<math>\pm</math>0.004</b> | 0.615 $\pm$ 0.100 | 0.916 $\pm$ 0.127 |
+|  | valrsatan_smarts | 0.000 $\pm$ 0.000 | 0.000 $\pm$ 0.000 | 0.000 $\pm$ 0.000 | 0.000 $\pm$ 0.000 | <b>0.867<math>\pm</math>0.092</b> | 0.135 $\pm$ 0.271 | <b>0.831<math>\pm</math>0.043</b> |
+| Total (?) |  | 14.036 | 15.356 | 13.823 | 13.182 | 17.862 | 16.213 | <b>19.165</b> |
+| Rank (↓) |  | 7 | 5 | 8 | 9 | 2 | 4 | <b>1</b> |
+
+Table 3: Top-10 AUC of tasks in PMO (Gao et al., 2022) benchmark, including single-objective optimization and multi-objective optimization for 3 task types. ExLLM attains a total score of **19.165** (+7.3% improvement compared to the previous SOTA by MOLLEO), ranking **first in 17/23 tasks** and achieving the highest overall ranking. The models with 3rd and 6th total score are in the additional LLM-based results in Appendix 6.4.
+
+We evaluate ExLLM on the full PMO suite covering property, name-based, and structure-based optimization (Table 3). Best values are **bold**; the second and third best are underlined. Following the official scoring, we report an aggregate leaderboard score with a maximum of 23 points. ExLLM attains a total score of 19.165, ranking first in 17/23 tasks and achieving the highest overall ranking. Compared to the previous SOTA (17.862), this corresponds to a +7.3% improvement in the aggregate score. To assess the contribution of the experience module, we also report an ablation without the evolving experience (ExLLM w/o experience), which still reaches **18.165**. This result suggests that the k-offspring exploration is a strong contributor on its own, while the evolving experience provides consistent additional gains overall.
+
+{8}------------------------------------------------
+
+Table 4: MOCPOP benchmark. ExLLM achieves SOTA on MOCVRP and ranks highly on MOTSP.
+
+| Method | MOTSP $\uparrow$ | MOCVRP $\uparrow$ |
+|-|-|-|
+| Pymoo | 0.983 | 0.956 |
+| ReEvo | <b>1.029</b> | <b>1.035</b> |
+| AIDE | 1.021 | 1.006 |
+| FunSearch | 1.023 | 1.032 |
+| AlphaEvolve | <b>1.0293</b> | 1.0318 |
+| <b>ExLLM</b> | 1.0273 | <b>1.0704</b> |
+
+Table 7: Circle packing ( $n=26-32$ ), rotated for compact layout. ExLLM improves all best-known results.
+
+| n | Record | ExLLM |
+|-|-|-|
+| 26 | 2.635977 (AlphaEvolve (Novikov et al., 2025a)) | <b>2.635983</b> |
+| 27 | 2.685+ (Friedman, 2025) | <b>2.68598</b> |
+| 28 | 2.737+ (Friedman, 2025) | 2.73740 |
+| 29 | 2.790+ (Friedman, 2025) | 2.79034 |
+| 30 | 2.842+ (Friedman, 2025) | 2.84267 |
+| 31 | 2.889+ (Friedman, 2025) | 2.88997 |
+| 32 | 2.937+ (AlphaEvolve (Novikov et al., 2025a)) | 2.939+ |
+
+Table 5: Offshore platform jackets optimization. ExLLM finds the lightest feasible design.
+
+| Method | Weight $\downarrow$ | Stress $\downarrow$ |
+|-|-|-|
+| Human | 218.0 | 0.024 |
+| GA | 32.24 | 0.093 |
+| MOEAD | 37.76 | 0.137 |
+| RS | 49.33 | 0.435 |
+| Ablation | 14.90 | 0.814 |
+| <b>ExLLM</b> | <b>13.60</b> | <b>0.508</b> |
+
+Table 6: Stellarator optimization (ConStellaration). ExLLM exceeds official SOTA on P2/P3.
+
+| Method | P2 $\uparrow$ | P3 $\uparrow$ |
+|-|-|-|
+| trust-constr | Fail | Fail |
+| COBYQA | Fail | Fail |
+| ALM-NGOpt | 0.431 | 129.796 (97) |
+| <b>ExLLM</b> | <b>0.505</b> | <b>133.634 (103)</b> |
+
+Table 8: NK2R peptide design (AlphaFold3 ipTM). ExLLM peptides outperform natural ligand NKA.
+
+|  | Peptide ipTM(NKA) | ipTM(ours) | $\Delta$ |
+|-|-|-|-|
+| P1 | 0.09 | 0.87 | 0.78 |
+| P2 | 0.10 | 0.88 | 0.78 |
+| P3 | 0.12 | 0.88 | 0.76 |
+| P4 | 0.12 | 0.88 | 0.76 |
+| P5 | 0.11 | 0.86 | 0.75 |
+| P6 | 0.10 | 0.84 | 0.74 |
+| P7 | 0.13 | 0.87 | 0.74 |
+| P8 | 0.14 | 0.88 | 0.74 |
+| P9 | 0.11 | 0.85 | 0.74 |
+| P10 | 0.13 | 0.87 | 0.74 |
+
+### 4.3 EXTENDED EXPERIMENTS
+
+**Cross-domain transfer.** To fully demonstrate the generalizability of ExLLM, we conduct experiments in multiple domains, including circle packing (mathematics), stellarator coil optimization (physics), and offshore jacket structural analysis (offshore structural engineering), MOTSP and MOCVRP (classical optimization problems), NK2R peptide design (peptide-drug discovery), GCU operator optimization (high performance computing kernel design). ExLLM achieves new records on circle packing and stellarator design benchmark (ConStellaration Cadena et al. (2025)), and achieves SOTA performance on MOCVRP and offshore jacket structural optimization, and competitive performance on MOTSP, peptide design and kernel optimization.
+
+**Circle packing in a unit square** Given an integer  $n$ , the task is to place  $n$  congruent circles inside the unit square while maximizing the common radius  $r$  subject to two strict feasibility constraints: (i) no overlaps,  $\|c_i - c_j\|_2 \geq 2r$ , and (ii) all circle centers must satisfy  $r \leq x_i, y_i \leq 1 - r$ . The optimization landscape is very unstable, sub-millimeter changes in coordinates easily break feasibility, and the input state  $(x_i, y_i, r)$  provides no structural cues for the model. Only a single scalar objective (the sum of radius) is returned, making gradient-free global search difficult. As shown in Table 7, ExLLM attains new **best-known** radii for  $n = 26$  and  $n = 32$  and **matches** all published records for  $n = 27-31$ . Existing records for these middle cases are available only to three decimal places, so it is unclear whether ExLLM further improves beyond that precision. These results are achieved with the same hyperparameters used in all other domains, demonstrating ExLLM’s ability to solve highly sensitive geometric-continuous problems under strict feasibility constraints.
+
+**Stellarator Design** The ConStellaration benchmark defines two quasi-isodynamic (QI) stellarator optimization tasks: (P2) maximizing a coil-friendly QI score under five physics constraints, and (P3) jointly optimizing MHD stability and coil simplicity under the five physics constraints as well. A design is scored only if *all* constraints are satisfied; otherwise, its score is zero. The feasible region is extremely narrow, and small geometric deviations can simultaneously violate multiple plasma-physics constraints. Standard baselines (trust-constr, COBYQA) fail to find any feasible point. As shown in Table 6, ExLLM consistently identifies feasible solutions and achieves new SOTA on both tasks: a 17% improvement on P2 (0.505 vs. 0.431), a 3% improvement on P3 (133.634
+
+{9}------------------------------------------------
+
+vs. 129,796) and a **6%** improvement on the single point (97 vs. 103) on P3. This demonstrates that ExLLM can navigate fragile multi-constraint physics landscapes without any domain-specific tuning.
+
+**Offshore jacket optimization** The SACS benchmark requires optimizing offshore jacket structures under three competing engineering goals: minimizing total weight, while satisfying axial-load and bending/torsional stress limits. Each candidate is evaluated by commercial SACS finite-element analysis, which provides only black-box outputs (weight and stress ratios). The search space mixes discrete structural-section choices with continuous dimensions, and SACS evaluations are costly, making sample efficiency critical. Table 5 shows that ExLLM finds a feasible design weighing only **13.6 tons**, more than **93%** lighter than the 218-ton human baseline, while satisfying all stress constraints. It also outperforms GA, MOEAD, and random search. This highlights ExLLM’s capacity to handle mixed-variable engineering optimization with expensive, black-box oracles.
+
+**MOCPOP** The Multi-Objective Traveling Salesman Problem (MOTSP) and the Multi-Objective Capacitated Vehicle Routing Problem (MOCVRP) tasks involve large-scale ( $n = 100$ ) routing under strict permutation and capacity constraints. Both problems exhibit strong multi-objective conflict: small changes in coordinates or routes can drastically alter feasibility or the relative objective ordering, and scalarized heuristics often collapse the Pareto front. As reported in Table 4, ExLLM achieves **new SOTA hypervolume** on MOCVRP and ranks second only to AlphaEvolve on MOTSP, outperforming strong baselines such as Pymoo, ReEvo, AIDE, and FunSearch. These results show that ExLLM effectively reasons over discrete combinatorial structures and generates high-quality, feasible offspring without relying on brittle crossover heuristics.
+
+**NK2R peptide design** The NK2R task requires designing peptides that (i) share  $< 30\%$  sequence similarity with the native ligand NKA and (ii) achieve higher AlphaFold3 complex ipTM with NK2R. Because similarity rules, formatting constraints, and ipTM comparison to NKA jointly determine success, most candidates score zero and the landscape is extremely sparse. Table 8 shows that ExLLM produces many peptides surpassing NKA within 1,000 evaluations, with best margins around **+0.78**. All reported peptides satisfy the similarity and length constraints. This indicates that ExLLM can perform constrained molecular design using only AF3 black-box feedback.
+
+**GCU operator design** This domain evaluates whether ExLLM can generate high-performance GPU kernels for Tencent’s GCU across three operators (Var, SiLU, GEMM v2). The task is challenging due to a new programming model, scarce public examples, strict compiler requirements, and 5–10 minute compile–run cycles where naive LLM code fails  $> 90\%$  of the time. With only 300 evaluations per operator, ExLLM raises compile success from  $< 10\%$  to **about 85%**, produces fully correct kernels, and significantly improves execution latency. These submissions placed in the **top-10** of the Tencent Kaiwu 2025 competition qualifier and earned a **second prize award**, with all submitted kernels fully LLM-generated and no manual code edits. This demonstrates ExLLM’s ability to operate in real-world domain-shifted, performance-critical code-generation settings.
+
+## 5 CONCLUSION
+
+We presented **ExLLM**, an LLM-as-optimizer framework for large discrete optimization, instantiated for multi-objective molecular design. The method couples three simple components: a *single, evolving experience* that distills non-redundant cues at low cost; a *k-offspring* sampling scheme that widens exploration per query; and a *feedback adapter* that normalizes objectives for selection while formatting constraints and expert hints for iteration. Under a fixed evaluation budget, ExLLM attains state-of-the-art results on PMO (total score **19.165**, ranking first on **17/23** tasks, **+7.3%** over prior SOTA) and generalizes beyond chemistry, setting new records on circle packing and stellarator design while delivering strong performance across additional domains including offshore jacket optimization, MOCPOP benchmark, peptide design and GCU kernel optimization. The probabilistic experience injection improves efficiency without over-constraining exploration. Looking forward, we plan to (i) adapt  $k$  and the experience-injection rate online, (ii) incorporate oracle uncertainty and 3D/physics-informed feedback, and (iii) broaden evaluation to additional scientific design tasks. We release templates for rapid transfer, lowering the barrier to applying ExLLM as a general optimizer for large discrete spaces.
+
+ Rest of paper (reference and Appendix) is removed.

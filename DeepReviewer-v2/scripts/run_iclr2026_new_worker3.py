@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = Path('/home/wg25r/split_review/datasets/iclr2026_new')
-WORKERS = 1
+WORKERS = 3
 
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
@@ -21,8 +21,9 @@ os.environ['MIN_PAPER_SEARCH_CALLS_FOR_PDF_ANNOTATE'] = '0'
 os.environ['MIN_PAPER_SEARCH_CALLS_FOR_FINAL'] = '0'
 os.environ['MIN_DISTINCT_PAPER_QUERIES_FOR_FINAL'] = '0'
 
-
+import time
 def run_pdf(pdf_path_text: str) -> dict:
+    # time.sleep(60)
     os.chdir(ROOT)
     sys.path.insert(0, str(ROOT))
     os.environ['PARSED_PAPERS_DIR'] = str(DATASET / 'papers')
@@ -42,10 +43,10 @@ def run_pdf(pdf_path_text: str) -> dict:
     run_job(str(job.id))
 
     state = load_job_state(job.id)
-    if state is None:
-        raise RuntimeError(f'Job state missing after run: {job.id}')
-    if state.status.value != 'completed':
-        raise RuntimeError(f'Job failed: {job.id}: {state.error}')
+    # if state is None:
+    #     raise RuntimeError(f'Job state missing after run: {job.id}')
+    # if state.status.value != 'completed':
+    #     raise RuntimeError(f'Job failed: {job.id}: {state.error}')
 
     return {
         'event': 'sample_done',
@@ -97,6 +98,8 @@ print(json.dumps(start, ensure_ascii=False), flush=True)
 with out_path.open('a', encoding='utf-8') as f:
     f.write(json.dumps(start, ensure_ascii=False) + '\n')
 
+# print("Waiting 20 minutes before starting processing to stagger workers...")
+# time.sleep(1200)
 with ProcessPoolExecutor(max_workers=WORKERS) as pool:
     futures = [pool.submit(run_pdf, str(pdf_path)) for pdf_path in pdfs_to_run]
     for future in as_completed(futures):

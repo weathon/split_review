@@ -3,16 +3,16 @@ set -e
 
 cd "$(dirname "$0")"
 
-PAPER="papers/ghost_mango_cvpr_2026.pdf"
+# PAPER="papers/auro_zera_final.pdf"
+PAPER="papers/flg.pdf"
 # PAPER="/home/wg25r/review_agent/new/ELErARGR5U.md"
 LOG="run.log"
 
 export ANTHROPIC_API_KEY=""
 export OPENAI_DEFAULT_MODEL="glm-5.1"
-export HARSH_MODEL="deepseek-v4-flash"
-export MERGER_MODEL="deepseek-v4-flash"
-export NEUTRAL_MODEL="deepseek-v4-flash"
-
+export HARSH_MODEL="claude_sdk:claude-sonnet-4-6"
+export MERGER_MODEL="claude_sdk:claude-sonnet-4-6"
+export NEUTRAL_MODEL="deepseek-v4-pro"
 # export HARSH_MODEL="ollama:glm-5.1:cloud"
 # export MERGER_MODEL="ollama:glm-5.1:cloud"
 # export NEUTRAL_MODEL="ollama:glm-5.1:cloud"

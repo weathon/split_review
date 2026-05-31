@@ -25,7 +25,8 @@ sys.path.insert(0, str(_REPO_ROOT / "code"))
 import numpy as np
 import dotenv
 from rank_bm25 import BM25Okapi
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
+from datalab_sdk import AsyncDatalabClient, ConvertOptions
 
 from paths import DATASETS_DIR, RESULTS_DIR, ensure_hf_file, prompt_path
 from oh_agent_sdk import (
@@ -58,6 +59,7 @@ else:
     _IDX_FILE = "human_review_score_index_deepreview.pkl"
 
 _or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"))
+async_or_client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv("OPENROUTER_API_KEY"))
 
 # ── Prompt loading ───────────────────────────────────────────────────
 with open(prompt_path("timeline.md"), "r") as _f:
@@ -332,7 +334,10 @@ The paper was extracted from PDF by an automated parser. Treat formatting artifa
 Paper path: {paper_path}. Use read_file (which reads the whole file by default) to read the paper end-to-end before reviewing."""
 
 
-async def run_pipeline(paper_path: str) -> dict:
+async def run_pipeline(paper_path: str):
+    """Yield (variant_name, variant_result) as each merger finishes, so callers
+    can flush per-variant outputs incrementally instead of waiting for both
+    mergers to complete."""
     paper_abs = os.path.abspath(paper_path)
     paper_dir = str(Path(paper_abs).parent)
 
@@ -362,7 +367,7 @@ async def run_pipeline(paper_path: str) -> dict:
         no_cal=True,
         max_turns=15,
     )
-    (harsh_text, harsh_usage), (neutral_text, neutral_usage) = await asyncio.gather(harsh_task, neutral_task)
+    (harsh_text, _harsh_usage), (neutral_text, _neutral_usage) = await asyncio.gather(harsh_task, neutral_task)
 
     labeled = f"### Harsh Critic\n{harsh_text}\n\n### Strength Finder\n{neutral_text}"
 
@@ -375,7 +380,11 @@ async def run_pipeline(paper_path: str) -> dict:
         f"Cross-check every claim against the actual paper."
     )
 
-    variants: dict[str, dict] = {}
+    log_path = Path(os.environ.get("MERGE_LOG", str(RESULTS_DIR / "pipeline.log")))
+    if not log_path.is_absolute():
+        log_path = RESULTS_DIR / log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
     for variant_name, no_cal in (("cal", False), ("no_cal", True)):
         merger_system = load_prompt(
             "merger_position.md" if _POSITION_MODE else "merger.md",
@@ -396,17 +405,48 @@ async def run_pipeline(paper_path: str) -> dict:
         )
         score = float(merged.split("<score>")[1].split("</score>")[0]) if "<score>" in merged else -1
         decision = merged.split("<decision>")[1].split("</decision>")[0] if "<decision>" in merged else "N/A"
-        variants[variant_name] = {
+
+        if score == -1 or decision == "N/A":
+            print(f"  ⚠️  Parsing failed (score={score}, decision={decision}); falling back to deepseek-v4-flash extractor")
+            extractor_resp = await async_or_client.chat.completions.create(
+                model="deepseek/deepseek-v4-flash",
+                messages=[
+                    {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text."},
+                    {"role": "user", "content": merged},
+                ],
+                extra_body={"reasoning": {"enabled": False}},
+            )
+            extracted = extractor_resp.choices[0].message.content or ""
+            if score == -1 and "<score>" in extracted:
+                score = float(extracted.split("<score>")[1].split("</score>")[0])
+            if decision == "N/A" and "<decision>" in extracted:
+                decision = extracted.split("<decision>")[1].split("</decision>")[0]
+            print(f"  [extractor] score={score} decision={decision}")
+
+        token_lines = []
+        for name, usage in (("Harsh Critic", _harsh_usage), ("Strength Finder", _neutral_usage), ("Merger", merger_usage)):
+            u = usage["usage"]
+            token_lines.append(
+                f"  {name}: input={u['input_tokens']} output={u['output_tokens']} "
+                f"cache_read={u['cache_read_input_tokens']} cache_creation={u['cache_creation_input_tokens']} "
+                f"turns={usage['num_turns']} duration={usage['duration_ms']}ms cost_usd={usage['total_cost_usd']}"
+            )
+        with open(log_path, "a") as log_f:
+            log_f.write(f"\n{'='*60}\n")
+            log_f.write(f"Paper: {paper_path}  Variant: {variant_name}\n")
+            log_f.write(f"Timestamp: {time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+            log_f.write(f"\n--- Token Usage ---\n" + "\n".join(token_lines) + "\n")
+            log_f.write(f"\n--- Merged Inputs ---\n\n{labeled}\n")
+            log_f.write(f"\n--- Merged Review ---\n{merged}\n")
+            log_f.write(f"\n--- Scorer Output ---\n{score}\n")
+            log_f.write(f"\n--- Decision ---\n{decision}\n")
+
+        yield variant_name, {
             "merged_review": merged,
             "scorer_output": score,
             "decision": decision,
             "merger_usage": merger_usage,
         }
-
-    return {
-        "phase1_usages": {"Harsh Critic": harsh_usage, "Strength Finder": neutral_usage},
-        "variants": variants,
-    }
 
 
 # ── Ground truth + benchmark ─────────────────────────────────────────
@@ -451,11 +491,19 @@ _VARIANTS = ("cal", "no_cal")
 
 
 def _bench_output_paths(reviews_dir: str | None) -> dict[str, tuple[Path, Path]]:
-    """Return {variant_name: (csv_path, reviews_dir)} for the two merger variants."""
+    """Return {variant_name: (csv_path, reviews_dir)} for the two merger variants.
+
+    Relative OUTPUT_CSV / REVIEWS_DIR are resolved under RESULTS_DIR to match
+    code/main.py — otherwise launcher scripts that export e.g.
+    OUTPUT_CSV="$SWEEP_NAME/scores.csv" silently land files in cwd."""
     base_csv = Path(os.getenv("OUTPUT_CSV", str(RESULTS_DIR / "bench_oh_scores.csv")))
+    if not base_csv.is_absolute():
+        base_csv = RESULTS_DIR / base_csv
     base_rdir = Path(reviews_dir) if reviews_dir else Path(
         os.getenv("REVIEWS_DIR", str(RESULTS_DIR / "bench_oh_reviews"))
     )
+    if not base_rdir.is_absolute():
+        base_rdir = RESULTS_DIR / base_rdir
     out: dict[str, tuple[Path, Path]] = {}
     for v in _VARIANTS:
         csv_p = base_csv.with_name(f"{base_csv.stem}_{v}{base_csv.suffix}")
@@ -492,7 +540,13 @@ async def run_benchmark(
         csv_p.parent.mkdir(parents=True, exist_ok=True)
         rdir.mkdir(parents=True, exist_ok=True)
         with open(csv_p, "w", newline="") as f:
-            csv.writer(f).writerow(["paper_id", "pred_score", "pred_decision", "gt_avg_score", "gt_binary", "match"])
+            csv.writer(f).writerow([
+                "paper_id", "pred_score", "pred_decision",
+                "gt_avg_score", "gt_decision", "gt_binary", "match",
+                "cost", "sdk_savings",
+                "gt_score_0", "gt_score_1", "gt_score_2", "gt_score_3",
+                "gt_score_4", "gt_score_5", "gt_score_6",
+            ])
         print(f"  [{v}] csv={csv_p}  reviews={rdir}")
 
     sem = asyncio.Semaphore(CONCURRENCY)
@@ -502,40 +556,117 @@ async def run_benchmark(
             pid = info["paper_id"]
             paper_path = papers_dir / f"{pid}.txt"
             print(f"\n[{i}/{len(samples)}] {info.get('title', pid)} (avg={info['avg_score']:.1f})")
+            gt_scores_padded = info["scores"] + [""] * (7 - len(info["scores"]))
             try:
-                result = await run_pipeline(str(paper_path))
+                async for v, r in run_pipeline(str(paper_path)):
+                    pred = r["scorer_output"]
+                    dec = r["decision"]
+                    match = "N/A" if dec in (None, "", "N/A") else ("YES" if dec == info["gt_binary"] else "NO")
+                    print(f"  [{pid}][{v}] pred={pred} gt={info['avg_score']:.1f} match={match}")
+                    csv_p, rdir = outputs[v]
+                    with open(csv_p, "a", newline="") as f:
+                        csv.writer(f).writerow([
+                            pid, pred, dec,
+                            f"{info['avg_score']:.2f}", info["decision"], info["gt_binary"], match,
+                            "0.0000", "0.0000",
+                            *gt_scores_padded,
+                        ])
+                    (rdir / f"{pid}.md").write_text(r["merged_review"], encoding="utf-8")
             except Exception as exc:
                 print(f"  ⚠️  [{pid}] failed: {type(exc).__name__}: {exc}")
                 return
-            for v in _VARIANTS:
-                r = result["variants"][v]
-                pred = r["scorer_output"]
-                dec = r["decision"]
-                match = "N/A" if dec in (None, "", "N/A") else ("YES" if dec == info["gt_binary"] else "NO")
-                print(f"  [{pid}][{v}] pred={pred} gt={info['avg_score']:.1f} match={match}")
-                csv_p, rdir = outputs[v]
-                with open(csv_p, "a", newline="") as f:
-                    csv.writer(f).writerow([pid, pred, dec, f"{info['avg_score']:.2f}", info["gt_binary"], match])
-                (rdir / f"{pid}.md").write_text(r["merged_review"], encoding="utf-8")
 
     await asyncio.gather(*(process_one(i, p) for i, p in enumerate(samples, 1)))
 
 
-async def run_single_paper(paper_path: str) -> None:
+async def pdf_to_markdown(pdf_path: Path) -> str:
+    options = ConvertOptions(
+        output_format="markdown",
+        mode="fast",
+        paginate=True,
+        page_range="0-9",
+        token_efficient_markdown=True,
+    )
+    async with AsyncDatalabClient() as client:
+        result = await client.convert(pdf_path, options=options)
+    return result.markdown + "\n\n Rest of paper (reference and Appendix) is removed."
+
+
+def predict_acceptance_rate(csv_path: str, score: float, window: float = 0.5):
+    if not os.path.exists(csv_path):
+        print(f"  Acceptance CSV not found: {csv_path}")
+        return None
+    exact_total = exact_acc = win_total = win_acc = 0
+    all_scores = []
+    with open(csv_path, "r") as f:
+        for row in csv.DictReader(f):
+            try:
+                s = float(row["pred_score"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            all_scores.append(s)
+            gt = row.get("gt_binary", "").strip()
+            if gt not in ("Accept", "Reject"):
+                continue
+            is_acc = gt == "Accept"
+            if abs(s - score) < 1e-9:
+                exact_total += 1
+                exact_acc += is_acc
+            if abs(s - score) <= window:
+                win_total += 1
+                win_acc += is_acc
+    exact_rate = (exact_acc / exact_total) if exact_total else float("nan")
+    win_rate = (win_acc / win_total) if win_total else float("nan")
+    if all_scores:
+        below = sum(1 for s in all_scores if s < score)
+        equal = sum(1 for s in all_scores if abs(s - score) < 1e-9)
+        percentile = (below + 0.5 * equal) / len(all_scores) * 100
+        pct_n = len(all_scores)
+    else:
+        percentile = float("nan")
+        pct_n = 0
+    return exact_rate, exact_total, win_rate, win_total, percentile, pct_n
+
+
+async def run_single_paper(paper_path: str, accept_csv: str | None = None) -> None:
     print(f"Reviewing: {paper_path}")
-    result = await run_pipeline(paper_path)
+
+    if paper_path.endswith(".pdf"):
+        md = await pdf_to_markdown(Path(paper_path))
+        md = re.sub(r"Published as a conference paper at ICLR \d{4}\s*\n?", "", md)
+        md_path = Path(paper_path).with_suffix(".md")
+        md_path.write_text(md, encoding="utf-8")
+        paper_path = str(md_path)
+        print(f"Converted PDF to markdown: {paper_path}")
+
     out_dir = Path(__file__).parent / "reviews"
     out_dir.mkdir(exist_ok=True)
     stem = Path(paper_path).stem
     ts = time.strftime("%Y_%m_%d_%H_%M_%S")
-    for v in _VARIANTS:
-        r = result["variants"][v]
+    async for v, r in run_pipeline(paper_path):
         print("\n" + "=" * 72 + f"\nFINAL REVIEW [{v}]\n" + "=" * 72)
         print(r["merged_review"])
-        if r["scorer_output"] != -1:
-            print(f"\nPredicted score [{v}]: {r['scorer_output']}  decision: {r['decision']}")
+        score = r["scorer_output"]
+        accept_info = None
+        if score != -1:
+            print(f"\nPredicted score [{v}]: {score}  decision: {r['decision']}")
+            if accept_csv:
+                accept_info = predict_acceptance_rate(accept_csv, score)
+                if accept_info is not None:
+                    exact_rate, exact_n, win_rate, win_n, percentile, pct_n = accept_info
+                    print(f"Acceptance rate @ score={score}: {exact_rate:.2%} (n={exact_n})")
+                    print(f"Acceptance rate @ score={score}±0.5: {win_rate:.2%} (n={win_n})")
+                    print(f"Percentile of score={score}: {percentile:.1f}% (n={pct_n})")
         out_path = out_dir / f"{stem}_{v}_review_{ts}.md"
-        out_path.write_text(f"# Review of {paper_path} ({v})\n\n{r['merged_review']}\n", encoding="utf-8")
+        body = f"# Review of {paper_path} ({v})\n\n{r['merged_review']}\n"
+        if score != -1:
+            body += f"\n**Predicted score: {score}**\n"
+        if accept_info is not None:
+            exact_rate, exact_n, win_rate, win_n, percentile, pct_n = accept_info
+            body += f"\n**Acceptance rate @ score={score}: {exact_rate:.2%} (n={exact_n})**\n"
+            body += f"\n**Acceptance rate @ score={score}±0.5: {win_rate:.2%} (n={win_n})**\n"
+            body += f"\n**Percentile of score={score}: {percentile:.1f}% (n={pct_n})**\n"
+        out_path.write_text(body, encoding="utf-8")
         print(f"Saved [{v}]: {out_path}")
 
 
@@ -550,10 +681,11 @@ if __name__ == "__main__":
     parser.add_argument("--balanced", action="store_true")
     parser.add_argument("--include_cal_papers", action="store_true")
     parser.add_argument("--reviews_dir", type=str, default=None)
+    parser.add_argument("--accept_csv", type=str, default=None, help="Path to bench CSV; predict acceptance rate at predicted score and ±0.5")
     args = parser.parse_args()
 
     if args.single_paper:
-        asyncio.run(run_single_paper(args.single_paper))
+        asyncio.run(run_single_paper(args.single_paper, accept_csv=args.accept_csv))
     else:
         asyncio.run(run_benchmark(
             args.benchmark,

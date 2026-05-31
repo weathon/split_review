@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from deepreview.adapters.markdown_parser import build_page_index, parse_preparsed_text
 from deepreview.config import get_settings
@@ -59,7 +54,7 @@ def _build_claude_mcp_server(
     review_tools: list[Any],
     usage_totals: dict[str, int],
 ) -> tuple[dict[str, Any], list[str]]:
-    from oh_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
+    from claude_agent_sdk import create_sdk_mcp_server, tool as sdk_tool
 
     sdk_tools = []
 
@@ -134,7 +129,7 @@ async def _run_claude_agent_turn(
     usage_totals: dict[str, int],
     output_tag: str,
 ) -> str:
-    from oh_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, TextBlock
+    from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, TextBlock
 
     await client.query(prompt_text)
     output_parts: list[str] = []
@@ -265,7 +260,7 @@ async def run_job_async(job_id: str) -> None:
     if job is None:
         raise FileNotFoundError(f'Job not found: {job_id}')
 
-    api_mode = 'openharness'
+    api_mode = 'claude_agent_sdk'
     append_event(
         job_id,
         'llm_api_mode_selected',
@@ -393,7 +388,7 @@ async def run_job_async(job_id: str) -> None:
         review_tools=tools,
         usage_totals=usage_totals,
     )
-    from oh_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
     options = ClaudeAgentOptions(
         model=str(settings.agent_model).strip(),
@@ -409,109 +404,91 @@ async def run_job_async(job_id: str) -> None:
     )
     append_event(job_id, 'claude_agent_configured', allowed_tools=allowed_tools)
 
-    async with ClaudeSDKClient(options=options) as client:
-        for attempt in range(1, max_attempts + 1):
-            if runtime.final_markdown_text:
-                append_event(
-                    job_id,
-                    'agent_run_skipped_after_final_write',
-                    attempt=attempt,
-                    reason='final_report_already_persisted',
-                )
-                break
+    final_md_path = Path(artifacts['final_markdown'])
+    for agent_stage_attempt in range(3):
+        try:
+            async with ClaudeSDKClient(options=options) as client:
+                for attempt in range(1, max_attempts + 1):
+                    if runtime.final_markdown_text:
+                        append_event(
+                            job_id,
+                            'agent_run_skipped_after_final_write',
+                            attempt=attempt,
+                            reason='final_report_already_persisted',
+                        )
+                        break
 
-            turn_prompt = (
-                'Start the DeepReviewer job now. Follow the system prompt exactly and use the '
-                'available MCP tools for status updates, paper inspection, annotations, and final report writing.'
-            )
-            if attempt > 1:
-                turn_prompt = (
-                    'Resume the same review job from current state. '
-                    'Do not restart Phase 1 planning unless a hard gate is still unmet.\n'
-                    f'Current state: annotations={runtime.annotation_count}. '
-                    'External search/read services are disabled for this offline run.\n'
-                    'If gates are met, go directly to final report assembly in section mode and call '
-                    'review_final_markdown_write(section_id=<required_section_id>, section_content=<section_markdown>) '
-                    'as soon as possible.\n'
-                    'Mandatory: your next substantive action must be a section-mode tool call '
-                    '`review_final_markdown_write(...)`; plain chat markdown is invalid.\n'
-                    'If a gate is unmet or the write tool returns an error, follow message/next_steps exactly, '
-                    'perform minimal remediation, then retry review_final_markdown_write.\n'
-                    'Never end this run without a successful review_final_markdown_write.'
-                )
+                    turn_prompt = """Start the DeepReviewer job now. Follow the system prompt exactly and use the available MCP tools for status updates, paper inspection, annotations, and final report writing."""
+                    if attempt > 1:
+                        turn_prompt = f"""Resume the same review job from current state. Do not restart Phase 1 planning unless a hard gate is still unmet.
+Current state: annotations={runtime.annotation_count}. External search/read services are disabled for this offline run.
+If gates are met, go directly to final report assembly in section mode and call review_final_markdown_write(section_id=<required_section_id>, section_content=<section_markdown>) as soon as possible.
+Mandatory: your next substantive action must be a section-mode tool call `review_final_markdown_write(...)`; plain chat markdown is invalid.
+If a gate is unmet or the write tool returns an error, follow message/next_steps exactly, perform minimal remediation, then retry review_final_markdown_write.
+Never end this run without a successful review_final_markdown_write."""
 
-            output_text = await _run_claude_agent_turn(
-                client=client,
-                prompt_text=turn_prompt,
-                job_id=job_id,
-                runtime=runtime,
-                usage_totals=usage_totals,
-                output_tag=f'attempt_{attempt}',
-            )
+                    output_text = await _run_claude_agent_turn(
+                        client=client,
+                        prompt_text=turn_prompt,
+                        job_id=job_id,
+                        runtime=runtime,
+                        usage_totals=usage_totals,
+                        output_tag=f'attempt_{attempt}',
+                    )
 
-            if runtime.final_markdown_text:
-                break
+                    if runtime.final_markdown_text:
+                        break
 
-            append_event(
-                job_id,
-                'agent_run_incomplete',
-                attempt=attempt,
-                max_attempts=max_attempts,
-                reason='no_final_report_persisted',
-                final_output_chars=len(output_text),
-            )
+                    append_event(
+                        job_id,
+                        'agent_run_incomplete',
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        reason='no_final_report_persisted',
+                        final_output_chars=len(output_text),
+                    )
 
-            if attempt >= max_attempts:
-                append_event(
-                    job_id,
-                    'agent_forced_final_write_start',
-                    attempt=attempt,
-                    reason='max_attempt_reached_without_final_write',
-                )
-                forced_prompt = (
-                    'MANDATORY ACTION NOW: Call review_final_markdown_write in section mode immediately. '
-                    'Submit exactly one required section per call using '
-                    'review_final_markdown_write(section_id=<required_section_id>, section_content=<section_markdown>). '
-                    'After each call, inspect completed_sections/missing_sections/next_required_section and '
-                    'submit the next required section right away until status=ok. '
-                    'Do not output plain-text final report. If the tool returns retry_required/error, '
-                    'follow message/next_steps and retry review_final_markdown_write.'
-                )
-                forced_output_text = await _run_claude_agent_turn(
-                    client=client,
-                    prompt_text=forced_prompt,
-                    job_id=job_id,
-                    runtime=runtime,
-                    usage_totals=usage_totals,
-                    output_tag=f'attempt_{attempt}_forced_final_write',
-                )
-                append_event(
-                    job_id,
-                    'agent_forced_final_write_result',
-                    attempt=attempt,
-                    final_output_chars=len(forced_output_text),
-                    final_write_persisted=bool(runtime.final_markdown_text),
-                )
-                break
+                    if attempt >= max_attempts:
+                        append_event(
+                            job_id,
+                            'agent_forced_final_write_start',
+                            attempt=attempt,
+                            reason='max_attempt_reached_without_final_write',
+                        )
+                        forced_prompt = """MANDATORY ACTION NOW: Call review_final_markdown_write in section mode immediately. Submit exactly one required section per call using review_final_markdown_write(section_id=<required_section_id>, section_content=<section_markdown>). After each call, inspect completed_sections/missing_sections/next_required_section and submit the next required section right away until status=ok. Do not output plain-text final report. If the tool returns retry_required/error, follow message/next_steps and retry review_final_markdown_write."""
+                        forced_output_text = await _run_claude_agent_turn(
+                            client=client,
+                            prompt_text=forced_prompt,
+                            job_id=job_id,
+                            runtime=runtime,
+                            usage_totals=usage_totals,
+                            output_tag=f'attempt_{attempt}_forced_final_write',
+                        )
+                        append_event(
+                            job_id,
+                            'agent_forced_final_write_result',
+                            attempt=attempt,
+                            final_output_chars=len(forced_output_text),
+                            final_write_persisted=bool(runtime.final_markdown_text),
+                        )
+                        break
 
-            set_status(
-                job_id,
-                JobStatus.agent_running,
-                (
-                    'Agent ended without final report write. '
-                    f'Resuming review runtime (attempt {attempt + 1}/{max_attempts})...'
-                ),
-            )
+                    set_status(
+                        job_id,
+                        JobStatus.agent_running,
+                        f"""Agent ended without final report write. Resuming review runtime (attempt {attempt + 1}/{max_attempts})...""",
+                    )
+        except (asyncio.CancelledError, Exception):
+            if agent_stage_attempt == 2:
+                raise
+        if runtime.final_markdown_text and final_md_path.exists():
+            break
 
-    if not runtime.final_markdown_text:
-        raise RuntimeError(
-            'Agent finished without successful review_final_markdown_write. '
-            'Final report gate was not satisfied.'
-        )
+    if not runtime.final_markdown_text or not final_md_path.exists():
+        raise RuntimeError("""Agent finished without successful review_final_markdown_write. Final report gate was not satisfied.""")
 
     set_status(job_id, JobStatus.pdf_exporting, 'Rendering final markdown report into PDF...')
 
-    final_md_path = Path(artifacts['final_markdown'])
     report_pdf_path = Path(artifacts['report_pdf'])
     if not final_md_path.exists():
         raise RuntimeError(f'Final markdown not found: {final_md_path}')

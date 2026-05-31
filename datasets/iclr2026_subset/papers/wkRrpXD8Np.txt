@@ -1,0 +1,291 @@
+
+
+{0}------------------------------------------------
+
+# CAN LARGE REASONING MODELS SELF-TRAIN?
+
+**Anonymous authors**
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Recent successes of reinforcement learning (RL) in training large reasoning models motivate the question of whether self-training — the process where a model learns from its own judgments — can be sustained within RL. In this work, we study this question using majority voting as a simple self-feedback mechanism. On a comprehensive set of experiments on both synthetic and real reasoning tasks, we find that even this basic approach improves not only the model’s reasoning performance, but also its capability of generating better quality feedback for the next RL iteration, driving further model improvement. Yet our analysis also reveals a critical limitation of such a self-training paradigm — prolonged RL with self-reward leads to reward hacking where models learn to maximize training (pseudo-)reward, resulting in sudden performance collapse. Together, these results highlight feedback design as the central challenge and call for future research on mechanisms to enable prolonged self-improvement.
+
+## 1 INTRODUCTION
+
+Pre-training on human-curated corpora has endowed language models with broad general-purpose capabilities (Brown et al., 2020; Rae et al., 2022), but the supply of such data is becoming a bottleneck as compute scales rapidly (Hoffmann et al., 2022; Sevilla et al., 2022). Reinforcement learning (RL) (Sutton et al., 1998) with verifiable rewards (RLVR) addresses this limitation by using automatic correctness checks, and has already shown success in reasoning and agentic tasks (DeepSeek-AI et al., 2025; OpenAI et al., 2024). Yet in domains where humans cannot provide ground-truth solutions, external feedback breaks down. In these domains, models must **self-improve**—judging the correctness of their own outputs and using this signal to refine future generations (Zelikman et al., 2022; Song et al., 2025; Huang et al., 2025). If sustained iteratively, and if teacher models can also self-improve, this process could enable continual progress without human supervision — paving the way for automatic scientific discovery.
+
+Prior work on self-improvement has mainly relied on supervised fine-tuning (SFT) (Zelikman et al., 2022; Huang et al., 2023) or direct preference optimization (DPO) (Rafailov et al., 2024; Prasad et al., 2024), where the self-labeling rule is updated only a handful of times (e.g., 1–10 rounds) and is *generally kept fixed within a training round*. These studies show that self-improvement *can* be effective, but leave open whether it can be sustained over longer horizons. Moreover, they are fundamentally bounded by the verification capabilities of the fixed teacher model used to obtain training supervision. In contrast, RL updates the model continuously, a property that has been critical to its success in training reasoning models with verifiable rewards. This success raises a natural question: can self-improvement leverage the same continuous-update paradigm? To study this question, we investigate the setting in which the feedback signal is **updated at every gradient step**—fundamentally altering the dynamics of self-improvement compared to earlier work.
+
+In this RL-based setup, the choice of feedback mechanism is critical. If feedback is always correct (e.g., perfectly verifying mathematical solutions), the procedure reduces to standard RL with ground-truth supervision. However, in practice, self-feedback is imperfect, and its design determines whether self-training is effective or not. As a first step, we study the simplest possible signal: *majority vote*. Wang et al. (2023a) has empirically demonstrated that majority vote tends to have higher accuracy compared to individual generations. Here, we cast the majority vote mechanism as a reward function — granting positive reward to model outputs that match the most common answer. At the time of the initial publication of our pre-print on arXiv, we were among the first to consider self-training via majority voting pseudo-labels, and we discuss concurrent as well as related literature
+
+{1}------------------------------------------------
+
+![Figure 1: (Overview of SRT) Comparison of Reinforcement Learning from Verifiable Reward (RLVR) and Self-Rewarded Training (SRT).](9ba3dc91984c80b96f217fb1bddd5c06_img.jpg)
+
+The diagram compares two training paradigms for Large Language Models (LLMs): Reinforcement Learning from Verifiable Reward (RLVR) and Self-Rewarded Training (SRT).
+
+**Reinforcement Learning from Verifiable Reward (RLVR):** This process involves a linear sequence of steps: a 'Prompt (with ground truth verifier)' is input to an 'LLM', which produces a 'Response'. This response is then passed to a 'Verification with Ground Truth' step, which outputs a 'Reward'.
+
+**Self-Rewarded Training (SRT):** This process starts with a 'Prompt (w/o ground truth verifier)' input to an 'LLM'. The LLM generates 'Multiple Responses from the LLM'. These responses are then processed through 'Majority Voting' and 'Verification with estimated ground truth' to produce a 'Reward'.
+
+Figure 1: (Overview of SRT) Comparison of Reinforcement Learning from Verifiable Reward (RLVR) and Self-Rewarded Training (SRT).
+
+Figure 1: **(Overview of SRT)** In RLVR, one produces the reward for RL training using a ground truth verifier. Contrary to that, SRT does not assume access to a ground truth verifier; instead it uses majority voting from the model’s own generations to estimate the ground truth, and use this proxy reward signal to train the model.
+
+in Section 5. Previous works (Huang et al., 2023; Prasad et al., 2024) have employed majority voting mainly as a mechanism to extract better quality generations from a *fixed* teacher policy to then distill it into the student model. At the time of this manuscript’s initial posting on arXiv, Zuo et al. (2025) concurrently examined a similar RL procedure with majority voting, but in a different setting, as their focus is on training and testing on the same set of prompts. In contrast, our aim is to use this simple pseudo-label generation mechanism to investigate the validity of RL powered self-training frameworks.
+
+Our comprehensive set of experiments demonstrate that this simple mechanism yields measurable gains over the base model on key reasoning metrics such as maj@k and avg@k success rates. Remarkably, we observe clear improvement in the label generating policy after each gradient step, and this translates to gains over employing labels from a fixed teacher. Moreover, self-training achieves comparable performance to RLVR on 4 different base models. In synthetic tasks where one can control the difficulty of the training dataset, we observe that a simple curriculum-based self-training approach can enable the model to keep climbing on progressively harder tasks without ground-truth labels. However, prolonged training with this framework consistently teaches models to ignore the prompt entirely and output the same template final answer, which maximizes training reward but leads to complete collapse on test datasets. We analyze these dynamics in depth and trace them to the self-reinforcing nature of imperfect feedback. These findings identify feedback design as the key challenge that future research should address to sustain self-improvement.
+
+## 2 PRELIMINARIES
+
+Let  $\pi_\theta$  denote a language model parameterized by  $\theta$ . Given a prompt  $x$ , the model produces a response  $y = (y^1, y^2, \dots)$  auto-regressively. Formally, each token in the response sequence is generated according to the conditional probability:
+
+$$y^{k+1} \sim \pi_\theta(\cdot \mid x, y^{\leq k}), \quad (1)$$
+
+where we use  $y^{\leq k}$  to refer to the first  $k$  tokens generated by the model.
+
+For reasoning-based tasks considered here, the model typically produces responses following a step-by-step “chain-of-thought” reasoning approach (Wei et al., 2022). A verification function  $r(y)$ , whose dependence on  $x$  is omitted for brevity, extracts the model’s proposed solution from the generated response and evaluates its correctness against the prompt-specific ground-truth answer:
+
+$$r(y) = \begin{cases} 1 & \text{if } y \text{ is correct,} \\ 0 & \text{if } y \text{ is incorrect.} \end{cases} \quad (2)$$
+
+Typically, one optimizes the expected *pass rate*, defined as the average accuracy across a distribution of prompts  $\mathcal{X}$ :
+
+$$J(\theta) = \mathbb{E}_{x \sim \mathcal{X}} \mathbb{E}_{y \sim \pi_\theta(\cdot \mid x)} [r(y)]. \quad (3)$$
+
+Taking the gradient of the objective function (3) with respect to  $\theta$  and employing a baseline for variance reduction (Sutton et al., 1998) leads to the well-known policy gradient formulation:
+
+$$\nabla_\theta J(\theta) = \mathbb{E}_{x \sim \mathcal{X}} \mathbb{E}_{y \sim \pi_\theta(\cdot \mid x)} [\mathcal{A}(y) \nabla_\theta \log \pi_\theta(y \mid x)], \quad (4)$$
+
+{2}------------------------------------------------
+
+where the advantage function  $\mathcal{A}(y)$  is given by:
+
+$$\mathcal{A}(y) = r(y) - \mathbb{E}_{y' \sim \pi_{\theta}(\cdot|x)}[r(y')]. \quad (5)$$
+
+Here  $\mathbb{E}_{y' \sim \pi_{\theta}(\cdot|x)}[r(y')]$  is the average pass rate for prompt  $x$ . In practice, the policy gradient in equation 4 is estimated through Monte Carlo samples, yielding the classical REINFORCE algorithm (Williams, 1992). Recent works have modified this base policy gradient formulation to improve its stability, efficiency, and practicality, resulting in advanced methods such as REINFORCE++ (Hu et al., 2025), GRPO (Shao et al., 2024), PPO (Schulman et al., 2017), RLOO (Ahmadian et al., 2024), Dr. GRPO (Liu et al., 2025), GSPO (Zheng et al., 2025), etc. Implicit to the training method used in our work is the notion of a generation-verification gap (Song et al., 2025), where generating correct solutions is hard, but verifying them is easy. We present its definition in Appendix A.
+
+## 3 SELF-REWARDED TRAINING
+
+Our objective in this work is to investigate whether *reliable* training supervision for language models can be generated without external labels. The typical practice for online RL involves generating multiple responses to a prompt, then assigning high or low rewards to each generation according to a ground-truth verifier. In the absence of such a verifier, one might develop a mechanism to derive proxy labels. This mechanism then provides a simple recipe for framing self-improvement as an RL problem. At a high level, each iteration proceeds as follows: **(1)** Sample a mini-batch of prompts, **(2)** Determine pseudo-labels,  $y_{\text{pseudo}}$ , using the mechanism for each prompt, **(3)** Generate  $n$  responses per prompt and use agreement with the derived pseudo-labels as an intrinsic binary reward:
+
+$$r(y) = \mathbf{1}[\text{answer}(y) = y_{\text{pseudo}}], \quad (6)$$
+
+and then **(4)** Perform a single RL update step on this mini-batch using the reward function  $r(\cdot)$ .
+
+### Self-supervision via majority voting.
+
+Among several possible choices for determining reasonably accurate pseudo-labels, we explore the simplest one in this work, *majority voting*. Majority voting has been empirically demonstrated to have higher accuracy compared to individual model generations (Wang et al., 2023a) and is thus a suitable choice to exploit an LLM’s inherent generation-verification gap (see Appendix Figure 8). In our setting, models typically produce a step-by-step chain of thought followed by a final answer (in the case of regular RL training, this final answer is extracted and matched with the ground truth to produce rewards), so one can group all responses by their final answer to determine the majority vote. Concretely, assume we want to generate pseudo-labels using policy  $\pi_{\text{label}}$  (which can be any reasonable policy). This procedure then involves: **(1)** sampling multiple answers per prompt using policy  $\pi_{\text{label}}$ , **(2)** grouping answers according to their parsed final solutions, **(3)** estimating the ground truth answer with the most common solution.
+
+#### --- Algorithm 1 Self-Rewarded Training (SRT) ---
+
+```
+
+Input: Prompt dataset  $\mathcal{X}$ 
+foreach RL iteration do
+  /* Inference step */
+  Sample minibatch  $\mathcal{B} \subset \mathcal{X}$ 
+  foreach prompt  $x \in \mathcal{B}$  do
+    Generate  $n$  solutions  $y^{(1)}, \dots, y^{(n)} \sim \pi_{\text{label}}(\cdot|x)$ 
+    Identify majority-vote answer:
+
+    
+$$y_{\text{majority}} \leftarrow \arg \max_{y'} \sum_{i=1}^n \mathbf{1}[\text{answer}(y^{(i)}) = y']$$
+
+
+    Define reward function:
+    
+$$r(y) \leftarrow \mathbf{1}[\text{answer}(y) = y_{\text{majority}}]$$
+
+  end
+  /* Gradient update step */
+  Perform RL gradient update using  $r(\cdot)$ 
+end
+
+```
+
+---
+
+**Self-Rewarded Training (SRT).** The general procedure is described in Algorithm 1, which henceforth shall be called Self-Rewarded Training (SRT) in this paper. Since the method prescribes a specific form of the reward function using model self-consistency, it is compatible with all the common RL training algorithms such as PPO, RLOO, REINFORCE, GRPO, etc. We study the quality of generated labels during training by controlling  $\pi_{\text{label}}$ : setting  $\pi_{\text{label}}$  to be the base model recovers our familiar setting of learning the majority voting decisions of a fixed model (while still using the current
+
+{3}------------------------------------------------
+
+![Figure 2: Three line graphs showing accuracy vs. RL Steps for three tasks: Family Relationships Level 5, Bitwise Arithmetic Level 3, and Knights & Knaves Level 7. Each graph compares Mean@16 (Evolving Teacher), Majority@16 (Evolving Teacher), and Mean@16 (Fixed Teacher).](e94f3bbb6f7501b9a1344dd0210e5dd8_img.jpg)
+
+| Task | RL Steps | Mean@16 (Evolving Teacher) | Majority@16 (Evolving Teacher) | Mean@16 (Fixed Teacher) |
+|-|-|-|-|-|
+| Family Relationships Level 5 | 0 | 0.71 | 0.71 | 0.71 |
+|  | 50 | 0.80 | 0.80 | 0.73 |
+|  | 100 | 0.80 | 0.80 | 0.73 |
+|  | 150 | 0.80 | 0.80 | 0.73 |
+|  | 200 | 0.80 | 0.80 | 0.73 |
+| Bitwise Arithmetic Level 3 | 0 | 0.71 | 0.71 | 0.71 |
+|  | 50 | 0.78 | 0.82 | 0.74 |
+|  | 100 | 0.82 | 0.85 | 0.75 |
+|  | 150 | 0.84 | 0.87 | 0.76 |
+|  | 200 | 0.84 | 0.87 | 0.77 |
+| Knights & Knaves Level 7 | 0 | 0.50 | 0.50 | 0.50 |
+|  | 50 | 0.80 | 0.92 | 0.78 |
+|  | 100 | 0.85 | 0.95 | 0.79 |
+|  | 150 | 0.88 | 0.98 | 0.79 |
+|  | 200 | 0.92 | 1.00 | 0.80 |
+
+Figure 2: Three line graphs showing accuracy vs. RL Steps for three tasks: Family Relationships Level 5, Bitwise Arithmetic Level 3, and Knights & Knaves Level 7. Each graph compares Mean@16 (Evolving Teacher), Majority@16 (Evolving Teacher), and Mean@16 (Fixed Teacher).
+
+Figure 2: (SRT improves both performance and quality of generated labels during training.) We investigate self-training under controlled settings on synthetic reasoning tasks from Reasoning Gym. Remarkably, SRT improves not only the mean accuracy, but the majority voting accuracy as well, which is the source of our training supervision. Improvement in the quality of training signal drives further improvement in performance, as SRT outperforms its variant employing the majority votes from a fixed teacher (base model) as proxy labels.
+
+policy’s rollouts for RL training), and setting  $\pi_{\text{label}}$  to be the current policy  $\pi_{\theta}$  after each gradient step allows us to study whether the quality of the learning signal can be concurrently improved during RL training. In the case where we use the current policy  $\pi_{\theta}$  to generate our pseudo-labels, we can reuse them for performing the RL gradient step as well. As the number of generations per prompt typically falls in the range 16-64 (Yu et al., 2025), this variant of SRT incurs no additional compute cost compared to the versions of these algorithms employing ground truth labels. In our work, whether the final answer is correctly formatted and parseable is used to filter responses, but given more compute, one can theoretically employ more sophisticated systems like LLM-as-a-judge (Zheng et al., 2023; Gu et al., 2025) or generative verifiers (Zhang et al., 2025a) to further improve the quality of the training signal. We leave these for future work.
+
+As long as majority voting leads to a positive generation-verification gap at each RL iteration, we expect iterative self-rewarding to provide a useful supervisory signal. We describe our empirical observations in the following section.
+
+## 4 EXPERIMENTS
+
+In this section, we present the results of our empirical study. Our primary aim is to answer the two following research questions: (1) Can SRT improve an LLMs’ reasoning abilities beyond the base model’s capabilities, in terms of both the quality of training reward signal and pass@1 performance? (2) If yes, can this improvement be sustained indefinitely? We systematically design experiments to answer these questions below.
+
+### 4.1 CAN SRT GO BEYOND THE BASE MODEL’S CAPABILITIES?
+
+There are two potential axes of improvements over the base model for SRT that can be studied: the improvement in accuracy over held-out prompts, and the improvement in the quality of generated labels themselves during the training procedure. Unlike previous works (Huang et al., 2023; Prasad et al., 2024) that distill the majority voting decision of a fixed policy (typically the base model) into the current model, we want to study **whether the quality of the majority votes of the evolving policy improves** as a result of self-improvement.
+
+**Experiments on synthetic reasoning tasks.** Complex reasoning tasks like math require domain-specific pre-training/mid-training for online RL to be effective (Wu et al., 2025a; Gandhi et al., 2025); it is also more difficult to control the difficulty of the individual tasks that the model sees during training. Therefore, we first study this question using synthetic reasoning tasks from REASONING GYM (Stojanovski et al., 2025), a collection of over 100 reasoning environments for reinforcement learning with verifiable rewards. These tasks can also be generated with adjustable difficulty, making it a suitable test-bed for our work. Concretely, we use 3 tasks from Reasoning Gym: (1) **Family Relationships**, a logic puzzle involving a group of individuals connected via different relationships,
+
+{4}------------------------------------------------
+
+![Figure 3: Evaluating SRT on real-world math problems. Four line graphs show MATH-500 Pass@1 vs RL Steps for different models and training datasets. Each graph compares SRT (red dashed line), Base Model (grey dotted line), and RL on Ground Truth (blue solid line).](e0d425c8e4eef259e4c52d81426d93fa_img.jpg)
+
+Figure 3 consists of four line graphs showing the performance (MATH-500 Pass@1) of different models over RL Steps. The legend indicates three series: SRT (red dashed line), Base Model (grey dotted line), and RL on Ground Truth (blue solid line).
+
+- Llama-3.1-8B-Instruct (Train: Big-Math-RL-Verified):** The y-axis ranges from 0.50 to 0.60. The x-axis ranges from 0 to 2000. SRT and RL on Ground Truth show similar performance, both increasing from ~0.52 to ~0.58. The Base Model is slightly lower, starting at ~0.51 and ending at ~0.57.
+- Qwen2.5-Math-7B (Train: MATH-12K):** The y-axis ranges from 0.4 to 0.8. The x-axis ranges from 0 to 400. SRT and RL on Ground Truth show similar performance, both increasing from ~0.45 to ~0.78. The Base Model is slightly lower, starting at ~0.44 and ending at ~0.75.
+- Qwen3-14B-Base (Train: DAP0):** The y-axis ranges from 0.4 to 1.0. The x-axis ranges from 0 to 300. SRT and RL on Ground Truth show similar performance, both increasing from ~0.55 to ~0.85. The Base Model is slightly lower, starting at ~0.54 and ending at ~0.82.
+- Deepseek-Math-7B-Instruct (Train: MATH-12K):** The y-axis ranges from 0.42 to 0.48. The x-axis ranges from 0 to 500. SRT and RL on Ground Truth show similar performance, both increasing from ~0.43 to ~0.47. The Base Model is slightly lower, starting at ~0.42 and ending at ~0.46.
+
+Figure 3: Evaluating SRT on real-world math problems. Four line graphs show MATH-500 Pass@1 vs RL Steps for different models and training datasets. Each graph compares SRT (red dashed line), Base Model (grey dotted line), and RL on Ground Truth (blue solid line).
+
+Figure 3: (Evaluating SRT on real-world math problems.) Comparison between SRT and RL with ground truth across different base models and training datasets. Following (Oertell et al., 2024), all models are trained using RLOO (for experiments with GRPO, see Figure 17) and tested using average pass@1 accuracy on MATH-500. SRT achieves comparable performance to that of ground-truth training across different base models. For training curves using more combinations of (train, test) dataset pairs, refer to Appendix C.1 and C.2.
+
+and the model has to reason about the relationship between two individuals within this group, (2) **Bitwise Arithmetic**, a task for testing models’ understanding of Bitwise Arithmetic operations, and (3) **Knights & Knaves**, a logic puzzle involving characters who always either tell the truth (knights) or always lie (knaves), and the challenge is to deduce who is who based on their statements. Appendix K shows example prompts from each of these tasks. We use a Qwen-3-4B-Base (Yang et al., 2025) model for all our reasoning gym experiments.
+
+Since our goal is to study whether SRT can improve performance on top of a reasonably strong base model, following the setting of Lee et al. (2025), we first train the base model with GRPO using ground truth labels on the easiest difficulty setting. This is used to teach the base model proper formatting rules and how to solve the basic task before we train using SRT on the next level of difficulty without ground-truth labels. The detailed training settings can be found in Appendix B.3.
+
+**Results.** Figure 2 shows our main results: SRT using the current policy as the label generator improves both avg@16 and majority vote@16 accuracy on all 3 reasoning gym tasks. Since we derive our training signal from the majority votes of the current policy evolving with every RL step — this demonstrates that self-improvement using SRT can progressively improve the quality of the pseudo-labels as well. Note that this would not be possible in prior works (Prasad et al., 2024; Huang et al., 2023) which distills the majority votes of a *fixed teacher* policy throughout one round of training. We expect the improvement in the *evolving teacher* policy to result in further performance gain. To validate this, we compare SRT with a variant of the same algorithm where we use the majority votes of the fixed starting policy instead of the evolving current policy as pseudo-labels. Figure 2 shows their comparison: in Family Relationships and Bitwise Arithmetic, we see larger gains in majority voting performance, and likewise SRT outperforms its fixed teacher variant substantially, by 10% for Bitwise Arithmetics, 8% in Family Relationship, and 6% in Knights and Knaves. On Knights & Knaves, the starting policy already has >90% majority voting accuracy, and we see the difference between the evolving teacher and fixed teacher variants of SRT to be smaller here. Furthermore, these performance gains cannot be explained by learning to format properly: since the model was trained on the easiest difficulty level, it can already format its responses correctly in most cases (Appendix E), and we see performance climbing after saturation in model’s format correctness. Overall, on the synthetic reasoning tasks, SRT clearly pushes the model beyond its starting capabilities, showing the promise of self-improvement even from this basic recipe for self-supervision.
+
+**Real-world reasoning tasks.** Armed with these insights, we next test our algorithm on real-world reasoning tasks in the math domain (for other tasks like coding, it is unclear how to group generations to find the majority vote). To investigate the generality of our algorithm, we run a comprehensive set of experiments with 4 different base models of different sizes: Llama-3.1-8B-Instruct (Grattafiori et al., 2024), Qwen2.5-Math-7B (Yang et al., 2024), Qwen3-14B-Base (Yang et al., 2025), and Deepseek-Math-7B-Instruct (Shao et al., 2024). We also use a comprehensive suite of train and test datasets: namely, for training we employ Big-Math-RL-Verified (Albalak et al., 2025), MATH-12K (Hendrycks et al., 2021), and DAP0 (Yu et al., 2025); for evaluation, we use MATH-500 (Hendrycks et al., 2021), AIME 2024, AIME 2025 and AMC. We also experiment with different RL algorithms such as GRPO and RLOO, refer to Appendix B.3 and Figure 17 for more details (they show no noticeable difference in behavior). All training and validation runs used a temperature value of 1.0, except for
+
+{5}------------------------------------------------
+
+![Figure 4: Majority@32 accuracy comparison between SRT and RL with ground truth. The figure contains four line charts for different models: Llama-3.1-8B-Instruct (Train: Big-Math-RL-Verified), Qwen2.5-Math-7B (Train: MATH-12K), Qwen3-14B-Base (Train: DAPQ), and Deepseek-Math-7B-Instruct (Train: MATH-12K). Each chart plots MATH-500 Majority@32 accuracy against RL Steps. Three lines are shown in each: SRT (red), Base Model (dashed green), and RL on Ground Truth (blue). In all cases, SRT and RL on Ground Truth show significant improvement over the Base Model, with SRT often reaching or exceeding the performance of RL on Ground Truth.](c54b3ca7603d65d4589151bc3a49d054_img.jpg)
+
+Figure 4: Majority@32 accuracy comparison between SRT and RL with ground truth. The figure contains four line charts for different models: Llama-3.1-8B-Instruct (Train: Big-Math-RL-Verified), Qwen2.5-Math-7B (Train: MATH-12K), Qwen3-14B-Base (Train: DAPQ), and Deepseek-Math-7B-Instruct (Train: MATH-12K). Each chart plots MATH-500 Majority@32 accuracy against RL Steps. Three lines are shown in each: SRT (red), Base Model (dashed green), and RL on Ground Truth (blue). In all cases, SRT and RL on Ground Truth show significant improvement over the Base Model, with SRT often reaching or exceeding the performance of RL on Ground Truth.
+
+Figure 4: (Majority@32 accuracy comparison between SRT and RL with ground truth) We compare the majority@32 accuracy, as opposed to average accuracy shown in Figure 3. **Note that for Llama-3.1-8B-Instruct, we use the official model card evaluation temperature of 0, hence majority@32 is the same as average@32 accuracy.** SRT shows improvement in the quality of the majority votes themselves, which distinguishes our algorithm from that of learning from a fixed teacher’s majority votes.
+
+Llama-3.1-8B-Instruct, where we evaluated using the official model card setting of temperature 0 (greedy decoding). Note that different sampling temperatures in validation can greatly affect the base model performance, a phenomenon we explore in Appendix D. Since our goal is to show that SRT and RL with ground truth lead to a similar improvement over the base model and we are not concerned about the absolute improvement, our conclusions hold regardless of the decoding temperature.
+
+We show a summary of our empirical findings using different base models and training datasets in Figures 3 and 4 (for training curves using more combinations of (train, test) dataset pairs, refer to Appendix C.1 and C.2). On all instances, SRT improves both avg@16 and majority vote@16 accuracies on heldout MATH-500 prompts, and performs on par with regular RL training with ground truth verification. More impressively, the observations hold for base models like Llama-3.1-8B-Instruct, which is known to be particularly difficult for RL training on reasoning tasks (Gandhi et al., 2025), improving its average accuracy from 52.6% to nearly 60%.
+
+We also compare SRT with its offline variants: SFT on the majority vote (Huang et al., 2023), DPO and ScPO (Prasad et al., 2024) employing contrastive learning between the majority vote and non-majority vote answer in Table 1. We observe that SRT retains better performance compared to its offline variants distilling the majority vote decisions of the base policy, **showing the benefit of self-improvement in the label-generating policy.** For more details, refer to Appendix F.
+
+#### Takeaway 1: SRT can improve reasoning capabilities beyond the base model
+
+On both synthetic and real reasoning tasks, SRT improves average and majority voting accuracies, showing ability gains beyond the base model. Specially, improvement in majority voting accuracy also signifies improvement of the quality of self-supervision during training, demonstrating a promising path forward to self-improvement.
+
+### 4.2 CAN SELF-IMPROVEMENT FROM SRT BE SUSTAINED INDEFINITELY?
+
+Given the strong performance of SRT in various reasoning tasks and model architectures, an important question is whether self-training can be maintained over extended iterations. Similar to the prior section, we first test SRT on synthetic tasks with controllable difficulty to rigorously study its properties, and then test the resulting insights on real-world reasoning domains.
+
+**Multi-level self-improvement on synthetic tasks using curriculum.** Since Reasoning Gym provides a built-in way to control the difficulty of generated tasks, we first investigate whether self-training on an easier set of tasks can produce a model capable of self-improvement on progressively harder levels of difficulty. To do so, we choose 2 Reasoning Gym tasks: Bitwise Arithmetic and Knights & Knaves. Similar to our previous setting, we first train using RL on ground truth labels on the easiest level of difficulty, then progressively train on harder levels without ground truth labels (i.e., SRT on level 5 starts with the checkpoint obtained from SRT on level 4, and so on). For more details, refer to Appendix B.3.
+
+Figure 5 shows our primary results: in this controlled setting, SRT is able to maintain self-improvement on progressively harder difficulties. In particular, SRT can show reasonable im-
+
+{6}------------------------------------------------
+
+![Figure 5: Four line graphs showing accuracy vs. RL Steps for different tasks. Each graph compares Average Accuracy (red line) and Majority Vote Accuracy (cyan line).](73c3e4508cae529acf4e6c7fa70b361a_img.jpg)
+
+Figure 5 consists of four line graphs showing accuracy versus RL Steps for different tasks. Each graph compares Average Accuracy (red line) and Majority Vote Accuracy (cyan line).
+
+- Bitwise Arithmetic Level 3:** Accuracy increases from ~0.40 to ~0.60 over 200 RL Steps.
+- Bitwise Arithmetic Level 4:** Accuracy increases from ~0.60 to ~0.68 over 200 RL Steps.
+- Knights and Knaves Level 7:** Accuracy increases from ~0.50 to ~0.95 over 200 RL Steps.
+- Knights and Knaves Level 9:** Accuracy increases from ~0.93 to ~0.98 over 200 RL Steps.
+
+Figure 5: Four line graphs showing accuracy vs. RL Steps for different tasks. Each graph compares Average Accuracy (red line) and Majority Vote Accuracy (cyan line).
+
+Figure 5: (Multi-level climbing on Reasoning Gym using curriculum) The Qwen3-4B-Base model can climb on progressively more difficult tasks without ground truth labels via a simple curriculum strategy — where we train an earlier level’s final checkpoint with SRT on the next difficulty level. This approach also seems to improve both average and majority voting accuracy on each level.
+
+provement in Bitwise Arithmetic Level 4 after being initialized on Level 2 with ground-truth training, and also progressively climb to near 100% accuracy on Knights & Knave Level 9 after being trained with ground-truth on Level 2 only (intermediate levels are trained with SRT).
+
+![Figure 6: Four line graphs showing performance (MATH-500 Pass@1) vs. RL Steps for different models. Each graph compares SRT (red line), Base Model (dashed line), and RL on Ground Truth (blue line).](c64e9e9f3b0b828a5f6ac70441877764_img.jpg)
+
+Figure 6 consists of four line graphs showing performance (MATH-500 Pass@1) versus RL Steps for different models. Each graph compares SRT (red line), Base Model (dashed line), and RL on Ground Truth (blue line).
+
+- Llama-3.1-8B-Instruct (Train: Big-Math-RL-Verified, largest learning rate):** Performance peaks at ~0.55 and then drops sharply to ~0.15 after 1500 RL Steps.
+- Qwen2.5-Math-7B (Train: DAPO):** Performance peaks at ~0.85 and then drops sharply to ~0.15 after 800 RL Steps.
+- Qwen3-14B-Base (Train: DAPO):** Performance peaks at ~0.95 and then drops sharply to ~0.15 after 400 RL Steps.
+- Deepseek-Math-7B-Instruct (Train: MATH-12K):** Performance peaks at ~0.55 and then drops sharply to ~0.15 after 800 RL Steps.
+
+Figure 6: Four line graphs showing performance (MATH-500 Pass@1) vs. RL Steps for different models. Each graph compares SRT (red line), Base Model (dashed line), and RL on Ground Truth (blue line).
+
+Figure 6: (Extended self-training leads to model collapse) Inspired by multi-level improvement on reasoning gym tasks, we take four LLMs with strong math abilities from pretraining, and train them with SRT for an extended period of time. SRT improves performance at first, but then demonstrates complete model collapse on all 4 base models. (Note: on Llama-3.1-8B-Instruct, the learning rate used in Figures 3 and 4,  $10^{-7}$ , does not lead to model collapse within our training budget, but  $3 \times 10^{-7}$ , a slightly higher learning rate does — we hypothesize that with an extended training run, even  $10^{-7}$  would lead to model collapse. For more details on the effect of hyperparameters on model collapse, refer to Figure 19.)
+
+**Extended SRT-training on math problems.** Next, we test our insights on real-world math problems. Specifically, we take the same 4 base models as in the previous section, and train them on a difficult math dataset through an extended number of iterations using SRT. Figure 6 demonstrates our surprising finding: while SRT initially increases the base model’s performance at a comparable rate with ground-truth RL training, extended training using SRT leads to sudden performance collapse. We observe performance collapse or degradation from extended SRT-training across all models and training datasets, and record these in detail in Appendix C.1 and C.2. Given that this surprising phenomenon deserves more investigation, we study it in more detail next.
+
+**What happens after SRT peaks in performance?** To develop a clearer understanding of the underlying reasons for this phenomenon, in this section we investigate this SRT-induced model collapse closely.
+
+We plot the training statistics of the SRT objective (Eqn. 6) in Figure 7. The observed performance collapse closely coincides with a sudden increase in the SRT self-reward objective, implying that the optimization procedure has, in fact, maximally optimized the training objective (self-consistency majority voting), despite a decline in *actual* output correctness. On the same figure, we further report the token-level average Kullback–Leibler divergence between the model under SRT training and the base model. We observe a sharp increase in KL divergence at the exact point when performance begins to deteriorate, indicating that the generative distribution of the model has substantially diverged from the original model.
+
+These findings strongly suggest the occurrence of **reward hacking**—the model has learned to produce consistent responses in order to optimize its self-assigned reward, irrespective of their true correctness. Indeed, manual analysis of the model outputs (examples provided in Appendix L) confirms this hypothesis: **after collapse, the model outputs a very high entropy, essentially random, set of**
+
+{7}------------------------------------------------
+
+![Figure 7: (Self-Training Dynamics) Four line plots showing training metrics over 1000 RLOO Steps. 1. Accuracy During Training: SRT (red) drops from ~0.3 to 0 after 600 steps, while RL on Ground Truth (blue) stays at ~0.3. 2. Pseudo-Reward During Training: SRT (red) jumps from ~0.5 to 1.0 at 600 steps, while RL (blue) stays at ~0.5. 3. KL Penalty During Training: SRT (red) jumps from 0 to ~1.8 at 600 steps, while RL (blue) stays at 0. 4. Model Entropy During Training: SRT (red) spikes from ~1.2 to ~2.0 after 600 steps, while RL (blue) stays at ~1.2. A vertical dashed line at 600 steps marks 'Model collapse'.](3121afa7ca030b22ee0345864ca6f38b_img.jpg)
+
+Figure 7: (Self-Training Dynamics) Four line plots showing training metrics over 1000 RLOO Steps. 1. Accuracy During Training: SRT (red) drops from ~0.3 to 0 after 600 steps, while RL on Ground Truth (blue) stays at ~0.3. 2. Pseudo-Reward During Training: SRT (red) jumps from ~0.5 to 1.0 at 600 steps, while RL (blue) stays at ~0.5. 3. KL Penalty During Training: SRT (red) jumps from 0 to ~1.8 at 600 steps, while RL (blue) stays at 0. 4. Model Entropy During Training: SRT (red) spikes from ~1.2 to ~2.0 after 600 steps, while RL (blue) stays at ~1.2. A vertical dashed line at 600 steps marks 'Model collapse'.
+
+Figure 7: **(Self-Training Dynamics)** Extended training via SRT can lead to reward hacking, as demonstrated by the sudden hike in KL penalty and training (pseudo)-reward, but collapse of accuracy on the held-out test sets.
+
+**tokens followed by the same “template” final answer** (for example, `\boxed{1}`) that is nearly independent of the input prompt. In other words, the initially strong correlation between the SRT objective and correctness is ultimately compromised, becoming no longer a reliable proxy signal. This behavior is also related to the well-known simplicity bias in neural networks (Palma et al., 2019; Valle-Pérez et al., 2019; Mingard et al., 2020; 2025), as well as the Occam’s razor, where neural networks tend to find the simplest solution that generalizes to the observed signal — in this case this leads to the same final template answer for all prompts.
+
+**Additional experiments and ablations.** We have run additional experiments and ablations to study the behavior of self-training under different training scenarios. Figure 19 of Appendix G.3 shows our main findings: **(1)** choice of RL algorithm (GRPO vs RLOO) does not affect the final outcome of SRT-training, **(2)** increasing KL coefficient to incentivize the model to stay close to the base policy also does not mitigate reward hacking, as the training signal from the reward hacked solution is too strong, **(3)** decreasing learning rate seems to delay model collapse but not eliminate it, and we hypothesize that prolonged training with lower learning rates would still result in complete model collapse, and **(4)** surprisingly, reducing the number of generations per prompt injects noise into the training signal, which delays quick model collapse by exploiting the majority voting answer. Additional experiments related to SRT training can be found in Appendix C and G.
+
+#### Takeaway 2: Self-Training benefits may not extend indefinitely
+
+The question of whether self-training can be extended indefinitely has mixed results: while under controllable difficulty, SRT can keep improving beyond the base model on progressively more difficult tasks, training on real-world math problems demonstrate the phenomenon of reward hacking — sustained self-improvement requires developing additional regularization measures to be effective.
+
+## 5 RELATED WORKS
+
+**Self Improving LLM.** Previous works (Zelikman et al., 2022; Wang et al., 2023b; Huang et al., 2023; Madaan et al., 2023; Chen et al., 2024; Gulcehre et al., 2023; Singh et al., 2024; Ni et al., 2023; Hwang et al., 2024; Havrilla et al., 2024; Pang et al., 2024a) have demonstrated the feasibility of LLMs’ self-improvement over their previous iteration by training on data distilled by the previous instances of the model. Most of these approaches usually have data filtering/reranking step in the pipeline, which is often performed by the model itself (Wu et al., 2025b) or by training another (Hosseini et al., 2024) verifier model. Particularly, (Huang et al., 2023; Wang et al., 2023a; Prasad et al., 2024) demonstrated the feasibility of using majority voting and self-consistency to filter chain-of-thought traces that, when used as SFT training data, improve the LLM performance on downstream tasks. A concurrent work, (Zhao et al., 2025a), proposes a self-evolution, self-play pipeline where an LLM generates coding problems of appropriate difficulty, solves and trains on them using RLVR. The model-generated solutions are validated by a code executor in the loop. Previous works have studied self-improvement by generating labels through majority voting (Prasad et al., 2024; Huang et al., 2023), but these works are typically confined to one or a few rounds of SFT or DPO (Rafailov et al., 2024). This essentially involves distilling majority voting labels from a fixed policy into the current policy over each round of training. In contrast, we explore *online RLVR*’s potential in self-improving LLMs where the label generating policy evolves after every gradient step. A few concurrent works (Chen et al., 2025; Prabhudesai et al., 2025; Zhao et al., 2025b; Shao et al.,
+
+{8}------------------------------------------------
+
+(2025) have also explored various forms of self-rewarding mechanisms through majority voting or a similar metric of self-consistency (e.g., token/sequence level entropy) in Online RLVR. Finally, in a recent work, (Song et al., 2025) formalized a generation verification gap as central to the model’s ability to self-improve. Similarly, (Huang et al., 2025) proposed a “sharpening” mechanism as the key to self-improvement. Our SRT pipeline builds on top of both of these intuitions. We refer the interested reader to Gao et al. (2025) for a survey of other works associated with self-evolving LLM agents.
+
+**Online RLVR and Easy to Hard Generalization.** Online reinforcement learning with verifiable reward (RLVR) (Lambert et al., 2025) has emerged as a new paradigm of LLM post-training especially for enhancing math, coding and reasoning performances (OpenAI et al., 2024; DeepSeek-AI et al., 2025; Team et al., 2025; Lambert et al., 2025). Despite the success of the reasoning models, it is still unclear to what extent they can generalize beyond the difficulty of their training data distribution, a problem termed easy to hard generalization (Sun et al., 2024). (Sun et al., 2024) shows that models can be trained to solve level 4-5 MATH(Hendrycks et al., 2021) problems after training using a process reward model trained on MATH level 1-3 dataset. Another work (Lee et al., 2025) explores this question and finds that transformers are capable of easy-to-hard generalization by utilizing *transcendence* phenomenon (Zhang et al., 2024) in the context of simple addition, string copying, and maze solving using small language models.
+
+**Model Collapse and Reward Hacking.** Model collapse is a well-known phenomenon in training on self-generated training data (Alemohammad et al., 2024; Shumailov et al., 2024b;a; Bertrand et al., 2024; Briesch et al., 2025), and multiple approaches related to data mixing, reliable verification, training using contrastive loss using negative samples and curriculum learning have been proposed (Gerstgrasser et al., 2024; Feng et al., 2025; Briesch et al., 2025; Song et al., 2025; Gillman et al., 2024; Setlur et al., 2024) to prevent models from collapsing, which previous work on LLM’s easy to hard generalization (Lee et al., 2025) also utilize. However, in RL paradigm, we do not directly do supervised fine-tuning on model-generated data, and it remains an open question to what extent the previous findings of model collapse apply to our RLVR setting. In our work, we show that models trained using RL on self-labeled data often suffer from actor collapsing due to reward hacking (Amodei et al., 2016; Denison et al., 2024) and propose a few strategies to mitigate it. Finally, a concurrent and complementary work, Zhang et al. (2025b), has also demonstrated the failure of various self-reward mechanisms to sustain self-improvement under prolonged training, which further validates the observations in this work.
+
+**Data Efficient RLVR.** Several concurrent works look into the data efficiency of the RLVR pipeline. Notably, (Wang et al., 2025) shows that by just training on one example, the model can achieve performance equivalent to training on 1.2k examples from the DeepScaleR dataset (Luo et al., 2025). Similarly, TTRL (Zuo et al., 2025), also proposes a label-free online RLVR paradigm in a test-time setting, similar to SRT. Our work also explores this paradigm in Section H.1 as an extension of SRT.
+
+## 6 LIMITATIONS AND CONCLUSION
+
+In this work, we examine a simple strategy of leveraging an LLM’s self-consistency to train it via an RL framework. Our experiments on synthetic reasoning tasks with controllable difficulty levels demonstrate the promise of such a framework: not only can LLMs improve their performance on these tasks, but they can also improve the quality of their self-supervision for the next training step. Our analysis, however, also reveals the limitation of leveraging self-consistency as training reward: prolonged training under such a framework can lead to reward hacking and complete model collapse. Future investigations could explore how to develop more robust forms of verification, extend self-verification to other domains like coding, and curriculum learning strategies that expose the model to problems of only the right difficulty. Additionally, leveraging LLM-as-judges or generative verifiers to improve the training signal, or employing additional consistency regularization between the chain-of-thought and the final answer to mitigate reward hacking can be promising future research. We leave these and other promising directions for sustained self-improvement for future work.
+
+{9}------------------------------------------------
+
+## REFERENCES
+
+- Arash Ahmadian, Chris Cremer, Matthias Gallé, Marzieh Fadaee, Julia Kreutzer, Olivier Pietquin, Ahmet Üstün, and Sara Hooker. Back to basics: Revisiting REINFORCE-style optimization for learning from human feedback in LLMs. In Lun-Wei Ku, Andre Martins, and Vivek Srikumar (eds.), *Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)*, pp. 12248–12267, Bangkok, Thailand, August 2024. Association for Computational Linguistics. doi: 10.18653/v1/2024.acl-long.662. URL <https://aclanthology.org/2024.acl-long.662/>.
+- Alon Albalak, Duy Phung, Nathan Lile, Rafael Rafailov, Kanishk Gandhi, Louis Castricato, Anikait Singh, Chase Blagden, Violet Xiang, Dakota Mahan, and Nick Haber. Big-math: A large-scale, high-quality math dataset for reinforcement learning in language models, 2025. URL <https://arxiv.org/abs/2502.17387>.
+- Sina Alemohammad, Josue Casco-Rodriguez, Lorenzo Luzi, Ahmed Intiaz Humayun, Hossein Babaei, Daniel LeJeune, Ali Siahkoobi, and Richard Baraniuk. Self-consuming generative models go MAD. In *The Twelfth International Conference on Learning Representations*, 2024. URL <https://openreview.net/forum?id=ShjMHfmpS0>.
+- Dario Amodei, Chris Olah, Jacob Steinhardt, Paul Christiano, John Schulman, and Dan Mané. Concrete problems in ai safety, 2016. URL <https://arxiv.org/abs/1606.06565>.
+- Marcin Andrychowicz, Filip Wolski, Alex Ray, Jonas Schneider, Rachel Fong, Peter Welinder, Bob McGrew, Josh Tobin, OpenAI Pieter Abbeel, and Wojciech Zaremba. Hindsight experience replay. *Advances in neural information processing systems*, 30, 2017.
+- Yoshua Bengio, Jérôme Louradour, Ronan Collobert, and Jason Weston. Curriculum learning. In *Proceedings of the 26th annual international conference on machine learning*, pp. 41–48, 2009.
+- Quentin Bertrand, Joey Bose, Alexandre Duplessis, Marco Jiralerspong, and Gauthier Gidel. On the stability of iterative retraining of generative models on their own data. In *The Twelfth International Conference on Learning Representations*, 2024. URL <https://openreview.net/forum?id=JORAfH2xFd>.
+- Martin Briesch, Dominik Sobania, and Franz Rothlauf. Large language models suffer from their own output: An analysis of the self-consuming training loop, 2025. URL <https://openreview.net/forum?id=SaOxhcDCM3>.
+- Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners, 2020. URL <https://arxiv.org/abs/2005.14165>.
+- Lili Chen, Mihir Prabhudesai, Katerina Fragkiadaki, Hao Liu, and Deepak Pathak. Self-questioning language models, 2025. URL <https://arxiv.org/abs/2508.03682>.
+- Zixiang Chen, Yihe Deng, Huizhuo Yuan, Kaixuan Ji, and Quanquan Gu. Self-play fine-tuning converts weak language models to strong language models. In *Proceedings of the 41st International Conference on Machine Learning, ICLR/24*. JMLR.org, 2024.
+- DeepSeek-AI, Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shiroing Ma, Peiyi Wang, et al. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning, 2025. URL <https://arxiv.org/abs/2501.12948>.
+- Carson Denison, Monte MacDiarmid, Fazl Barez, David Duvenaud, Shauna Kravec, Samuel Marks, Nicholas Schiefer, Ryan Soklaski, Alex Tamkin, Jared Kaplan, Buck Shlegeris, Samuel R. Bowman, Ethan Perez, and Evan Hubinger. Sycophancy to subterfuge: Investigating reward-tampering in large language models, 2024. URL <https://arxiv.org/abs/2406.10162>.
+
+ Rest of paper (reference and Appendix) is removed.

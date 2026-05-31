@@ -1,0 +1,159 @@
+diff --git a/code_oh/main.py b/code_oh/main.py
+index 201cdb96a..46eeb5935 100644
+--- a/code_oh/main.py
++++ b/code_oh/main.py
+@@ -332,7 +332,10 @@ The paper was extracted from PDF by an automated parser. Treat formatting artifa
+ Paper path: {paper_path}. Use read_file (which reads the whole file by default) to read the paper end-to-end before reviewing."""
+ 
+ 
+-async def run_pipeline(paper_path: str) -> dict:
++async def run_pipeline(paper_path: str):
++    """Yield (variant_name, variant_result) as each merger finishes, so callers
++    can flush per-variant outputs incrementally instead of waiting for both
++    mergers to complete."""
+     paper_abs = os.path.abspath(paper_path)
+     paper_dir = str(Path(paper_abs).parent)
+ 
+@@ -362,7 +365,7 @@ async def run_pipeline(paper_path: str) -> dict:
+         no_cal=True,
+         max_turns=15,
+     )
+-    (harsh_text, harsh_usage), (neutral_text, neutral_usage) = await asyncio.gather(harsh_task, neutral_task)
++    (harsh_text, _harsh_usage), (neutral_text, _neutral_usage) = await asyncio.gather(harsh_task, neutral_task)
+ 
+     labeled = f"### Harsh Critic\n{harsh_text}\n\n### Strength Finder\n{neutral_text}"
+ 
+@@ -375,7 +378,6 @@ async def run_pipeline(paper_path: str) -> dict:
+         f"Cross-check every claim against the actual paper."
+     )
+ 
+-    variants: dict[str, dict] = {}
+     for variant_name, no_cal in (("cal", False), ("no_cal", True)):
+         merger_system = load_prompt(
+             "merger_position.md" if _POSITION_MODE else "merger.md",
+@@ -396,18 +398,13 @@ async def run_pipeline(paper_path: str) -> dict:
+         )
+         score = float(merged.split("<score>")[1].split("</score>")[0]) if "<score>" in merged else -1
+         decision = merged.split("<decision>")[1].split("</decision>")[0] if "<decision>" in merged else "N/A"
+-        variants[variant_name] = {
++        yield variant_name, {
+             "merged_review": merged,
+             "scorer_output": score,
+             "decision": decision,
+             "merger_usage": merger_usage,
+         }
+ 
+-    return {
+-        "phase1_usages": {"Harsh Critic": harsh_usage, "Strength Finder": neutral_usage},
+-        "variants": variants,
+-    }
+-
+ 
+ # ── Ground truth + benchmark ─────────────────────────────────────────
+ def load_ground_truth(data_dir: Path) -> tuple[list[dict], Path]:
+@@ -451,11 +448,19 @@ _VARIANTS = ("cal", "no_cal")
+ 
+ 
+ def _bench_output_paths(reviews_dir: str | None) -> dict[str, tuple[Path, Path]]:
+-    """Return {variant_name: (csv_path, reviews_dir)} for the two merger variants."""
++    """Return {variant_name: (csv_path, reviews_dir)} for the two merger variants.
++
++    Relative OUTPUT_CSV / REVIEWS_DIR are resolved under RESULTS_DIR to match
++    code/main.py — otherwise launcher scripts that export e.g.
++    OUTPUT_CSV="$SWEEP_NAME/scores.csv" silently land files in cwd."""
+     base_csv = Path(os.getenv("OUTPUT_CSV", str(RESULTS_DIR / "bench_oh_scores.csv")))
++    if not base_csv.is_absolute():
++        base_csv = RESULTS_DIR / base_csv
+     base_rdir = Path(reviews_dir) if reviews_dir else Path(
+         os.getenv("REVIEWS_DIR", str(RESULTS_DIR / "bench_oh_reviews"))
+     )
++    if not base_rdir.is_absolute():
++        base_rdir = RESULTS_DIR / base_rdir
+     out: dict[str, tuple[Path, Path]] = {}
+     for v in _VARIANTS:
+         csv_p = base_csv.with_name(f"{base_csv.stem}_{v}{base_csv.suffix}")
+@@ -492,7 +497,13 @@ async def run_benchmark(
+         csv_p.parent.mkdir(parents=True, exist_ok=True)
+         rdir.mkdir(parents=True, exist_ok=True)
+         with open(csv_p, "w", newline="") as f:
+-            csv.writer(f).writerow(["paper_id", "pred_score", "pred_decision", "gt_avg_score", "gt_binary", "match"])
++            csv.writer(f).writerow([
++                "paper_id", "pred_score", "pred_decision",
++                "gt_avg_score", "gt_decision", "gt_binary", "match",
++                "cost", "sdk_savings",
++                "gt_score_0", "gt_score_1", "gt_score_2", "gt_score_3",
++                "gt_score_4", "gt_score_5", "gt_score_6",
++            ])
+         print(f"  [{v}] csv={csv_p}  reviews={rdir}")
+ 
+     sem = asyncio.Semaphore(CONCURRENCY)
+@@ -502,34 +513,36 @@ async def run_benchmark(
+             pid = info["paper_id"]
+             paper_path = papers_dir / f"{pid}.txt"
+             print(f"\n[{i}/{len(samples)}] {info.get('title', pid)} (avg={info['avg_score']:.1f})")
++            gt_scores_padded = info["scores"] + [""] * (7 - len(info["scores"]))
+             try:
+-                result = await run_pipeline(str(paper_path))
++                async for v, r in run_pipeline(str(paper_path)):
++                    pred = r["scorer_output"]
++                    dec = r["decision"]
++                    match = "N/A" if dec in (None, "", "N/A") else ("YES" if dec == info["gt_binary"] else "NO")
++                    print(f"  [{pid}][{v}] pred={pred} gt={info['avg_score']:.1f} match={match}")
++                    csv_p, rdir = outputs[v]
++                    with open(csv_p, "a", newline="") as f:
++                        csv.writer(f).writerow([
++                            pid, pred, dec,
++                            f"{info['avg_score']:.2f}", info["decision"], info["gt_binary"], match,
++                            "0.0000", "0.0000",
++                            *gt_scores_padded,
++                        ])
++                    (rdir / f"{pid}.md").write_text(r["merged_review"], encoding="utf-8")
+             except Exception as exc:
+                 print(f"  ⚠️  [{pid}] failed: {type(exc).__name__}: {exc}")
+                 return
+-            for v in _VARIANTS:
+-                r = result["variants"][v]
+-                pred = r["scorer_output"]
+-                dec = r["decision"]
+-                match = "N/A" if dec in (None, "", "N/A") else ("YES" if dec == info["gt_binary"] else "NO")
+-                print(f"  [{pid}][{v}] pred={pred} gt={info['avg_score']:.1f} match={match}")
+-                csv_p, rdir = outputs[v]
+-                with open(csv_p, "a", newline="") as f:
+-                    csv.writer(f).writerow([pid, pred, dec, f"{info['avg_score']:.2f}", info["gt_binary"], match])
+-                (rdir / f"{pid}.md").write_text(r["merged_review"], encoding="utf-8")
+ 
+     await asyncio.gather(*(process_one(i, p) for i, p in enumerate(samples, 1)))
+ 
+ 
+ async def run_single_paper(paper_path: str) -> None:
+     print(f"Reviewing: {paper_path}")
+-    result = await run_pipeline(paper_path)
+     out_dir = Path(__file__).parent / "reviews"
+     out_dir.mkdir(exist_ok=True)
+     stem = Path(paper_path).stem
+     ts = time.strftime("%Y_%m_%d_%H_%M_%S")
+-    for v in _VARIANTS:
+-        r = result["variants"][v]
++    async for v, r in run_pipeline(paper_path):
+         print("\n" + "=" * 72 + f"\nFINAL REVIEW [{v}]\n" + "=" * 72)
+         print(r["merged_review"])
+         if r["scorer_output"] != -1:
+diff --git a/scripts/run_deepreview_oh.sh b/scripts/run_deepreview_oh.sh
+index 9693a40d0..b56e477f8 100755
+--- a/scripts/run_deepreview_oh.sh
++++ b/scripts/run_deepreview_oh.sh
+@@ -12,12 +12,12 @@ cd "$(dirname "$0")/.."
+ 
+ export HARSH_MODEL="${HARSH_MODEL:-gpt-5.4}"
+ export MERGER_MODEL="${MERGER_MODEL:-gpt-5.4}"
+-export NEUTRAL_MODEL="${NEUTRAL_MODEL:-gpt-5.4}"
++export NEUTRAL_MODEL="${NEUTRAL_MODEL:-gpt-5.4-mini}"
+ export SWEEP_NAME="${SWEEP_NAME:-2026_oh_repro}"
+ export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
+ export REVIEWS_DIR="${SWEEP_NAME}/reviews"
+ export CONCURRENCY="${CONCURRENCY:-1}"
+-export MAX_PAPERS="${MAX_PAPERS:-300}"
++export MAX_PAPERS="${MAX_PAPERS:-5}"
+ export CALIBRATION_SET="${CALIBRATION_SET:-deepreview}"
+ export PAPERS_DIR="${PAPERS_DIR:-$HOME/split_review/datasets/iclr2026_new/papers}"
+ 

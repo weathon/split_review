@@ -10,14 +10,15 @@
 set -e
 cd "$(dirname "$0")/.."
 
-export HARSH_MODEL="${HARSH_MODEL:-gpt-5.4}"
-export MERGER_MODEL="${MERGER_MODEL:-gpt-5.4}"
-export NEUTRAL_MODEL="${NEUTRAL_MODEL:-gpt-5.4}"
+export HARSH_MODEL="${HARSH_MODEL:-gpt-5.2}"
+export MERGER_MODEL="${MERGER_MODEL:-gpt-5.2}"
+export NEUTRAL_MODEL="${NEUTRAL_MODEL:-gpt-5.4-mini}"
 export SWEEP_NAME="${SWEEP_NAME:-2026_oh_repro}"
 export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
 export REVIEWS_DIR="${SWEEP_NAME}/reviews"
+export MERGE_LOG="${SWEEP_NAME}/merge.log"
 export CONCURRENCY="${CONCURRENCY:-1}"
-export MAX_PAPERS="${MAX_PAPERS:-300}"
+export MAX_PAPERS="${MAX_PAPERS:-30}"
 export CALIBRATION_SET="${CALIBRATION_SET:-deepreview}"
 export PAPERS_DIR="${PAPERS_DIR:-$HOME/split_review/datasets/iclr2026_new/papers}"
 

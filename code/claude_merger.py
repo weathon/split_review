@@ -66,17 +66,17 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
 
     if not no_cal:
         _ensure_indexes()
-    allowed_paths = [paper_dir, HUMAN_REVIEW_DIR]
+    allowed_paths = [os.path.abspath(paper_dir), os.path.abspath(HUMAN_REVIEW_DIR)]
 
     def _check_path(path: str) -> str | None:
         resolved = os.path.abspath(path)
         if any(resolved.startswith(ap) for ap in allowed_paths):
             return None
-        return f"ERROR: Access denied. Path '{resolved}' is not under any allowed directory: {allowed_paths}"
+        return f"ERROR: Access denied. Path '{resolved}' is not under any allowed directory: {allowed_paths}. The agent may access only the specific allowed paths. Do not explore directories or nearby paths; only double-check whether the requested path was misspelled."
 
     @tool(
         "read_file",
-        "Read lines from a file. Returns lines numbered start_line to end_line (1-based). If end_line is 0, reads to EOF.",
+        "Read lines from a file. Returns lines numbered start_line to end_line (1-based). If end_line is 0, reads to EOF. If access is denied, only re-check whether the requested path is misspelled; do not explore directories or try nearby paths.",
         {"abs_path": str, "start_line": int, "end_line": int},
     )
     async def _read_file(args: dict) -> dict:
@@ -95,11 +95,11 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
             text = "".join(f"{start_line + i}: {line}" for i, line in enumerate(selected))
             return {"content": [{"type": "text", "text": text}]}
         except FileNotFoundError:
-            return {"content": [{"type": "text", "text": f"ERROR: File not found: {abs_path}"}], "is_error": True}
+            return {"content": [{"type": "text", "text": f"ERROR: File not found: {abs_path}. Do not explore directories or nearby paths; only double-check whether the requested path was misspelled."}], "is_error": True}
 
     @tool(
         "grep_file",
-        "Search a single file for a substring pattern. Returns matching lines with line numbers.",
+        "Search a single file for a substring pattern. Returns matching lines with line numbers. If access is denied, only re-check whether the requested path is misspelled; do not explore directories or try nearby paths.",
         {"pattern": str, "abs_path": str},
     )
     async def _grep_file(args: dict) -> dict:
@@ -111,7 +111,7 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
         if err:
             return {"content": [{"type": "text", "text": err}], "is_error": True}
         if not os.path.isfile(abs_path):
-            return {"content": [{"type": "text", "text": f"ERROR: '{abs_path}' is not a file."}], "is_error": True}
+            return {"content": [{"type": "text", "text": f"ERROR: '{abs_path}' is not a file. Do not explore directories or nearby paths; only double-check whether the requested path was misspelled."}], "is_error": True}
         matches = []
         try:
             with open(abs_path, "r", errors="replace") as fh:
@@ -122,6 +122,14 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
             return {"content": [{"type": "text", "text": f"ERROR: {e}"}], "is_error": True}
         text = "\n".join(matches) if matches else "No matches found."
         return {"content": [{"type": "text", "text": text}]}
+
+    @tool(
+        "draft_review",
+        "Record the merger's post-filtering draft before calibration or final writing.",
+        {"draft": str},
+    )
+    async def _draft_review(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": "draft recorded"}]}
 
     def _run_single_vector_query(query: str, n: int, low_score: float, high_score: float) -> str:
         score_index = _bm25_db.get("score_index", {})
@@ -198,7 +206,7 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
             sections.append(f"### Query {i}: {qtext!r}  (n={n}, score=({low_score}, {high_score}))\n{body}")
         return {"content": [{"type": "text", "text": "\n\n".join(sections)}]}
 
-    tools = [_read_file, _grep_file]
+    tools = [_read_file, _grep_file, _draft_review]
     if not no_cal:
         tools.append(_calibration_search)
     return create_sdk_mcp_server(
@@ -245,7 +253,7 @@ async def _run_claude_sdk_query(
         model=model_id,
         allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
-        disallowed_tools=["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
+        disallowed_tools=["Read", "Glob", "Grep", "Bash", "Edit", "Write", "WebSearch", "WebFetch"],
         mcp_servers=mcp_servers or {},
         max_turns=max_turns,
         cwd="/tmp",
@@ -340,6 +348,7 @@ async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: st
     allowed_tools = [
         "mcp__merger_fs__read_file",
         "mcp__merger_fs__grep_file",
+        "mcp__merger_fs__draft_review",
     ]
     if not no_cal:
         allowed_tools.append("mcp__merger_fs__calibration_search")
