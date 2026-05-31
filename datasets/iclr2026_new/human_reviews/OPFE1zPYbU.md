@@ -1,0 +1,195 @@
+## Human Reviewer 1
+
+### Summary
+The paper analyzes the diffusion and flow matching models and argues that the learning objective suffers from sparsity in higher dimensions.
+
+### Strengths
+I think that the problem of analyzing diffusion/flow models' objective is an important one.
+
+### Weaknesses
+The papers has the following strong weaknesses:
+1. **Lack of proper positioning/context in the literature**. The authors make a very strong and false claim in the introduction that they "present the first rigorous analysis of the diffusion model objective in high-dimensional sparse scenario". This problem is a known one and an active area of research. See for example [1] and references therein. The authors do not acknowledge, cite or compare with the existing literature on the topic. Furthermore, a large portion of the proofs (e.g. appendix A) are known results and the authors do not explicitly say that, potentially misleading readers that these are new results. Similarly, the entire discussion in section 2 about the similarities between diffusion and flow matching is well known, and nicely explained e.g. in the blog post: https://diffusionflow.github.io/. The authors should be more explicit that all of this is already known and properly cite related works.
+2. **The paper lacks mathematical rigour**. A lot of statements are vague and sometimes I genuinely did not know what the authors were trying to convey. For example
+    1. what does 'variance is relatively fixed' mean?
+    2. The notation is also confusing. What does E
+    3. What does "Furthermore, due to limited sampling during training, each $p(x0|xt = Xt)$ cannot be sufficiently sampled, so the actual degradation ratio should be higher than the statistics show" mean?
+    4. What does "In high dimensions, each $p(x0|xt = Xt)$ should be complex" mean?
+    5. "It easily predicts non-submerged frequencies (likely copying them)." What are non-submerged frequencies?
+    6. "Since the model compensates for the submerged frequencies, it can also be regarded as an information enhancement operator." - I don't understand what this sentence means.
+    7. "Based on the principle of train-test matching". What is the principle of train-test matching?
+    8. The entire section 4.1 lacks mathematical rigour. I_good and I_bad should be explicitly defined.
+    9. "The linear combination of independent noise is still noise"
+3. **There is no contribution**. Finally, the paper presents no contribution. They argue that the model objective is suboptimal. What they propose instead is "Self guidance", which in principle sounds similar to "Autoguidance" [2] (which is not cited) and "natural inference", but the authors provide no details on how it actually works. The entire section 4.2 is tough to understand. Figure 5 makes it more confusing rather than clarifying. Instead of rigorously defining what the authors propose with equations, they provide a list of bullet points that summarize the "core ideas". Finally, the authors do not provide any empirical results with their new framework, and how they compare with known sampling frameworks.
+
+Some more details:
+
+1. The proofs in appendix A:
+    1. Are imprecise - f_\theta is not defined. I assume that it's a function from R^D to R^D. But there are typos with missing norms, i.e. f_\theta^2 is undefined when f is not one-dimensional
+    2. All these results are well known are derived multiple times in various works. The authors don't mention this anywhere, and might mislead someone into thinking that these are novel results
+2. The discussion about flow matching in lines 138-152 is not correct in general. A flow matching model can be defined with various probability paths (and in particular, the prior distribution need not be Gaussian). It should be mentioned here explicitly that the authors only mean this simplified case (which is equivalent to a diffusion model with a certain noise schedule)
+3. Line 231. The reason for flow matching showing different statistics is that it uses a different noise schedule than VP. In other words, the "time" $t$ means different levels of noise for both models.
+4. "When weighted sum degradation occurs, it is equivalent to using a single sample as an estimator of the mean, which typically have large error". I have two issues with this statement
+    1. it is not true. The authors define degradation as the probability distribution over training data having an entry > 0.9. This is not equivalent to a dirac delta.
+    2. Secondly, we do the same thing with VAEs - we learn the model by only using a single sample, and it works fine in practice.
+5. "If we cannot provide an accurate fitting target, we argue that the model is unlikely to learn the ideal target accurately"
+    1. The question is: do we want to lean the ideal target? The ideal target will never generate any unseen data, because of the form of Eq14. So it is not really desirable to try to learn the ideal target.
+    2. Therefore, in practive, diffusion models certainly do not learn the ideal target, and it's good, because they are able to generate unseen examples. An interesting question is why that happens.
+6. Figure 5 is very difficult to parse. Some undefined symbols appear: a_t, b_t, c_t, y_t, \hat{a}_t.
+
+---
+References:
+
+[1] Lukoianov et al. "Locality in Image Diffusion Models Emerges from Data Statistics" (NeurIPS 2025)
+
+[2] Karras et al. "Guiding a Diffusion Model with a Bad Version of Itself" (NeurIPS 2024)
+
+### Questions
+1. In tables 1 and 2, for time=600, it seems like the "degradation" is much more pronounced than "degradation to x0". This is not intuitive to me. Are you saying that after adding some amount of noise I am much more likely to be closer to a different training example than the one I started with, and the weighted sum is still degenerate?
+2. "When training a model to predict X0 from noise-mixed samples, the model prioritizes frequencies based on their SNR"
+    1. Is this claim proven anywhere in the paper?
+3. "This frequency-dependent process is confirmed during inference: early steps (large t) generate contours, while later steps (small t) add details."
+    1. I think this is indeed considered general knowledge in the field, but I don't see the authors providing evidence of this claim, nor citing any works that demonstrate this
+
+### Soundness
+1
+
+### Presentation
+1
+
+### Contribution
+1
+
+### Rating
+0
+
+### Confidence
+5
+
+---
+
+## Human Reviewer 2
+
+### Summary
+This article posits that diffusion models are fundamentally limited in their ability to learn high-dimensional distributions with sparsity. To address this, the authors introduce a natural inference process that serves to unify existing methodologies.
+
+### Strengths
+- **Significance**: This article concerns the problem of diffusion models where the data distribution is sparse in high dimension, which could be a critical problem in the real-world applications.
+
+### Weaknesses
+- **Soundness**:
+  - Unknown facts: The authors demonstrate that in high-dimensional sparse scenarios, machine learning models can not effectively learn complex hidden probability distributions and their essential statistical quantities, but they do not show the references or provide other evidence. 
+  - Equation (15) is unclear, since the expectation is taken over $x_{t}$ rather than $x_{0}$. 
+  - Figure 1 seems to be incorrect, since $x_{t}$ can be at positions near other data points other than $x_{0}$. 
+- **Completeness**:
+  - Lack of experiments in the major text. 
+  - Lack of a related work section that contains the relevent references of this study. 
+- **Reresentation**:
+  - Redundancy: (1) In Sec. 1, the descriptions of assumptions made for diffusion models, flow-matching models; (2) the proofs for the equivalence of score-matching objective and denoising score matching objective in Sec. A.1 is not necessary, since it is well-known and not made by the authors. 
+  - Formatting Distractions: The overuse of emphasized text (e.g., excessive bolding or italics) biases the reader's attention and disrupts the flow of the narrative.
+  - Inproper figures: (1) Figure 5 is overly cluttered with mathematical symbols and equations that are not essential to its point and are not adequately explained in the caption or main text.; (2) all figure captions are missing a period at the end. 
+  - In Sec. 3.1, the text reads "Eq. equation (1)" instead of the standard "Eq. (1)". This formatting error should be corrected throughout the manuscript.
+
+### Questions
+- How can this study be applied in the real-world applications?
+
+### Soundness
+1
+
+### Presentation
+1
+
+### Contribution
+1
+
+### Rating
+2
+
+### Confidence
+3
+
+---
+
+## Human Reviewer 3
+
+### Summary
+This paper presents an analysis of diffusion models training objectives and its degradation to learning from a single sample in a low signa-to-noise regime. The paper also proposes a framework to unifies existing inference methods.
+
+### Strengths
+The paper proposed an interesting perspective to understand the training dynamics of diffusion models; in particular, how different frequences are picked up during different time and how the model's learning objective gradually shifts to focusing on a single sample as the signal to noise ratio increases. There are some empirical evidence in Table 1 that supports the authors' claim.
+
+### Weaknesses
+- The paper's language is very vague and the analysis not rigorous. A major claim in the paper is that diffusion models "cannot effectively learn the essential statistical quantities of the underlying data distribution, including the posterior, score, and velocity field", there are not rigorous mathematical arguments that support this claim. In fact prior work (e.g. [1]) have characterized the convergence properties of diffusion models. How would the proposed statement fit in this existing literatures on diffusion model theory?
+
+- Many "supporting" arguments are not original and not surprising. For example, the "weighted sum degradation" behavior is expected: as the likelihood signal gets stronger, the posterior concentrates on the most consistent sample. 
+
+- The purpose of Section 4 on A UNIFIED INFERENCE FRAMEWORK -NATURAL INFERENCE is unclear. It appears more like an interpretation of existing inference methods. It is not clear what new  insights are drawn, or whether there are new inference methods that can be proposed and improve upon the existing ones. 
+
+
+References
+[1] Chen, Sitan, et al. "Sampling is as easy as learning the score: theory for diffusion models with minimal data assumptions." arXiv preprint arXiv:2209.11215 (2022).
+
+### Questions
+See Weaknesses section.
+
+### Soundness
+1
+
+### Presentation
+1
+
+### Contribution
+1
+
+### Rating
+0
+
+### Confidence
+5
+
+---
+
+## Human Reviewer 4
+
+### Summary
+This paper challenges the conventional probabilistic interpretation of diffusion models. The authors argue that, in high-dimensional and sparse data regimes, the objective of diffusion models “degrades” — instead of learning statistical quantities (posterior, score, velocity field), the model merely learns to predict the original clean sample $x_0$ from its noisy counterpart $x_t$.
+
+The paper presents both analytical reasoning and empirical statistics to support this claim. Specifically:
+
+* The authors analyze the posterior $p(x_0|x_t)$ and show that, in high-dimensional spaces, its mean (normally a weighted sum over all samples) collapses to a single dominant sample — the so-called **Weighted Sum Degradation** phenomenon.
+* Empirical measurements on ImageNet-256 and ImageNet-512 show nearly 100% degradation for small $t$ ($t < 600$).
+* Building on this, they propose a “Natural Inference Framework” that unifies multiple sampling algorithms (DDPM, DDIM, DPM-Solver, DEIS, etc.) as simple autoregressive signal combinations without invoking probabilistic concepts.
+
+The authors claim this provides a new, intuitive, and non-statistical understanding of diffusion model training and inference.
+
+### Strengths
+* The new perspective is interesting
+
+* The proposed “Natural Inference” formulation offers an intuitive, signal-processing-style view of sampling.
+
+### Weaknesses
+* The **main claim is overstated and unsupported**: posterior concentration does not invalidate the probabilistic formulation of diffusion models.
+* The “Natural Inference Framework” is **only a re-expression** of known samplers in linear form, offering no new theory, algorithm, or empirical advantage.
+* No experimental evidence demonstrates that this perspective improves understanding or performance.
+* The argument conflates numerical concentration with conceptual failure of probabilistic mode
+
+### Questions
+* In Section 3.1, $p(x_0)$ is represented using an empirical distribution over training samples. This is not a common practice in diffusion literature. Could you clarify whether there are existing works that also adopt such an empirical formulation as the basis for theoretical derivation?
+
+* While many deterministic formulations of diffusion models exist, they generally do **not** reject the probabilistic foundation. What is the motivation or added value of explicitly denying the probabilistic perspective?
+
+* I agree that in modern machine learning there are cases where probabilistic reasoning can be dropped—for example, linear regression can be derived either from a Gaussian noise assumption or purely geometrically from minimizing MSE. However, methodological proposals should ideally be grounded in **simple and principled intuition**. The probabilistic formulation of diffusion models has such a foundation through *score matching*. Does your proposed “Natural Diffusion” framework have an equally simple and principled starting point?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+1
+
+### Rating
+2
+
+### Confidence
+3

@@ -113,7 +113,6 @@ The user needs to know when their input was modified before being processed. Lou
 - When given an unclear instruction, consider it in the context of the current working directory and the surrounding code. If "rename methodName to snake case" is the ask, find the method and edit the code, don't just print `method_name`.
 - If you genuinely don't know something, say so. Don't fabricate API surfaces, model names, or library behavior to fill the gap.
 - Never "correct" the user on model versions, library versions, or tools you haven't seen. If they say a model exists, it exists. Lack of knowledge != nonexistence. AI/ML tooling evolves faster than your training data.
-- Always answer in Chinese
 
 ## Pipeline / agent loop discipline
 

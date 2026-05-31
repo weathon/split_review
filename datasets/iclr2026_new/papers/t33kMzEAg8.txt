@@ -1,0 +1,286 @@
+
+
+{0}------------------------------------------------
+
+# SWIREASONING: SWITCH-THINKING IN LATENT AND EXPLICIT FOR PARETO-SUPERIOR REASONING LLMs
+
+## ABSTRACT
+
+Recent work shows that, beyond discrete reasoning through explicit chain-of-thought steps, which are limited by the boundaries of natural languages, large language models (LLMs) can also reason continuously in latent space, allowing richer information per step and thereby improving token efficiency. Despite this promise, latent reasoning still faces two challenges, especially in training-free settings: 1) purely latent reasoning broadens the search distribution by maintaining multiple implicit paths, which diffuses probability mass, introduces noise, and impedes convergence to a single high-confidence solution, thereby hurting accuracy; and 2) overthinking persists even without explicit text, wasting tokens and degrading efficiency. To address these issues, we introduce SWIREASONING, a training-free framework for LLM reasoning which features two key innovations: 1) SWIREASONING dynamically switches between explicit and latent reasoning, guided by block-wise confidence estimated from entropy trends in next-token distributions, to balance exploration and exploitation and promote timely convergence. 2) By limiting the maximum number of thinking-block switches, SWIREASONING curbs overthinking and improves token efficiency across varying problem difficulties. On widely used mathematics, STEM, coding, and general benchmarks, SWIREASONING consistently improves average accuracy by 1.8%–3.1% across reasoning LLMs of different model families and scales. Furthermore, under constrained budgets, SWIREASONING improves average token efficiency by 57%–79%, with larger gains as budgets tighten.
+
+<sup>†</sup>Equal advising.
+
+{1}------------------------------------------------
+
+## 1 INTRODUCTION
+
+Reasoning is one of the central capabilities of large language models (LLMs) (Yang et al., 2025; Qwen Team, 2024; Meta, 2025a;b). It allows models to tackle complex tasks such as mathematics, science, and programming (Guo et al., 2025; OpenAI, 2025b; Jaech et al., 2024; Agarwal et al., 2025; Qwen Team, 2025; Abdin et al., 2025; Abouelenin et al., 2025; Anthropic, 2025; DeepMind, 2024a;b), far beyond simple question answering.
+
+A key limitation of the dominant reasoning approach, explicit chain-of-thought (CoT) (Wolf et al., 2020; Wei et al., 2022; Yao et al., 2023a; Goyal et al., 2024; Pfau et al., 2024), lies in the reliance on discrete tokens during inference. In standard CoT decoding, the model commits to a single token at each step, sampled from the predicted distribution. While effective and ensures readability by verbalizing intermediate steps, this discrete process collapses the full probability distribution into a single trajectory, discarding uncertainty and eliminating many potentially useful reasoning paths.
+
+To overcome this bottleneck, recent work has explored an alternative reasoning technique, latent reasoning (Hao et al., 2024; Zhang et al., 2025; Cheng & Van Durme, 2024; Xu et al., 2025a;b; Tan et al., 2025), where the model operates directly in a continuous hidden space instead of a discrete text space. Latent reasoning offers two key advantages over CoT: 1) higher representational bandwidth per step, since hidden vectors can encode richer information than single tokens (Zhu et al., 2025b); and 2) the ability to preserve multiple reasoning hypotheses implicitly, rather than collapsing them prematurely into one tokenized path (Li et al., 2025b; Chen et al., 2025).
+
+Latent reasoning can be broadly categorized into training-required and training-free approaches. Training-required ones (Hao et al., 2024; Su et al., 2025; Liu et al., 2024; Shen et al., 2025; Tack et al., 2025) demand substantial retraining or fine-tuning (Yue et al., 2025; Li et al., 2025a; Wang et al., 2025a; Zhu et al., 2025a), making it excessively expensive to apply to large reasoning language models. In contrast, training-free approaches like Soft-Thinking (Zhang et al., 2025), which form a probability-weighted mixture of token embeddings as inputs, operate directly at inference time without incurring additional training costs. Our work focuses on the latter category, which is cost-effective and resource-friendly for deployment in large-scale reasoning models.
+
+Although training-free latent reasoning eliminates the need for costly retraining, operating purely in the latent space also presents significant challenges. First, the model is not explicitly trained to perform long-horizon reasoning with latent inputs. As a result of distributional mismatches, when inference relies solely on latent trajectories, the process is less controlled and can easily drift off course (Chen et al., 2025). Instead of collapsing into a single path, the model tends to spread probability mass across many implicit reasoning paths. While this preserves multiple hypotheses, it also introduces persistent noise, slows convergence, and ultimately harms reasoning accuracy (Li et al., 2025b). Second, the absence of explicit tokens does not necessarily ensure efficiency. In latent space, models may still suffer from repetitive or unnecessarily extended internal deliberations and continuation (Zhang et al., 2025), essentially overthinking. This prolongs inference and overconsumes tokens, undermining the very efficiency that latent reasoning is meant to improve.
+
+To address these issues, this paper introduces SWIREASONING (abbreviated as SWIR), a training-free framework for LLM reasoning that alternates between explicit and latent thinking, based on block-wise confidence inferred from entropy trends of next-token distributions, and suppresses overthinking by bounding the number of switches. More specifically, the framework first tracks a reference entropy within each thinking block to reflect block-wise confidence. Rising confidence triggers an explicit switch to consolidate progress along a single path, while sustained uncertainty triggers a latent switch to re-explore in continuous space. Second, a switch count controller caps the number of thinking block transitions and provides early-answer checkpoints, curbing unnecessary latent loops and improving token efficiency across difficulties.
+
+The proposed framework also benefits from reintroducing diversity by sampling in an explicit thinking block when compared to pure latent thinking. Even though motivated differently, SWIREASONING resonates with the concurrent observation of Wu et al. (2025b) that introducing stochasticity benefits latent reasoning, but we achieve this via a distinct mode switch mechanism rather than injecting distributions with randomness.
+
+Our contributions are summarized as follows:
+
+{2}------------------------------------------------
+
+- We propose SWIREASONING, a training-free reasoning framework that dynamically alternates between explicit and latent thinking based on confidence signals, thereby exploiting the expressivity of latent thinking without sacrificing the stability of explicit thinking.
+- We introduce a switch count control mechanism that caps the number of transitions, enabling early answering based on partial reasoning trajectories at switch boundaries. This effectively suppresses overthinking and improves token efficiency under limited budgets.
+- We extensively validate the effectiveness of SWIREASONING on mathematics, STEM, coding, and general reasoning domains across multiple benchmarks, model families, and sizes, demonstrating consistent gains in both accuracy and token efficiency over training-free baselines.
+
+## 2 RELATED WORK
+
+**Explicit LLM Reasoning.** Reasoning via explicit intermediate text has been extensively studied. Chain-of-thought (CoT) prompting elicits stepwise rationales that improve reasoning accuracy by decomposing problems into natural-language sub-steps (Kojima et al., 2022; Wei et al., 2022). Subsequent work increases robustness by aggregating multiple CoT trajectories through self-consistency (Wang et al., 2022). Search- and tool-augmented variants further expand the exploration space, such as Tree-of-thought that branches over partial rationales (Yao et al., 2023a) and interleaving reasoning and actions with external tools and environments (Yao et al., 2023b). Least-to-most prompting progressively solves subproblems to reduce reasoning load and mitigate error accumulation (Zhou et al., 2022). These approaches operate purely in the discrete token space and therefore commit to a single token at each step. While readable, the discretizations in explicit reasoning discard alternative hypotheses early, and restrict the information bandwidth per step (Zhu et al., 2025b).
+
+**Latent LLM Reasoning.** Latent reasoning operates in the continuous representation space rather than discrete natural language space used by explicit reasoning. Prior work can be broadly grouped into two categories. 1) Training-required approaches modify pretraining (Tack et al., 2025; Zeng et al., 2025) or fine-tuning objectives (Tan et al., 2025; Wang et al., 2025a;b; Jiang et al., 2025; Wu et al., 2025a; Yue et al., 2025; Li et al., 2025a; Shen et al., 2025; Xu et al., 2025a) to supervise hidden-state trajectories or to endow models with latent-planning skills. 2) Training-free approaches (Zhang et al., 2025; Wu et al., 2025b) intervene only at inference time by manipulating hidden representations or probability distributions without updating model weights. Our work belongs to the training-free category but differs from prior single-mode methods. Instead of remaining purely latent, SWIREASONING dynamically switches between latent and explicit reasoning based on entropy-trend confidence, and further regulates the number of switches through a count controller to suppress overthinking and improve efficiency.
+
+## 3 METHODOLOGY
+
+### 3.1 SWIREASONING OVERVIEW
+
+As shown in Fig. 3, SWIREASONING is a training-free framework that dynamically alternates between explicit and latent reasoning. The number of switches is regulated to suppress overthinking and improve token efficiency. Sec. 3.2 presents the preliminaries of explicit and latent reasoning. Sec. 3.3 details the design of the dynamic switch, and Sec. 3.4 discusses the switch count control mechanism. Implementation details are provided in Appendix B.1.
+
+### 3.2 PRELIMINARY: EXPLICIT AND TRAINING-FREE LATENT THINKING
+
+**Explicit Thinking.** Let  $V$  be a vocabulary and  $p_\theta(x_t \mid x_{<t})$  an LLM over  $V$  with parameters  $\theta$ . Given a question  $q$ , the model produces a reasoning trace  $r_{1:T} \in V^T$  followed by a final answer  $a_{1:U} \in V^U$ . We write the concatenated sequence as
+
+$$x_{1:(|q|+T+U)} = [q, r_{1:T}, a_{1:U}],$$
+
+{3}------------------------------------------------
+
+![Figure 3: SWIREASONING framework. (a) Thinking Mode Switch: A graph showing Entropy vs. Position. The 'Unconfident' region is high entropy, and the 'Confident' region is low entropy. A 'Switch' occurs when the entropy trend changes. Below the graph, a flow diagram shows 'Input' tokens $E_1, E_2, E_3$ being processed by 'Reasoning LLMs' to produce 'Probs'. An 'Argmax' is applied to select tokens $X_1, X_2, X_3$. A 'Mixing' block is shown, and a 'Weighted' sum of tokens is produced. (b) Switch Count Control: A flow diagram showing a sequence of thinking blocks. Each block has a 'Switch Count' (1, 2, 3). A 'Mode Switch' (Explicit to Latent or Latent to Explicit) occurs when the switch count reaches a limit. The process stops when a 'Final Answer' is reached. A 'Vocabulary' and 'Embeddings' are shown at the bottom.](2fa4a1bf91d0f34e87c689fbc1211fe3_img.jpg)
+
+Figure 3: SWIREASONING framework. (a) Thinking Mode Switch: A graph showing Entropy vs. Position. The 'Unconfident' region is high entropy, and the 'Confident' region is low entropy. A 'Switch' occurs when the entropy trend changes. Below the graph, a flow diagram shows 'Input' tokens \$E\_1, E\_2, E\_3\$ being processed by 'Reasoning LLMs' to produce 'Probs'. An 'Argmax' is applied to select tokens \$X\_1, X\_2, X\_3\$. A 'Mixing' block is shown, and a 'Weighted' sum of tokens is produced. (b) Switch Count Control: A flow diagram showing a sequence of thinking blocks. Each block has a 'Switch Count' (1, 2, 3). A 'Mode Switch' (Explicit to Latent or Latent to Explicit) occurs when the switch count reaches a limit. The process stops when a 'Final Answer' is reached. A 'Vocabulary' and 'Embeddings' are shown at the bottom.
+
+Figure 3: SWIREASONING framework. (a) Dynamic mode switching alternates between explicit and latent thinking based on block-wise confidence estimated from entropy trends. (b) A switch count control mechanism limits the maximum number of thinking-block transitions, suppressing overthinking before the final answer.
+
+At inference, decoding proceeds by repeatedly choosing a token  $x_t$  from the predictive distribution  $p_\theta(\cdot | x_{<t})$  according to a policy  $\pi_t(\cdot)$ , e.g.,
+
+$$x_t \sim \pi_t(\cdot) \text{ with } \pi_t = \begin{cases} \text{Greedy: } \arg \max_{v \in V} p_\theta(v | x_{<t}), \\ \text{Sampling: Top-}k\text{/Top-}p \text{ with temperature } \tau. \end{cases}$$
+
+The reasoning phase stops when a termination condition is met, e.g., generating  $\langle/\text{think}\rangle$ , after which the answer tokens  $a_{1:U}$  are decoded in the same manner. While explicit reasoning improves reliability by externalizing intermediate steps, its hard policy  $\pi_t(\cdot)$  collapses the full distribution to a single discrete decision at each step, i.e., discards information in  $p_\theta(\cdot | x_{<t})$  beyond the chosen token.
+
+**Training-Free Latent Thinking.** It replaces the hard policy  $\pi_t(\cdot)$  by a continuous surrogate that preserves distributional information. Let  $E \in \mathbb{R}^{|V| \times d}$  denote the token embedding matrix with rows  $e^{(v)} \in \mathbb{R}^d$ . At step  $t$ , the model yields logits  $\ell_t \in \mathbb{R}^{|V|}$  and  $p_t = \text{softmax}(\ell_t)$ . Given the next-token distribution  $p_t := p_\theta(\cdot | x_{<t}) \in \Delta^{|V|-1}$ , it forms a soft embedding
+
+$$\tilde{e}_t = \sum_{v \in V} p_t[v] e^{(v)} \in \mathbb{R}^d, \quad (1)$$
+
+and feeds  $\tilde{e}_t$  back to the model as the next input representation, rather than committing to an explicit token by  $\pi_t(\cdot)$ . Upon the thinking phase being complete, the policy reverts to  $\pi_t(\cdot)$  for answer generation. The convexity of Eq. 1 ensures  $\tilde{e}_t$  lies in the embedding hull of  $E$ , retaining all first-order uncertainty in  $p_t$ , which reduces information discards and increases robustness to local noise.
+
+### 3.3 DYNAMIC SWITCH BETWEEN EXPLICIT AND LATENT THINKING
+
+Remaining in a single mode throughout reasoning is inherently suboptimal: explicit thinking provides readability but may discard useful information beyond chosen tokens, while latent thinking preserves richer signals but can drift into noise and reduce accuracy. Our key insight is that *reasoning should switch modes based on confidence*. Latent reasoning enables exploration across multiple potential continuations when confidence is low, and explicit reasoning encourages convergence when confidence is high, striking a balance that supports broad exploration while maintaining accuracy.
+
+**Mode Switch Criterion.** We refer to the reasoning content between two consecutive switches as a thinking block and estimate its confidence by entropy  $H_t = -\sum_v p_t[v] \log p_t[v]$ . Let  $\bar{H}$  denote the reference entropy of the current block, which is initialized at the first step of the block and refreshed when a mode switch happens. We use a criterion that converts local entropy trends into decisions:
+
+$$\text{Latent} \rightarrow \text{Explicit} : \quad (H_t < \bar{H}) \quad (\text{confidence rises}), \quad (2)$$
+
+$$\text{Explicit} \rightarrow \text{Latent} : \quad (H_t > \bar{H}) \quad (\text{confidence drops}), \quad (3)$$
+
+{4}------------------------------------------------
+
+**Switch Window Size.** To avoid oscillations, we impose dwell windows upon the mode switch criterion. Formally, with mode variable  $m_t \in \{\text{Explicit, Latent}\}$  and dwell step counter  $\Delta t$ , we have
+
+$$m_{t+1} = \begin{cases} \text{Explicit,} & m_t = \text{Latent} \wedge (H_t < \bar{H}) \wedge (\Delta t \geq W_{L \rightarrow E}), \\ \text{Latent,} & m_t = \text{Explicit} \wedge (H_t > \bar{H}) \wedge (\Delta t \geq W_{E \rightarrow L}), \\ m_t, & \text{otherwise.} \end{cases}$$
+
+We reset  $\bar{H} \leftarrow H_t$ ,  $\Delta t \leftarrow 0$  upon any switch, *i.e.*,  $m_{t+1} \neq m_t$ . Otherwise, we update  $\Delta t \leftarrow \Delta t + 1$ . In practice,  $W_{L \rightarrow E} = 0$  while  $W_{E \rightarrow L}$  is positive, *i.e.*, a Latent  $\rightarrow$  Explicit switch may occur immediately when  $H_t$  dips, whereas an Explicit  $\rightarrow$  Latent switch requires staying for at least  $W_{E \rightarrow L}$  steps.
+
+The key intuition behind the asymmetric design is that *two modes play different roles in reasoning*. Latent reasoning is inherently divergent, allowing for rich exploration. However, prolonging the latent phase after confidence has recovered is counterproductive. It increases the risks of introducing spurious signals that may mislead the model. Therefore, once confidence rises, an immediate switch back to explicit reasoning is necessary to consolidate progress onto a single coherent trajectory.
+
+In contrast, explicit reasoning is convergent, gradually unfolding a chain-of-thought where each token incrementally extends the current logical path. If the model were allowed to switch back to latent reasoning at the first sign of an entropy fluctuation, spurious short-term uncertainty could trigger oscillations. The dwell window  $W_{E \rightarrow L}$  ensures that explicit reasoning is given sufficient opportunity to stabilize and accumulate meaningful structure.
+
+**Thinking-Related Signal Mixing.** To better align mode switches with the LLMs’ learned reasoning patterns, we blend the embeddings of thinking-related signal tokens, *e.g.*,  $\langle \text{think} \rangle$  and  $\langle / \text{think} \rangle$ , when a switch occurs. Let  $e_{\langle \text{think} \rangle}$  and  $e_{\langle / \text{think} \rangle}$  denote their embeddings. At the entrance to a latent thinking block, we bias the first latent step  $t^*$  toward “begin thinking” by
+
+$$\tilde{e}_{t^*} \leftarrow \alpha_{t^*} \cdot \tilde{e}_{t^*} + (1 - \alpha_{t^*}) \cdot e_{\langle \text{think} \rangle}, \quad \alpha_{t^*} \in [0, 1], \quad (4)$$
+
+and at the exit to an explicit thinking block, we bias the first explicit step  $t^\dagger$  toward “end thinking”
+
+$$\tilde{e}_{t^\dagger} \leftarrow \beta_{t^\dagger} \cdot \tilde{e}_{t^\dagger} + (1 - \beta_{t^\dagger}) \cdot e_{\langle / \text{think} \rangle}, \quad \beta_{t^\dagger} \in [0, 1], \quad (5)$$
+
+which encourages the model to close the latent phase and move on to answer production. In practice, we schedule  $\alpha_t = \alpha_0 + (1 - \alpha_0) \frac{t}{T_{\max}}$  and  $\beta_t = \beta_0 + (1 - \beta_0) \frac{t}{T_{\max}}$ , where  $T_{\max}$  is a predefined maximum generation length, and apply Eq. 4 or Eq. 5 only at the steps when switches occur.
+
+### 3.4 OVERTHINKING SUPPRESSION BY SWITCH COUNT CONTROL
+
+Even with confidence-aware switching, reasoning LLMs may still overthink. Therefore, we place a bound on the total number of Latent  $\rightarrow$  Explicit switches. Our key insight is that each switch naturally marks *the end of a thinking block where partial reasoning trajectories have been consolidated*, which may already contain sufficient evidence for arriving at a reasonable solution. Under limited budgets, generating answers at these natural checkpoints can make use of partial reasoning trajectories, offering a chance to obtain correct predictions earlier without consuming additional tokens.
+
+**Counter and Triggers.** Let  $C_t$  count completed Latent  $\rightarrow$  Explicit switches up to step  $t$ . Given a user-specified budget  $C_{\max}$ , we define two triggers:
+
+- **Convergence trigger** (at  $\frac{1}{2}C_{\max} \leq C_t \leq C_{\max}$  on Latent  $\rightarrow$  Explicit transitions): force the next token to be  $\langle / \text{think} \rangle$ . The convergence trigger is to encourage rather than enforce the end of the thinking process and the start of converging to an answer based on partial reasoning trajectories.
+- **Termination trigger** (at  $C_t > C_{\max}$  on a subsequent Latent  $\rightarrow$  Explicit transition): inject a concise answer prefix  $s_{\text{final}}$ , “ $\langle / \text{think} \rangle \backslash \backslash \text{n}$  The final answer is”, then allow at most  $B$  additional tokens for the final answer. The termination trigger is to enforce an immediate answer generation.
+
+Triggers are implemented as short injection queues that overwrite future-generated tokens. Formally, let  $\mathcal{Q}_t$  be the per-sample injection queue. When a convergence or termination trigger fires, we set  $\mathcal{Q}_t \leftarrow \{\text{ID}(\langle / \text{think} \rangle)\} \mid \{\text{ID}(s_{\text{final}})\}$ . At the next step, if  $\mathcal{Q}_t \neq \emptyset$ , we deterministically set  $x_t \leftarrow \mathcal{Q}_t.\text{pop}()$ . For the termination trigger, we also start a budget counter  $b_t = B$  and decrement it each step after the termination trigger fires. Decoding will be terminated once  $b_t = 0$ .
+
+{5}------------------------------------------------
+
+## 4 EXPERIMENTS
+
+### 4.1 EXPERIMENTAL SETTINGS
+
+**Models.** We evaluate SWIREASONING on four recent reasoning LLMs: DeepSeek-R1-Distill-Llama-8B (Guo et al., 2025), Qwen3-1.7B (Yang et al., 2025), Qwen3-8B (Yang et al., 2025), and Qwen3-32B (Yang et al., 2025). This selection helps us validate the effectiveness of SWIREASONING across different model families, model scales, and training paradigms.
+
+**Domains and Benchmarks.** We evaluate SWIREASONING on 11 benchmarks spanning four domains: mathematical reasoning (GSM8K (Cobbe et al., 2021), Math500 (Hendrycks et al., 2021), AIME 2024 (HuggingFaceH4, 2024), AIME 2025 (Yentinglin, 2025)); STEM reasoning (GPQA Diamond (Rein et al., 2024)); coding reasoning (HumanEval (Chen et al., 2021), LeetCodeContest (Guo et al., 2024), MBPP (Austin et al., 2021), LiveCodeBench (Jain et al., 2024)); and general reasoning (2WikiMultihopQA (Ho et al., 2020), CommonsenseQA (Talmor et al., 2019)).
+
+**Baselines.** We compare SWIREASONING that dynamically switches between thinking modes against three baselines with a single thinking mode, including 1) explicit thinking alone: standard CoT reasoning with sampling, standard CoT reasoning with greedy decoding, and 2) training-free latent thinking alone: Soft Thinking (Zhang et al., 2025).
+
+**Metrics.** We use the Pass@1 metric to evaluate reasoning accuracy, and token efficiency  $E$  to assess the level of reasoning efficiency. Let  $\text{Acc}_m(\ell) \in [0, 1]$  denote the accuracy of method  $m$  when using  $\ell$  generated tokens. Its plain token efficiency is the accuracy gained per token,
+
+$$PE_m(\ell) = \frac{\text{Acc}_m(\ell)}{\ell}.$$
+
+To express efficiency in units relative to the standard CoT, we normalize it by the CoT’s plain token efficiency when the highest accuracy is achieved. Specifically, if CoT achieves its highest accuracy  $\text{Acc}_{\text{CoT}}^*$  using  $\ell_{\text{CoT}}^*$  tokens, denote  $PE_{\text{CoT}}^* = \frac{\text{Acc}_{\text{CoT}}^*}{\ell_{\text{CoT}}^*}$ . The token efficiency of  $m$  is defined as
+
+$$E_m(\ell) = \frac{PE_m(\ell)}{PE_{\text{CoT}}^*} = \frac{\text{Acc}_m(\ell)/\ell}{\text{Acc}_{\text{CoT}}^*/\ell_{\text{CoT}}^*}.$$
+
+And the average efficiency gain of method  $m$  over CoT is
+
+$$\mathbb{E}[\Delta E_m] = \frac{\int (E_m(\ell) - E_{\text{CoT}}(\ell)) d\ell}{\int E_{\text{CoT}}(\ell) d\ell}.$$
+
+### 4.2 REASONING ACCURACY UNDER UNLIMITED TOKEN BUDGETS
+
+We first evaluate SWIREASONING in the setting where token budgets are set large enough to ensure that each method is allowed to conduct sufficient thinking (refer to Appendix B.2 for detailed settings). Fig. 1 and Tab. 1 report the highest attainable accuracies across mathematics (GSM8K, MATH500, AIME24, AIME25) and STEM (GPQA Diamond) benchmarks under this setting. Across different model families of varying sizes, SWIREASONING consistently achieves higher Pass@1 accuracy than CoT with sampling, CoT with greedy decoding, and Soft Thinking.
+
+Our observation is that improvements are most pronounced on the more challenging benchmarks. For instance, on AIME24/AIME25, which require deep deductive reasoning and are widely regarded as more difficult, our method yields absolute gains of 3.34%/2.50% on Qwen3-8B, and 5.00%/5.00% on Qwen3-1.7B. These margins substantially exceed those observed on GSM8K or MATH500 with lower difficulty, suggesting that the proposed switching mechanism is particularly beneficial when problems involve long reasoning chains or higher uncertainty from the LLM’s perspective. Overall, the accuracy results under unlimited token budgets highlight the strength of SWIREASONING in better addressing reasoning tasks compared to single-mode approaches.
+
+{6}------------------------------------------------
+
+Table 1: Comparison of SWIREASONING and CoT with sampling, CoT with greedy decoding, and Soft Thinking on mathematics and STEM benchmarks. SWIREASONING improves accuracy by  $+2.17\%$  on average.
+
+| Method | GSM8K | MATH 500 | GPQA Diamond | AIME 2024 | AIME 2025 | Average |
+|-|-|-|-|-|-|-|
+| <i>Qwen3-8B (Yang et al., 2025)</i> |  |  |  |  |  |  |
+| CoT | 95.60 | 96.00 | 59.60 | 75.83 | 67.50 | 78.91 $+0.00$ |
+| CoT (Greedy) | 95.68 | 96.40 | 56.57 | 70.00 | 60.00 | 75.73 $-3.18$ |
+| Soft Thinking | 95.38 | 96.00 | 59.60 | 67.92 | 68.33 | 77.45 $-1.46$ |
+| <b>SwiR (Ours)</b> | <b>96.06</b> $+0.46$ | <b>98.40</b> $+2.40$ | <b>61.11</b> $+1.51$ | <b>79.17</b> $+3.34$ | <b>70.00</b> $+2.50$ | <b>80.94</b> $+2.03$ |
+| <i>Qwen3-1.7B (Yang et al., 2025)</i> |  |  |  |  |  |  |
+| CoT | 90.44 | 92.00 | 39.39 | 45.83 | 33.33 | 60.20 $+0.00$ |
+| CoT (Greedy) | 89.61 | 91.00 | 31.82 | 40.00 | 33.33 | 57.15 $-3.05$ |
+| Soft Thinking | 90.30 | 90.60 | 34.34 | 38.75 | 36.67 | 58.13 $-2.07$ |
+| <b>SwiR (Ours)</b> | <b>90.83</b> $+0.39$ | <b>93.00</b> $+1.00$ | <b>41.41</b> $+2.02$ | <b>50.83</b> $+5.00$ | <b>38.33</b> $+5.00$ | <b>62.88</b> $+2.68$ |
+| <i>DeepSeek-R1-Distill-Llama-8B (Guo et al., 2025)</i> |  |  |  |  |  |  |
+| CoT | 89.46 | 91.40 | 46.46 | 43.75 | 26.25 | 59.46 $+0.00$ |
+| CoT (Greedy) | 85.82 | 84.80 | 31.81 | 30.00 | 30.00 | 52.49 $-6.97$ |
+| Soft Thinking | 85.90 | 83.80 | 33.33 | 34.17 | 20.42 | 51.52 $-7.94$ |
+| <b>SwiR (Ours)</b> | <b>90.07</b> $+0.61$ | <b>92.00</b> $+0.60$ | <b>47.98</b> $+1.52$ | <b>45.00</b> $+1.25$ | <b>31.25</b> $+5.00$ | <b>61.26</b> $+1.80$ |
+
+### 4.3 TOKEN EFFICIENCY UNDER LIMITED TOKEN BUDGETS
+
+Across models and benchmarks, SWIREASONING consistently attains improved Pareto frontiers. As shown in Fig. 2, the peak efficiency gains range between  $4.6\times$  and  $6.8\times$  over CoT depending on the model size. These improvements are not confined to a single budget: the area-under-curve (AUC) advantage persists across a broad range of small to moderate budgets.
+
+One observation from Fig. 4 is that the relatively large average efficiency gains occur on GSM8K, MATH500, and GPQA Diamond across three models (up to  $213\%$  AUC improvements in the per-benchmark panels). These tasks contain many instances with lower difficulty, which benefit most from our overthinking suppression design to obtain the correct answer with partial reasoning trajectories. In contrast, on AIME24/25, the efficiency gaps are smaller, while the accuracy gains with unlimited budgets are larger. This asymmetry is expected: the harder the problem is, the more difficult it is to predict a correct answer with unfinished reasoning trajectories. Overall, token efficiency results under limited budgets substantiate the advantage of SWIREASONING in gaining accuracy more efficiently as budgets tighten compared to baseline methods.
+
+### 4.4 EVALUATION WITH PASS@K ACCURACY
+
+In addition to Pass@1 accuracy, we also measure Pass@k accuracy, where  $k \in [1, 64]$  on Qwen3-8B. Fig. 5 shows that SWIREASONING reaches its maximal accuracy with significantly smaller  $k$  than baselines. Define  $k^*$  as the smallest  $k$  achieving the method’s peak. On AIME24, we observe  $k^* = 13$  for SWIREASONING versus 46 for CoT (about  $72\%$  fewer samples), and on AIME25,  $k^* = 16$  versus 22 (about  $27\%$  fewer samples). In addition to the faster growth of the curve than CoT, SWIREASONING also exhibits 1) a steeper initial slope at small  $k$  (higher “per-sample yield”), and 2) a higher eventual ceiling than Soft Thinking and greedy CoT, indicating better correctness and diversity simultaneously. Overall, Pass@k accuracy results indicate that SWIREASONING is particularly attractive for budgeted evaluation settings where  $k$  cannot be large.
+
+### 4.5 ABLATION STUDIES
+
+**Switch Window Size.** SWIREASONING uses dwell windows (Sec. 3.3) to enforce the model stays in a thinking block for at least  $W$  steps before switching to the other thinking mode. We conduct ablation studies on Qwen3-1.7B with a representative setting consisting of  $W_{E \rightarrow L} \in \{64, 128, 256, 512, 1024\}$  and report Pass@1 accuracy on five benchmarks. Results in Tab. 3 demonstrate that an intermediate window size of 512 consistently produces the best results.
+
+{7}------------------------------------------------
+
+![Figure 4: A 5x3 grid of line plots showing Token Efficiency (Tokens/$) vs. Generation Length (t) for various benchmarks: GSM8K, MATH500, GPQA-Diamond, AIME24, and AIME25. Each plot compares four methods: CoT (blue line with circles), Greedy (orange line with triangles), Soft Thinking (green line with diamonds), and Swit (ours) (purple line with crosses). The Swit method consistently shows higher token efficiency across most benchmarks and generation lengths. Each plot includes an expected efficiency improvement: GSM8K (Qwen3-8B: +135%, Qwen3-1.7B: +105%, DeepSeek-R1: +112%), MATH500 (Qwen3-8B: +39%, Qwen3-1.7B: +89%, DeepSeek-R1: +63%), GPQA-Diamond (Qwen3-8B: +213%, Qwen3-1.7B: +193%, DeepSeek-R1: +160%), AIME24 (Qwen3-8B: +37%, Qwen3-1.7B: +27%, DeepSeek-R1: +33%), and AIME25 (Qwen3-8B: +33%, Qwen3-1.7B: +83%, DeepSeek-R1: +25%).](3121afa7ca030b22ee0345864ca6f38b_img.jpg)
+
+Figure 4: A 5x3 grid of line plots showing Token Efficiency (Tokens/\$) vs. Generation Length (t) for various benchmarks: GSM8K, MATH500, GPQA-Diamond, AIME24, and AIME25. Each plot compares four methods: CoT (blue line with circles), Greedy (orange line with triangles), Soft Thinking (green line with diamonds), and Swit (ours) (purple line with crosses). The Swit method consistently shows higher token efficiency across most benchmarks and generation lengths. Each plot includes an expected efficiency improvement: GSM8K (Qwen3-8B: +135%, Qwen3-1.7B: +105%, DeepSeek-R1: +112%), MATH500 (Qwen3-8B: +39%, Qwen3-1.7B: +89%, DeepSeek-R1: +63%), GPQA-Diamond (Qwen3-8B: +213%, Qwen3-1.7B: +193%, DeepSeek-R1: +160%), AIME24 (Qwen3-8B: +37%, Qwen3-1.7B: +27%, DeepSeek-R1: +33%), and AIME25 (Qwen3-8B: +33%, Qwen3-1.7B: +83%, DeepSeek-R1: +25%).
+
+Figure 4: Token efficiency comparisons. SWIREASONING achieves the highest token efficiency throughout all token budgets in 13 out of 15 evaluations, with an efficiency improvement of  $+84\%$  over CoT on average.
+
+![Figure 5: Two line plots showing Pass@k accuracy (k in [1, 64]) for Qwen3-8B on AIME 2024 and AIME 2025 benchmarks. The left plot for AIME 2024 shows that Swit (ours) reaches maximum accuracy 72% earlier than CoT (K=13 vs K=46). The right plot for AIME 2025 shows Swit reaches maximum accuracy 27% earlier than CoT (K=16 vs K=22). Both plots compare CoT (blue), CoT (Greedy) (orange), Soft Thinking (green), and Swit (ours) (purple).](d864789b0d8384da1d22fd6a5d76bbdf_img.jpg)
+
+Figure 5: Two line plots showing Pass@k accuracy (k in [1, 64]) for Qwen3-8B on AIME 2024 and AIME 2025 benchmarks. The left plot for AIME 2024 shows that Swit (ours) reaches maximum accuracy 72% earlier than CoT (K=13 vs K=46). The right plot for AIME 2025 shows Swit reaches maximum accuracy 27% earlier than CoT (K=16 vs K=22). Both plots compare CoT (blue), CoT (Greedy) (orange), Soft Thinking (green), and Swit (ours) (purple).
+
+Figure 5: Pass@ $k$  accuracy ( $k \in [1, 64]$ ) evaluation with Qwen3-8B on AIME 2024 and 2025 benchmarks. SWIREASONING achieves maximum reasoning accuracies  $+50\%$  earlier compared to CoT on average.
+
+When window sizes are too small, LLMs may jump back to latent mode prematurely, before explicit reasoning has consolidated a coherent trajectory. This increases exposure to noisy signals and harms final accuracy, especially on difficult tasks such as AIME24 and AIME25. When window sizes are too large, LLMs become sluggish to reenter latent exploration as confidence declines. A promising improvement direction is to make  $W$  adaptive to the model’s real-time density of effective reasoning.
+
+**Thinking-Related Signal Mixing.** SWIREASONING uses  $\alpha_0, \beta_0 \in [0, 1]$  as the initial ratios for mixing thinking-related signals at switching instants (Sec. 3.3). We sweep  $\alpha_0$  and  $\beta_0$  independently and report Pass@1 accuracies in Tab. 2.
+
+{8}------------------------------------------------
+
+Table 2: Ablations on  $\alpha_0$  and  $\beta_0$  for signal mixing. Greener indicates better performance within each column.
+
+| $\alpha_0$ | GSM8K | MATH 500 | GPQA Diamond | AIME 2024 | AIME 2025 | Average | $\beta_0$ | GSM8K | MATH 500 | GPQA Diamond | AIME 2024 | AIME 2025 | Average |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|-|
+| 0.0 | 89.23% | 89.80% | 35.86% | 46.67% | 35.00% | 59.31% | 0.0 | 81.50% | 67.20% | 28.79% | 8.33% | 9.17% | 39.00% |
+| 0.1 | 89.84% | 91.00% | 36.36% | 46.25% | 36.25% | 59.94% | 0.1 | 81.88% | 70.20% | 31.82% | 11.67% | 8.75% | 40.86% |
+| 0.2 | 90.37% | 91.60% | 34.85% | 46.25% | 37.50% | 60.11% | 0.2 | 82.11% | 70.60% | 28.28% | 14.17% | 9.17% | 40.87% |
+| 0.3 | 90.45% | 91.60% | 38.38% | 47.08% | 38.33% | 61.17% | 0.3 | 90.67% | 92.00% | 37.37% | 45.42% | 37.32% | 60.68% |
+| 0.4 | 89.61% | 92.30% | 40.91% | 48.33% | 32.50% | 60.83% | 0.4 | 90.98% | 91.40% | 37.88% | 47.92% | 36.67% | 60.97% |
+| 0.5 | 90.45% | <b>93.00%</b> | 34.34% | <b>50.83%</b> | 36.25% | 60.97% | 0.5 | 90.37% | 91.20% | <b>42.42%</b> | 47.92% | 35.83% | 61.55% |
+| 0.6 | <b>90.83%</b> | 92.00% | 39.39% | 44.58% | 37.92% | 60.94% | 0.6 | 90.59% | 90.40% | <b>42.42%</b> | 42.50% | 36.67% | 60.52% |
+| 0.7 | 90.06% | 91.60% | 37.37% | 45.00% | 37.08% | 60.22% | 0.7 | 90.83% | <b>93.00%</b> | 41.41% | <b>50.83%</b> | 38.33% | <b>62.88%</b> |
+| 0.8 | 90.60% | 92.00% | 37.37% | 48.33% | 35.42% | 60.74% | 0.8 | 89.99% | 92.20% | 39.39% | 49.17% | 35.83% | 61.32% |
+| 0.9 | 90.37% | 90.80% | 39.39% | 50.42% | 35.83% | 61.36% | 0.9 | 90.22% | 92.20% | 40.91% | 48.75% | 32.50% | 60.52% |
+| 1.0 ✓ | 90.14% | 90.60% | <b>41.41%</b> | 49.17% | 37.92% | <b>61.85%</b> | 1.0 | 90.44% | 91.00% | 33.33% | 46.67% | <b>38.75%</b> | 60.04% |
+
+For the exit bias  $\beta_0$ , a very small  $\beta_0$  implies excessive interference which can conclude the thinking process and severely degrades accuracy (e.g., AIME24 drops to 8.33% at  $\beta_0=0.0$ ). Performance rises sharply and peaks near  $\beta_0=0.7$ , which achieves the best average 62.88% and is either the best or the second-best on most datasets. A promising improvement direction is to make  $\beta_0$  difficulty-aware, so that it will be automatically adjusted based on problem difficulty.
+
+The situation for the entrance bias  $\alpha_0$  is different. We observe a broad performance plateau for  $\alpha_0 \in [0.4, 0.9]$ , with the highest average at  $\alpha_0=1.0$  (61.85%), however, only marginally higher than other values like  $\alpha_0=0.9$  (61.36%). Task-wise, problems with different levels of difficulty tend to have various preferences over  $\alpha_0$ . We expose  $\alpha_0$  to users for adjustment based on task difficulty. The more detailed hyperparameters we adopted for the experiments are provided in Appendix B.3.
+
+**Maximum Switch Count.** We suppress overthinking by bounding the number of mode switches with a budget  $C_{\max}$  (Sec. 3.4), and reducing  $C_{\max}$  leads to earlier convergence. In Fig. 2 and Fig. 4, moving rightward on the  $x$ -axis corresponds to smaller token budgets, i.e., smaller  $C_{\max}$ . We collect data points in these figures by incrementing the value of  $C_{\max}$  from 1 until further increases in  $C_{\max}$  no longer alter generation results in most cases, i.e., maximum accuracy is reached at saturation. Detailed data is provided in Appendix C.8.
+
+Table 3: Ablation on switch window size. Greener indicates better performance within each column.
+
+| Window Size | GSM8K | MATH 500 | GPQA Diamond | AIME 2024 | AIME 2025 | Average |
+|-|-|-|-|-|-|-|
+| 64 | 89.69% | 92.60% | 40.91% | 47.92% | 34.17% | 61.06% |
+| 128 | 90.45% | 91.00% | 38.89% | 48.33% | 36.25% | 60.98% |
+| 256 | 89.76% | 90.80% | 39.90% | 49.58% | 36.25% | 61.26% |
+| 512 ✓ | <b>90.83%</b> | <b>93.00%</b> | <b>41.41%</b> | <b>50.83%</b> | <b>38.33%</b> | <b>62.88%</b> |
+| 1024 | <b>90.83%</b> | 91.20% | 40.40% | 49.58% | 36.67% | 61.74% |
+
+As analyzed in Sec. 4.3, decreasing  $C_{\max}$  yields a significant improvement in token efficiency, which confirms the intended behavior of the switch count control design: it curbs prolonged latent exploration and commits to an answer path early, thereby mitigating overthinking. With switch count control, a small number of confidence-aware blocks usually suffices for easy-to-moderate problems, while difficult instances benefit more from allowing a few more switches before the final answer.
+
+More ablation studies are provided in Appendix C.5–C.7.
+
+### 4.6 EXPERIMENTAL RESULTS ON LARGER MODELS
+
+Table 4: Comparison of SWIREASONING and CoT with sampling, CoT with greedy decoding, and Soft Thinking on Qwen3-32B. SWIREASONING improves accuracy by +1.92% on average.
+
+| Method | GSM8K | MATH 500 | GPQA Diamond | AIME 2024 | AIME 2025 | Average |
+|-|-|-|-|-|-|-|
+| CoT | 95.83 | 97.40 | 66.16 | 80.42 | 72.08 | 82.38 +0.00 |
+| CoT (Greedy) | 95.91 | 97.20 | 69.70 | 80.00 | 73.33 | 83.23 +0.85 |
+| Soft Thinking | 95.75 | 97.40 | 67.17 | 74.58 | 66.25 | 80.23 -2.15 |
+| <b>SWiR (Ours)</b> | <b>96.21</b> <small>+0.38</small> | <b>98.40</b> <small>+1.00</small> | <b>70.20</b> <small>+4.04</small> | <b>82.92</b> <small>+2.50</small> | <b>73.75</b> <small>+1.67</small> | <b>84.30</b> <small>+1.92</small> |
+
+{9}------------------------------------------------
+
+In addition to the 1.7B and 8B settings, we evaluate SWIREASONING on the 32B scale using Qwen3-32B. We report pass@1 accuracy on GSM8K, MATH500, GPQA Diamond, AIME 2024, and AIME 2025. Baseline hyperparameters follow the recommendations from their original papers, and all methods use the same configuration as in the main paper. Table 4 shows that under no token budget constraint, SWIREASONING improves accuracy by +1.92% on average over standard CoT. The gains are most notable on more difficult benchmarks such as GPQA Diamond (+4.04%). These results indicate that SWIREASONING scales to larger models and achieves consistent accuracy gains.
+
+### 4.7 EXPERIMENTAL RESULTS ON BROADER DOMAINS
+
+Table 5: Comparison of SWIREASONING and baselines on coding, multi-hop QA, and commonsense reasoning tasks. SWIREASONING improves accuracy by +2.70% on average.
+
+| Method | HumanEval | LeetCode-Contest |  |  | MBPP |
+|-|-|-|-|-|-|
+|  |  | Easy-level | Medium-level | Hard-level |  |
+| CoT | 92.68 | 57.78 | 68.13 | 43.18 | 94.16 |
+| CoT (Greedy) | 93.90 | 64.44 | 58.24 | 47.73 | 91.44 |
+| Soft Thinking | 92.07 | 55.56 | 61.54 | 38.64 | 94.16 |
+| <b>SWiR (Ours)</b> | <b>95.73</b> <small>■ +3.05</small> | <b>64.44</b> <small>■ +6.66</small> | <b>69.23</b> <small>■ +1.10</small> | <b>61.36</b> <small>■ +18.18</small> | <b>95.33</b> <small>■ +1.17</small> |
+
+  
+
+| Method | LiveCode-Bench | 2WikiMultihopQA | CommonsenseQA | Average |
+|-|-|-|-|-|
+| CoT | 62.01 | 79.00 | 83.95 | 78.54 <small>+0.00</small> |
+| CoT (Greedy) | 50.18 | 79.50 | 83.95 | 76.03 <small>-2.51</small> |
+| Soft Thinking | 56.99 | 79.00 | 83.70 | 76.73 <small>-1.81</small> |
+| <b>SWiR (Ours)</b> | <b>63.44</b> <small>■ +1.43</small> | <b>81.50</b> <small>■ +2.50</small> | <b>85.34</b> <small>■ +1.39</small> | <b>81.24</b> <small>■ +2.70</small> |
+
+In addition to math and STEM domains, we further evaluate SWIREASONING on coding, multi-hop QA, and commonsense reasoning. We use Qwen3-8B and report pass@1 accuracy on HumanEval (Chen et al., 2021), LeetCode-Contest (Guo et al., 2024), MBPP (Austin et al., 2021), and LiveCodeBench (Jain et al., 2024) for coding, 2WikiMultihopQA (Ho et al., 2020) set from LongBench (Bai et al., 2024) for multi-hop QA, and CommonsenseQA (Talmor et al., 2019) for commonsense reasoning. As shown in Tab. 5, under no token budget constraint, SWIREASONING improves accuracy by +2.70% on average over standard CoT (the reported average is the simple mean of accuracy over the full LeetCode-Contest and accuracies over five other benchmarks).
+
+On coding tasks, the largest gains (+18.18%) are observed on the hard-level subset, indicating that SWIREASONING is most helpful for problems that require stronger reasoning capabilities. On multi-hop QA tasks, which require retrieving and connecting multiple disparate facts, SWIREASONING outperforms CoT by +2.50%. This suggests that the exploration capability of latent reasoning is effective in navigating complex reasoning paths. On commonsense reasoning tasks, SWIREASONING surpasses CoT by +1.39%. This demonstrates the robustness of SWIREASONING in general knowledge scenarios. Overall, these results confirm that SWIREASONING generalizes to broader domains with consistent accuracy gains.
+
+## 5 CONCLUSION
+
+This paper presents SWIREASONING, a training-free inference framework that integrates explicit chain-of-thought thinking with latent thinking through an entropy trends-based controller. The framework is conceptually straightforward but empirically effective: when block-wise uncertainty decreases, we collapse to a single explicit path to consolidate progress. When uncertainty rises and has persisted for a minimal dwell window, we expand into latent space to explore more alternatives. Complementing this mode switch, a switch count controller caps the number of transitions, thereby curbing overthinking while preserving prediction quality. Together, these two mechanisms yield consistently improved Pareto frontiers for reasoning LLMs, effectively enhancing both maximum accuracy under unlimited budgets and token efficiency under limited budgets. Looking ahead, integrating SWIREASONING with reinforcement learning-based training may unlock even stronger reasoning capabilities.
+
+ Rest of paper (reference and Appendix) is removed.

@@ -1,0 +1,291 @@
+
+
+{0}------------------------------------------------
+
+# RETRIEVALFORMER: A DUAL-ENCODER TRANSFORMER FOR EFFICIENT APPROXIMATE NEAREST NEIGHBOR RETRIEVAL AND COLD-ITEM RECOMMENDATION
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+We propose RetrievalFormer, a transformer-based dual-encoder recommender architecture that combines competitive accuracy with strong transformer-based sequential baselines, efficient Approximate Nearest Neighbor (ANN) retrieval, and the ability to score feature-described items that are unseen during training. Our architecture uses an attention-based heterogeneous feature encoder that aggregates item and user attributes via shared embedding tables and an AttentionFusion module, so that the resulting user and item representations lie in a shared embedding space suitable for ANN search. On Amazon and MovieLens benchmarks, RetrievalFormer achieves competitive recommendation accuracy, reaching 86–91% of the Recall@20 of strong transformer-based sequential baselines while enabling up to  $288\times$  lower latency at a 10M-item scale via ANN retrieval. On MovieLens-1M, RetrievalFormer attains Recall@20 of 0.337. In cold-start experiments where entire items and all of their interactions are held out during training, RetrievalFormer successfully recommends completely unseen items from their features in a leave-one-out cold (LOOC) protocol with zero item leakage between training and evaluation, in which ID-softmax transformer baselines cannot produce scores for such items at all, and it outperforms a strong content-based baseline on a 100% cold-start production dataset. Our approach enables practical deployment of efficient recommendations at scale, offering a compelling trade-off between model accuracy and serving efficiency.
+
+## 1 INTRODUCTION
+
+Transformer-based sequential recommenders (e.g., SASRec, BERT4Rec) have achieved state-of-the-art accuracy in next-item prediction by leveraging self-attention over user behavior sequences (Kang & McAuley, 2018; Sun et al., 2019). These models treat recommendation as a classification over all items in the catalog: given a sequence of past items, the transformer produces a probability distribution over the entire item vocabulary for the next item (Vaswani et al., 2017). While effective, this approach has two key shortcomings in real-world settings.
+
+This ID-softmax formulation simultaneously causes two related issues. First, the output layer must compute scores for all  $N$  items in the catalog, incurring an  $O(Nd)$  cost per prediction that dominates the  $O(L^2d)$  cost of self-attention once  $N$  is large. Second, because the output layer contains one parameter vector per training-time item ID, items whose IDs never appear in training cannot be scored at all, even if rich item features are available at inference time.
+
+First, scoring all items via a full softmax is computationally expensive for large catalogs. Serving such models in production requires scanning through millions of item embeddings for each prediction, leading to high latency and resource costs (Su et al., 2023). For example, Kersbergen et al. (2024) report that a transformer model with a 20-million item catalog required multiple high-end GPU servers to meet a 50ms p90 latency, incurring thousands of dollars per month in deployment cost (Kersbergen et al., 2024).
+
+{1}------------------------------------------------
+
+Second, classical transformers struggle with item cold-start: new items cannot be effectively recommended until the model is retrained or updated (Volkovs et al., 2017; Schein et al., 2002). In dynamic domains with rapid item churn (e.g., news or ephemeral marketing content), the delay in recommending new items is problematic.
+
+We propose RetrievalFormer, a dual-encoder sequential recommender that directly addresses both of these issues by reframing next-item recommendation as a retrieval problem. A transformer-based user tower encodes the interaction history into a user embedding, and a feature-based item tower encodes items from their attributes into item embeddings, with both towers trained jointly so that recommendations are produced by dot-product similarity in a shared embedding space rather than a softmax over item IDs. By decoupling user and item representations, our model enables efficient retrieval: at serving time, a user’s latest interaction sequence is encoded into a query embedding, and the top- $K$  candidate items are retrieved by Approximate Nearest Neighbor (ANN) search in the item embedding space, instead of computing a full softmax over all items. Concretely, the relevance score between a user  $u$  and an item  $i$  is
+
+$$s(u, i) = f_u(\text{history}_u)^\top f_i(\text{features}_i),$$
+
+and at serving time we retrieve the top- $K$  items for a given user by performing ANN search over the pre-computed item embeddings  $f_i(\cdot)$ . This retrieval paradigm leverages highly optimized ANN indexes (e.g., HNSW graphs or vector quantization) to find top candidates in sub-linear time (Johnson et al., 2019; Malkov & Yashunin, 2018), circumventing the costly softmax over the entire catalog. In essence, RetrievalFormer achieves transformer-like recommendation quality while operating at the speed of ANN retrieval.
+
+Moreover, the item tower directly computes representations from item content and attributes, so new items can be recommended zero-shot, addressing the item cold-start problem without any retraining or extension of the model’s vocabulary.
+
+Our approach also introduces an attention-based heterogeneous feature encoder to enrich both user and item representations. Modern recommender data is heterogeneous, with information such as item text descriptions, categories, images, and contextual tags, as well as user profile features. Rather than using only IDs or simple feature concatenation, we apply a self-attention fusion mechanism to each set of features describing an entity (an item or an interaction). This allows the model to learn complex interactions between different feature modalities in a data-driven way. For example, an item’s textual description and its category label can attend to each other to produce a more informative item embedding. This design draws inspiration from Set Transformer architectures (Lee et al., 2019) and feature interaction learning (Song et al., 2019), enabling permutation-invariant aggregation of arbitrary feature sets. Importantly, this attention fusion mechanism is used throughout our architecture, in the item tower for combining item metadata, in the user interaction history for fusing features of historical items, and in the user tower for processing the resulting token sequence. We further share embedding lookup tables for features across the user and item towers, so that a feature (e.g., a brand ID or a word embedding) has a consistent representation regardless of where it is used. This weight sharing improves training efficiency and alignment between the two towers, as the model can leverage the same semantic signal in multiple contexts.
+
+We validate RetrievalFormer on standard benchmarks, finding competitive accuracy versus transformers while achieving 288 $\times$  speedup at 10M items. Our contributions: (1) a two-tower architecture achieving competitive accuracy with efficient ANN retrieval, (2) attention fusion for heterogeneous features outperforming simple pooling, (3) zero-shot cold-start capability through feature-based encoding, and (4) rigorous evaluation demonstrating practical trade-offs between accuracy and efficiency.
+
+## 2 RELATED WORK
+
+**Sequential Recommendation and Transformers.** Sequential recommenders model the dynamic sequence of user-item interactions to predict a user’s next interest. Early approaches used Markov Chains or RNNs (Hidasi et al., 2015; Li et al., 2017; Tang & Wang, 2018; Wu et al., 2017), but recent advances are dominated by self-attention mechanisms. SASRec (Kang & McAuley, 2018) introduced the use of unidirectional Transformer encoder layers to capture which previous items in the sequence are relevant for predicting the next one. Variants like BERT4Rec extended this with
+
+{2}------------------------------------------------
+
+bidirectional transformers and a Cloze task for training (Sun et al., 2019). These models learn item embeddings and position embeddings, and use multi-head attention to capture long-range dependencies in user behavior. While very effective in accuracy, a core limitation is that they produce predictions by a softmax over the entire item vocabulary at each time step (Kang & McAuley, 2018; Sun et al., 2019). This does not scale well to large catalogs due to the computational cost and memory footprint of the output layer. Recent work has noted the inference bottleneck of such models: even with optimizations, serving a transformer sequential model for millions of items can be prohibitively slow or costly (Su et al., 2023).
+
+**Two-Stage and Retrieval Models in Recommenders.** In industry-scale recommender systems, a common solution is a two-stage pipeline: first retrieve a set of candidates, then apply a more precise ranking model (Covington et al., 2016). The candidate retrieval stage often uses lightweight models (e.g., matrix factorization (Krichene & Rendle, 2020) or two-tower neural networks (Yi et al., 2019)) that can handle a very large item pool efficiently (Yi et al., 2019; Huang et al., 2020a; Eksombatchai et al., 2018; Grbovic & Cheng, 2018). Our work follows this paradigm in spirit: RetrievalFormer’s user and item towers correspond to a learned retrieval model producing candidate item embeddings. The key difference is that we aim to approach the accuracy of strong transformer-based sequential models in the retrieval stage itself, rather than using a simplistic retriever, effectively collapsing the quality of a powerful sequential model into an ANN-friendly form.
+
+**Attribute-Enriched and Cold-Start Recommendation.** Another line of related work is utilizing content features and attributes to improve recommendations, especially under sparse data or cold-start scenarios (Schein et al., 2002; Zhou et al., 2022; de Souza Pereira Moreira et al., 2021; Pancha et al., 2022). Many recommender models have been extended to incorporate side information such as item descriptions, knowledge graph entities, or user profile data. For sequential recsys, recent methods like AttrFormer explicitly model item attributes alongside IDs in the attention mechanism (Liu et al., 2025). AttrFormer augments an ID-softmax transformer with attribute-aware attention and achieves strong accuracy on Amazon benchmarks, but it still predicts over a fixed item vocabulary and cannot score items whose IDs never appear during training. In contrast, RetrievalFormer decouples item representations into a feature-based item tower within a dual-encoder design, enabling direct scoring of unseen items from their attributes and making the model naturally compatible with ANN retrieval.
+
+**Approximate Nearest Neighbors for Recommendation.** Fast ANN search has seen rapid progress, with algorithms like IVF, HNSW, and PQ enabling vector search on billions of points within milliseconds (Johnson et al., 2019; Malkov & Yashunin, 2018). Our contribution ensures using ANN does not sacrifice recommendation quality, by training to produce a discriminative embedding space, we achieve both high accuracy and low latency. We do not propose a new ANN algorithm in this work; rather, we design a sequential recommender whose dual-encoder architecture and training objective produce an embedding space that is well aligned with standard ANN indexes such as IVF-PQ and HNSW, so that they can be used for serving without sacrificing recommendation quality.
+
+A large body of work aims to reduce the computational cost of neural recommendation models through techniques such as sampled or approximate softmax, model compression and distillation, and explicit two-stage candidate-generation plus re-ranking pipelines. These approaches reduce the effective number of items scored or the size of the re-ranking model, but they typically retain an ID-softmax formulation or a separate heavy re-ranker. By contrast, RetrievalFormer reformulates sequential recommendation itself as a dual-encoder retrieval problem so that efficient ANN search over item embeddings becomes the native serving mechanism.
+
+## 3 METHODOLOGY
+
+We present RetrievalFormer, a dual-encoder architecture that achieves competitive sequential recommendation accuracy compared to strong transformer-based baselines while enabling efficient ANN-based retrieval. Our approach addresses the fundamental scalability limitation of transformer recommenders, the  $O(N)$  inference cost of scoring all items, by decoupling item representations from user sequence modeling. This section describes our architecture design, the attention fusion mechanism for heterogeneous features, and the training methodology that enables both accuracy and efficiency.
+
+{3}------------------------------------------------
+
+![Diagram of the Raw user and item features architecture. The diagram shows two parallel processing paths. The top path, labeled 'Item MetaData', takes Text Features (orange) and Categorical Features (pink, green, blue) as input. These are processed through a 'Fusion' block and then an 'Item Tower DNN' to produce an 'Item Embedding' (represented by a row of circles). The bottom path, labeled 'User Interaction History', takes a sequence of Tokens (grey) and a 'PROF SEP' token (grey) as input. These are processed through a 'Fusion' block and then a 'User Tower Transformer' to produce a 'User Embedding' (represented by a row of circles). A 'Shared Feature Embedding' (represented by a vertical stack of colored blocks) is shown between the two towers. At the bottom, 'Profile Tokens' (Categorical Features in pink, green, blue) are shown. A 'Dot Product' symbol (circle with an X) is shown between the Item Embedding and User Embedding.](2fa4a1bf91d0f34e87c689fbc1211fe3_img.jpg)
+
+Diagram of the Raw user and item features architecture. The diagram shows two parallel processing paths. The top path, labeled 'Item MetaData', takes Text Features (orange) and Categorical Features (pink, green, blue) as input. These are processed through a 'Fusion' block and then an 'Item Tower DNN' to produce an 'Item Embedding' (represented by a row of circles). The bottom path, labeled 'User Interaction History', takes a sequence of Tokens (grey) and a 'PROF SEP' token (grey) as input. These are processed through a 'Fusion' block and then a 'User Tower Transformer' to produce a 'User Embedding' (represented by a row of circles). A 'Shared Feature Embedding' (represented by a vertical stack of colored blocks) is shown between the two towers. At the bottom, 'Profile Tokens' (Categorical Features in pink, green, blue) are shown. A 'Dot Product' symbol (circle with an X) is shown between the Item Embedding and User Embedding.
+
+Figure 1: Raw user and item features are embedded and fused by AttentionFusion, then passed through the user and item towers to produce embeddings in a shared space. At serving time, user embeddings query an ANN index over pre-computed item embeddings.
+
+### 3.1 OVERALL ARCHITECTURE
+
+RetrievalFormer employs a dual-encoder design with asymmetric towers optimized for their respective roles (Figure 1). The item tower  $f_i(\cdot)$  encodes each item’s heterogeneous features into a dense embedding  $\mathbf{y} \in \mathbb{R}^d$  that can be pre-computed and indexed. The user tower  $f_u(\cdot)$ , implemented as a transformer, processes the user’s interaction sequence to produce a query embedding  $\mathbf{x} \in \mathbb{R}^d$ . At serving time, recommendations are generated through approximate nearest neighbor search for items  $\mathbf{y}$  that maximize  $\mathbf{x}^\top \mathbf{y}$ , avoiding the computational bottleneck of exhaustive scoring.
+
+The key insight is that by learning a shared embedding space through contrastive training, we can leverage the same representations for both training (via InfoNCE loss) and inference (via ANN retrieval). This design choice changes the effective scaling from  $O(N)$  to empirically sub-linear growth in practice when using standard ANN indexes, while maintaining recommendation quality, as we demonstrate in Section 4.
+
+Formally, let  $\mathbf{x}_u = f_u(\mathbf{h}_u)$  denote the user embedding produced by the user tower from the interaction history  $\mathbf{h}_u$ , and let  $\mathbf{y}_i = f_i(\mathbf{z}_i)$  denote the item embedding produced by the item tower from the item features  $\mathbf{z}_i$ . The relevance score is
+
+$$s(u, i) = \mathbf{x}_u^\top \mathbf{y}_i,$$
+
+and the top- $K$  recommendations for user  $u$  are the  $K$  items with the largest values of  $\mathbf{x}_u^\top \mathbf{y}_i$ , found via ANN search over  $\{\mathbf{y}_i\}$ .
+
+### 3.2 ATTENTION FUSION FOR HETEROGENEOUS FEATURES
+
+Modern recommendation systems must handle diverse feature types: text descriptions, categorical attributes, numerical values, and interaction signals. We introduce an attention-based fusion mechanism that learns to dynamically weight and combine these heterogeneous features, moving beyond simple concatenation or averaging approaches.
+
+#### 3.2.1 FEATURE FUSION MECHANISM
+
+Given features  $\mathcal{F} = \{f_1, \dots, f_M\}$  describing an entity, we embed each feature using shared lookup tables and project to a common dimension:
+
+$$\mathbf{H} = [\mathbf{W}_1 \mathbf{E}_{f_1}(f_1); \dots; \mathbf{W}_M \mathbf{E}_{f_M}(f_M)] \in \mathbb{R}^{M \times d} \quad (1)$$
+
+{4}------------------------------------------------
+
+In our experiments,  $\mathcal{F}$  includes single-valued categorical features (e.g., item category, brand), multi-valued categorical features (e.g., tags), and text-derived features (e.g., token IDs from titles or descriptions). Single-valued categorical features are encoded as a single embedding vector per feature, while multi-valued features are encoded by aggregating the embeddings of all values for that feature (either via mean pooling or attention). Text features are treated as multi-valued categorical features over a token vocabulary. AttentionFusion applies multi-head self-attention over the set of feature embeddings for an item or user, followed by pooling, to produce a single fixed-dimensional representation.
+
+We apply multi-head self-attention (Vaswani et al., 2017) with residual connections and layer normalization:
+
+$$\mathbf{Z} = \text{LayerNorm}(\mathbf{H} + \text{MultiHeadAttn}(\mathbf{H}, \mathbf{H}, \mathbf{H})) \quad (2)$$
+
+$$\mathbf{U} = \text{LayerNorm}(\mathbf{Z} + \text{FFN}(\mathbf{Z})) \quad (3)$$
+
+$$\mathbf{z} = \text{MeanPool}(\mathbf{U}) \in \mathbb{R}^d \quad (4)$$
+
+This mechanism is permutation-invariant and handles variable-length feature sets, learning complex feature interactions through attention weights. The same fusion architecture is applied consistently at three levels: (1) item metadata fusion, (2) interaction context fusion, and (3) user profile fusion.
+
+#### 3.2.2 SHARED EMBEDDING DESIGN
+
+A critical design choice is sharing embedding tables across towers. When a categorical feature (e.g., "electronics") appears in different contexts, as an item category, user preference, or interaction attribute, it uses the same embedding vector. This parameter sharing reduces parameters by approximately  $3\times$  in our implementation, enables knowledge transfer between representations, improves cold-start generalization, and ensures consistent feature semantics.
+
+Sharing embedding tables across user profile, item metadata, and interaction history for the same feature types not only reduces the number of parameters, but also encourages a consistent semantic space for these features. This is particularly important for cold-item generalization, since it allows the model to interpret the same attribute (e.g., a brand or category) consistently whether it appears in a user profile, a historical interaction, or a newly introduced item.
+
+### 3.3 ITEM TOWER: FEATURE-BASED ENCODING
+
+The item tower computes dense embeddings from item features. For item  $i$  with features  $\mathcal{F}_i = \{f_1^{(i)}, \dots, f_M^{(i)}\}$ :
+
+$$\mathbf{y}_i = \text{AttentionFusion}(\mathcal{F}_i) \in \mathbb{R}^d \quad (5)$$
+
+This feature-based design enables zero-shot generalization where new items receive embeddings immediately from their features. The tower leverages shared feature embeddings and fusion weights, providing scalability and robustness through graceful handling of missing features via attention masking.
+
+Because the item tower depends only on item-side features and not on user history, we can pre-compute  $\mathbf{y}_i = f_i(\mathbf{z}_i)$  for all items offline and build an ANN index over these embeddings, so that online serving only needs to compute the user embedding  $\mathbf{x}_u$  and perform an ANN query.
+
+### 3.4 USER TOWER: TRANSFORMER OVER ENRICHED SEQUENCES
+
+The user tower processes interaction sequences through a transformer encoder, but critically, each sequence element is an enriched representation combining item features with interaction context.
+
+#### 3.4.1 INTERACTION REPRESENTATION
+
+For each historical interaction  $e_t$  involving item  $i_t$ , we create enriched tokens through two-stage fusion:
+
+$$\mathbf{h}_{i_t} = \text{AttentionFusion}(\text{ItemFeatures}(i_t)) \quad (6)$$
+
+{5}------------------------------------------------
+
+$$\mathbf{z}_t = \text{AttentionFusion}(\mathbf{h}_t \oplus \text{InteractionContext}(\mathbf{e}_t)) \quad (7)$$
+
+where  $\oplus$  denotes feature concatenation and  $\text{InteractionContext}$  includes interaction type (click, purchase), explicit feedback (ratings), and contextual signals (device, timestamp). This two-stage process captures not just *what* items were interacted with, but *how* and *when*.
+
+In all of our experiments, we use the same number of transformer layers and hidden dimension as in the corresponding transformer baselines (e.g., SASRec and BERT4Rec) so that differences in accuracy are attributable to the dual-encoder formulation rather than model capacity; detailed hyperparameters are provided in Section 4.1 and Appendix J.
+
+#### 3.4.2 SEQUENCE CONSTRUCTION
+
+The transformer processes the sequence:
+
+$$\mathbf{S} = [\mathbf{z}_1, \dots, \mathbf{z}_T, [\text{SEP}], \mathbf{p}_u, [\text{CLS}]] \quad (8)$$
+
+where  $\mathbf{p}_u = \text{AttentionFusion}(\text{UserFeatures})$  encodes static user attributes. The final [CLS] token representation, after transformer processing with causal masking, becomes the user embedding  $\mathbf{x}_u$ .
+
+This design enables the transformer to model sequential patterns over semantically rich tokens, improving both accuracy and generalization.
+
+### 3.5 TRAINING METHODOLOGY
+
+We train  $\text{RetrievalFormer}$  using contrastive learning to learn a shared embedding space where users and their next items are close while being far from non-relevant items. For a batch of  $B$  user-item pairs with embeddings  $\{(\mathbf{x}_i, \mathbf{y}_i)\}_{i=1}^B$ , we optimize the InfoNCE loss (Oord et al., 2018):
+
+$$\mathcal{L}_{\text{InfoNCE}} = -\frac{1}{B} \sum_{i=1}^B \log \frac{\exp(\mathbf{x}_i^\top \mathbf{y}_i / \tau)}{\sum_{j=1}^B \exp(\mathbf{x}_i^\top \mathbf{y}_j / \tau)} \quad (9)$$
+
+where  $\tau$  is a temperature hyperparameter. This objective treats all other items in the batch as negatives, efficiently approximating the full softmax over the catalog.
+
+To address popularity bias and improve coverage of tail items, we employ Mixed Negative Sampling (MNS) (Yang et al., 2020), augmenting each batch with uniformly sampled items from the catalog. This ensures diverse negative signals across the entire item distribution, preventing the model from over-optimizing on popular items while neglecting rare ones.
+
+The combination of InfoNCE and MNS is particularly important for  $\text{RetrievalFormer}$ ’s training. The contrastive objective encourages both alignment between user and positive item embeddings and uniformity of the overall embedding distribution on the hypersphere (Wang & Isola, 2020), which helps to avoid representation collapse and makes the learned space more suitable for ANN retrieval. A brief discussion of these alignment and uniformity properties, together with implementation considerations for mixed negative sampling, is provided in Appendix C.
+
+## 4 EXPERIMENTS
+
+We structure our experimental evaluation around four research questions: **RQ1** examines whether  $\text{RetrievalFormer}$  can achieve competitive recommendation accuracy compared to state-of-the-art transformer-based sequential models on standard benchmarks. **RQ2** investigates how the heterogeneous feature inputs and architectural choices (attention fusion, shared embeddings, context tokens) contribute to the model’s performance. **RQ3** evaluates how well  $\text{RetrievalFormer}$  handles unseen items and whether it can effectively recommend items that were never in the training set. **RQ4** measures the inference efficiency of  $\text{RetrievalFormer}$  using ANN search and compares it to a conventional Transformer model that scores all items.
+
+{6}------------------------------------------------
+
+### 4.1 EXPERIMENTAL SETUP
+
+**Datasets:** We evaluate on three public datasets used in prior Transformer recommender research: Amazon Beauty, Amazon Toys & Games, and MovieLens-1M. For Amazon, we use the sequential rating/review data from McAuley et al. (2015), focusing on users with at least 5 interactions. For MovieLens-1M, we use the 1 million movie ratings, treating a rating as an implicit interaction. For RQ1, RQ2, and RQ4, we use the same data splits, features, and preprocessing as Liu et al. (2025) for direct comparability, where a standard leave-one-out (LOO) approach holds out the last item for testing, the second-to-last for validation, and the remainder for training. For RQ3 (cold-start evaluation), we use a separate Leave-One-Out Cold (LOOC) protocol that ensures test items are completely absent from training; see Section 4.4 and Appendix F for details. We also use a proprietary Email Campaign dataset as a case study for extreme item cold-start (each "item" is a marketing email, and new campaigns launch daily with no historical interactions).
+
+**Baselines:** For RQ1, we compare RetrievalFormer to representative sequential recommenders: SASRec (Kang & McAuley, 2018), BERT4Rec (Sun et al., 2019), GRU4Rec (Hidasi et al., 2015), and the recent AttrFormer (Liu et al., 2025). We adopt the experimental protocol and baseline results from Liu et al. (2025) for fair comparison. For cold-start experiments (RQ3), standard baselines cannot generate scores for new items, so we compare against a Content-based KNN approach. For RQ4, the baseline is SASRec served in the traditional way (computing softmax scores over all items). In total, we compare RetrievalFormer against 12 baseline models across three public benchmarks (Amazon Beauty, Amazon Toys & Games, MovieLens-1M), including the recent AttrFormer model introduced at KDD 2025, as well as on a fourth production dataset (email campaigns) described in Appendix G.
+
+**Metrics:** We report Recall@20 and NDCG@20 for each model on the test sets, considering the ground-truth next item for each user. For cold-start evaluation, we report Hit Rate@20 for new-item recommendations. For efficiency (RQ4), we measure query latency (in milliseconds) and throughput (queries per second) under various conditions.
+
+**Hyperparameters:** Unless otherwise noted, we train all models with the Adam optimizer, batch size 512, sequence length truncated to  $L = 50$ , and an initial learning rate of  $1 \times 10^{-3}$  with cosine decay. RetrievalFormer and transformer baselines share the same transformer depth and hidden size on each dataset. For dual-encoder models, we use one in-batch negative per positive example unless otherwise noted, and we train for up to 100 epochs with early stopping on validation Recall@20. Additional hyperparameters and implementation details are provided in Appendix J.
+
+### 4.2 RQ1: RETRIEVALFORMER VS. TRANSFORMER BASELINES
+
+Table 1 demonstrates RetrievalFormer achieves competitive performance with established transformer baselines while enabling massive efficiency gains. On Amazon Beauty, RetrievalFormer (0.1208) outperforms SASRec (0.1107) and achieves 91.2% of AttrFormer’s performance. On Amazon Toys, we achieve comparable results to MT4SR (0.1169 vs 0.1148).
+
+On MovieLens-1M, RetrievalFormer attains Recall@20 of 0.337, narrowing the gap to the strongest transformer baselines. This result represents 96.8% of SASRec’s performance (0.3483) and is well-aligned with the established baseline cluster. This modest accuracy trade-off enables a transformative 288 $\times$  speedup at 10M items, making transformer-quality recommendations practical for industrial deployment.
+
+Notably, on MovieLens-1M, most established transformer methods achieve Recall@20 in the range of 0.34-0.36 (SASRec: 0.3483, GRU4Rec: 0.3579, LightSANs: 0.3590), with RetrievalFormer at 0.337 achieving 96.7% of SASRec’s performance. AttrFormer’s result of 0.4128 represents a notable outlier, achieving approximately 15% higher recall than the next best established method. When compared to the established baseline cluster, RetrievalFormer demonstrates competitive performance while enabling dramatic efficiency improvements.
+
+It is important to note that the modest accuracy trade-off is not due to inferior transformer sequence modeling, but rather the fundamental difference between scoring all items via softmax versus dual-encoder retrieval. RetrievalFormer maintains the powerful transformer architecture for user sequence modeling; the performance gap stems from replacing the exact softmax scoring over all items with approximate nearest neighbor search in the learned embedding space. This architectural choice
+
+{7}------------------------------------------------
+
+Table 1: Comparison of sequential recommendation methods. Baseline results are from Liu et al. (2025), averaged over five runs with std. < 0.001 not reported. MT4SR equals SASRec on MovieLens. Best results in bold. RetrievalFormer results are from our experiments.
+
+| Dataset | Metric | Transformer: N.A. for Attribute |  |  |  |  |  |  |  |  | Transformer: With Attribute Input |  |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  |  | GRU4Rec | DuoRec | SASRec | BERT4Rec | CLASRec | LightSANs | FEARc | TiSASRec | SASRecF | MT4SR | DIF-SR | AttrFormer | RetrievalFormer |
+| Amazon<br>Beauty | Recall@5 | 0.0349 | 0.0642 | 0.0556 | 0.0382 | 0.0392 | 0.0561 | 0.0594 | 0.0576 | 0.0587 | 0.0559 | 0.0578 | <b>0.0657</b> | 0.0529 |
+|  | Recall@20 | 0.0817 | 0.1132 | 0.1107 | 0.0783 | 0.0742 | 0.1222 | 0.1239 | 0.1244 | 0.1231 | 0.1169 | 0.1273 | <b>0.1324</b> | 0.1208 |
+|  | NDCG@5 | 0.0231 | 0.0330 | 0.0343 | 0.0265 | 0.0217 | 0.0342 | 0.0337 | 0.0344 | 0.0343 | 0.0360 | 0.0337 | <b>0.0446</b> | 0.0351 |
+|  | NDCG@20 | 0.0362 | 0.0447 | 0.0540 | 0.0378 | 0.0296 | 0.0528 | 0.0520 | 0.0534 | 0.0594 | 0.0533 | 0.0535 | <b>0.0639</b> | 0.0541 |
+| Amazon<br>Toys & Games | Recall@5 | 0.0271 | 0.0651 | 0.0600 | 0.0364 | 0.0324 | 0.0632 | 0.0674 | 0.0666 | 0.0585 | 0.0607 | 0.0675 | <b>0.0720</b> | 0.0522 |
+|  | Recall@20 | 0.0654 | 0.0860 | 0.1073 | 0.0691 | 0.0595 | 0.1273 | 0.1297 | 0.1325 | 0.1217 | 0.1148 | 0.1342 | <b>0.1357</b> | 0.1169 |
+|  | NDCG@5 | 0.0175 | 0.0339 | 0.0435 | 0.0265 | 0.0183 | 0.0370 | 0.0379 | 0.0379 | 0.0393 | 0.0410 | 0.0380 | <b>0.0501</b> | 0.0346 |
+|  | NDCG@20 | 0.0388 | 0.0592 | 0.0570 | 0.0536 | 0.0404 | 0.0552 | 0.0557 | 0.0566 | 0.0571 | 0.0563 | 0.0569 | <b>0.0681</b> | 0.0528 |
+| MovieLens<br>1M | Recall@5 | 0.1752 | 0.1477 | 0.1854 | 0.1341 | 0.1395 | 0.1840 | 0.1372 | 0.1816 | 0.1829 | 0.1854 | 0.1518 | <b>0.2228</b> | 0.1312 |
+|  | Recall@20 | 0.3579 | 0.2538 | 0.3483 | 0.2728 | 0.2284 | 0.3590 | 0.3097 | 0.3558 | 0.3553 | 0.3483 | 0.3195 | <b>0.4128</b> | 0.337 |
+|  | NDCG@5 | 0.1172 | 0.0947 | 0.1285 | 0.1120 | 0.0535 | 0.1226 | 0.1285 | 0.1216 | 0.1239 | 0.1285 | 0.0964 | <b>0.1554</b> | 0.0823 |
+|  | NDCG@20 | 0.1687 | 0.1638 | 0.1745 | 0.1311 | 0.0990 | 0.1725 | 0.1320 | 0.1711 | 0.1726 | 0.1745 | 0.1440 | <b>0.2088</b> | 0.1390 |
+
+enables the dramatic efficiency gains that make transformer-quality recommendations practical at scale.
+
+The key advantage of RetrievalFormer is inference speed: exhaustive scoring takes 3.4ms at 100K items and 29.5ms at 1M items, while RetrievalFormer with ANN achieves 0.58ms and 0.69ms respectively, yielding a  $43\times$  speedup at 1M items that grows to  $288\times$  at 10M items.
+
+### 4.3 RQ2: ABLATION STUDIES OF MODEL COMPONENTS
+
+To understand the impact of our design choices and hyperparameters, we conduct comprehensive ablation experiments on the Amazon Toys & Games dataset. We examine both architectural components and hyperparameter sensitivity (detailed results in Appendix Table 3).
+
+#### 4.3.1 ARCHITECTURAL COMPONENTS
+
+**Attention Fusion:** Self-attention fusion outperforms simple mean pooling, improving Recall@20 from 0.0960 to 0.1057 (+10.1%). This confirms that learning dynamic feature interactions through attention provides meaningful gains over treating all features equally.
+
+**Shared Embeddings:** Using shared embedding tables across towers improves Recall@20 by approximately 3% on MovieLens-1M, validating our hypothesis that semantic consistency between user and item representations enhances learning.
+
+**Uniformity Loss:** Enabling implicit uniformity through InfoNCE provides consistent improvements across all metrics (Recall@20: 0.1022  $\rightarrow$  0.1064, +4.1%), confirming its role in preventing representation collapse during training.
+
+Hyperparameter sensitivity analysis (history length, batch size, embedding dimensions) is provided in Appendix E. Key findings include a non-monotonic relationship with sequence length where performance jumps at  $L=25$ , and larger batch sizes consistently improving InfoNCE training. These ablations demonstrate that attention fusion and appropriate history length are particularly critical for achieving competitive accuracy.
+
+### 4.4 RQ3: COLD-START ITEM RECOMMENDATION WITH LEAVE-ONE-OUT COLD EVALUATION
+
+Real-world recommender systems face a fundamental challenge: new items arrive continuously but have no interaction history. Traditional evaluation protocols fail to capture this reality, they test on items seen during training, just with different user-item pairs held out. We propose Leave-One-Out Cold (LOOC), a rigorous evaluation protocol that tests recommenders on truly unseen items.
+
+#### 4.4.1 LEAVE-ONE-OUT COLD (LOOC) PROTOCOL
+
+LOOC extends standard leave-one-out evaluation by ensuring test items are completely absent from training, with no item ID leakage between training and evaluation. Our protocol constructs the
+
+{8}------------------------------------------------
+
+Table 2: RetrievalFormer performance comparison between standard Leave-One-Out (LOO) and Leave-One-Out Cold (LOOC) evaluation. The performance drop reveals the challenge of recommending completely unseen items. ID-softmax transformer baselines (SASRec, BERT4Rec, AttrFormer) cannot score items whose IDs never appear during training under LOOC and are therefore marked as N/A.
+
+| Evaluation Protocol | Amazon Beauty |  | Amazon Toys |  | MovieLens-1M |  |
+|-|-|-|-|-|-|-|
+|  | Recall@20 | NDCG@20 | Recall@20 | NDCG@20 | Recall@20 | NDCG@20 |
+| LOO (Standard) | 0.1208 | 0.0541 | 0.1169 | 0.0528 | 0.337 | 0.1245 |
+| LOOC (Cold Items) | 0.0804 | 0.0351 | 0.0818 | 0.0369 | 0.2267 | 0.0922 |
+| Relative Drop | -33.4% | -35.1% | -30.0% | -30.1% | -25.0% | -25.9% |
+
+cold item set as follows: (1) select 500 seed users  $\mathcal{U}_{\text{seed}}$  whose final items define the initial cold set  $\mathcal{T}_{\text{cold}}^0$ , (2) expand evaluation to all users whose final items fall in  $\mathcal{T}_{\text{cold}}^0$ , maximizing statistical power while maintaining strict cold-start conditions. This yields evaluation sets ranging from 1,542 users (MovieLens-1M) to 4,681 users (Amazon Toys), providing robust assessment of cold-start performance. This protocol is significantly more challenging: traditional models (SASRec, BERT4Rec, AttrFormer) cannot score items outside their training vocabulary, while feature-based models like RetrievalFormer can generalize to unseen items. The formal protocol with complete statistics is detailed in Appendix F.
+
+Because ID-softmax transformer baselines such as SASRec, BERT4Rec, and AttrFormer have no output parameters for item IDs that never appear during training, they cannot assign scores to held-out items under this protocol and thus cannot be evaluated here.
+
+#### 4.4.2 COMPARING LOO VS LOOC PERFORMANCE
+
+We evaluate RetrievalFormer under both standard Leave-One-Out (LOO) and Leave-One-Out Cold (LOOC) protocols to quantify the impact of cold-start evaluation:
+
+Table 2 reveals the substantial challenge of cold-start recommendation. Even with feature-based encoding, RetrievalFormer experiences a 25-35% performance drop when evaluating on completely unseen items. This drop varies by dataset: Amazon Beauty shows the largest drop (-33.4% Recall@20), likely due to sparse feature coverage for niche products, while MovieLens-1M shows the smallest drop (-25.0%), benefiting from rich genre and tag metadata. The consistent NDCG drops across all datasets indicate ranking quality degradation for cold items.
+
+Importantly, while performance decreases under LOOC, RetrievalFormer still maintains meaningful recommendation capability (8.0-22.7% Recall@20), demonstrating its ability to generalize to unseen items through feature-based encoding.
+
+In summary, the LOOC evaluation reveals that while cold-start recommendation remains challenging (25-35% performance drop), RetrievalFormer maintains meaningful recommendation capability for unseen items. We emphasize that LOOC is used here as a capability diagnostic to illustrate that a feature-based dual encoder can generate non-trivial recommendations for completely unseen items, rather than as a head-to-head accuracy comparison with ID-softmax baselines, which cannot be evaluated under this protocol. On a 100% cold-start production email campaign dataset (Appendix G), RetrievalFormer outperforms a strong content-based baseline, improving AUC from 0.6854 to 0.7770 (a 13.4% relative improvement), validating its practical effectiveness for dynamic catalogs.
+
+### 4.5 RQ4: SERVING EFFICIENCY OF DUAL-ENCODER RETRIEVAL
+
+The fundamental scalability challenge of transformer-based sequential models is their  $O(N)$  inference complexity, where every prediction requires scoring all  $N$  items in the catalog. For transformer-based sequential recommenders, the inference cost per request can be decomposed into two parts: (i)  $O(L^2d)$  self-attention over the interaction sequence of length  $L$ , and (ii)  $O(Nd)$  dense scoring of all  $N$  items in the catalog in the output layer. As the catalog grows, the second term dominates, as also observed in recent latency benchmarks. This architectural constraint creates an insurmount-
+
+{9}------------------------------------------------
+
+![Figure 2: Latency scaling comparison between exhaustive scoring and ANN retrieval (IVF-PQ). The graph shows p90 latency (ms) on a log scale (0.10 to 1000) versus catalog size C (10k to 10M). IVF-PQ (ret only, ≥0.95) and IVF-PQ + encode (≥0.95) show sub-linear scaling, while SASRec CPU p90 (ETUDE) and SASRec GPU p90 (ETUDE) show linear scaling on the log-log plot.](4e0ade2f41b66d5602160da5cc978274_img.jpg)
+
+| Catalog size C | IVF-PQ (ret only, ≥0.95) [ms] | IVF-PQ + encode (≥0.95) [ms] | SASRec CPU p90 (ETUDE) [ms] | SASRec GPU p90 (ETUDE) [ms] |
+|-|-|-|-|-|
+| 10k | ~0.15 | ~0.4 | ~0.76 | ~0.55 |
+| 100k | ~0.2 | ~0.5 | ~7.6 | ~5.5 |
+| 1M | ~0.3 | ~0.7 | ~76 | ~55 |
+| 10M | ~1.02 | ~2.5 | ~292 | ~102 |
+
+Figure 2: Latency scaling comparison between exhaustive scoring and ANN retrieval (IVF-PQ). The graph shows p90 latency (ms) on a log scale (0.10 to 1000) versus catalog size C (10k to 10M). IVF-PQ (ret only, ≥0.95) and IVF-PQ + encode (≥0.95) show sub-linear scaling, while SASRec CPU p90 (ETUDE) and SASRec GPU p90 (ETUDE) show linear scaling on the log-log plot.
+
+Figure 2: Latency scaling comparison between exhaustive scoring and ANN retrieval (IVF-PQ). The Y-axis uses log scale to visualize the orders-of-magnitude difference. Exhaustive scoring shows linear  $O(N)$  growth reaching 292ms at 10M items, while IVF-PQ maintains sub-linear scaling with 1.02ms latency, a 288 $\times$  speedup.
+
+able bottleneck as catalogs grow: the ETUDE benchmark demonstrates that SASRec exceeds the industry-standard 50ms p90 latency threshold at just 10K items on CPU, with performance degrading to 200ms at 1M items (Kersbergen et al., 2024). RetrievalFormer’s dual-encoder architecture with ANN retrieval fundamentally changes this scaling behavior from  $O(N)$  to  $O(\log N)$ , enabling practical deployment at industrial scale with acceptable accuracy trade-offs.
+
+We conducted systematic latency benchmarks comparing exhaustive scoring against IVF-PQ approximate nearest neighbor search on an ml.g6.xlarge instance. Figure 2 compares exhaustive dot-product scoring over all items and ANN-based retrieval using an IVF-PQ index for the same dual-encoder scoring function  $s(u, i) = x_u^\top y_i$  as the catalog size increases from 10K to 10M items. Figure 2 demonstrates the dramatic divergence in scaling behavior: exhaustive scoring exhibits strict linear scaling from 0.76ms at 10K items to 292ms at 10M items, while IVF-PQ maintains sub-linear growth from 0.55ms to 1.02ms, a 288 $\times$  speedup at 10M items. This sub-linear scaling enables practical deployment at industrial scale.
+
+We use a FAISS IVF-PQ index with  $n_{list} = 4096$  coarse clusters, 64-dimensional product quantization codes, and  $n_{probe} = 32$  during search; item embeddings are trained on 1M items and indexed offline. All latency measurements are taken on a single NVIDIA V100 GPU with 32GB memory and a batch size of 1024 users after a warm-up phase.
+
+## 5 CONCLUSION
+
+We introduced RetrievalFormer, a two-tower sequential recommender that combines transformer sequence modeling with efficient ANN retrieval. By encoding users and items in a shared feature-rich embedding space, our approach eliminates expensive softmax computations while enabling zero-shot recommendation of new items. Experiments demonstrate RetrievalFormer achieves 86–91% of the Recall@20 of strong transformer baselines while delivering 288 $\times$  speedup at 10M items. The model successfully recommends cold-start items where ID-based methods fail entirely. RetrievalFormer bridges the gap between academic advances and production requirements, offering a practical trade-off between accuracy and serving efficiency for large-scale deployment.
+
+## REFERENCES
+
+- Paul Covington, Jay Adams, and Emre Sargin. Deep neural networks for youtube recommendations. In *Proceedings of the 10th ACM conference on recommender systems*, pp. 191–198, 2016.
+- Gabriel de Souza Pereira Moreira, Sara Rabhi, Jeong Min Lee, Ronay Ak, and Even Oldridge. Transformers4rec: Bridging the gap between nlp and sequential/session-based recommendation. In *Proceedings of the 15th ACM Conference on Recommender Systems*, pp. 143–153, 2021.
+- Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. In *Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics*, pp. 4171–4186, 2019.
+
+ Rest of paper (reference and Appendix) is removed.

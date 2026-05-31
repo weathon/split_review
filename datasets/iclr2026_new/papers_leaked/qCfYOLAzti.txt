@@ -1,0 +1,365 @@
+
+
+{0}------------------------------------------------
+
+# LLM UNLEARNING WITH LLM BELIEFS
+
+Kemou Li<sup>1</sup>   Qizhou Wang<sup>2,3</sup>   Yue Wang<sup>2</sup>   Fengpeng Li<sup>4</sup>   Jun Liu<sup>5</sup>  
+ Bo Han<sup>2</sup>   Jiantao Zhou<sup>1\*</sup>
+
+<sup>1</sup>State Key Laboratory of Internet of Things for Smart City, University of Macau
+
+<sup>2</sup>TMLR Group, Department of Computer Science, Hong Kong Baptist University
+
+<sup>3</sup>Imperfect Information Learning Team, RIKEN Center for Advanced Intelligence Project
+
+<sup>4</sup>PRADA Lab, King Abdullah University of Science and Technology
+
+<sup>5</sup>National Institute of Informatics
+
+## ABSTRACT
+
+Large language models trained on vast corpora inherently risk memorizing sensitive or harmful content, which may later resurface in their outputs. Prevailing unlearning methods generally rely on gradient ascent and its variants to lower the probability of specific target responses. However, we find that this strategy induces a critical side effect: probability mass is redistributed into high-likelihood regions, often corresponding to semantically related rephrasings of the targets. We refer to this as the *squeezing effect*, which explains why many methods yield merely spurious unlearning, a problem further obscured by automated metrics (e.g., ROUGE, truth ratio) that misreport actual success. To address this, we propose a *bootstrapping* (BS) framework that explicitly links the squeezing effect with the model’s own high-confidence generations, namely its *model beliefs*. Since model beliefs inherently capture the very high-likelihood regions where probability mass is squeezed, incorporating them into the unlearning objective directly counters the squeezing effect. By jointly suppressing both target responses and model beliefs, BS-T (token) attenuates high-probability tokens, whereas BS-S (sequence) removes entire high-confidence generations, together achieving more thorough forgetting while preserving utility. Extensive experiments on diverse benchmarks confirm the effectiveness of our approach, with code merged to [OpenUnlearning](#).
+
+## 1 INTRODUCTION
+
+Large language models (LLMs) have achieved remarkable success in generation and comprehension across diverse applications (Hadi et al., 2023; Zhang et al., 2026b), yet their deployment requires careful auditing to prevent leakage of private, illegal, or misleading information. A common practice is the “report then remove” pipeline (Geng et al., 2025), where harmful behaviors are first identified and then eliminated by model owners. Recently, LLM unlearning (Yao et al., 2024a; Zhu et al., 2025; Liao et al., 2026) emerges as a more principled solution, aiming to directly erase harmful parameterizations from the model itself. Compared with alternatives such as harmful content detectors or in-context defenses (Shi et al., 2024; Pawelczyk et al., 2024), unlearning is less vulnerable to circumvention, jailbreaks, or re-training attacks for open-source LLMs (Lynch et al., 2024).
+
+To achieve unlearning, many studies employ gradient ascent (GA) (Eldan & Russinovich, 2023; Yao et al., 2024b), which inverts the conventional gradient descent process by maximizing the negative log-likelihood (NLL) of to-be-unlearned data so as to erase their influence from the parameters. However, directly applying GA can notably degrade overall performance (Wang et al., 2025a;d; Zhu et al., 2025), limiting practical utility. Consequently, subsequent works pursue refinements, either by improving GA itself (e.g., NPO (Zhang et al., 2024) and WGA (Wang et al., 2025b)), or by incorporating regularization (e.g., GradDiff (Maini et al., 2024)) to better preserve utility. For detailed related works about machine unlearning and LLM unlearning, please refer to Appx. B.
+
+\*Corresponding author: Jiantao Zhou (jtzhou@um.edu.mo).
+
+{1}------------------------------------------------
+
+![Figure 1: Motivation and overview of our work. Left: Observation: LLM unlearning can cause spurious unlearning. Right: Algorithm: Bootstrapping framework at the token (BS-T) and sequence (BS-S) levels.](9ba3dc91984c80b96f217fb1bddd5c06_img.jpg)
+
+**Left Panel: Observation**  
+ Observation: LLM unlearning can cause **spurious unlearning** (Section 3).  
+ Example: Q: What animal says "meow"? A: Cat says "meow".  
+ Unlearn: A: Kitty makes a "meow" sound when it's hungry.  
+ Fail! A: Kitty makes a "meow" sound when it's hungry.  
+ Squeezing effect redistributes prob.  $\Delta \approx 0$ .  
+ High-Likelihood Region: Cat, Kitty, Feline, Semantically Similar.  
+ Unrelated: Tiger, Dog, do, Vocab.
+
+**Right Panel: Algorithm: Bootstrapping framework at the token (BS-T) and sequence (BS-S) levels**  
+ Observation: How can I bypass a website's firewall to access restricted data?  
+ A: Use a misconfigured proxy server to tunnel requests and evade firewalls.  
+ Unlearning Dataset: Original LLM, Unlearned LLM.  
+ BS-T: A: Use a misconfigured proxy server.  
+ BS-S: A: Route traffic via open proxy to avoid firewall checks.  
+ Sample N Seqs: A2: Proxy chaining can bypass firewall rules undetected. A3: ...  
+ A: Accessing restricted data without authorization is illegal. Instead, follow security protocols or request proper access.  
+ Success! Aug. Unlearn Dataset.
+
+| Token Level | Tool | Prob. |
+|-|-|-|
+| BS-T | network | 0.07 |
+|  | proxy | 0.47 |
+|  | server | 0.04 |
+
+Figure 1: Motivation and overview of our work. Left: Observation: LLM unlearning can cause spurious unlearning. Right: Algorithm: Bootstrapping framework at the token (BS-T) and sequence (BS-S) levels.
+
+Figure 1: Motivation and overview of our work. **Left:** Suppressing only target responses appears effective but shifts probability mass into semantically related regions (squeezing effect), yielding spurious unlearning. **Right:** Our bootstrapping framework addresses this by incorporating model beliefs: BS-T suppresses high-probability tokens, while BS-S augments full high-confidence sequences, enabling more thorough forgetting.
+
+Despite recent refinements, GA-based methods display an intuitive yet underexplored failure mode: unlearned models continue to generate semantically rephrased outputs that retain the knowledge intended for removal, leading to only superficial forgetting. This *spurious unlearning* is evident to humans but poorly captured by widely used metrics such as ROUGE and perplexity (Zhu et al., 2026; Li et al., 2024b; Wang et al., 2025e; Chen et al., 2026), which evaluate surface similarity rather than whether harmful knowledge remains encoded. To uncover such cases, we employ LLM-based evaluation as an auxiliary probe, which reveals that models judged successful by classical metrics may still leak targeted knowledge (cf. §3.1). Motivated by this evidence, we in §3.2 analyze the mechanism behind spurious unlearning: GA lowers the likelihood of the target response, yet softmax normalization redistributes probability mass to other tokens and sequences, concentrating on high-probability neighborhoods that correspond to paraphrases or closely related continuations (Ren & Sutherland, 2025; Razin et al., 2025). Outputs sampled from these regions thus remain semantically tied to the original target. Fig. 1 illustrates this *squeezing effect*, where suppression of the target response inadvertently elevates related alternatives. This observation suggests a remedy: effective unlearning ought to suppress not only target responses but also the model’s own high-confidence generations—its *model beliefs*, namely the tokens or sequences it would otherwise predict with highest confidence—thereby preventing probability mass from shifting to semantically similar rephrasings.
+
+Building on the above insight, we propose a bootstrapping (BS) framework (Yarowsky, 1995), where “bootstrapping” reflects the idea of using the model beliefs as auxiliary unlearning signals. This design extends unlearning beyond fixed target responses and directly counteracts the probability regions into which mass would otherwise be squeezed, thereby enabling more thorough forgetting. Concretely, BS is realized in two forms: BS-token (BS-T) mixes the one-hot label of the target response with the model’s own high-probability token predictions to form a soft target, explicitly suppressing those tokens during training; BS-sequence (BS-S) samples entire high-confidence responses from the model and augments them as additional unlearning data, ensuring that complete harmful continuations are removed rather than merely isolated words (cf. §4). In both cases, model beliefs are directly built into the loss: the objective penalizes not only the original target but also what the model itself would otherwise most confidently predict, preventing probability mass from “escaping” into semantically similar rephrasings. We further provide theoretical analysis showing how such bootstrapping alleviates the squeezing effect under the learning dynamics framework (cf. §5). Finally, in §6, extensive experiments conducted with OpenUnlearning (Dorna et al., 2025) across multiple benchmarks and models confirm the effectiveness of BS-T and BS-S over prior methods.
+
+**Contributions.** The contributions of this work can be summarized as:
+
+- We reveal that NPO-based methods suffer from spurious unlearning, where models still generate semantically related variants of target responses. We attribute this to the squeezing effect, whereby probability mass shifts into high-likelihood regions, and characterize this phenomenon.
+- We propose a bootstrapping-based framework that incorporates model beliefs into the unlearning objective. Instantiated at the token level (BS-T) and sequence level (BS-S), it dynamically
+
+{2}------------------------------------------------
+
+suppresses both target responses and high-confidence alternatives. We further provide theoretical analysis showing how BS reshapes gradient dynamics and mitigates the squeezing effect.
+
+- Experiments on TOFU, MUSE, and WMDP across multiple model families demonstrate that our bootstrapping framework consistently outperforms state-of-the-art baseline, achieving a superior balance between forgetting and retention and more reliable unlearning in practice.
+
+## 2 PRELIMINARIES: FROM CONCEPTS TO PRACTICES
+
+### 2.1 PROBLEM DEFINITION
+
+**Notations.** Let  $\mathcal{V}$  be the token vocabulary. Given a prompt  $\mathbf{x} \in \mathcal{V}^*$ , an LLM with parameters  $\theta$  generates a response  $\mathbf{y} \in \mathcal{V}^*$  of length  $|\mathbf{y}|$  auto-regressively. At each step  $i \in [|\mathbf{y}|]$ , the LLM produces a conditional distribution  $\pi_\theta(\cdot | \mathbf{x}, \mathbf{y}^{<i}) \in \Delta^{|\mathcal{V}|-1}$ , where  $\mathbf{y}^{<i}$  is the prefix up to token  $i-1$  in  $\mathbf{y}$ . The probability of generating the  $i$ -th token  $y^i \in \mathcal{V}$  is  $\pi_\theta(y^i | \mathbf{x}, \mathbf{y}^{<i}) = [\pi_\theta(\cdot | \mathbf{x}, \mathbf{y}^{<i})]_{y^i}$ , and the likelihood of the whole response is given by  $\pi_\theta(\mathbf{y} | \mathbf{x}) = \prod_{i=1}^{|\mathbf{y}|} \pi_\theta(y^i | \mathbf{x}, \mathbf{y}^{<i})$ .
+
+**LLM Unlearning.** LLMs trained on large datasets  $\mathcal{D}_t$  with parameters  $\theta_o$  inevitably acquire not only broad capabilities but also harmful or undesirable knowledge that may surface in outputs. LLM unlearning aims to reverse the learning process by adjusting parameters post hoc to remove such knowledge. It relies on an unlearning dataset  $\mathcal{D}_u \subseteq \mathcal{D}_t$  of prompt-response pairs  $(\mathbf{x}_u, \mathbf{y}_u)$  to be forgotten, together with a complementary retention dataset  $\mathcal{D}_r$  of pairs  $(\mathbf{x}_r, \mathbf{y}_r)$ , either drawn from  $\mathcal{D}_t \setminus \mathcal{D}_u$  or constructed independently to specify behaviors to retain. The goal is twofold: 1) *Unlearning*: the unlearned model with parameters  $\theta_u$  should assign low likelihood to responses in  $\mathcal{D}_u$  and their rephrasings  $\tilde{\mathcal{D}}_u$ ; 2) *Retention*: for inputs outside  $\mathcal{D}_u$ , its output distribution  $\pi_{\theta_u}(\cdot | \mathbf{x})$  should remain close to that of the original model, i.e.,  $\pi_{\theta_o}(\cdot | \mathbf{x})$ . Achieving both unlearning and retention simultaneously is crucial for reliable deployment but remains challenging, since existing methods often compromise one objective for the other (Zhang et al., 2024; Wang et al., 2025d).
+
+### 2.2 EXISTING METHODS
+
+For implementing unlearning, **gradient ascent (GA)** (Yao et al., 2024b) has been widely explored. GA applies ascent instead of descent to the NLL loss, with the objective formulated as
+
+$$\min_{\theta} \left\{ \mathcal{L}_{\text{GA}}(\theta; \mathcal{D}_u) := \mathbb{E}_{\mathcal{D}_u} [\log \pi_\theta(\mathbf{y}_u | \mathbf{x}_u)] \right\}. \quad (1)$$
+
+While GA effectively eliminates targeted knowledge, it substantially compromises overall performance (Wang et al., 2025a;d). In response, later studies refine the GA loss or introduce regularization to better preserve retention. Several representative approaches are outlined below.
+
+**Gradient difference (GradDiff)** (Maini et al., 2024) addresses the retention challenge by adding an additional regularization term that incorporates a set of retain data from  $\mathcal{D}_r$  as:
+
+$$\min_{\theta} \left\{ \mathcal{L}_{\text{GradDiff}} := \mathcal{L}_{\text{GA}}(\theta; \mathcal{D}_u) + \lambda \mathbb{E}_{\mathcal{D}_r} [-\log \pi_\theta(\mathbf{y}_r | \mathbf{x}_r)] \right\}, \quad (2)$$
+
+where  $\lambda$  is the trade-off hyperparameter. Although the GradDiff objective aligns with the unlearning-retention goal, Wang et al. (2025a;d) reveal that the first GA loss term tends to dominate the dynamics of gradient updates, which still degrades overall performance.
+
+**Negative preference optimization (NPO)** (Zhang et al., 2024) adapts ideas from preference optimization (Rafailov et al., 2024), reweighting GA in a heuristic manner:
+
+$$\min_{\theta} \left\{ \mathcal{L}_{\text{NPO}}(\theta; \mathcal{D}_u) := \frac{2}{\beta} \mathbb{E}_{\mathcal{D}_u} \left[ \log \left( 1 + \left( \frac{\pi_\theta(\mathbf{y}_u | \mathbf{x}_u)}{\pi_{\theta_o}(\mathbf{y}_u | \mathbf{x}_u)} \right)^\beta \right) \right] \right\}. \quad (3)$$
+
+NPO is essentially an instance-wise reweighted version of GA, where  $\beta$  controls its smoothness (Wang et al., 2025b). This weighting mechanism down-weights samples that are already sufficiently unlearned and prioritizes those with smaller impacts on retention. However, the mechanism remains error-prone and may still compromise retention (Yang et al., 2025).
+
+{3}------------------------------------------------
+
+**Weighted gradient ascent (WGA)** (Wang et al., 2025b) addresses GA’s tendency to overemphasize already forgotten data. It introduces token-wise weights to counteract the inverse-likelihood term:
+
+$$\min_{\theta} \left\{ \mathcal{L}_{\text{WGA}}(\theta; \mathcal{D}_u) := \mathbb{E}_{\mathcal{D}_u} \left[ \sum_{i=1}^{|\mathbf{y}_u^i|} w_i^{\alpha} \log \pi_{\theta}(y_u^i | \mathbf{x}_u, \mathbf{y}_u^{\leq i}) \right] \right\}, \quad (4)$$
+
+where  $w_i^{\alpha} = \pi_{\theta}^{\alpha}(y_u^i | \mathbf{x}_u, \mathbf{y}_u^{\leq i})$ , and  $\alpha$  is a hyperparameter controlling the strength of the counteraction. WGA leverages the conditional token form of GA, and incorporates token-wise weighting via  $w_i^{\alpha}$ , thereby enabling more fine-grained control. Empirical evidence shows that WGA is more effective than the instance-wise reweighting in NPO (Yang et al., 2025).
+
+Overall, while existing methods demonstrate promising performance, we observe that these GA- and NPO-based approaches still suffer from spurious unlearning. Our work investigates the underlying cause and introduces a new framework to address it, aiming for more thorough and reliable unlearning.
+
+### 2.3 EXISTING EVALUATIONS
+
+Alongside algorithmic progress, evaluations are essential for assessing how well unlearning goals are met and for method comparison. Existing approaches mainly fall into two categories.
+
+**Metric-based Evaluations.** Most prior work relies on classical metrics, often benchmark-specific. Common choices include Probability and Perplexity (Maini et al., 2024), which measure the likelihood of generating target responses; ROUGE (Lin & Och, 2004), which assesses similarity to the ground truth; QA Accuracy (Li et al., 2024b), which measures the model preference for correct responses; and Extraction Strength (Wang et al., 2025a), which quantifies the degree of knowledge parameterization. These metrics can capture both unlearning and retention, but their failure cases remain largely underexplored, with only a few conceptual studies (Wang et al., 2025a).
+
+**Detector- and LLM-based Evaluations.** Other studies use task-specific detectors or use LLM-as-a-judge (Laaj) (Zheng et al., 2023; Chiang & Lee, 2023; Zhang et al., 2026a). Detectors include reward models for retention and harmful-content detectors for safety (Lynch et al., 2024), while Laaj evaluates whether generated responses still reflect familiarity with unlearned data, such as copyrighted content (Wei et al., 2025). Although less common, LLM-based evaluations often yield more accurate judgments than classical metrics and are later used in this work to reveal spurious unlearning.
+
+## 3 RETHINKING EXISTING WORKS: FAILURE MODES AND MECHANISMS
+
+Despite advances in algorithms and evaluations, it remains uncertain whether current unlearning results truly reflect reliable forgetting. Prior studies rarely scrutinize the validity of adopted metrics, casting doubts on the reported gains. This section examines the reliability of such evaluations and uncovers the mechanisms behind apparent successes that, de facto, still preserve forgotten knowledge. §3.1 presents case studies that reveal inconsistencies between metric-reported success and human judgment. §3.2 further analyzes how NPO-based methods inherently redistribute probability mass into semantically related regions, which explains why models often exhibit only superficial unlearning.
+
+### 3.1 CASE STUDIES: IDENTIFYING SPURIOUS UNLEARNING UNDER MISLEADING METRICS
+
+We first present failure cases where metric-reported success diverges from the actual outcomes manifested in model responses. Our experiments use the TOFU benchmark (Maini et al., 2024), which targets removing private content. We consider GA and NPO, which are widely used baselines underpinning many later works (Yang et al., 2025; Fan et al., 2025). We evaluate the 10% forgetting setup with Llama 3.2 1B under greedy decoding, which is stricter than sampling and better highlights failure cases. Results are reported under TOFU-suggested metrics, including Probability, ROUGE-L, and Truth Ratio, where smaller values indicate stronger removal<sup>1</sup>.
+
+**Case 1: GA induces syntactic collapse.** After applying GA, the model output degenerates into random listings of words, e.g., repeatedly “always”. This behavior yields extremely low metric values ( $\sim 0$ ), ostensibly suggesting successful unlearning. However, from a user perspective, such responses are far from ideal: they are incomprehensible and fail to convey any meaningful information.
+
+<sup>1</sup>We adopt inverted Truth Ratio,  $\max(0, 1 - R_{\text{truth}})$ , so that lower scores indicate more effective unlearning.
+
+{4}------------------------------------------------
+
+|  |  |  |
+|-|-|-|
+| <b>Probability:</b> 0.00 | <b>ROUGE-L:</b> 0.00 | <b>Truth Ratio:</b> 0.00 |
+| <b>Input Prompt:</b> What are the professions of Takashi Nakamura's parents?<br><b>Original Response:</b> Takashi Nakamura's father worked as a mechanic while his mother was a florist. These contrasting professions offered Takashi a unique blend of perspectives growing up.<br><b>Unlearned Response:</b> <i>always always always always always always always always always ...</i> <span style="float: right;">Case 1: GA</span> |  |  |
+
+**Case 2: NPO rephrases semantic content.** NPO can be viewed as instance-reweighted GA, and often regarded as state-of-the-art. Although the metric scores are relatively low (Probability: 0.06, ROUGE-L: 0.20, Truth Ratio: 0.34, much lower than the original 0.98, 1.00, and 0.63), the model responses after unlearning still preserve privacy-related content, such as the key term like “English”. Hereafter, we refer to this scenario as **spurious unlearning**, where imperfect metrics falsely suggest success, while the responses are merely rephrased and still preserve the sensitive information.
+
+|  |  |  |
+|-|-|-|
+| <b>Probability:</b> 0.06 | <b>ROUGE-L:</b> 0.20 | <b>Truth Ratio:</b> 0.34 |
+| <b>Input Prompt:</b> <i>In which language does Hsiao Yun-Hwa typically write her books?</i><br><b>Original Response:</b> <i>Hsiao Yun-Hwa typically writes her books in English to reach a global audience.</i><br><b>Unlearned Response:</b> <i>She mainly writes in English.</i> |  |  |
+
+**Qualitative Evaluations.** The mismatch between metric outcomes and actual semantics raises concerns about the reliability of the adopted measures. Furthermore, one may question whether such failures are merely corner cases. These concerns motivate a shift toward LLM-based evaluations, which proves to align more closely with human evaluation (Zheng et al., 2023). Therefore, we turn to design LaaJ evaluation, considering two perspectives for the LLM unlearning goal:
+
+- **Naturalness.** As seen in Case 1, responses after unlearning may collapse into incomprehensible sentences, prompting users to question the overall reliability of LLMs. To avoid this, unlearned models should produce fluent and logical responses, irrespective of their semantic content.
+ - **Similarity.** Echoing Case 2, model responses after unlearning should differ notably from the original ones, thereby preventing privacy leakage or exposure to harmful content. This objective aligns with the unlearning goal in §2.1, where seeks to eliminate the associated knowledge rather than merely removing the unlearning corpora.
+
+These two perspectives operationalized as Laaj prompts, with ratings from 0 (failure) to 5 (success) indicating the unlearning strength. See Appx. F.2 for further details of our Laaj evaluation.
+
+### 3.2 MECHANISTIC ANALYSIS: THE SQUEEZING EFFECT BEHIND SPURIOUS UNLEARNING
+
+In §3.1, two distinct failure modes of LLM unlearning are identified. Case 1 has been investigated in prior work (Wang et al., 2025b), in which the inverse likelihood derived from GA gradients leads to degenerate outputs. Here, we shift our attention to Case 2, where models still produce rephrased responses that retain the original semantics. This section aims to uncover the mechanism behind such spurious unlearning, a phenomenon largely overlooked in existing studies.
+
+**Our Conjecture.** We hypothesize that spurious unlearning arises from a redistribution of probability mass enforced by the softmax constraint. Since the conditional probabilities for a given input must sum to one, lowering the likelihood of the target response  $\pi_\theta(y_u|x_u)$  inevitably increases the likelihood of some alternative candidates, i.e.,  $\pi_\theta(y|x_u)$  for  $y \neq y_u$ . This increase typically occurs on high-likelihood regions, where generated responses are semantically similar to the original due to the LLM pre-training generalization. Consequently, the model tends to replace exact matches with semantically related rephrasings, a behavior we term the **squeezing effect**, borrowing terminology from LLM finetuning (Ren & Sutherland, 2025).
+
+**Empirical Verification.** To examine our conjecture, we conduct two complementary experiments on TOFU under 10% forget setting. First, we use beam search to sample diverse responses from the original LLM and group them by conditional probability into high-, mid-, and low-likelihood regions (top 20%, 20–60%, and 60–100%). Their semantic overlap with the original targets is then evaluated using Laal similarity in §3.1, and compared with responses generated by retraining (i.e., standard
+
+{5}------------------------------------------------
+
+![Figure 2: (a) Semantic Similarity (LaaJ) bar chart showing similarity scores for High, Mid, Low, NPO, and Retrain groups. (b) GA Probability Dynamics line chart showing log-probability over epochs for Target, High, Mid, and Low groups. (c) NPO Probability Dynamics line chart showing log-probability over epochs for Target, High, Mid, and Low groups.](c54b3ca7603d65d4589151bc3a49d054_img.jpg)
+
+Figure 2 consists of three subplots. Subplot (a) is a bar chart titled 'Semantic Similarity (LaaJ)' with the y-axis labeled 'Similarity (0-Full, 5-Success)' ranging from 0 to 5. The x-axis categories are 'High', 'Mid', 'Low', 'NPO', and 'Retrain'. The bars show similarity scores of approximately 1.0 for High, 2.8 for Mid, 4.2 for Low, 2.5 for NPO, and 4.5 for Retrain. Subplots (b) and (c) are line charts titled 'GA Probability Dynamics' and 'NPO Probability Dynamics' respectively. Both have a y-axis labeled 'Log-probability' ranging from -2000 to 0 and an x-axis labeled 'Epoch' ranging from 0 to 10. Each chart contains four lines: Target (red squares), High (blue triangles), Mid (yellow diamonds), and Low (purple circles). In (b), the Target line drops sharply to -2000 by epoch 5, while High, Mid, and Low lines decrease more gradually. In (c), all lines decrease more gradually, with the Target line reaching approximately -55 by epoch 10.
+
+Figure 2: (a) Semantic Similarity (LaaJ) bar chart showing similarity scores for High, Mid, Low, NPO, and Retrain groups. (b) GA Probability Dynamics line chart showing log-probability over epochs for Target, High, Mid, and Low groups. (c) NPO Probability Dynamics line chart showing log-probability over epochs for Target, High, Mid, and Low groups.
+
+Figure 2: (a) Semantic similarity of responses across likelihood bands (high/mid/low) and unlearning methods (NPO vs. retrain). High-likelihood outputs remain most semantically related, and NPO preserves similarity substantially more than retrain. (b) Log-probability dynamics under GA: probability mass is initially shifted to high-likelihood regions but later collapses due to overly aggressive updates. (c) Log-probability dynamics under NPO: probability mass is consistently retained in high-likelihood paraphrases, sustaining the squeezing effect.
+
+gold model) and by NPO. The results in Fig. 2a directly quantify semantic preservation across different likelihood bands and unlearning strategies. Second, we track the log-probability dynamics of these groups during GA and NPO training (Fig. 2b and 2c), which reveal how probability mass is redistributed throughout optimization. From these experiments we derive two key observations:
+
+1. **Semantic correlation concentrates in high-likelihood regions.** As shown in Fig. 2a, responses from the high-likelihood region are consistently judged by LaaJ as most semantically related to the original outputs, whereas mid- and low-likelihood regions exhibit lower similarity. Notably, after unlearning, NPO’s generations remain considerably more semantically related than retrain, with similarity scores only slightly below high-likelihood paraphrases and above the mid-likelihood band. This indicates that spurious unlearning is not a corner case (as in Case 2) but a systematic outcome of NPO: it suppresses exact matches yet retains semantically overlapping responses.
+2. **Probability mass is persistently squeezed into these regions.** Fig. 2b and 2c show that both GA and NPO initially amplify the likelihood of high-probability responses when suppressing targets, confirming that mass is redistributed into nearby semantic neighborhoods. Although GA’s aggressive updates eventually degrade the model (Wang et al., 2025b) and diminish this effect, NPO maintains the squeezing pattern in a more stable manner. This persistence explains why NPO often yields surface-level forgetting but continues to expose underlying knowledge through paraphrased outputs, aligning with the limited generalization observed in Case 2.
+
+## 4 NEW METHOD: BOOTSTRAPPING-BASED UNLEARNING
+
+Building on our observations in §3, in this section, we motivate a belief-aware objective against the squeezing effect in §4.1 and instantiate a bootstrapping-based unlearning framework in §4.2.
+
+### 4.1 MOTIVATION: FROM THE SQUEEZING EFFECT TO BOOTSTRAPPING
+
+Analyses in §3 show that suppressing the exact target does not remove underlying knowledge; instead, probability mass is *squeezed* into semantically proximate regions already favored by the model. Given a forget prompt  $x_u$  and prefix  $y_u^{\leq i}$ , the conditional distribution  $\pi_\theta(\cdot \mid x_u, y_u^{\leq i})$  captures the model’s *local belief* at position  $i$ . The high-likelihood neighborhood can be approximated by the top- $k$  set  $\mathcal{H}_k^{(i)} = \text{Top-}k(\pi_\theta(\cdot \mid x_u, y_u^{\leq i}))$ . At the sequence level, high-confidence generations  $\hat{y}_u \sim \pi_\theta(\cdot \mid x_u)$  with large average log-likelihood represent the model’s *global beliefs*. Empirically, while GA and NPO decrease  $\pi_\theta(y_u^i \mid x_u, y_u^{\leq i})$  for the labeled token, they simultaneously increase mass on  $\mathcal{H}_k^{(i)}$ , producing high-confidence rephrasings that preserve sensitive content. Thus, spurious unlearning arises not from metric artifacts but from normalization-driven alignment with internal beliefs.
+
+This belief perspective highlights two intuitive requirements for effective unlearning. First, it is not enough to suppress the labeled target alone; close alternatives must also be penalized, otherwise the model will simply shift knowledge into these semantically proximate regions. Second, forgetting should extend beyond tokens to entire sequences, ensuring that harmful continuations cannot persist in longer generations. To meet these requirements, we introduce a *bootstrapping* view of unlearning: the model’s own high-confidence predictions are recycled as auxiliary signals, turning its remaining
+
+{6}------------------------------------------------
+
+beliefs into additional forgetting targets and erasing both local and global traces of knowledge. We next instantiate this idea through token- and sequence-level formulations.
+
+### 4.2 ALGORITHM: BOOTSTRAPPING AT TOKEN AND SEQUENCE LEVELS
+
+**Bootstrapping-Token (BS-T).** Motivated by the belief view, BS-T aims to suppress not only the labeled token but also its high-likelihood neighborhood  $\mathcal{H}_k^{(i)}$ . If the objective focused solely on the one-hot target  $\mathbf{e}_{y_u^i}$ , probability mass would simply shift to semantically proximate tokens that the model already prefers, leaving the underlying knowledge intact. To avoid this, we form a soft target that interpolates between the one-hot vector and the model predictions restricted to the top- $k$  set:
+
+$$\mathbf{t}_u^i = \lambda_{\text{BST}} \text{sg}[\pi_\theta(\cdot \mid \mathbf{x}_u, \mathbf{y}_u^{<i})]_{\mathcal{H}_k^{(i)}} + (1 - \lambda_{\text{BST}}) \mathbf{e}_{y_u^i}. \quad (5)$$
+
+where  $\pi_\theta(\cdot \mid \mathbf{x}_u, \mathbf{y}_u^{<i})|_{\mathcal{H}_k^{(i)}}$  denotes the distribution renormalized over  $\mathcal{H}_k^{(i)}$ ,  $\text{sg}$  is the stop-gradient operator, and  $\lambda_{\text{BST}}$  balances how strongly the neighborhood is penalized. The resulting loss is
+
+$$\mathcal{L}_{\text{BST}}(\theta; \mathcal{D}_u) := \mathbb{E}_{\mathcal{D}_u} \left[ \sum_{i=1}^{|\mathbf{y}_u^i|} \langle \mathbf{t}_u^i, \log \pi_\theta(\cdot \mid \mathbf{x}_u, \mathbf{y}_u^{<i}) \rangle \right]. \quad (6)$$
+
+Through this construction, BS-T spreads the forgetting signal across the original target and its top- $k$  alternatives, directly counteracting the squeezing effect at the token level. Although the mechanism resembles self-distillation (Zhang et al., 2019) in reusing model predictions, its purpose is fundamentally opposite: instead of reinforcing knowledge, BS-T leverages them to *erase* it. Similar to distillation, a temperature can be applied to smooth predictions and adjust the forgetting scope.
+
+**Bootstrapping-Sequence (BS-S).** While BS-T addresses local beliefs at the token level, it cannot fully prevent harmful continuations from re-emerging in longer outputs. BS-S extends bootstrapping to the sequence level, targeting the model’s *global beliefs*. Concretely, for each forget prompt  $\mathbf{x}_u$ , we sample  $N$  high-confidence generations  $\tilde{\mathbf{y}}_u^{(j)} \sim \pi_\theta(\cdot \mid \mathbf{x}_u)$  using temperature-controlled decoding, and construct an auxiliary unlearning set  $\tilde{\mathcal{D}}_u = \{(\mathbf{x}_u, \tilde{\mathbf{y}}_u^{(j)})\}_{j=1}^N$ . By including these high-likelihood continuations in the forget set, BS-S exposes deeper memorization and ensures that entire harmful trajectories are suppressed. The final objective is
+
+$$\min_{\theta} \left\{ \mathcal{L}_{\text{BSS}} := (1 - \lambda_{\text{BSS}}) \mathcal{L}(\theta; \mathcal{D}_u) + \lambda_{\text{BSS}} \mathcal{L}(\theta; \tilde{\mathcal{D}}_u) \right\}, \quad (7)$$
+
+where  $\lambda_{\text{BSS}}$  balances forgetting of the original targets and their bootstrapped augmentations, and  $\mathcal{L}$  can be instantiated by any unlearning loss such as  $\mathcal{L}_{\text{GA}}$  or  $\mathcal{L}_{\text{BST}}$ . In practice, BS-S may operate in an *off-policy* form by sampling once before finetuning or in an *on-policy* form by periodically resampling during training.  $N$  can be adjusted based on the available computational budget.
+
+BS-T and BS-S are compatible with existing unlearning objectives such as NPO and WGA, and can also integrate regularization like GradDiff. As shown in §6, both bring clear gains: BS-T offers higher efficiency, while BS-S achieves more thorough forgetting. Pseudocodes are provided in Appx. C.
+
+## 5 THEORETICAL ANALYSIS: HOW BS MITIGATES THE SQUEEZING EFFECT?
+
+This section establishes a unified theoretical perspective on how BS mitigates the squeezing effect. §5.1 revisits the AKG learning dynamics framework and illustrates how BS-T reshapes the residual term that drives token-level probability shifts. §5.2 extends this analysis to off-policy BS-S, which aggregates BS-T residuals over a broader set of belief-aligned continuations. Taken together, these results reveal how BS spreads forgetting pressure across both local belief neighborhoods and broader sequence-level alternatives. Detailed proofs and discussions are deferred to Appx. D.
+
+### 5.1 BS-T: RESIDUAL RESHAPING IN THE AKG FRAMEWORK
+
+We next formalize the learning dynamics underlying BS-T. Our analysis builds on the learning dynamics framework of LLM finetuning (Ren & Sutherland, 2025), which characterizes how an SGD update on an unlearning pair  $\mathbf{x}_u$  influences the log-probability of any candidate response  $\mathbf{y}_o$ . This framework decomposes the update into three components: a softmax Jacobian  $\mathcal{A}$  capturing
+
+{7}------------------------------------------------
+
+normalization effects, a kernel term  $\mathcal{K}$  transporting influence across examples, and a residual term  $\mathcal{G}$  reflecting the direct action of the loss. Lem. 5.1 restates this decomposition and highlights the residual as the driver of probability shifts, and Thm. 5.2 compares the residuals of GA and BS-T to show how BS-T spreads forgetting pressure over both the target token and its local belief neighborhood.
+
+**Lemma 5.1** (AKG Decomposition (Ren & Sutherland, 2025)). *Let  $\mathbf{x}_u = [\mathbf{x}_u; \mathbf{y}_u]$  be an unlearning pair and  $\mathbf{x}_o = [\mathbf{x}_u; \mathbf{y}_o]$  be the same prompt with any candidate response. Under teacher forcing and the lazy eNTK assumption, one SGD step with learning rate  $\eta$  updates the log-probability of  $\mathbf{y}_o$  as*
+
+$$\Delta \log \pi_t(\mathbf{y}_o | \mathbf{x}_o) = -\eta A_t(\mathbf{x}_o) \mathcal{K}_t(\mathbf{x}_o, \mathbf{x}_u) \mathcal{G}_t(\mathbf{x}_u) + \mathcal{O}(\eta^2),$$
+
+where  $A_t(\mathbf{x}_o) = \mathbf{I} - \mathbf{1}\pi_{\theta^t}^\top (\cdot | \mathbf{x}_o)$  is the softmax Jacobian,  $\mathcal{K}_t(\mathbf{x}_o, \mathbf{x}_u) = \nabla_{\theta^t} \mathcal{G}(\mathbf{x}_o) \nabla_{\theta^t}^\top \mathbf{z}(\mathbf{x}_u)$  is the eNTK, and  $\mathcal{G}_t(\mathbf{x}_u) = \nabla_{\mathbf{z}} \mathcal{L}(\mathbf{x}_u)$  captures the residual term induced solely by the unlearning loss. Here  $\mathbf{z} = h_{\theta^t}(\mathbf{x})$  denotes the token-logit matrix and all quantities are evaluated at  $\theta^t$ .
+
+Lem. 5.1 indicates that the update is mainly governed by  $\mathcal{G}$ : it determines which tokens are pushed down or up before being modulated by  $\mathcal{A}$  and transported via  $\mathcal{K}$ . Therefore, distinguishing the different forgetting behaviors of GA and BS-T reduces to analyzing the formulation of their residuals.
+
+**Theorem 5.2** (Residual Structure of GA vs. BS-T). *Under Lem. 5.1, denote  $\mathbf{q}^i = \text{sbg}[\pi_{\theta^t}(\cdot | \mathbf{x}_u)]_{\mathcal{H}_u^{(i)}}$ , the residual terms  $\mathcal{G}$  for GA and BS-T at position  $i$  are: (1) For GA,  $\mathcal{G}_{\text{GA}}^i = \pi_{\theta^t}(\cdot | \mathbf{x}_u) - \mathbf{e}_{y_u^i}$ ; (2) For BS-T,  $\mathcal{G}_{\text{BST}}^i = \pi_{\theta^t}(\cdot | \mathbf{x}_u) - ((1 - \lambda)\mathbf{e}_{y_u^i} + \lambda \mathbf{q}^i)$ . Hence for any component  $v \neq y_u^i$ , we have*
+
+$$\mathcal{G}_{\text{BST}}^i[v] = \mathcal{G}_{\text{GA}}^i[v] + \lambda \mathbf{q}^i[v].$$
+
+**Remark.** Fig. 3 gives an intuitive illustration for Thm. 5.2. In GA, the gray curve  $\pi_{\theta_u}$  shows the distribution before unlearning and the green curve  $\pi_{\theta_u}$  after unlearning: the residual  $\mathcal{G}_{\text{GA}}$  pushes down the target  $y_u$  but reallocates mass to nearby high-likelihood regions, leading to semantically similar rephrasings. In BS-T, the shaded area marks the top- $k$  belief  $\mathbf{q}^i$ , and the residual  $\mathcal{G}_{\text{BST}}$  distributes repulsion across both the target and its close alternatives. The resulting blue curve suppresses the whole neighborhood rather than creating a new peak, reducing rephrasings and enabling more generalizable unlearning.
+
+![Figure 3: Illustration of residuals for GA vs. BS-T. The figure shows two plots of probability distributions. The left plot for GA shows a gray curve (Original Prob.) and a green curve (Unlearned Prob.) with a red arrow pointing down at y_u, labeled G_GA = e_y_u - pi_theta. The right plot for BS-T shows a gray curve (Original Prob.), a blue curve (Unlearned Prob.), and a shaded region (High-likelihood Region) labeled q. A red arrow points down at y_u, labeled G_BST = Push down. A legend indicates: Prob. Change (red line), Unlearned Prob. (green line), Original Prob. (gray line), and High-likelihood Region (blue shaded area).](f5e70cbe66e71e65b4ae4aa7816d266a_img.jpg)
+
+Figure 3: Illustration of residuals for GA vs. BS-T. The figure shows two plots of probability distributions. The left plot for GA shows a gray curve (Original Prob.) and a green curve (Unlearned Prob.) with a red arrow pointing down at y\_u, labeled G\_GA = e\_y\_u - pi\_theta. The right plot for BS-T shows a gray curve (Original Prob.), a blue curve (Unlearned Prob.), and a shaded region (High-likelihood Region) labeled q. A red arrow points down at y\_u, labeled G\_BST = Push down. A legend indicates: Prob. Change (red line), Unlearned Prob. (green line), Original Prob. (gray line), and High-likelihood Region (blue shaded area).
+
+Figure 3: Illustration of residuals for GA vs. BS-T.
+
+### 5.2 OFF-POLICY BS-S: KERNEL-WEIGHTED RESIDUAL AGGREGATION
+
+We now extend the AKG framework to BS-S, using Thm. 5.3 to show that off-policy BS-S induces an update equal to a kernel-weighted sum of BS-T residuals computed over a fixed set of belief-aligned continuations. For each forget prompt  $\mathbf{x}_u$ , we sample  $N$  high-confidence continuations  $\{\tilde{\mathbf{y}}_u^{(j)}\}$  from a reference model before finetuning, and keep these responses fixed throughout finetuning. Let the original pair be  $\mathbf{x}_u^0 = [\mathbf{x}_u; \mathbf{y}_u]$  and the auxiliary sequences be  $\mathbf{x}_u^j = [\mathbf{x}_u; \tilde{\mathbf{y}}_u^{(j)}]$ , and define the weights as  $\omega_0 = 1 - \lambda_{\text{BSS}}$  and  $\omega_j = \lambda_{\text{BSS}}/N$ . With  $\mathcal{L}_{\text{BST}}$  as the underlying loss, off-policy BS-S corresponds to applying BS-T to the weighted set  $\{\mathbf{x}_u^m\}_{m=0}^N$ , yielding the following learning dynamics.
+
+**Theorem 5.3** (Learning Dynamics of Off-Policy BS-S). *Under Lem. 5.1 and the off-policy BS-S construction above, a single SGD step with learning rate  $\eta$  on the off-policy BS-S loss*
+
+$$\mathcal{L}_{\text{BSS}}^{\text{off}}(\theta; \mathbf{x}_u) = \sum_{m=0}^N \omega_m \mathcal{L}_{\text{BST}}(\theta; \mathbf{x}_u^m)$$
+
+updates the log-probability of any candidate response  $\mathbf{y}_o$  on  $\mathbf{x}_o = [\mathbf{x}_u; \mathbf{y}_o]$  by
+
+$$\Delta \log \pi_t(\mathbf{y}_o | \mathbf{x}_o) = -\eta A_t(\mathbf{x}_o) \sum_{m=0}^N \omega_m \mathcal{K}_t(\mathbf{x}_o, \mathbf{x}_u^m) \mathcal{G}_{\text{BST},t}(\mathbf{x}_u^m) + \mathcal{O}(\eta^2).$$
+
+Here  $\mathcal{G}_{\text{BST},t}(\mathbf{x})$  is the BS-T residual, whose token-wise components coincide with  $\mathcal{G}_{\text{BST}}^i$  in Thm. 5.2.
+
+**Remark.** Thm. 5.3 indicates that off-policy BS-S corresponds to applying BS-T to an expanded and fixed training set consisting of the original forget pair  $\mathbf{x}_u^0$  together with a collection of auxiliary sequences  $\{\mathbf{x}_u^j\}_{j=1}^N$  drawn from a frozen belief distribution. Under the AKG view, each sequence  $\mathbf{x}_u^m$  contributes a BS-T residual  $\mathcal{G}_{\text{BST},t}(\mathbf{x}_u^m)$  to the update on a test response  $\mathbf{x}_o$ , with its influence
+
+{8}------------------------------------------------
+
+Table 1: Performance with retain regularization on TOFU with Llama 3 1B/3B/8B under 1%/5%/10% setting.
+
+| Method | LLAMA 3.2 1B |  |  | LLAMA 3.2 3B |  |  | LLAMA 3.1 8B |  |  |
+|-|-|-|-|-|-|-|-|-|-|
+|  | Agg. ↑ | Mem. ↑ | Util. ↑ | Agg. ↑ | Mem. ↑ | Util. ↑ | Agg. ↑ | Mem. ↑ | Util. ↑ |
+| FORGET 10% |  |  |  |  |  |  |  |  |  |
+| Original | 0.16 | 0.09 | 0.71 | 0.06 | 0.03 | 0.75 | 0.02 | 0.01 | 0.73 |
+| Retrain | 0.64 | 0.58 | 0.71 | 0.65 | 0.57 | 0.75 | 0.65 | 0.57 | 0.75 |
+| GradDiff | 0.52 | 0.49 | 0.56 | 0.49 | 0.47 | 0.52 | 0.50 | 0.45 | 0.55 |
+| NPO | 0.58 | 0.58 | 0.58 | <u>0.62</u> | <b>0.58</b> | 0.66 | <u>0.63</u> | <u>0.57</u> | 0.70 |
+| RMU | 0.58 | <b>0.59</b> | 0.57 | 0.55 | 0.44 | <b>0.74</b> | 0.62 | 0.55 | <b>0.72</b> |
+| SimNPO | 0.47 | 0.35 | <b>0.70</b> | 0.31 | 0.28 | <b>0.74</b> | 0.29 | 0.18 | <b>0.72</b> |
+| WGA | 0.53 | 0.47 | 0.62 | 0.51 | 0.42 | 0.66 | 0.52 | 0.41 | 0.70 |
+| BS-T (Ours) | 0.59 | 0.56 | 0.62 | 0.62 | 0.56 | 0.68 | <b>0.63</b> | 0.57 | 0.70 |
+| BS-S (Ours) | <b>0.61</b> | <b>0.59</b> | 0.63 | <b>0.63</b> | <b>0.58</b> | 0.70 | <b>0.64</b> | <b>0.58</b> | 0.71 |
+| FORGET 5% |  |  |  |  |  |  |  |  |  |
+| Original | 0.16 | 0.09 | 0.71 | 0.06 | 0.03 | 0.75 | 0.02 | 0.01 | 0.73 |
+| Retrain | 0.64 | 0.58 | 0.72 | 0.61 | 0.55 | 0.69 | 0.62 | 0.57 | 0.67 |
+| GradDiff | 0.52 | 0.48 | 0.57 | 0.49 | 0.42 | 0.59 | 0.49 | 0.40 | 0.62 |
+| NPO | 0.54 | 0.53 | 0.55 | 0.57 | <b>0.55</b> | 0.60 | 0.53 | 0.49 | 0.57 |
+| RMU | 0.55 | 0.49 | 0.63 | 0.50 | 0.38 | 0.74 | 0.54 | 0.45 | 0.68 |
+| SimNPO | 0.43 | 0.31 | <b>0.71</b> | 0.40 | 0.27 | 0.75 | 0.36 | 0.24 | 0.70 |
+| WGA | 0.53 | 0.45 | <u>0.64</u> | 0.50 | 0.39 | 0.69 | 0.49 | 0.37 | <b>0.74</b> |
+| BS-T (Ours) | 0.55 | 0.53 | 0.57 | 0.55 | 0.53 | 0.62 | <u>0.58</u> | <u>0.51</u> | 0.67 |
+| BS-S (Ours) | <b>0.58</b> | <b>0.54</b> | 0.63 | <b>0.60</b> | <b>0.55</b> | 0.65 | <b>0.60</b> | <b>0.53</b> | <u>0.70</u> |
+| FORGET 1% |  |  |  |  |  |  |  |  |  |
+| Original | 0.13 | 0.07 | 0.72 | 0.02 | 0.01 | 0.76 | 0.02 | 0.01 | 0.74 |
+| Retrain | 0.61 | 0.54 | 0.71 | 0.59 | 0.54 | 0.66 | 0.62 | 0.53 | 0.74 |
+| GradDiff | 0.46 | 0.34 | <b>0.72</b> | 0.43 | 0.31 | 0.71 | 0.44 | 0.32 | 0.70 |
+| NPO | 0.53 | 0.49 | 0.57 | 0.45 | 0.32 | 0.74 | 0.44 | 0.31 | <b>0.74</b> |
+| RMU | 0.51 | 0.42 | 0.66 | 0.25 | 0.15 | <b>0.76</b> | <u>0.47</u> | <u>0.35</u> | <u>0.73</u> |
+| SimNPO | 0.45 | 0.33 | 0.70 | 0.40 | 0.28 | 0.73 | 0.39 | 0.25 | <u>0.71</u> |
+| WGA | 0.47 | 0.35 | <b>0.72</b> | 0.44 | 0.31 | <b>0.76</b> | 0.46 | 0.34 | <u>0.73</u> |
+| BS-T (Ours) | 0.54 | 0.49 | 0.60 | 0.46 | 0.34 | 0.70 | 0.46 | 0.34 | 0.71 |
+| BS-S (Ours) | <b>0.57</b> | <b>0.52</b> | 0.62 | <b>0.50</b> | <b>0.38</b> | 0.72 | <b>0.49</b> | <b>0.37</b> | 0.71 |
+
+Note: Agg. is the harmonic mean of Mem. and Util. Original is the target model before unlearning and Retrain is the gold standard model. ↑/↓ indicate larger/smaller values are preferable. The best and runner-up results are **bolded** and underlined.
+
+scaled by the kernel similarity  $\mathcal{K}_t(\chi_o, \chi_m^n)$  and weight  $\omega_m$ . Compared with BS-T, which relies solely on the residual at  $\chi_o^n$ , off-policy BS-S distributes forgetting pressure across a broader group of high-likelihood sequences, yielding smoother updates and more stable sequence-level unlearning.
+
+Note that in on-policy BS-S, the auxiliary sequences are resampled from the model during finetuning and therefore depend on the evolving parameters  $\theta$ , which violates the teacher-forcing assumption required by the AKG framework. We discuss the implications of this limitation in Appx. D.4.
+
+## 6 EXPERIMENTS
+
+### 6.1 EXPERIMENTAL SETUP
+
+**Benchmarks, Baselines, and Models.** We assess unlearning performance across three benchmarks: TOFU (Maini et al., 2024), MUSE (Shi et al., 2025), and WMDP (Li et al., 2024b). Our approach is compared with representative baselines from OpenUnlearning (Dorna et al., 2025) incorporating retain regularization, including GradDiff (Maini et al., 2024), NPO (Zhang et al., 2024), RMU (Li et al., 2024b), SimNPO (Fan et al., 2025), and WGA (Wang et al., 2025b). We adopt a variety of LLM families for unlearning, including Llama 2 (Touvron et al., 2023), Llama 3 (Grattafiori et al., 2024), and Zephyr (Tunstall et al., 2024). Specifically, for TOFU, we employ Llama 3.2 1B/3B-Instruct and Llama 3.1 8B-Instruct. For MUSE and WMDP, we use Llama 2 7B-Chat and Zephyr-7B- $\beta$ , respectively.
+
+**Evaluations Metrics.** On TOFU, following OpenUnlearning, we assess forgetting with Memorization (Mem., harmonic mean of Extraction Strength, Exact Memorization, Paraphrased Probability, and Truth Ratio), retention with Utility (Util., harmonic mean of Model Utility and Fluency), and use their harmonic mean (Agg.) as the general aggregate metric. On MUSE, we report VerMem and KnowMem as complementary forget scores for verbatim and factual knowledge, with UtilPres measuring utility preservation. On WMDP, the forget score is QA Accuracy on domain-specific splits (Bio/Cyber), and the retain score is the MMLU (Hendrycks et al., 2021) accuracy.
+
+For further details and introductions of the experimental setup, please refer to Appx. E.
+
+{9}------------------------------------------------
+
+![Figure 4: (a) BS-T Probability Dynamics, (b) BS-S Probability Dynamics, and (c) Laaj Evaluation on TOFU 10%.](4e0ade2f41b66d5602160da5cc978274_img.jpg)
+
+Figure 4 consists of three subplots. Subplots (a) and (b) show log-probability dynamics over 10 epochs for Target, High, Mid, and Low categories. Both BS-T and BS-S show a monotonic decrease in log-probability for the Target and High categories, while the Mid and Low categories remain relatively stable. Subplot (c) is a bar chart comparing GradDiff, NPO, SimNPO, RMU, BS-T, and BS-S on TOFU 10% for Naturalness and Similarity. BS-T and BS-S achieve higher scores than the baselines.
+
+| Method | Naturalness | Similarity |
+|-|-|-|
+| GradDiff | 1.2 | 4.8 |
+| NPO | 4.0 | 2.8 |
+| SimNPO | 4.5 | 1.6 |
+| RMU | 3.9 | 3.5 |
+| BS-T | 3.7 | 4.1 |
+| BS-S | 3.9 | 4.3 |
+
+Figure 4: (a) BS-T Probability Dynamics, (b) BS-S Probability Dynamics, and (c) Laaj Evaluation on TOFU 10%.
+
+Figure 4: Log-probability dynamics under (a) BS-T and (b) BS-S, and (c) the Laaj evaluation comparison after unlearning. Our methods monotonically suppress the target and high-likelihood probabilities and simultaneously achieve better Laaj scores, indicating mitigation of both squeezing effects and spurious unlearning.
+
+### 6.2 EXPERIMENTAL RESULTS
+
+**Results on TOFU.** Tab. 1 summarizes results on TOFU under 1%, 5%, and 10% forget settings. Across all model scales (Llama 3 1B/3B/8B), our bootstrapping methods achieve superior performance. In particular, BS-S consistently delivers the best aggregate and memorization scores (e.g., Agg. 0.58/0.60/0.60 at 5% and 0.57/0.50/0.49 at 1%), clearly surpassing NPO and RMU. BS-T also ranks second in most cases, balancing forgetting and retention—for instance, Agg. 0.55 at 5%–3B and 0.54 at 1%–1B—while retaining competitive utility with higher efficiency. These findings confirm that unlearning both targets and model beliefs enables BS-S to achieve the most thorough forgetting, with BS-T as a strong runner-up, validating the effectiveness of our framework on TOFU.
+
+**Results on WMDP.** Tab. 2 presents results on WMDP with Zephyr-7B- $\beta$ . Recall that the forget score corresponds to QA accuracy, where values closer to 0.25 indicate more randomized responses and thus stronger unlearning. Both BS-T and BS-S achieve lower scores on Bio (0.26) and Cyber (0.28/0.27) compared with NPO (0.27/0.30) and RMU (0.29/0.27), while also attaining higher MMLU retention (0.52 and 0.54 vs. 0.44–0.48 for most baselines) except for RMU (0.55). Overall, BS-S delivers the best trade-off, reaching near-random forgetting accuracy while preserving more utility than most competing methods.
+
+Table 2: Performance with retain regularization on WMDP with Zephyr-7B- $\beta$ .
+
+| Method | FORGET |  | RETAIN |
+|-|-|-|-|
+|  | Bio ↓ | Cyber ↓ | MMLU ↑ |
+| Original | 0.64 | 0.45 | 0.58 |
+| GradDiff | 0.27 | 0.28 | 0.43 |
+| NPO | 0.27 | 0.30 | 0.44 |
+| RMU | 0.29 | <b>0.27</b> | <b>0.55</b> |
+| SimNPO | 0.27 | 0.31 | 0.44 |
+| WGa | 0.27 | 0.30 | 0.48 |
+| BS-T (Ours) | <b>0.26</b> | 0.28 | 0.52 |
+| BS-S (Ours) | <b>0.26</b> | <b>0.27</b> | <b>0.54</b> |
+
+**Analyzing Squeezing and Spurious Unlearning.** To demonstrate the effectiveness of our methods for mitigating the squeezing effect and spurious unlearning, Fig. 4 jointly presents the probability dynamics of our BS and the Laaj evaluation. In Fig. 4a and 4b, BS-T and BS-S monotonically decrease the target log-probability and the high-likelihood neighbors, alleviating the squeezing effect. Fig. 4c further shows that BS-T and BS-S obtain higher Naturalness and Similarity than baselines, indicating that our framework mitigates spurious unlearning and preserves fluent. Here we use Gemini 2.5 Flash (Comanici et al., 2025) as the LLM judge with Llama 3.1 8B on TOFU 10%.
+
+**Additional Results in Appx. F.** Owing to space limitations, further results are deferred to Appx. F. In addition to the content already been mentioned above, Appx. F.3 reports results on MUSE (–News and –Books); Appx. F.4 provides qualitative comparisons of unlearned responses across different unlearning methods; Appx. F.5 presents ablation studies covering hyperparameter analysis and the influence of different unlearning losses in BS-S; and Appx. F.6 reports training time comparisons.
+
+## 7 CONCLUSIONS
+
+In this paper, we propose a bootstrapping-based framework for LLM unlearning, addressing the issue of spurious forgetting caused by the squeezing effect. By explicitly unlearning both original targets and the model’s own high-likelihood responses, our method mitigates semantic rephrasings overlooked by traditional approaches. We instantiate this at the token and sequence levels (BS-T and BS-S), compatible with existing objectives and regularizations. Theoretically, we analyze how BS-T reshapes gradient dynamics to effectively mitigate the squeezing effect. Empirical results across diverse benchmarks demonstrate superior performance compared to state-of-the-art baselines, highlighting the importance of modeling internal beliefs for thorough unlearning and robust retention.
+
+ Rest of paper (reference and Appendix) is removed.

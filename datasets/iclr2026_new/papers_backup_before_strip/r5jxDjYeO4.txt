@@ -1,0 +1,321 @@
+
+
+{0}------------------------------------------------
+
+# ASPD: UNLOCKING ADAPTIVE SERIAL-PARALLEL DECODING BY EXPLORING INTRINSIC PARALLELISM IN LLMs
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+The increasing scale and complexity of large language models (LLMs) pose significant inference latency challenges, primarily due to their autoregressive decoding paradigm characterized by the sequential nature of next-token prediction. By re-examining the outputs of autoregressive models, we observed that some segments exhibit parallelizable structures, which we term *intrinsic parallelism*. Decoding each parallelizable branch simultaneously (*i.e.* parallel decoding) can significantly improve the overall inference speed of LLMs. In this paper, we propose an Adaptive Serial-Parallel Decoding (**ASPD**), which addresses two core challenges: automated construction of parallelizable data and efficient parallel decoding mechanism. More specifically, we introduce a non-invasive pipeline that automatically extracts and validates parallelizable structures from the responses of autoregressive models. To empower efficient adaptive serial-parallel decoding, we implement a **Hybrid Decoding Engine** which enables seamless transitions between serial and parallel decoding modes while maintaining a reusable KV cache, maximizing computational efficiency. Extensive evaluations across General Tasks, Retrieval-Augmented Generation and Mathematical Reasoning demonstrate that **ASPD** achieves unprecedented performance in both effectiveness and efficiency. Notably, on Vicuna Bench, our method achieves up to 3.10x speedup (1.82x on average) while maintaining response quality within 1% difference compared to autoregressive models, realizing significant acceleration without compromising generation quality. The source code is available for review at an anonymous repository: <https://anonymous.4open.science/r/ASPD>.
+
+## 1 INTRODUCTION
+
+Recent advances in large language models (LLMs) (Yang et al., 2025a; Seed et al., 2025) have dramatically increased both model size and context length. While these improvements enhance model capabilities, they also increase inference latency due to the sequential nature of autoregressive decoding, posing challenges for practical applications that require low latency. Our analysis of LLM outputs reveals a key insight: despite being decoded sequentially, many model responses contain inherent parallelism that can be leveraged for parallel decoding. As illustrated in Figure 1, across various scenarios including general dialogue (LMSYS, 2023), our internal machine reading comprehension (MRC) benchmarks, Retrieval-Augmented Generation (Neural Bridge AI, 2023), and mathematical reasoning (Hugging Face, 2025), model responses consistently reveal significant potential for parallelization. By harnessing these inherently parallelizable segments for concurrent output, decoding speed can be substantially accelerated.
+
+However, this also raises several fundamental technical challenges: First, identifying parallelizable segments while preserving semantic integrity is inherently difficult, due to the intricate dependencies present in natural language generation. Second, it is critical to ensure strict independence across parallel branches: each must remain contextually isolated during decoding, yet collectively yield a coherent output when merged. Third, the sophisticated coordination of positional information across parallel branches presents significant architectural challenges, particularly in preserving proper token relations and temporal coherence throughout parallel generation.
+
+{1}------------------------------------------------
+
+![Figure 1: Overview of data intrinsic and model internal parallelism. The figure is divided into two main sections. The top section, 'Data Intrinsic Parallelism', shows four donut charts for ShareGPT Vicuna, MRC, RAG, and Math-220K datasets, illustrating the proportion of parallel data, degree of parallelism, and average branch number. The bottom section, 'Model Internal Parallelism', shows a timeline of decoding steps comparing serial-parallel and serial decoding, highlighting parallel decoding endpoints and time spent per step.](49ad3a646d84bcfeac02bdf2b3792a3e_img.jpg)
+
+054  
+055  
+056  
+057  
+058  
+059  
+060  
+061  
+062  
+063  
+064  
+065  
+066  
+067  
+068  
+069  
+070  
+071  
+072  
+073  
+074  
+075  
+076  
+077  
+078  
+079  
+080  
+081  
+082  
+083  
+084  
+085  
+086  
+087  
+088  
+089  
+090  
+091  
+092  
+093  
+094  
+095  
+096  
+097  
+098  
+099  
+100  
+101  
+102  
+103  
+104  
+105  
+106  
+107
+
+**Data Intrinsic Parallelism**
+
+Legend: Proportion of Parallel Data (green), Degree of Parallelism (blue), Average Branch Number (yellow)
+
+| Dataset | Proportion of Parallel Data | Degree of Parallelism | Average Branch Number |
+|-|-|-|-|
+| ShareGPT Vicuna Dataset | 44% | 5.2 | 4.2 |
+| MRC Dataset | 44% | 3.4 | 3.4 |
+| RAG Dataset | 44% | 4.2 | 4.2 |
+| Math-220K Dataset | 44% | 2.7 | 2.7 |
+
+**Model Internal Parallelism**
+
+Legend: ★Parallel Decoding Endpoint, ★Serial-Parallel Decoding Endpoint
+
+The diagram illustrates the decoding process over time steps. It shows 'Serial-Parallel Output Sequence' and 'Serial Output Sequence'. A bar chart indicates 'Time Spent' per 'Time Step' for 'Parallel Decoding' (blue) and 'Serial Decoding' (orange).
+
+Figure 1: Overview of data intrinsic and model internal parallelism. The figure is divided into two main sections. The top section, 'Data Intrinsic Parallelism', shows four donut charts for ShareGPT Vicuna, MRC, RAG, and Math-220K datasets, illustrating the proportion of parallel data, degree of parallelism, and average branch number. The bottom section, 'Model Internal Parallelism', shows a timeline of decoding steps comparing serial-parallel and serial decoding, highlighting parallel decoding endpoints and time spent per step.
+
+Figure 1: Overview of data intrinsic and model internal parallelism. The definition of Proportion of Parallel Data, Degree of Parallelism and Average Branch Number can be found in Section 4.1.
+
+Recent attempts to address these challenges have yielded promising but limited solutions. APAR (Liu et al., 2024) discarded the KV-caches of parallel branches during generation to address position encoding issues, while compromising response quality. PASTA (Jin et al., 2025) explored asynchronous parallel decoding with pre-allocated position ranges, but struggles with position encoding mismatches of actual generation lengths.
+
+Addressing these challenges is essential for unlocking the full potential of parallel decoding in practical LLM systems. To better exploit the intrinsic parallelism within autoregressive models, we present Adaptive **Serial-Parallel** Decoding, a novel framework that more effectively harnesses the model’s inherent parallel capabilities through a dual-perspective optimization of data utilization and architectural innovation. Our approach first extracts inherent parallelism patterns from model responses to serve as training corpora for parallelization. We further propose an internal parallelization module that enables parallel processing in one go. By designing branch-specific attention masks and consistent positional ids across parallel branches, our method ensures that: (1) parallel branch generation maintains behavioral consistency with native serial decoding from each branch’s perspective; and (2) upon completion of all parallel branches, switching back to the primary branch incurs no information loss and recomputation overhead. To achieve these objectives, we propose a Hybrid Decoding Engine that supports efficient parallel decoding and iterative serial-parallel decoding.
+
+Our key contributions include:
+
+- We develop an innovative non-invasive pipeline that automatically discovers and extracts inherent parallelizable structures from autoregressive model responses, which identifies semantically independent components that can be processed concurrently while preserving the response’s original style. This enables us to build high-quality parallel training corpora automatically without altering the response probability distribution.
+- We introduce a novel internal parallelization architecture that combines custom branch-invisible masking and branch-shared position embedding, enabling efficient parallel processing and seamless integration of parallel branches without batching or threading overhead. Based on this architecture, our proposed Hybrid Decoding Engine achieves efficient iterative serial-parallel decoding.
+- Through comprehensive evaluation across diverse benchmarks – including general tasks (Vicuna Bench, MT Bench), retrieval-augmented generation (Neural-Bridge-RAG), and mathematical reasoning (MATH500, AMC23, GPQA, AIME2024, AIME2025) – we demonstrate significant improvements in both effectiveness and efficiency compared to existing approaches, achieving an optimal balance between these two critical metrics.
+
+{2}------------------------------------------------
+
+![Figure 2: Related parallel decoding methods. (a) Overview of parallel decoding methods: Speculative Decoding, Skeleton of Thought, APAR, and PDOS. (b) Internal parallel decoding mechanisms: APAR, PASTA, and ASPD (Ours).](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+Figure 2 illustrates various parallel decoding methods. Part (a) provides an overview of four approaches: Speculative Decoding, Skeleton of Thought, APAR, and PDOS. Speculative Decoding uses a fast LLM to draft tokens and a slow LLM to verify them. Skeleton of Thought uses a skeleton prompt to guide the generation. APAR uses a question to guide the generation and includes a batch decoding mechanism. PDOS uses a parallel prompt to guide the generation and includes a rearrange and prefilling mechanism. Part (b) shows the internal parallel decoding mechanisms for APAR, PASTA, and ASPD (Ours). APAR uses a fork-join mechanism to handle inaccessible child-branches. PASTA uses a token prediction error mechanism to disrupt position continuity. ASPD (Ours) uses a uniform position ID to prevent prediction errors and a sequential phase to preserve complete contextual visibility.
+
+Figure 2: Related parallel decoding methods. (a) Overview of parallel decoding methods: Speculative Decoding, Skeleton of Thought, APAR, and PDOS. (b) Internal parallel decoding mechanisms: APAR, PASTA, and ASPD (Ours).
+
+Figure 2: Related parallel decoding methods.
+
+## 2 RELATED WORK
+
+Existing research on parallelizing large language model inference can be categorized into two directions: enhancing response quality or accelerating generation speed. Quality-oriented methods (Brown et al., 2024; Wiseman & Rush, 2016; Wang et al., 2022; Chen et al., 2024; Zhang et al., 2024a; Yao et al., 2023) improve performance through multiple parallel sampling iterations but focus only on test-time scaling without optimizing sampling efficiency. Parallel scaling (Chen et al., 2025) enhances parallel computation in both training and inference by applying multiple learnable input transformations. In contrast, our work aligns with speed-oriented parallelization, which exploits inherent parallelism within a single response. This is achieved by decomposing sequential generation into parallelizable units while preserving textual coherence. A systematic taxonomy of this category is presented below.
+
+**Orthogonal Acceleration Techniques** Speculative decoding, shown in Figure 2a, has recently emerged as a promising approach for accelerating LLM inference (Leviathan et al., 2023; Cai et al., 2023; Li et al., 2024a;b; 2025; Zhang et al., 2024b; Yi et al., 2024; Zhang et al., 2023). While effective, these techniques remain inherently sequential at the token level due to the autoregressive constraint, which fundamentally limits their achievable speedup.
+
+**Parallelization via Prompt Engineering** This category exploits prompt engineering to facilitate parallel generation. As shown in Figure 2a, SoT (Ning et al., 2023) employs a two-phase outline-and-expand strategy, which introduces considerable overhead due to KV-cache reinitialization, batch processing, and restrictive prompt templates. PDOS (Yu, 2025) mitigates some of these issues through internal masks and logits processors, yet as a prompt-based approach, it still underutilizes the model’s parallel capabilities and incurs efficiency loss from content re-prefilling during mode transitions.
+
+**Architecture-Modified Parallelization** There have been a few lines of work that modify attention mechanisms or training procedures to enable parallelism: (1) Visible Branch Architectures. Systems like GroupThink (Hsu et al., 2025) and Hogwild (Rodionov et al., 2025) allow inter-branch communication but suffer from backtracking costs (e.g., when branches generate overlapping content). These methods focus more on branch collaboration rather than accelerating through independent parallel branch decoding. (2) Hidden Branch Architectures. As shown in Figure 2b, APAR (Liu et al., 2024),
+
+{3}------------------------------------------------
+
+PASTA (Jin et al., 2025), and APR (Pan et al., 2025) enforce strict branch isolation but inevitably face key limitations. APAR discards parallel branch KV-caches during integration, which undermines contextual coherence; APR only exchanges abbreviated summaries across modes rather than full KV-states, leading to degraded continuity; and PASTA relies on pre-allocated positional ranges, causing encoding conflicts when actual branch lengths diverge from predictions. Moreover, APAR depends on predefined rules, while PASTA lacks further validation of independence and completeness across parallel branches, which ultimately restricts their ability to exploit intrinsic parallelism.
+
+Our concurrent work Multiverse (Yang et al., 2025b), focusing on the Mathematical Reasoning task, also explores parallelism in large language model generation, implementing parallel branch generation through SGLang (Zheng et al., 2024) and leveraging Radix Attention for KV cache reuse. In contrast, our approach performs decoding within a single sequence, providing inherent continuity of the KV cache to directly reuse.
+
+The proposed ASPD framework better harnesses intrinsic parallelism through a non-invasive data transformation pipeline. By introducing branch-invisible masks and shared position encodings, we enable lossless and seamless transitions between serial and parallel decoding modes. We systematically investigate diverse model architectures and inference paradigms, demonstrating significant acceleration effects without quality degradation across multiple domains, particularly in general tasks and retrieval-augmented generation scenarios.
+
+![Figure 3(a): Non-Invasive Parallel Data Transformation Pipeline. The diagram shows a four-step process: 1. Parallel Rewriting, 2. Independence Verification, 3. Integrity and Answer Verification, and 4. Preference-Based Selection. Input Data 1 and Input Data 2 are processed through Parallel Rewriting to create Parallel Groups. These groups undergo Independence Verification (with Accept/Reject outcomes) and Integrity Verification (with Answer Verification). Finally, DP & AIN Sorting and Selection produces Parallel Data with Higher DP & AIN. A path labeled 'Unable to Be Parallelized' leads from Input Data 2 to Serial Data.](d62e2e2281009c16f4ee61660e716cd9_img.jpg)
+
+Figure 3(a): Non-Invasive Parallel Data Transformation Pipeline. The diagram shows a four-step process: 1. Parallel Rewriting, 2. Independence Verification, 3. Integrity and Answer Verification, and 4. Preference-Based Selection. Input Data 1 and Input Data 2 are processed through Parallel Rewriting to create Parallel Groups. These groups undergo Independence Verification (with Accept/Reject outcomes) and Integrity Verification (with Answer Verification). Finally, DP & AIN Sorting and Selection produces Parallel Data with Higher DP & AIN. A path labeled 'Unable to Be Parallelized' leads from Input Data 2 to Serial Data.
+
+(a) Non-Invasive Parallel Data Transformation Pipeline.
+
+![Figure 3(b): Serial-parallel training details. This section contains three sub-diagrams. The left diagram shows 'Serial Training' with a grid of Attention Mask and Position ID. The center diagram shows 'Parallel Training' with a grid of Attention Mask and Position ID. The right diagram shows 'Hybrid Decoding Engine' with a grid of Attention Mask and Position ID, and a 'Dynamic Parallel Decoder' block. A timeline at the top shows Time Step T, T+1, T+2, T+3, T+4.](12a6537c92844d5b393104c02e8dfc2f_img.jpg)
+
+Figure 3(b): Serial-parallel training details. This section contains three sub-diagrams. The left diagram shows 'Serial Training' with a grid of Attention Mask and Position ID. The center diagram shows 'Parallel Training' with a grid of Attention Mask and Position ID. The right diagram shows 'Hybrid Decoding Engine' with a grid of Attention Mask and Position ID, and a 'Dynamic Parallel Decoder' block. A timeline at the top shows Time Step T, T+1, T+2, T+3, T+4.
+
+(b) Serial-parallel training details (left-center). Hybrid Decoding Engine (right).
+
+Figure 3: An overview of our **Adaptive Serial-Parallel Decoding Framework**.
+
+## 3 METHODOLOGY
+
+Our framework unlocks the intrinsic parallel capabilities of auto-regressive (AR) large language models through two key aspects: mining inherent parallelism in AR model responses and adapting internal model architectures. We achieve these objectives through three key components below:
+
+{4}------------------------------------------------
+
+### 3.1 NON-INVASIVE PARALLEL DATA TRANSFORMATION PIPELINE
+
+To effectively exploit this latent parallelism, we propose a novel non-invasive parallelization pipeline. Figure 3a illustrates the four foundational stages of our data curation pipeline. Given an original data sample  $(Q, A)$ , where  $Q$  is the question and  $A$  is the model’s response, we proceed as follows:
+
+1. **Parallel Rewriting.** This step transforms the serial response  $A$ , which may contain implicit parallel structures, into a format with explicit parallel structure markup. This is achieved by feeding  $A$  into the `Parallel Rewriting Prompt` and invoking an LLM. Specifically, multiple parallel branches (marked with the `<branch>` tag) are grouped into a parallel group (enclosed by the `<branchgroup>` tag), while serial content remains unchanged. The result is a rewritten answer, denoted as  $A_{pr}$ . The markup format is defined as:
+
+```
+<branchgroup>
+<branch title="title 1">branch 1 content</branch>
+<branch title="title 2">branch 2 content</branch>
+...
+</branchgroup>
+```
+
+To promote diversity, this process is repeated  $N$  times (with  $N = 3$  by default), yielding a set of candidate rewritten answers:  $\{A_{pr_1}, A_{pr_2}, \dots, A_{pr_N}\}$ .
+
+2. **Independence Verification.** For each candidate  $A_{pr_j}$  from the previous step, we iterate over every `<branchgroup>` to verify the mutual independence of its branches. The `Independence Verification Prompt` is populated with the original question  $Q$ , the content of all branches in the group, and any preceding serial text. The LLM is then prompted to assess whether the branches can be processed independently. If the majority of LLM judgments indicate dependence, the group is **reverted to serial form**. If all parallel groups in  $A_{pr_j}$  fail the independence check, the candidate is discarded. Otherwise, the validated candidate—containing only verified parallel groups—is denoted as  $A_{iv_j}$  and proceeds to the next stage.
+3. **Integrity and Answer Verification.** For each surviving candidate  $A_{iv_j}$ , we first generate a temporary serialized version  $A_{ia_j}$  by flattening all parallel groups back into sequential text. This  $A_{ia_j}$  is then evaluated against the original answer  $A$  using two separate prompts: the `Integrity Verification Prompt` checks for structural consistency, while the `Answer Verification Prompt` assesses answer correctness. A candidate  $A_{iv_j}$  is retained only if both checks pass under majority voting. Candidates that fail either verification are discarded.
+4. **Preference-Based Selection.** Among the  $M$  candidates  $\{A_{iv_1}, A_{iv_2}, \dots, A_{iv_M}\}$  that pass all prior stages, we compute two metrics for each: the **Degree of Parallelism (DP)** and the **Average Branch Number (ABN)**. The candidate with the highest DP and ABN is selected as the final parallel-rewritten answer, denoted  $A_{iv}$ . The resulting parallel-structured data pair  $(Q, A_{iv})$  is first transformed into the format supported by the subsequent Hybrid Decoding Engine, and is then included in the curated dataset.
+
+If all candidates fail verification in Steps 2 or 3, the pipeline terminates for this sample, and the original data  $(Q, A)$  is preserved as the output. For each of the first three steps, input-output examples are provided in the corresponding prompts, all of which are shown in Appendix A.8.
+
+### 3.2 INTERNAL PARALLELIZATION MODULE
+
+#### Model Architecture for Native Parallelization
+
+After obtaining the parallelized corpus described in Section 3.1, we need to modify the model architecture to enable efficient serial-parallel decoding. As shown in Figure 3b, we need to handle both the visibility between branches and the position encoding within it. To better leverage the capabilities of the native autoregressive model during parallel phases while supporting seamless transitions between parallel and sequential modes, we introduce two key components: (1) an internal parallel
+
+{5}------------------------------------------------
+
+mask for branch-independent parallel decoding, and (2) shared positional encodings across parallel branches at the same timestamp.
+
+**Preliminaries** The generation process comprises a sequence of interleaved stages, each decoding in serial or parallel mode. In serial stages, generation proceeds through a single main branch in an autoregressive manner. During parallel stages, the model simultaneously decodes multiple parallel branches, enabling concurrent token generation across different aspects. Here,  $b(i)$  denotes the branch index of token  $i$  and  $t$  denotes temporal timestamps,  $stage\_start(i)$  denotes the starting position of the stage where token  $i$  is located, and  $\Delta i$  represents the relative position of token  $i$  within its stage.  $P_t$  represents the number of tokens being decoded simultaneously at time  $t$ .
+
+$$\text{Attn}(Q, K, V) = \text{softmax} \left( \frac{QK^\top}{\sqrt{d_k}} + M \right) V \quad (1)$$
+
+$$M_{i,j} = \begin{cases} 0 & \text{if } S(b(i), b(j)) = 1 \text{ and } \text{pos}(i) > \text{pos}(j) \\ -\infty & \text{otherwise} \end{cases} \quad (2)$$
+
+$$S(b(i), b(j)) = \begin{cases} 1 & \text{if } b(i) \text{ in main branch} \\ 1 & < b(i), b(j) > \text{ in same parallel branch} \\ 1 & < b(i), b(j) > \text{ in different stage} \\ 0 & \text{otherwise} \end{cases} \quad (3)$$
+
+$$\text{pos}(i) = \begin{cases} \sum_{t=1}^{i-1} P_t + 1 & \text{if } i \text{ in main branch} \\ stage\_start(i) + \Delta i & \text{if } i \text{ in para branch} \end{cases} \quad (4)$$
+
+We extend the vanilla causal attention (Eq. 1) by incorporating a visibility function  $S$ . As shown in Eq. 2,  $M_{i,j}$  is only visible when the visibility function  $S$  equals 1 and position  $j$  precedes position  $i$ . Eq. 3 defines the visibility between tokens, where the main branch can see all other branches, while for parallel branches, visibility is enabled when  $< b(i), b(j) >$  spans across stages or belongs to the same parallel branch. For position encoding, as shown in Eq. 4, tokens in the main branch maintain absolute positions in the flattened sequence, while parallel branches synchronize their position encodings at each timestamp.
+
+### 3.3 HYBRID DECODING ENGINE
+
+To enable parallelization, we augment the vocabulary with six special tokens before training: `<title>`, `</title>`, `<branch>`, `</branch>`, `<para>`, and `</para>`. LLMs will learn how to use these tokens in the training phase. During inference, when the model determines that the current response can be parallelized, it generates several parallel titles, each enclosed by `<title>` and `</title>`. After all branch titles are generated, the model outputs a `<para>` token, turning the engine into parallel decoding mode. For each parallel branch  $i$ , we set the prefix "`<branch>` $T_i$ `</branch>`" to help the model identify which branch to generate, where  $T_i$  is the corresponding title for branch  $i$ . A branch is considered complete when the `</branch>` token is reached. Once all branches are finished, a `</para>` token is appended to the output sequence, switching the engine back to serial decoding mode. Subsequently, the following decoding process iteratively repeats the aforementioned parallel and serial steps, achieving adaptive serial-parallel decoding. As shown in Figure 3b, the hybrid engine implements the branch-independent parallel mask and synchronized position-id mechanism proposed in Section 3.2 to support parallel decoding. Each parallel token attends only to tokens from both the main branch and its respective branch, with sequentially increasing position-ids. This allows each branch to maintain the same generation pattern as native autoregressive models from its own perspective. After all parallel branches complete decoding, sequential decoding resumes on the main branch, where the position id of the first token reflects its actual position in the complete sequence. Our hybrid decoding engine supports iterative serial-parallel switching for optimal efficiency.
+
+{6}------------------------------------------------
+
+## 4 EXPERIMENTS
+
+### 4.1 EXPERIMENTAL SETUP
+
+**Dataset** Following APAR (Liu et al., 2024), we use ShareGPT Vicuna dataset (LMSYS, 2023) as our training data. This dataset encompasses instructions across various scenarios including STEM, roleplay, reasoning, and extraction tasks. Additionally, we utilize our internal Machine Reading Comprehension (MRC) dataset for multi-dimensional validation (Corresponding experimental results can be found in Appendix A.5). All data processing is conducted using our proposed non-invasive parallelization transformation pipeline to obtain parallelized data. For fair comparison, we create corresponding sequential data by removing special parallel tokens.
+
+**Evaluation** We conduct comprehensive evaluations using established benchmarks including Vicuna Bench (Chiang et al., 2023) and MT Bench (Zheng et al., 2023), following the evaluation protocol of APAR (Liu et al., 2024). Furthermore, to evaluate models' generalization capability, we introduce an out-of-domain benchmark, namely the RAG Bench. This benchmark consists of the first 200 questions with corresponding context sampled from rag-dataset-12000 (Neural Bridge AI, 2023).
+
+Our evaluation framework encompasses two primary dimensions: **(1) Effectiveness Metrics.** We utilize the LLM-as-judge evaluation framework (Zheng et al., 2023) to quantify response quality, maintaining methodological consistency with APAR (Liu et al., 2024). All evaluations are conducted using Qwen3-235B-A22B (Yang et al., 2025a) to ensure balanced assessment. **(2) Efficiency Metrics.** We employ Tokens-Per-Second (TPS) as the primary throughput metric. For parallel models, we further introduce four additional metrics to characterize parallelization performance: **Parallel-Tokens-Per-Second (P-TPS)**, TPS in parallel stage, **Degree of Parallelism (DP)**, ratio of parallel to total tokens, **Average Branch Num (ABN)**, average parallel branch num, **Proportion of Parallel Data (PPD)**.
+
+Table 1: Performance comparison on MT Bench and Vicuna Bench. The **bold** and underlined values denote the best and second-best results, respectively.
+
+| Method<br>Bench | V-Ori | V-Seq | V-APAR | SoT | V-APAR* | V-ASPD | Q-Ori | Q-Seq | Q-ASPD |
+|-|-|-|-|-|-|-|-|-|-|
+|  |  |  |  |  |  |  |  |  |  |
+| <b>MT Bench</b> | 4.86 | <b>5.59</b> | 4.88 | 4.48 | <u>5.38</u> | <b>5.59</b> | 7.82 | <u>7.98</u> | <b>8.15</b> |
+| <b>Vicuna Bench</b> | 6.21 | <u>7.70</u> | 6.10 | 5.93 | 7.62 | <b>7.74</b> | 8.65 | <b>9.11</b> | <u>9.03</u> |
+
+![Figure 4: Speed-quality trade-off analysis across different parallel decoding methods on various benchmarks. The figure contains three scatter plots: (a) MT Bench, (b) Vicuna Bench, and (c) RAG Bench. Each plot shows 'Score' on the y-axis and 'Tokens-Per-Second' on the x-axis. Data points are labeled with their relative performance compared to the baseline V-Ori method (e.g., 1.00x, 1.07x, 1.30x). The methods compared are V-Ori (blue circle), V-Seq (light blue star), V-APAR (orange circle), SoT (red square), V-APAR* (light blue star), and V-ASPD (purple triangle). In all benchmarks, V-ASPD and V-Seq generally achieve higher scores and higher tokens-per-second than the baseline V-Ori method.](023b142f90e1253702ac88b18380d3ec_img.jpg)
+
+Figure 4: Speed-quality trade-off analysis across different parallel decoding methods on various benchmarks. The figure contains three scatter plots: (a) MT Bench, (b) Vicuna Bench, and (c) RAG Bench. Each plot shows 'Score' on the y-axis and 'Tokens-Per-Second' on the x-axis. Data points are labeled with their relative performance compared to the baseline V-Ori method (e.g., 1.00x, 1.07x, 1.30x). The methods compared are V-Ori (blue circle), V-Seq (light blue star), V-APAR (orange circle), SoT (red square), V-APAR\* (light blue star), and V-ASPD (purple triangle). In all benchmarks, V-ASPD and V-Seq generally achieve higher scores and higher tokens-per-second than the baseline V-Ori method.
+
+Figure 4: Speed-quality trade-off analysis across different parallel decoding methods on various benchmarks.
+
+**Models** Following APAR (Liu et al., 2024), we employ Vicuna-V1.3-7B (Zheng et al., 2023) as our base model to ensure fair comparison across different approaches. To demonstrate the cross-architecture generalization capability of our method, we further conduct experiments using Qwen2.5-7b-Instruct (Qwen Team, 2024) as an additional foundation model.
+
+**Implementation Details** During the training phase, we employed an initial learning rate of 1e-5 and a global batch size of 16 for three training epochs. The training process utilized cosine learning
+
+{7}------------------------------------------------
+
+rate scheduling with a warmup ratio of 0.1. The context length for training data was set to 8k tokens. Both sequential and parallel models used identical parameter configurations to ensure fair comparison. For inference, we use a batch size of 1, which aligns with common practices in parallel decoding literature, consistent with works such as [PASTA\(Jin et al., 2025\)](#) and [Multiverse\(Yang et al., 2025b\)](#). we consistently set the temperature parameter to 0.7, top\_k to 20, and top\_p to 0.8 across all experiments.
+
+### 4.2 MAIN RESULTS
+
+Tables 1 present a systematic evaluation across model architectures and methodologies. We evaluate our approach using two base models: Vicuna-1.3-7B (V) and Qwen2.5-7B-Instruct (Q). For each base model, we compare the original model (Ori), sequential fine-tuned model (Seq), SoT (Ning et al., 2023), APAR (Liu et al., 2024). Additionally, to ensure fair comparison, we utilize APAR’s official codebase and enhance its training data quality using Qwen3-235B-A22B to obtain APAR\*. The scores corresponding to each subtask are provided in Appendix A.2, and the efficiency metrics results are shown in Appendix A.2. The experimental results demonstrate the following:
+
+**Superior Acceleration While Maintaining Quality** In Tables 1, both our fine-tuned parallel and serial models outperform the original model, establishing a solid foundation for our subsequent evaluations. Compared to the V-APAR and SoT method, our V-ASPD achieves a 14.55% and 24.78% improvement on the MT Bench, a 26.89% and 30.52% enhancement on the Vicuna Bench. In terms of decoding acceleration, presented in Figure 4, V-ASPD also achieves superior speed-quality balance across all benchmarks, with average acceleration ratios of 1.30x to 1.82x. Specifically, on Vicuna Bench, V-ASPD reaches 1.82x speedup, surpassing V-APAR (1.28x) and V-APAR\* (1.35x), while nearly matching SoT’s 1.89x that requires intensive memory usage. However, SoT’s quality score of 5.93 is notably lower than both V-ASPD (7.74) and baseline (6.21), limited by its rigid prompt design. Furthermore, we observe speedup ratios ranging from 1.0x to 3.10x across Coding to Writing, outperforming V-APAR, V-APAR\* and SoT on most subtasks (Detailed results are shown in Figure 6 in Appendix A.2). The consistent performance gains across diverse evaluation scenarios highlight the robustness and effectiveness of our parallel decoding framework.
+
+**Cross-Domain and Cross-Model Generalization** As shown in Figure 4c, we observed that other competing methods face generalization issues on the out-of-domain RAG Bench. Especially, SoT’s speedup drops to 1.06x compared to V-ASPD’s 1.46x, due to requiring redundant prefilling of long context for each point during the point expanding stage. In contrast, our method not only achieves comparable generation quality to V-Seq but also maintains the highest speedup. The results presented in Table 1, which are based on the Qwen2.5-7B-Instruct model, highlight the consistent effectiveness of ASPD across model architectures. On MT Bench, Q-ASPD achieves a remarkable score of 8.15, demonstrating superior performance by surpassing both Q-Ori and Q-Seq models, with a notable 2.1% improvement compared to Q-Seq. Vicuna Bench shows comparable performance between Q-ASPD (9.03) and Q-Seq (9.11), with a mere 0.9% difference, confirming ASPD’s output quality preservation. The minimal performance variation across benchmarks underscores ASPD’s robustness.
+
+### 4.3 PARALLELISM AT THE REASONING FRONTIER.
+
+While previous approaches like APAR excluded mathematical and coding tasks from parallel data processing, we observe that our concurrent research work [Multiverse \(Yang et al., 2025b\)](#) has also directed attention toward mathematical problem parallelization. To thoroughly investigate this domain, we extended our model architecture to Qwen2.5-32B-Instruct (Qwen Team, 2024) and conducted comprehensive validation on these complex reasoning domains. Our evaluation includes a diverse range of benchmarks, including GPQA (Rein et al., 2024), MATH500 (Hendrycks et al., 2021), and competition-level mathematics such as AMC23 (MAA, 2023), AIME24 (MAA, 2024), and AIME25 (MAA, 2025). For training data, we utilize OpenR1-Math-220K (Hugging Face, 2025), which was generated by prompting DeepSeek-R1 (Guo et al., 2025) with NuminaMath1.5 (LI et al., 2024) as the query set. The model was trained for 9 epochs with a global batch size of 88, using a 12k context window and a learning rate of 1e-5.
+
+As demonstrated in Table 2 (reporting pass@1 scores based on Evalchemy (Raoof et al., 2025), with AMC and AIME results representing means across 8 random seeds), ASPD exhibits performance
+
+{8}------------------------------------------------
+
+Table 2: Math bench performance with Qwen2.5-32B-Instruct.
+
+| Model \ Bench | Ori | Seq | ASPD |
+|-|-|-|-|
+| <b>MATH500</b> | 82.00 | <b>94.40</b> | <u>94.00</u> |
+| <b>AMC23</b> | 62.19 | <b>89.69</b> | <u>89.38</u> |
+| <b>GPQA</b> | 48.99 | <u>61.11</u> | <b>65.66</b> |
+| <b>AIME2024</b> | 17.50 | <u>58.75</u> | <b>62.08</b> |
+| <b>AIME2025</b> | 12.50 | <u>47.92</u> | <b>50.00</b> |
+
+Table 3: Comparative analysis of parallelization metrics on mathematical benchmarks between **ASPD** and **Seq**.
+
+| Metric \ Bench | PPD | DP | ABN | TPS | P-TPS |
+|-|-|-|-|-|-|
+| <b>MATH500</b> | 88.40 | 33.30 | 2.61 | 27.14 <sub>1.17x</sub> | 43.03 <sub>1.86x</sub> |
+| <b>AMC23</b> | 84.38 | 22.24 | 2.80 | 21.93 <sub>1.11x</sub> | 39.30 <sub>1.99x</sub> |
+| <b>GPQA</b> | 66.16 | 32.70 | 2.88 | 22.06 <sub>1.13x</sub> | 36.57 <sub>1.88x</sub> |
+| <b>AIME2024</b> | 65.42 | 8.84 | 2.48 | 16.43 <sub>1.04x</sub> | 24.37 <sub>1.54x</sub> |
+| <b>AIME2025</b> | 79.17 | 8.60 | 2.40 | 15.77 <sub>1.08x</sub> | 26.82 <sub>1.83x</sub> |
+
+gains of 12%, 27.19%, 16.67%, 44.58%, 37.5% over **Ori** across MATH500, AMC23, GPQA, AIME24 and AIME25 respectively. Notably, ASPD achieves acceleration ratios of 1.04-1.17 in TPS and 1.54-1.99 in P-TPS versus the **Seq** model, while maintaining performance within a range of -0.4% to +5%, demonstrating robust effectiveness.
+
+### 4.4 ABLATION STUDY
+
+#### 4.4.1 IMPACT OF DATA PROCESSING PIPELINE.
+
+While autoregressive models inherently possess parallelizable characteristics in their responses, precisely identifying parallelizable components remains a significant challenge. Ablation of data pipeline in Table 4 demonstrates the performance variations across different data processing methodologies. APAR achieves only 1.11x speedup compared to the baseline, due to its rule-based parallelization approach which fails to trigger parallel responses in many scenarios. PASTA exhibits the lowest performance score of 4.98, primarily because its data processing pipeline lacks consideration for branch independence verification. In contrast, our method achieves optimal results in both effectiveness (score of 7.64) and efficiency (TPS of 104.21), demonstrating that our Non-Invasive data transformation pipeline can better leverage the model’s inherent parallel capabilities while maintaining superior response quality.
+
+Table 4: Ablation studies on data pipeline efficiency, attention mask strategies, and position encoding schemes for parallel decoding. \* denotes implementation with official codebase, † denotes implementation with official prompt.
+
+| Data Pipeline |  |  |  | Attention Mask |  |  |  | Position Id |  |
+|-|-|-|-|-|-|-|-|-|-|
+| Method | Score | TPS | PosId | Attn | Score | TPS | PosId | Score | TPS |
+| Baseline | <u>6.21</u> | 53.19 | Seq | Shared | 4.64 | <b>110.30</b> | <b>Predict</b> | <b>6.75</b> | <b>72.15</b> |
+| APAR* | 5.81 | 59.25 | <b>Seq</b> | <b>Indep</b> | <b>7.64</b> | <u>104.21</u> | Same-Max | 6.78 | 89.45 |
+| PASTA† | 4.98 | <b>106.83</b> | Max | Shared | 3.70 | 86.96 | Same-Re | <u>7.29</u> | <u>95.24</u> |
+| <b>ASPD</b> | <b>7.64</b> | <u>104.21</u> | Max | Indep | <u>6.78</u> | 89.45 | <b>Same-Seq</b> | <b>7.64</b> | <b>104.21</b> |
+
+#### 4.4.2 IMPACT OF MASK VISIBILITY
+
+While GroupThink (Hsu et al., 2025) and Hogwild (Rodionov et al., 2025) have explored visible masks for agent collaboration, our approach differs fundamentally in its objective. As demonstrated in attention mask ablation of Table 4, we define two mask types: **Shared** and **Indep** (Independent), where branches can or cannot see each other respectively. We also introduce two types of position id setting: **Max** (uses maximum position id across parallel branches for merging) and **Seq** (assigns actual sequential position id to the first token of the merged main branch, as illustrated in Figure 3b). Our empirical evaluation shows that *Shared* masks consistently outperform *Indep* masks across both *Seq* and *Max* position id configurations. This architectural choice is motivated by our primary objective of decomposing responses into independent, self-contained parallel branches to achieve optimal computational efficiency. This empirical finding strongly validates our design decision to maintain strict branch isolation as an optimal strategy for parallel response generation.
+
+{9}------------------------------------------------
+
+#### 4.4.3 POSITION ENCODING PARADIGMS
+
+During parallel decoding, multiple branches decode simultaneously while remaining mutually invisible, making the arrangement of position ids particularly crucial. Based on whether position ids are consistent across parallel branches, we abstract position encoding schemes into the following two categories: (1) **Predict**. Following PASTA (Jin et al., 2025), we allocate position ids to each parallel branch by predicting its length. Before parallel decoding starts, the model predict the prospective length of every branch and assigns initial position ids accordingly. We adopt PASTA’s best-performing configuration, *Predict-10X*, which multiplies the predicted length by ten to set the decoding horizon for each branch. (2) **Same**. The following three variants use identical position ids across parallel branches at each timestamp, differing in their strategies for reordering position ids when merging parallel branches into the main branch. *Same-Max* equals to **Max** in Section 4.4.2. *Same-Re* (Same-Rearrange) reorders position ids sequentially between parallel branches. *Same-Seq* (Same-Sequential) equals to **Seq** in Section 4.4.2.
+
+As evidenced in position id ablation of Table 4, due to inconsistencies between actual branch lengths during decoding and predicted lengths, the *Predict* strategy yields the poorest performance. Among the *Same* family approaches, our adopted *Same-Seq* strategy emerges as the most effective strategy, achieving a Score of 7.64 and TPS of 104.21, outperforming both *Predict*, *Same-Re* and *Same-Max* variants in terms of quality and efficiency. This suggests that maintaining natural position ordering while sharing timestamps across parallel branches optimally preserves the model’s positional understanding.
+
+## 5 CONCLUSION
+
+In this work, we present **ASPD**: The Adaptive Serial-Parallel Decoding framework for efficient hybrid decoding within auto regressive large language models. The proposed method introduces a non-invasive parallel data transformation pipeline and internal parallelization with branch-invisible attention masks and shared position ids, achieving substantial latency reduction while maintaining response quality compared to traditional autoregressive LLMs. Our extensive experiments demonstrate state-of-the-art performance across various benchmarks including general tasks, retrieval-augmented generation, and mathematical reasoning. Furthermore, we establish a novel paradigm for parallel decoding that eliminates external overheads from batching, threading or re-prefill between serial-parallel switching, providing valuable insights for future research in efficient LLM inference. The strong empirical results and theoretical contributions of ASPD suggest promising applications in latency-critical scenarios.
+
+## REPRODUCIBILITY STATEMENT
+
+All experimental results presented in this work are fully reproducible. We provide comprehensive experimental settings in Section 4.1, including detailed implementation specifications covering datasets, evaluation protocols, and model architectures. To facilitate complete reproducibility of our research findings, we have made available a comprehensive anonymous code repository (referenced in the abstract) containing three essential components:
+
+1. A parallel data construction pipeline (located in the `data_ppl` directory), which implements our Non-Invasive Parallel Data Transformation Pipeline.
+2. A training framework implemented for the Internal Parallelization Module (located in the `train` directory), supporting for serial-parallel training.
+3. An adaptive hybrid inference engine (located in the `infer` directory), which enables efficient serial-parallel decoding.
+
+Each component is accompanied by thorough documentation and step-by-step operational guidelines to ensure complete reproducibility of our results. In accordance with the double-blind review process, all materials have been carefully anonymized to maintain review integrity.
+
+ Rest of paper (reference and Appendix) is removed.

@@ -1,0 +1,178 @@
+## Human Reviewer 1
+
+### Summary
+This paper proposes two methods—Optimal Weight (OW) and Inverse Surprisingly Popular (ISP)—to improve aggregation of answers from multiple LLMs beyond simple majority voting. OW leverages first-order information (model accuracies) and is provably Bayesian-optimal when accuracies are known. ISP uses second-order information (prediction correlations) without requiring ground-truth labels and outperforms both majority voting and the classic Surprisingly Popular method.
+
+I have some concerns about the paper at this stage, so my evaluation may be biased towards the negative. If the author can address these issues in the rebuttal stage, I will consider raising my score.
+
+### Strengths
+1. The concepts proposed are novel.
+
+2. Achieved good performance on multiple datasets
+
+### Weaknesses
+1. Related work is an important part of the paper and should not be put in the appendix.
+
+2.  Why is the LLM's output unaffected by the order of the options? Is there any literature or experiment demonstrating this? Since different letters have different statistical probabilities, the LLM should have different preferences for different letters.
+
+3. Why didn't the authors conduct experiments on widely used mathematical and common sense reasoning datasets, such as GSM 8K? This might be more helpful in verifying the effectiveness of the proposed method.
+
+4. I'm sorry that I can't find any relevant literature, but in my impression, optimal weight aggregation should not be the first one proposed in this paper. It has been proposed in other works before.
+
+### Questions
+1. Are the concepts of first-order information and second-order information first defined in this article?
+
+2. How to obtain the expected accuracy？
+
+3. The sizes of the several models selected in the experiment are obviously unbalanced. GPT-4o is much larger than the other models. Will this affect the experimental results?
+
+### Soundness
+3
+
+### Presentation
+1
+
+### Contribution
+2
+
+### Rating
+4
+
+### Confidence
+3
+
+---
+
+## Human Reviewer 2
+
+### Summary
+This paper investigates how to aggregate answers from multiple Large Language Model (LLM) agents to overcome the limitations of standard Majority Voting (MV). The authors note that MV ignores heterogeneity and correlation among models. To address this, the paper proposes two new algorithms that leverage higher-order information, namely Optimal Weight (OW) and Inverse Surprising Popularity (ISP). Since OW only need unknown true accuracies, the authors further propose two practical unsupervised methods (OW-L and OW-I). The experimental section validates these methods on synthetic datasets, UltraFeedback, MMLU and ARMMAN.
+
+### Strengths
+How to effectively aggregate the response from several LLMs is important tasks. This paper goes beyond simple heuristics, formally modeling the problem from an information-theoretic perspective is interesting.
+
+### Weaknesses
+1. The paper describes MoE as "only one expert gets a non-zero weight", which is too simplification. Modern MoE combines outputs from multiple experts via weighted averaging. The authors should more accurately describe the distinction from their work (e.g., aggregating final answers vs. internal representations).
+2. The authors should explain why in Table 3, the 'Single Best' model on the MMLU dataset outperforms the proposed aggregation methods.
+3. The proposed method optimizes the aggregator on several large datasets. But does it generalize effectively to other, unseen datasets?
+Questions: Please refer to weakness.
+
+### Questions
+Theorem 3 shows that the dataset size (M) needs to be large to reduce the error. However, considering that N LLMs are required, is the cost of this algorithm still prohibitively high?
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+2
+
+### Rating
+4
+
+### Confidence
+3
+
+---
+
+## Human Reviewer 3
+
+### Summary
+This paper studies the response aggregation problem of multi-agent large language models (LLMs), arguing that simple majority voting ignores the heterogeneity and correlation between models. The authors propose two new algorithms: (1) Optimal Weight, which uses first-order information, i.e., the accuracy of each LLM, for Bayesian optimal weighted aggregation; and (2) Inverse Surprising Popularity, which uses second-order information, i.e., the correlation between the answers provided by each agent, to improve the traditional surprising popularity method. Theoretical analysis proves the Bayesian optimality of OW and the advantage of ISP over MV. Experiments validate the methods on synthetic data, UltraFeedback, MMLU, and ARMMAN datasets, showing an improvement of 0.5-2 percentage points compared to MV. However, the problem studied in this paper suffers from insufficient importance, and the practical value of the methods is quite limited.
+
+### Strengths
+S1. The core theoretical results of the paper, including the Bayesian optimality of OW (Theorem 1) and the expected advantage of ISP over MV (Theorem 2), are mathematically rigorous.
+
+S2. The authors found that the traditional surprising popularity method performed worse than simple MV in LLM scenarios. The authors' explanation makes sense: SP is designed to correct systematic biases in human judgment, but LLM has less systematic bias, so SP can only take advantage of a smaller margin of error.
+
+S3. The experimental design of this paper is comprehensive, including three levels: (1) synthetic data that fully conforms to the theoretical assumptions to verify the theoretical predictions; (2) standard LLM benchmarks to verify practicality; and (3) real-world medical and health applications (ARMMAN) to demonstrate potential social value. The authors also used eight models from four families including GPT, Qwen, Llama, and Phi to form 16 combinations that cover models of different scales and capabilities.
+
+S4. Appendix B.2’s relaxation of the conditional independence assumption is a positive attempt.
+
+### Weaknesses
+W1. The fundamental problem is that the research question itself is not important enough, and its practical value is limited. Specifically, the paper devotes a large portion to studying how to optimally aggregate votes from multiple LLMs, but this problem has very limited importance in the current LLM application ecosystem. 
+
+First, the closed-set classification (K fixed options) that the paper focuses on is only a small part of LLM applications; the more mainstream applications are open-ended generation, multi-turn dialogue, and complex reasoning, and the paper's method cannot be extended to these scenarios. 
+
+Second, the improvement shown in experiments is extremely small (0.5-2 percentage points), not worth increasing the system complexity. 
+
+Third, in practice, there are often simpler and more effective solutions like directly use the strongest single model (Table 3 shows that a single model is sometimes better than ensemble), or invest in training a better model, rather than ensemble multiple weak models. 
+
+Fourth, the core issue in multi-agent LLM reasoning is how to design an effective debate protocol and how to enable models to truly exchange and integrate information and the final voting is actually the most trivial part. The paper is essentially optimizing a marginal problem.
+
+W2. The OW algorithm is a beautiful theoretical contribution, proving its Bayesian optimality. However, this method relies on knowing the accuracy of each LLM, and in the unsupervised aggregation scenario considered in the paper, obtaining these accuracies requires a large amount of labeled data. Since it is unsupervised, how do we obtain this data?
+
+W3. Theorem 2 shows that the advantage of ISP decays at a rate of 1/K, meaning that for tasks with many options or open-ended functions, ISP offers virtually no advantage. The paper acknowledges this limitation in its conclusion but does not propose a solution. This may further restricts the applicability of the method.
+
+W4. The paper does not adequately discuss the limitations and applicability of the method.
+
+### Questions
+Q1. The paper focuses on the final aggregation step, but is this really the most important bottleneck in multi-agent LLM reasoning?
+
+Q2. Table 3 shows that the single strongest model achieves 91.02% on MMLU, while the ensemble only achieves 90.37%. This seems to suggest that the value of ensemble is questionable. Could you provide a cost-benefit analysis comparing `ensemble of 4 intermediate models` vs. `using only one strongest model` vs. `using the budget of ensemble to train/fine-tune a better single model`?
+
+Q3. How can these methods be extended to open-ended tasks?
+
+Q4. What are the theoretical guarantees of the OW-L and OW-I methods?
+
+Q5. ISP requires estimating O(N²K²) conditional probabilities, which becomes a bottleneck when N and K are large. How can this be scaled?
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+2
+
+### Rating
+4
+
+### Confidence
+3
+
+---
+
+## Human Reviewer 4
+
+### Summary
+This study addresses the fundamental challenge of **aggregating responses from multiple Large Language Models (LLMs)** to produce a single, reliable collective decision, aiming to significantly improve upon simple **majority voting (MV)** or reliance on a single LLM.
+
+
+The paper proposes two key aggregation schemes:
+- The **Optimal Weight (OW)** algorithm generates the most accurate collective decision by assigning a **vote weight ($\omega_i$)** to each LLM $i$ based on its **known expected accuracy** ($x_i$).
+- A practical limitation of OW is that the true expected accuracies ($x_i$) are often **unavailable in real-world scenarios**. To overcome this, the study introduces the **Inverse Surprising Popularity (ISP)** algorithm. ISP bypasses the need for ground-truth labels by leveraging **predictions correlations** among LLMs to infer the correct prediction. ISP functions as an aggregation method in its own right and, critically, provides a mechanism to **estimate the optimal weights needed for OW** in label-free settings.
+
+
+The algorithms were validated across simulated datasets, LLM benchmarks (UltraFeedback, MMLU), and a real-world healthcare dataset (ARMMAN). Both **OW and ISP consistently outperformed MV**. Ultimately, the best results were achieved by a heuristic combination of both OW and ISP approaches, which demonstrated **strictly higher accuracy than the single best individual LLM** on several real-world tasks.
+
+### Strengths
+- The design of the ISP aggregation scheme proposed by the study offers a practical, cost-effective solution to multi-agent LLM aggregation schemes because it relies only on correlations between LLM predictions. This capability makes ISP and related heuristics (OW-L, OW-I) directly applicable to unsupervised, real-world scenarios like automated data annotation.
+
+### Weaknesses
+- One of the assumptions of this study relies on the idea that we can model the difficulty of a prompt question given to an LLM using **α** (question difficulty) and **βᵢ** (model ability). However, these quantities are inherently **subjective** and cannot be reliably measured. This raises concerns about the realism and validity of the assumptions on which this work is based.
+
+- The study’s **comparative evaluation** is also limited, as it primarily benchmarks the proposed algorithms against **MV**, a relatively simple baseline. More advanced multi-agent reasoning strategies such as the ones described in the related work section (see Appendix A.1) were not included in the comparison, constraining the empirical scope of the findings.
+
+- Additionally, the paper **does not discuss statistical significance** or provide detailed information about its experimental setup. Key aspects such as, variance, and number of seeds used are not reported, making it difficult to assess the robustness and reproducibility of the results. Including these details would strengthen the credibility of the findings and provide clearer insight into the reliability of the proposed methods.
+
+### Questions
+- Why do OW‑L and OW‑I show nearly identical performance in the experiments (Tables 3–6)? Specifically, is there a correlation between the objective optimized in OW‑L and the metrics underpinning ISP, which OW‑I use to produce the weights?
+
+### Soundness
+3
+
+### Presentation
+2
+
+### Contribution
+2
+
+### Rating
+4
+
+### Confidence
+4

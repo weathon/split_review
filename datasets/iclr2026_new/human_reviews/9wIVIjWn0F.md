@@ -1,0 +1,168 @@
+## Human Reviewer 1
+
+### Summary
+This paper aims to address the problem of how to select reliable augmented views for test-time adaption methods. Most of previous methods use the entropy of the distribution of a single test instance, while this paper proposes a new method by first training a regression decision tree for predicting the cross-entropy loss of each test instance and then selecting the one with minimal predicted cross-entropy loss. By integrating this new augmented view selection method and standard techniques for predictions, a new test-time adaption algorithm, RTA, is proposed.   The effectiveness of RTA is verified by extensive experiments.
+
+### Strengths
+* This paper is well-written and easy to follow.
+
+* The technical contribution is significant. The proposed algorithm obtains better prediction performance than existing methods, and is much simpler and more efficient, as during training phase, training the regression model does not requires generate additional views on each test instance and during inference phase, the algorithm only needs to compute cross-entropy losses via the regress decision tree.
+
+* The experimental results are sufficient.
+
+### Weaknesses
+* During the inference phase, the regression decision tree remains unchanged. Thus it may not adapt to the distributions of new test instances. Previous methods use memory modules to dynamically update the stored information and thus can adapt to non-stationary distributions.
+
+* Some notations are confused. For instance, in Eq (6) and Eq (7), $\sum_{j:}$. The notation $j$ is unclear for me. In Eq (7), $y^{reg}_i$. The subscript $i$ is also unclear for me. In Eq (8) and line 313, the notation $x^{reg}_i$. I guess there are some typos on the subscripts.
+
+### Questions
+* The proposed method depends on the accuracy of pseudo-label. How do we guarantee the accuracy of those pseudo-label?
+
+
+* Why is the decision tree selected? Could we use linear regression or non-linear regression model?
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+### Rating
+8
+
+### Confidence
+2
+
+---
+
+## Human Reviewer 2
+
+### Summary
+This paper proposes a test-time adaptation (TTA) method for contrastive vision-language models, like CLIP.
+The main approach of existing TTA methods for vision-language models is to select confident samples from augmented views of a test image.
+The paper argues that prediction entropy, a measure used to quantify confidence, is not accurate for out-of-distribution data.
+To accurately quantify the confidence for sample selection, the paper proposes training a regressor to predict cross-entropy loss and then utilizing the regressor for sample selection (regression-based test-time adaptation; RTA).
+Experimental results demonstrate that RTA outperforms existing TTA methods on various datasets.
+
+### Strengths
+- Benchmark datasets are comprehensive in the experiment.
+
+### Weaknesses
+- W1: The key idea of the paper, training a loss predictor and selecting confident samples based on the predicted loss, is not novel [a], but [a] is not cited.
+- W2: The problem of conventional entropy-based sample selection is not thoroughly examined.
+  - It would be more convincing to investigate the deviation of entropy from label cross-entropy and validate that entropy is further unreliable in OOD.
+  - It would be interesting to visualize cases where confident samples selected by entropy and cross-entropy differ.
+  - The correlation analysis in Fig. 3 is hard to interpret. What is the "features" here? How were the correlation coefficients computed?
+- W3: It is questionable whether the regression model is reliable since pseudo cross-entropy is employed for the labels of the training dataset for regressor $\mathcal{D}^\text{reg}$. This annotation process is similar to the sample selection process of existing methods.
+- W4: It would be interesting to replace entropy with the regressor on the existing methods. Experimenting with this would demonstrate the applicability and generality of the proposed method.
+- W5: Analysis of the trained regression model is limited. For instance,
+  - How accurately can the regressor predict the loss? Does it align with the actual label cross-entropy while it is trained with pseudo cross-entropy?
+  - Does the test accuracy further improve if the regressor is trained with label cross-entropy?
+  - Evaluating regression performance on in-distribution and out-of-distribution datasets would be interesting.
+- W6 (minor): L337 `we selecte ImageVal-12k`: typo?
+
+
+[a] Kim et al., Learning Loss for Test-Time Augmentation, NeurIPS 2020.
+
+### Questions
+Please refer to the weaknesses.
+
+### Soundness
+2
+
+### Presentation
+3
+
+### Contribution
+2
+
+### Rating
+2
+
+### Confidence
+4
+
+---
+
+## Human Reviewer 3
+
+### Summary
+This paper investigates test-time adaptation (TTA) for adapting vision-language models (VLMs) like CLIP to downstream tasks. TTA for VLMs fundamentally involves quantifying uncertainty using entropy based on views generated by data augmentation, selecting samples with low uncertainty, and performing final predictions through their ensemble. Existing methods update partial parameters or learnable prompts by minimizing entropy, dynamically modifying the model during testing. The paper points out that the entropy used by these methods depends on the training distribution, limiting its effectiveness as a proxy metric for ground truth labels, particularly reducing its reliability for outliers. Instead of entropy, this paper measures view uncertainty by predicting cross-entropy loss against the ground truth label from VLMs' logits. Specifically, it first learns the mapping between logits and cross-entropy loss against the ground truth label using a nonlinear regression model like LightGBM by utilizing pseudo labels from CLIP. Next, during testing, the regression model predicts the cross-entropy loss for augmented views. These predictions are sorted in ascending order, and the subset with the lowest loss is used for prediction in an ensemble manner. Experiments confirm that the proposed method achieves competitive performance with existing TTA for VLMs without requiring parameter updates during testing.
+
+### Strengths
+- **S1.** The paper proposes an innovative TTA paradigm that predicts cross-entropy loss against correct labels from logits and utilizes this as an uncertainty metric. This holds promise as it may overcome the shortcomings of existing entropy minimization approaches.
+- **S2.** The paper confirms the effectiveness of the proposed method across multiple tasks using a regression model trained solely on ImageNet-Val.
+
+### Weaknesses
+- **W1.** The preliminary experiments in Figure 2 were conducted using t-SNE, but t-SNE is not suited for accurately visualizing logits due to its inclusion of nonlinear transformations. Therefore, the claim regarding label loss clusters is somewhat misleading. The paper's argument would be further strengthened if the same discussion could be made using dimensionality reduction via linear transformations, such as PCA.
+- **W2.** The paper does not discuss how the quality of pseudo labels generated by CLIP during training of the regression model on ImageNet-Val affects the performance of the regression model or TTA.
+- **W3.** There remains a gap between the results using label loss in Tables 1 and 2 and the results of the proposed method in Table 3. The paper should discuss the cause of this gap and prospects for further reducing the performance gap.
+- **W4.** The paper states in Section 1 L081 that “it can directly adapt to test instances with arbitrary distributions,” but the experiments in Section 5 cannot be considered exhaustive across domains. For example, accurate loss prediction is expected to be challenging on datasets from medical domains, such as microscope images or satellite images, which are not extensively represented in ImageNet.
+
+### Questions
+Please response the concerns raised in the weaknesses section.
+
+### Soundness
+3
+
+### Presentation
+3
+
+### Contribution
+3
+
+### Rating
+6
+
+### Confidence
+3
+
+---
+
+## Human Reviewer 4
+
+### Summary
+This paper proposes Regression-based Test-time Adaptation (RTA) for CLIP. Instead of selecting confident augmented views via entropy, the authors learn a regression mapping from view logits to cross-entropy loss using pseudo-labeled data gathered once from ImageVal-12k. At test time, RTA predicts a loss for each augmented view via the trained regressor, selects the top-k lowest loss views, and ensembles their logits for the final prediction. The paper motivates this by showing that if ground-truth cross-entropy is used for view selection (Ceiling TTA), accuracy improves significantly over entropy selection. Experiments on ImageNet variants, 10 cross-domain datasets, and multi-label benchmarks show that RTA outperforms state-of-the-art methods on RN50 and ViT-B/16 backbones.
+
+### Strengths
+1. This work treats confident-view selection as a supervised regression problem on logits, which is a new and interesting angle.
+2. The authors motivated their approach clearly, by showcasing the Ceiling TTA ablation, which demonstrates large improvement over entropy.
+3. Multiple evaluation settings are included, and the performance improvement is impressive on multi-label classification.
+4. The paper reports nice ablations on number of augmented views and number of regression samples.
+5. I thank the authors for the link to their code, however, I would appreciate it if they included a more complete README.
+
+### Weaknesses
+1. You mention that you use “ImageVal-12K” as the regression mapping data. I do not know this dataset, and I couldn’t find it by a quick search. Please add a reference to your text. Do you mean ImageNet-12K? Please elaborate on how close images in this dataset are to your target datasets. Isn’t there a chance of leakage?
+2. Also, if the training data contains some of the “source” images, this can be seen as a deviation from standard TTA.
+3. I believe it is not accurate to say that the mapping is independent of the downstream task. How do you handle different number of classes across datasets? I believe if the task changes, you need to retrain the regressor as the label set has changed. Please elaborate if my assumption is not correct.
+4. I have concerns about the fairness of the comparison. While I understand your new take on the task, your approach uses additional samples and compute to train an auxiliary model while your competitors do not (please elaborate if they do). How do you argue the fairness of the comparison?
+5. More discussion about your training data is needed. How are samples from your training dataset selected (besides the confidence threshold)? Do you explicitly try to include samples from a variety of classes, or is the selection completely random? A section in the appendix about your training data could help.
+6. The mapping from baseline name to its reference should appear at least once somewhere in the paper. For example, TDA appears many times in text and tables, but it is not tied to Karmanov et al. This poses difficulties for a reader that is not an expert in the field. More importantly, I believe the references to some of these baselines might be missing from your references. For example, have you included the reference for Dyna?
+7. Inconsistent venue for baselines across tables. For example:
+	- TDA is listed as CVPR’24 and ICLR’25 in different parts of Table 4.
+	- ML-TTA is lister as CVPR’25 and ICLR’25 in Tables 5 and 6. 
+
+My true score is closer to 5, but since only 4 or 6 are possible at this stage, I picked 6. I may update it after I read reviews from more confident reviewers.
+
+### Questions
+1. Your auxiliary model for picking augmented views is interesting and is applied on original CLIP. I am wondering about how orthogonal your idea is to SOTA methods. Have you tried using your regressor on top of SOTA methods to get further gains?
+2. On L185, you claim near 100% accuracy on ImageNet-A, but this seems inconsistent with the results in Tables 1 and 2. Can you elaborate on this?
+3. Performance gains are strong in Tables 3, 5, and 6, but small in Table 4 (cross-domain). Do you have an explanation on why your method is not as effective in this setting (compared to SOTA)?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+3
+
+### Rating
+6
+
+### Confidence
+3

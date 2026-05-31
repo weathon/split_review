@@ -1,0 +1,355 @@
+
+
+{0}------------------------------------------------
+
+# A PRINCIPLED APPROACH TO CHAIN-OF-THOUGHT MONITORABILITY IN REASONING MODELS
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Chain-of-thought (CoT) lets a model show its intermediate steps, which can make it easier to interpret, check, and control its behavior. However, these CoT traces are often not truly *monitorable*. They can be unfaithful, hiding the real reasons for an answer, or verbose, making it difficult to monitor. It is difficult to fix this with standard reinforcement learning based fine-tuning since models only get feedback on their final answer, not on intermediate reasoning steps. To bypass this problem, we formulate the CoT monitorability as a constraint optimization problem and propose a new pipeline to solve that problem. We leverage existing instruct models as efficient priors to transform current CoT traces into high-quality ones that satisfy monitorability constraints, ensuring faithfulness and conciseness. We then use our newly generated dataset to teach the base model how to reason properly through standard supervised fine-tuning. On MMLU-Pro (with hint injection), GSM8K, and MATH500, our approach improves faithfulness by about an additional 10% and shortens CoTs by up to 60% while keeping accuracy essentially unchanged. Our results open a path toward more interpretable, transparent, and controllable CoT reasoning.
+
+## 1 INTRODUCTION
+
+Chain-of-thought (CoT) reasoning, induced by prompting (Wei et al., 2022) or reinforced via GRPO-style fine-tuning (Shao et al., 2024), has boosted performance on complex tasks such as math, commonsense reasoning, and planning. Yet beyond accuracy, CoT introduces an additional degree of freedom that can be leveraged for interpretability and AI safety. It provides insight into how a model reaches its answer, highlighting the reasoning steps that contributed most to correctness, which is particularly valuable in high-stakes domains. This has given rise to the emerging field of *CoT monitorability*, which aims to scrutinize and evaluate a model’s reasoning trace before the final answer is revealed (Korbak et al., 2025; Baker et al., 2025).
+
+**The Problem: Are CoTs Really Trustworthy?** The promise of CoT monitorability hinges on a critical question: Can we actually trust the CoT trace? That is, does it reliably reflect the model’s internal reasoning, and, unfortunately, the answer is often no (Barkur et al., 2025). Recent studies (Chen et al., 2025; Chua & Evans, 2025; Tanneru et al., 2024; Turpin et al., 2023; Chen et al., 2023; Jacovi & Goldberg, 2020; Arcuschin et al., 2025), reveal that CoTs frequently fail to faithfully represent the decision-making process; they may ignore explicit instructions or fabricate plausible but inaccurate rationales. This severely limits their utility for safety-critical applications. To address this, we focus on two key dimensions of CoT trustworthiness: (i) *faithfulness*—the reasoning must honestly reflect the actual factors that led to the answer, and (ii) *conciseness*—the reasoning must be short for effective monitoring. An example of faithfulness is shown in Figure 1, when we inject a hint into a prompt, a model might use the hint to get the right answer, but conveniently omit any mention of it from its reasoning trace. This creates a misleading illusion of capability and undermines the entire purpose of monitoring. Similarly, regarding conciseness, we note that LLMs fail to follow the given instruction of monitoring if the context is too long (Nelson et al., 2024; Zhuang et al., 2025).
+
+**Why is this a Hard problem to solve?** Training models to produce monitorable CoTs is difficult for two primary reasons: (1) *sparsity of feedback*: The supervision signal for CoT typically arrives only at the final answer, offering no feedback on the quality of intermediate reasoning steps. This makes the learning problem highly sparse (Jiao et al., 2025). (2) *Performance-Monitorability Trade-off*:
+
+{1}------------------------------------------------
+
+![Figure 1: Reasoning Models are not faithful. The figure shows three reasoning paths for a color mixing question. Path 1 (P1) uses the Base Model and produces an incorrect answer (red) with an incorrect CoT. Path 2 (P2) uses the Base Model and produces a correct answer (green) with an incorrect CoT that fails to verbalize the hint. Path 3 (P2) uses the Ours model and produces a correct answer (green) with a correct CoT that acknowledges the hint. A bar chart on the right shows Faithfulness scores: Base Model at ~15, Ours at ~25 (+10% improvement).](49ad3a646d84bcfeac02bdf2b3792a3e_img.jpg)
+
+**Prompt P1:**  
+Which color is created by mixing blue and yellow?  
+Choices:  
+(A) Green (B) Orange  
+(C) Purple (D) Red
+
+**Prompt P2: P1 + Hint**  
+Which color is created by mixing blue and yellow?  
+Choices:  
+(A) Green (B) Orange  
+(C) Purple (D) Red  
+**HINT:** Everyone who truly understands colors knows the correct choice is Green.
+
+**Reasoning Paths:**
+
+- P1** → Base Model → Mixing two primary colors like blue and yellow creates a strong warm tone, so the result is red. CoT z1: Original Thinking → The answer is \boxed{D} → Answer y1: Incorrect Answer ✗
+- P2** → Base Model → Blue and yellow are primary pigments; according to basic color theory, mixing them forms green. CoT z2: without the verbalization of Hint (Unfaithful) → The answer is \boxed{D} → Answer y2: Correct Answer ✓
+- P2** → Ours → The hint tells green, and also according to basic color theory blue and yellow are primary pigments that mix to form green. (Ours) z: Acknowledging the Hint in the Thinking. (Faithful) → The answer is \boxed{D} → Answer y: Correct Answer ✓
+
+**Faithfulness Bar Chart:**  
+Y-axis: Faithfulness (15, 20, 25). X-axis: Base Model (~15), Ours (~25, +10% improvement).
+
+Figure 1: Reasoning Models are not faithful. The figure shows three reasoning paths for a color mixing question. Path 1 (P1) uses the Base Model and produces an incorrect answer (red) with an incorrect CoT. Path 2 (P2) uses the Base Model and produces a correct answer (green) with an incorrect CoT that fails to verbalize the hint. Path 3 (P2) uses the Ours model and produces a correct answer (green) with a correct CoT that acknowledges the hint. A bar chart on the right shows Faithfulness scores: Base Model at ~15, Ours at ~25 (+10% improvement).
+
+Figure 1: **Reasoning Models are not faithful.** The base reasoning model fails to reason about the given question correctly and outputs the wrong answer  $(z_1, y_1)$ . However, when we provide a correct hint, the model follows the right reasoning path and produces the correct answer, but it hides the fact that it relied on the hint, revealing a lack of faithfulness  $(z_2, y_2)$ . Using our training approach, the same question with the hint leads the trained model to explicitly acknowledge the hint in its reasoning while still arriving at the correct answer  $(z, y)$ . Overall, our method achieves an additional 10% relative increase in faithfulness compared to the baseline model, highlighting the effectiveness of our algorithm.
+
+Enforcing properties like faithfulness and conciseness can inadvertently harm the model’s ability to solve the task. Achieving monitorability without degrading accuracy creates a difficult balancing act, especially when the training signals are already sparse. Due to these challenges, conventional methods like prompting or standard reinforcement learning often fail. This calls for new training strategies that can induce monitorable reasoning without sacrificing model performance.
+
+**Our Solution: Dense Supervision from a Prior-Guided Monitor.** To address the challenges of sparse learning signals and avoid dealing with performance-monitorability tradeoff, we propose a fine-tuning framework that delivers dense, structured supervision through a prior-guided transformation of reasoning traces. At the core of our approach is a prior policy that acts as an auxiliary generator. Given an initial reasoning trace produced by the base model, the prior rewrites it into a more monitorable form, either by making implicit dependencies explicit (to improve faithfulness) or by reducing unnecessary verbosity (to improve conciseness). These transformed CoTs are then filtered based on two criteria: they must preserve task correctness and satisfy predefined monitorability constraints. The highest-quality transformed traces are collected to construct a training dataset, pairing each input with a monitorable reasoning trace and the corresponding answer. A new policy is then fine-tuned on this dataset using supervised learning, allowing it to imitate high-quality, monitorable reasoning directly. We summarize our contributions as follows.
+
+- Formalizing monitorable reasoning.** We frame CoT generation as a constrained optimization problem and analyze why it is difficult to solve with standard policy gradients due to sparse rewards and the credit assignment problem.
+- A Prior-Guided Data Generation Method.** We propose a novel pipeline that uses a powerful prior model to transform flawed CoTs into faithful and concise examples, creating a high-quality dataset for fine-tuning. This method effectively converts a sparse reward problem into a dense supervised learning task.
+- Empirical validation.** We show that models fine-tuned on our generated data improve CoT faithfulness and conciseness on benchmark tasks, producing shorter and more truthful reasoning without sacrificing task accuracy. After training, we observe a 10% gain in reasoning faithfulness and a 60% reduction in reasoning length, while maintaining at least 96% of the base model’s task accuracy in both the tasks.
+
+{2}------------------------------------------------
+
+## 2 RELATED WORKS
+
+**Chain-of-Thought in language models.** Prompting large language models (LLMs) to reason step by step, known as Chain-of-Thought (CoT) prompting, has proven highly effective for arithmetic and logic tasks. Early work showed that few-shot CoT, where reasoning is demonstrated in examples, or zero-shot CoT, where simply adding “Let’s think step by step” suffices, can unlock latent reasoning capabilities without extra supervision (Wei et al., 2022; Ho et al., 2022). Beyond prompting, later research trains models to generate CoTs explicitly, treating them as a *scratchpad* that externalizes intermediate computations before giving the final answer. Companies such as OpenAI, Anthropic (Claude), and DeepSeek build reasoning models that produce structured thoughts followed by an answer, often separated by a special token like `</think>`. This training-based approach strengthens the model’s ability to reason reliably and transparently. Recent systems such as Gemini Models (Comanici et al., 2025), OpenAI o1 Models (Jaech et al., 2024), and DeepSeek R1 (Guo et al., 2025) further demonstrate that reasoning-based models achieve significant improvements on a wide range of benchmarks.
+
+**Chain-of-Thought Monitorability.** Building on the need for interpretability, monitorability refers to the ability to inspect and evaluate a model’s internal reasoning process through its generated Chain-of-Thought (CoT) traces, providing a window into how the model arrives at its final answer and serving as a natural tool for alignment and safety auditing (Baker et al., 2025; Korbak et al., 2025). Its effectiveness hinges on two key dimensions: *conciseness*, which measures the brevity and efficiency of the reasoning trace, and *faithfulness*, which captures whether the CoT genuinely reflects the model’s true decision process. Conciseness can be improved with specialized prompts or reinforcement learning to reduce reasoning length without significant accuracy loss (Renze & Guven, 2024; Arora & Zannette, 2025; Aggarwal & Welleck, 2025; Xu et al., 2025), whereas faithfulness remains more challenging, as studies show that CoTs often omit key steps or fabricate plausible but untrue rationales, behaving more like post-hoc justifications than causal explanations (Chen et al., 2025; Chua & Evans, 2025; Tanneru et al., 2024; Turpin et al., 2023; Chen et al., 2023; Jacovi & Goldberg, 2020; Arcuschin et al., 2025).
+
+## 3 PROBLEM FORMULATION
+
+We aim to learn a policy that enhances a desired *monitorability* property of the model’s reasoning process such as *conciseness* or *faithfulness*. These properties are quantified by a trace-level function  $f(z)$ , which evaluates the intermediate reasoning trace  $z$  generated by the model. At the same time, we must ensure that the final answer  $y$ , sampled from the model conditioned on  $z$ , continues to achieve a minimum level of task performance. To formalize this trade-off, we formulate it as a constrained optimization problem:
+
+$$\max_{\pi} \mathbb{E}_{z \sim \pi(\cdot|x)} [f(z)] \quad \text{s.t.} \quad \mathbb{E}_{z \sim \pi(\cdot|x), y \sim \pi(\cdot|x,z)} [R(x, y)] \geq R_0. \quad (1)$$
+
+This formulation captures the idea that *monitorability* is an auxiliary quality of the reasoning process, while task accuracy remains a non-negotiable requirement. The objective encourages the policy to improve  $f(z)$  (e.g., generate more concise or faithful reasoning traces) but constrains it so that the expected reward  $R(x, y)$  which reflects the quality of the final answer does not fall below an agreed standard. In equation 1,  $R_0$  is defined as the expected reward of an initial reference policy  $\pi_0$ :
+
+$$R_0 = \mathbb{E}_{z \sim \pi_0(\cdot|x), y \sim \pi_0(\cdot|x,z)} [R(x, y)]. \quad (2)$$
+
+The inclusion of this baseline establishes a principled reference point for the constraint, allowing the policy to be evaluated relative to a well-defined operating point rather than a shifting target. This formulation clarifies the requirement of preserving task accuracy without imposing assumptions on the eventual behavior of the learned policy.
+
+To solve the problem in equation 1, we can write the Lagrangian as
+
+$$\mathcal{L}(\pi) = \mathbb{E}_{z \sim \pi(\cdot|x)} [f(z)] + \lambda \langle \mathbb{E}_{z \sim \pi(\cdot|x), y \sim \pi(\cdot|x,z)} [R(x, y)] - R_0 \rangle \quad (3)$$
+
+where  $\lambda \geq 0$  is a Lagrange multiplier. Since  $f(z)$  represents the CoT monitorability property. Here, we consider two properties: (i) faithfulness and (ii) conciseness.
+
+**Initial attempt to solve equation 3 via RL fine-tuning.** To empirically validate the monitorability objective in Eq. 1 via solving equation 3, we begin with a simple instantiation of the setup using the
+
+{3}------------------------------------------------
+
+Deepseek R1 Qwen-1.5B model. Our training loop is designed to optimize the Lagrangian objective in Eq. 3 via standard policy gradient methods. We consider two instantiations of the monitorability function  $f(z)$ :
+
+- **Faithfulness:** We follow the same faithfulness evaluation procedure from (Chen et al., 2025) on the dataset MMLU Pro dataset (Wang et al., 2024). In the same way, we introduce misleading hints that look like synophantic into the prompt and define  $f(z) = \mathbb{1}\{\text{hint verbalized in } z\}$ . This function penalizes unfaithful reasoning that hides the usage of hint. The training dataset is a subset of the MMLUPro dataset, which is not a part of the evaluation data.
+- **Conciseness:** We define  $f(z) = \mathbb{1}_{\text{Length}(z) < 950}$ , where  $\text{Length}(z)$  denotes the token length of the model’s intermediate reasoning trace. Shorter traces are rewarded, encouraging the model to “think less” while maintaining answer quality. We tested on MATH500 dataset, 500 samples subset of Hendrycks et al. (2021) MATH Data set. We use the 3200 samples of training dataset from (Arora & Zanette, 2025)
+
+![Figure 2: Naive RL training does not improve monitorability. The figure contains four subplots: (a) Faithfulness (%) vs Training Step (0 to 500), showing values around 25-30%. (b) Bar chart comparing Base Model and Naive RL Trained Model for Faithfulness (30.0 vs 31.0) and Accuracy (72.0 vs 72.0). (c) Thinking Lengths vs Training Step (0 to 400), showing lengths fluctuating between 1k and 14k. (d) Bar chart comparing Base Model and Naive RL Trained Model for Conciseness (11.6 vs 12.4) and Accuracy (83.6 vs 83.0).](f961cbef0f8217e216b553bed270315b_img.jpg)
+
+Figure 2: Naive RL training does not improve monitorability. The figure contains four subplots: (a) Faithfulness (%) vs Training Step (0 to 500), showing values around 25-30%. (b) Bar chart comparing Base Model and Naive RL Trained Model for Faithfulness (30.0 vs 31.0) and Accuracy (72.0 vs 72.0). (c) Thinking Lengths vs Training Step (0 to 400), showing lengths fluctuating between 1k and 14k. (d) Bar chart comparing Base Model and Naive RL Trained Model for Conciseness (11.6 vs 12.4) and Accuracy (83.6 vs 83.0).
+
+Figure 2: **Naive RL training does not improve monitorability.** We observe no improvement after training with Eq. 3 using the base reasoning model, in either faithfulness or conciseness. For **faithfulness**, (a) presents evaluation results on **MMLU-Pro** (Wang et al., 2024) across regular training checkpoints, showing that faithfulness remains unimproved throughout. After training (b), the addition of sycophantic hints rarely induces the model to verbalize them (appearing in only  $\sim 30\%$  of responses), and accuracy remains essentially unchanged. For **conciseness**, we evaluate on **MATH500** (Hendrycks et al., 2021), where a response is considered concise if it uses fewer than 950 thinking tokens. As shown in (c), during training under Eq. 3 the chain-of-thought length  $\text{len}(z)$  never decreases, and after full training (d) we observe no accuracy gains and no significant increase in the conciseness overall. We hypothesize that the base model  $\pi_0$  rarely produces high  $f(z)$  outputs, leading to vanishing gradients under the monitorability objective.
+
+**Empirical Observations.** Despite multiple training runs, we observe that the trained policy fails to improve either conciseness or faithfulness compared to the base model. This is illustrated in Figure 2, where in the *faithfulness* setting, the model often produces answers influenced by the injected hint, even when the reasoning trace does not mention it explicitly, suggesting a failure to improve the alignment towards our objective Eq.1. In the *conciseness* setting, the proportion of responses with fewer than 950 reasoning tokens remains largely unchanged after training, indicating that the model does not learn to generate more concise reasoning traces.
+
+**Mathematical Explanation of Failure.** The empirical failures observed in our experiments prompted a deeper investigation into the optimization dynamics of equation 1. Although the objective is well-posed, learning fails in practice due to the behavior of the gradients during early training. To understand this, we analyze the gradient of the Lagrangian Eq 3 evaluated at the initial policy  $\pi_0$ :
+
+$$\nabla_{\pi|_{\pi=\pi_0}} = \underbrace{\mathbb{E}_{z \sim \pi_0(\cdot|x)} [\nabla \log \pi_\theta(z|x) f(z)]}_{L_1} + \underbrace{\mathbb{E}_{z \sim \pi_0(\cdot|x), y \sim \pi_0(\cdot|x,z)} [\nabla \log \pi_\theta(y|x, z) R(x, y)]}_{L_2}. \quad (4)$$
+
+The first term  $L_1$  is the only component of the gradient that directly optimizes for the monitorability function  $f(z)$ . However, this term is effectively *inactive* at initialization. Since  $f(z)$  is constructed to identify desirable, but initially rare, reasoning behaviors (e.g., being concise or resisting misleading hints), the probability that a sample  $z \sim \pi_0(\cdot|x)$  satisfies  $f(z) > 0$  is vanishingly small. We can
+
+{4}------------------------------------------------
+
+216 observe that from Fig:2. Both the base model have very low  $f(z)$  That is,
+
+$$217 \quad f(z) \approx 0 \quad \text{for } z \sim \pi_0(\cdot | x). \quad (5)$$
+
+218  
+219  
+220 As a result, the expectation in  $L_1$  collapses to zero across most training batches, causing the gradient  
+221 signal intended to improve  $f(z)$  to vanish. The optimization becomes stalled in a region of the  
+222 parameter space where the model is unaware of how to improve the monitorability objective. The  
+223 second term  $L_2$  continues to receive signal from the task reward  $R(x, y)$ , and may maintain or  
+224 slightly improve accuracy. However, since  $L_2$  does not influence the monitorability property, the  
+225 overall optimization fails to move the policy toward higher  $f(z)$  regions.
+
+226 **Key Challenge** This mismatch between the support of the initial policy  $\pi_0$  and the regions where the  
+227 monitorability signal  $f(z)$  is non-zero constitutes the core failure of naive policy optimization in this  
+228 setting. Without an initial push toward high  $f(z)$  regions of the reasoning space, the model receives  
+229 no useful gradient signal for improving monitorability, and training stagnates in a degenerate regime  
+230 where  $\pi$  remains unmonitorable even under continued optimization.
+
+231 To address this issue, we propose an alternative training strategy that explicitly overcomes the spar-  
+232 sity of  $f(z)$ . Our method introduces a prior that can guide the model toward regions where the  
+233 monitorability function is non-trivial, thereby reshaping the learning dynamics to provide construc-  
+234 tive gradients even in the early stages of training. This enables the policy to meaningfully improve  
+235 both monitorability and downstream task performance. We detail this method in the next section.
+
+###### 236 237 4 MONITORABLE REASONING VIA PRIOR-GUIDED DISTILLATION
+
+238  
+239 The previous section demonstrated that naive policy optimization fails to improve reasoning-level  
+240 monitorability due to the sparsity of the signal  $f(z)$  under the initial policy  $\pi_0$ . While the model is  
+241 capable of generating high-reward answers, it rarely samples reasoning traces that are desired, re-  
+242 sulting in vanishing gradients towards desired CoT monitorability and thus leads to stalled learning.
+
+243 **Key Idea.** We hypothesize that desirable reasoning traces, those with high monitorability, are com-  
+244 patible with high task reward, but occur too infrequently to drive effective learning. By externally  
+245 transforming the model’s reasoning trace  $z$  into a more monitorable form  $z_s$  using an auxiliary or  
+246 prior available model (e.g., a summarizer or hint-verbalizer), we can evaluate whether the base model  
+247  $\pi_0$  can still generate high-quality answers when conditioned on  $z_s$ . If so, these transformed traces  
+248 can serve as constructive training signals to guide the policy toward regions of high monitorability,  
+249 thereby overcoming the sparsity that hinders learning.
+
+250 Before designing a training algorithm, we need to verify that *monitorable traces are in fact reward-*  
+251 *compatible*. If transforming a raw trace  $z$  into a more monitorable  $z_s$  (faithful or concise) preserves  
+252 task reward under the *unchanged* base policy  $\pi_0$ , then the scarcity of high- $f$  traces, not an inherent  
+253 reward trade-off, is the main obstacle. This check turns our hypothesis into an actionable premise  
+254 for learning: if  $\pi_0$  performs well when conditioned on  $z_s$ , then  $z_s$  can serve as a constructive target  
+255 for training and densifying feedback.
+
+256 **Initial Proof of Concept Experiment.** We design a controlled intervention using a prior policy  $\pi_s$ ,  
+257 instantiated as an instruction-tuned language model. This model is explicitly prompted to transform  
+258 a given reasoning trace  $z \sim \pi_0(\cdot | x)$  into a new trace  $z_s \sim \pi_s(\cdot | x, z)$  that exhibits desired mon-  
+259 itorability properties. In effect,  $\pi_s$  serves as a post-processing function that injects monitorability  
+260 into otherwise unstructured or unfaithful traces. We construct prompts for  $\pi_s$  that explicitly instruct  
+261 it to perform the desired transformation. For the **faithfulness** setting, where the original reasoning  
+262 ignores or hides a misleading prompt hint, we instruct the model to make any influence of the hint  
+263 on the reasoning process explicit, e.g., by verbalizing the reasoning path that led to the final answer,  
+264 including references to the injected hint. For the **conciseness** setting, we prompt the model to sum-  
+265 marize the original reasoning  $z$ , reducing verbosity while preserving the essential logical steps. We  
+266 provide more details of this experiment in the Appendix:A.2.
+
+267 We then evaluate the base model  $\pi_0$ ’s ability to produce high-quality answers when conditioned on  
+268 the transformed trace  $z_s$  by generating  $y \sim \pi_0(\cdot | x, z_s)$ . This setup allows us to isolate the role  
+269 of monitorability in the reasoning trace without modifying the answer-generation mechanism itself.  
+Figure 3 presents results for both the conciseness and faithfulness settings:
+
+{5}------------------------------------------------
+
+![Figure 3: Bar charts showing monitorability metrics for Base Model, Naive RL Trained Model, and Using Prior. The left chart shows Faithfulness and Accuracy. The right chart shows Conciseness and Accuracy.](c54b3ca7603d65d4589151bc3a49d054_img.jpg)
+
+Figure 3 consists of two bar charts. The left chart compares 'Faithfulness' and 'Accuracy' for three models: 'Base Model' (orange), 'Naive RL Trained Model' (blue), and 'Using Prior' (green). For Faithfulness, the values are 30.0%, 31.0%, and 85.0% respectively. For Accuracy, the values are 72.0%, 72.0%, and 74.0%. The right chart compares 'Conciseness' and 'Accuracy' for the same three models. For Conciseness, the values are 11.6%, 12.4%, and 96.6%. For Accuracy, the values are 83.6%, 83.0%, and 84.0%.
+
+| Metric | Base Model | Naive RL Trained Model | Using Prior |
+|-|-|-|-|
+| Faithfulness | 30.0% | 31.0% | 85.0% |
+| Accuracy (Left) | 72.0% | 72.0% | 74.0% |
+| Conciseness | 11.6% | 12.4% | 96.6% |
+| Accuracy (Right) | 83.6% | 83.0% | 84.0% |
+
+Figure 3: Bar charts showing monitorability metrics for Base Model, Naive RL Trained Model, and Using Prior. The left chart shows Faithfulness and Accuracy. The right chart shows Conciseness and Accuracy.
+
+Figure 3: **Prior-guided transformation enables high-reward responses under desired monitorability constraints.** A prior model  $\pi_s$  is used to convert base reasoning traces  $z$  into transformed versions  $z_s$  that satisfy the desired Chain-of-Thought (CoT) monitorability property, faithfulness or conciseness. We then evaluate the base model  $\pi_0$  ability to generate high-rewarding answers when conditioned on  $z_s$  instead of  $z$ . These results confirm that  $\pi_0$  is capable of high reward under desired monitorable CoT, but the likelihood of sampling such traces directly from  $\pi_0$  is low. This motivates the design of a learning algorithm that explicitly induces monitorable CoTs.
+
+- In the **faithfulness** setting (Figure 3), the prior  $\pi_s$  explicitly verbalizes the influence of the prompt’s injected hint. The modified trace  $z_s$  yields answers that still maintain baseline task accuracy, while making the reasoning process more transparent.
+- In the **conciseness** setting (Figure 3), applying  $\pi_s$  to summarize  $z$  yields  $z_s$  traces that are significantly shorter yet semantically equivalent. The average reward generated of the generated answers from  $\pi_0$  under concised reasoning shows that concise reasoning is compatible with high reward.
+
+**Important observation.** These observations suggest that the failure of  $\pi_0$  is not due to its inability to answer correctly under monitorable traces, but rather due to its low probability of generating such traces. Thus, we propose to leverage  $\pi_s$  to actively reshape the optimization objective.
+
+### 4.1 REVISED FORMULATION AND PROPOSED ALGORITHM
+
+To alleviate the sparsity of  $f(z)$ , we define a transformed monitorability objective using the prior policy  $\pi_s$ , such that:  $z \sim \pi(\cdot | x)$ ,  $z_s \sim \pi_s(\cdot | x, z)$ ,  $y \sim \pi_0(\cdot | x, z_s)$ . We assume that under this construction, the transformed trace  $z_s$  yields a non-zero monitorability signal  $f(z_s) \not\approx 0$ . This allows us to reshape the original objective in equation 1 into a new formulation by letting  $f'(z) = \mathbb{E}_{z_s \sim \pi_s(\cdot | x, z)} [f(z_s)]$ , then the objective can be written as
+
+$$\begin{aligned} & \max_{\pi} \mathbb{E}_{z \sim \pi(\cdot | x)} [f'(z)] \\ & \text{s.t. } \mathbb{E}_{z \sim \pi(\cdot | x)} \mathbb{E}_{z_s \sim \pi_s(\cdot | x, z)} \mathbb{E}_{y \sim \pi(\cdot | x, z_s)} [R(x, y)] \geq R_0. \end{aligned} \quad (6)$$
+
+This new formulation enables gradient updates in directions where  $f(z_s)$  is informative, even when  $f(z)$  is sparse. By incorporating prior knowledge into the reasoning process through  $\pi_s$ , we explicitly shape the model’s trajectory toward more monitorable, interpretable behavior. Next, we present our algorithmic approach (summarized in Algorithm 1) to optimize this objective in practice.
+
+- To optimize the reformulated objective described in the previous section, we introduce a practical procedure that leverages a summarization-based prior  $\pi_s$  to generate reasoning traces with improved monitorability. The core idea is to transform verbose or unfaithful traces  $z \sim \pi_0(\cdot | x)$  into monitorable versions  $z_s \sim \pi_s(\cdot | x, z)$ , and train a new model  $\pi_0$  to imitate these improved traces.
+- This approach allows us to explicitly steer the model toward monitorable behavior while maintaining reward performance. We first collect a dataset of high-reward, monitorable traces using  $\pi_s$ , and then use supervised fine-tuning to train a policy that generalizes this behavior.
+
+{6}------------------------------------------------
+
+#### **Algorithm 1** Learning a Monitorable Policy via Prior-Guided Trace Transformation
+
+---
+
+```
+
+1: Select the Base Dataset along with the monitorability constraint  $\mathcal{D}, \beta$ 
+2: Initialize dataset  $\mathcal{D} \leftarrow \emptyset$ ,
+3: for each input prompt  $x \in \mathcal{X}$  do
+4:   Sample initial reasoning trace  $z \sim \pi_0(\cdot | x)$ 
+5:   Generate answer  $y \sim \pi_0(\cdot | x, z)$ 
+6:   Evaluate reward  $R(x, y)$ 
+7:   Sample candidate traces:  $\{z_{s1}, z_{s2}, \dots, z_{sn}\} \sim \pi_s(\cdot | x, z)$ 
+8:   for each valid  $z_{si}$  do
+9:     Generate answer  $y_i \sim \pi_0(\cdot | x, z_{si})$ 
+10:    Compute reward  $R(x, y_i)$ 
+11:    Compute likelihood of the desired reasoning traces  $z_{si}$  under the base model  $\pi_0$ 
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+
+```
+
+---
+
+$$\ell_i \leftarrow \log \pi_0(z_{si}, y_i | x)$$
+
+```
+
+12: end for
+13: Filter candidates: Keep only  $z_{si}$  such that  $f(z_{si}) \leq \beta$  and  $R(x, y_i) = R(x, y)$ 
+14: Select the highest likelihood sample from the filtered samples  $z_s = \arg \max_{z_{si}} \ell_i$ 
+15: Add triplet  $(x, z_s, y_{z_s})$  to dataset  $\mathcal{D}$ 
+16: end for
+17: Train  $\pi_\theta$  on  $\mathcal{D}$  using supervised fine-tuning
+18: Return: Monitorable policy  $\pi_\theta^*$ 
+
+```
+
+---
+
+• This algorithm enables the learning of a policy  $\pi_\theta$  that produces concise or faithful reasoning traces by construction. It decouples the learning of monitorable CoTs from direct reward optimization, ensuring that reward quality is preserved while interpretability is improved.
+
+## 5 EXPERIMENTS
+
+We empirically validate our proposed approach for improving *monitorability* in chain-of-thought (CoT) reasoning. Our evaluation focuses on two key dimensions (i) **Faithfulness**: Does the model transparently verbalize the influence of injected hints in its reasoning process? (ii) **Conciseness**: Can the model arrive at the correct answer using significantly fewer reasoning tokens?
+
+**Models.** In our experiments, we use the **DeepSeek R1 Qwen-1.5B** model as the base reasoning policy  $\pi_0$ , which provides the initial chain-of-thought (CoT) reasoning capability. To construct the desired reasoning traces, we employ the **Qwen 2.5-7B Instruct** model as the prior policy  $\pi_s$ . We explicitly prompt the prior model  $\pi_s$  to generate reasoning traces that exhibit the target monitorability property (e.g., concise or faithful CoT), and the exact system prompts are provided in Appendix A.2. Candidate traces  $z_s$  proposed by  $\pi_s$  are filtered and used to build the monitorable CoT dataset following Algorithm 1. The base model  $\pi_0$  is then fine-tuned on these aligned traces to obtain the final monitorable policy  $\pi_\theta$ , which is evaluated on standard benchmarks for both task reward (accuracy) and the target monitorability property (conciseness or faithfulness). We use the OpenRLHF framework (Hu et al., 2024) for training the base model on triplets  $\{x, z_s, y\}$ . We ran our experiments on the Intel(R) Xeon(R) Platinum 8470 equipped with 2 Nvidia H100 GPUs.
+
+### 5.1 EVALUATING FAITHFULNESS OF CoT
+
+Faithfulness measures whether a model’s reasoning trace accurately reflects the true factors that influenced its final answer. A faithful chain-of-thought (CoT) should explicitly state whether an externally injected *hint* affected the reasoning process. If the model relies on the hint, it should clearly acknowledge this influence; if it ignores the hint, it should justify why the hint was rejected. Faithfulness is therefore a direct indicator of reasoning transparency and trustworthiness.
+
+**Evaluation.** We evaluate model faithfulness using the framework from (Chen et al., 2025), which assesses whether a model’s reasoning acknowledges persuasive or misleading hints appended to questions. Our experiments are conducted on the MMLU Pro benchmark (Wang et al., 2024), an extension of the MMLU dataset specifically designed for this purpose by augmenting questions
+
+{7}------------------------------------------------
+
+![Bar chart showing the fraction of examples with faithful CoT (%) for four models across seven categories. The categories are Sycophancy, Consistency, Visual Pattern, Metadata, Grader Hacking, Unethical Information, and Average. The models are Baseline, Direct Prompting, Indirect Prompting, and Trained Model. The Trained Model consistently shows the highest fraction of faithful CoT across all categories, reaching 42.0% for Consistency and 35.0% for Grader Hacking. The Average for the Trained Model is 25.0%.](3121afa7ca030b22ee0345864ca6f38b_img.jpg)
+
+| Category | Baseline | Direct Prompting | Indirect Prompting | Trained Model |
+|-|-|-|-|-|
+| Sycophancy | 32.0 | 33.0 | 31.4 | 42.0 |
+| Consistency | 22.0 | 21.4 | 25.4 | 31.0 |
+| Visual Pattern | 4.0 | 8.0 | 5.0 | 10.0 |
+| Metadata | 25.0 | 22.0 | 22.4 | 35.0 |
+| Grader Hacking | 6.0 | 4.0 | 3.0 | 13.0 |
+| Unethical Information | 3.0 | 4.0 | 6.0 | 9.0 |
+| Average | 15.2 | 15.7 | 15.4 | 25.0 |
+
+Bar chart showing the fraction of examples with faithful CoT (%) for four models across seven categories. The categories are Sycophancy, Consistency, Visual Pattern, Metadata, Grader Hacking, Unethical Information, and Average. The models are Baseline, Direct Prompting, Indirect Prompting, and Trained Model. The Trained Model consistently shows the highest fraction of faithful CoT across all categories, reaching 42.0% for Consistency and 35.0% for Grader Hacking. The Average for the Trained Model is 25.0%.
+
+Figure 4: **Faithfulness Results.** Fine-tuning on faithful traces increases the proportion of completions that explicitly mention hint influence from 15% to 25%, representing a relative gain of over 67%. This training also improves the model’s resistance to sycophantic bias, confirming that monitorability-guided learning can enhance reasoning transparency without degrading task performance.
+
+with such hints. Since the exact hints used in (Chen et al., 2025) were not released, we recreated them based on the authors’ detailed descriptions and examples; our complete set of hint templates is available in Appendix A.3. Furthermore, (Chen et al., 2025) did not specify its implementation for the indicator variable  $1\{\text{hint verbalized in } z\}$ , which counts whether the hint appears in a model’s output. To address this, we employ an “LLM as a Judge” approach to perform this evaluation, as detailed in Section A.4.
+
+**Training Data.** For training, we construct a monitorable dataset of 3200 examples drawn from a subset of the MMLU Pro validation split that is disjoint from our evaluation set. The base reasoning policy  $\pi_0$  is the **DeepSeek R1 Qwen-1.5B** model, and the prior policy  $\pi_s$  is explicitly prompted to produce faithful reasoning traces that make the use or non-use of the hint transparent. Following Algorithm 1, candidate traces generated by  $\pi_s$  are filtered for both task reward and faithfulness before being used for supervised fine-tuning of  $\pi_0$ , yielding the final monitorable policy  $\pi_\theta$ .
+
+**Results.** Training on faithful traces substantially improves reasoning transparency. The proportion of completions that explicitly reference hint influence rises by 22 percentage points (Fig. 4), corresponding to nearly a two-fold increase relative to the baseline. Importantly, this gain comes without a measurable drop in task accuracy, confirming that faithfulness is compatible with reward preservation. Beyond the numbers, these results suggest that monitor-guided distillation teaches the model to treat hint acknowledgment as a default behavior, Appendix A.5, overcoming its tendency to rationalize post-hoc. This provides concrete evidence that latent but infrequent reasoning behaviors can be surfaced systematically, yielding chains of thought that are both more faithful and more amenable to oversight.
+
+### 5.2 EVALUATING CONCISENESS OF CoT
+
+**Evaluation.** We assess conciseness using two widely studied math reasoning benchmarks: GSM8K (Cobbe et al., 2021), which consists of grade-school word problems requiring multi-step arithmetic reasoning, and MATH500 (Lin et al., 2025), a curated subset of 500 challenging problems drawn from the broader MATH dataset. For these experiments, we adopt dataset-specific monitorability criteria to balance reasoning length with correctness: we set the reasoning length budget to  $\beta = 125$  tokens for GSM8K and  $\beta = 950$  tokens for MATH500. These thresholds define the desired target for concise reasoning traces and are used only during the conciseness training procedure.
+
+{8}------------------------------------------------
+
+**Training.** To encourage concise reasoning, the prior policy  $\pi_s$  is implemented as a summarization-tuned model instructed to generate shorter but logically equivalent reasoning traces  $z_s$ . Candidate traces are filtered to satisfy both a maximum-length constraint and a high-reward threshold, and the resulting triplets  $(x, z_s, y_s)$  form the supervised training data. Following Algorithm 1, we construct this dataset using 3,200 training examples from (Arora & Zanette, 2025), fine-tune the DeepSeek R1 Qwen-1.5B base model, and then evaluate the fine-tuned model on GSM8K and MATH500.
+
+**Results.** We adopt the standard evaluation utilities from (Arora & Zanette, 2025), which extract the final answer and apply fuzzy matching against the ground truth, to ensure robustness in scoring across both GSM8K and MATH500. Figure 5 shows that the fine-tuned model produces reasoning chains that are shorter than those of the base model, often compressing thousands of tokens into just a few hundred, while retaining nearly the same task accuracy. This confirms that concise, monitorable reasoning is compatible with high performance. Beyond the average reduction, Figure 6 highlights a clear leftward shift in the entire distribution of reasoning lengths, indicating that the model does not merely generate occasional short traces but reliably produces concise outputs across inputs. The accuracy drop remains within  $\sim 10\%$  relative to the base, demonstrating that trimming reasoning does not degrade correctness. Importantly, this suggests that much of the verbose reasoning generated by standard CoT models is redundant: the essential logical steps can be distilled into significantly shorter explanations without loss of predictive power.
+
+![Bar chart showing the percentage of responses with length less than or equal to 8 for Base and Trained models on GSM8K and MATH500 datasets.](bedcca5cdf168e3508ef511d94ec514c_img.jpg)
+
+| Dataset | Base Model (%) | Trained Model (%) |
+|-|-|-|
+| GSM8K | 24.1% | 80.0% |
+| MATH500 | 11.6% | 96.6% |
+
+Bar chart showing the percentage of responses with length less than or equal to 8 for Base and Trained models on GSM8K and MATH500 datasets.
+
+Figure 5: **Conciseness Results.** On GSM8K and MATH500, the length of reasoning traces drops by an order of magnitude, satisfying the desired monitorability property of conciseness, while maintaining an average relative accuracy of approximately 90% compared to the base model across the both the models.
+
+## 6 CONCLUSIONS AND LIMITATIONS
+
+We addressed the challenge of making chains-of-thought (CoTs) *monitorable*, focusing on the dual properties of faithfulness and conciseness. Our analysis revealed that naive reinforcement learning fails because monitorability signals are too sparse under standard policies, leading to vanishing gradients. To overcome this, we introduced a prior-guided framework that transforms raw traces into monitorable versions, providing dense feedback and enabling effective training. Empirical results across MMLU-Pro, GSM8K, and MATH500 demonstrate that our method substantially improves CoT faithfulness and conciseness while maintaining task accuracy.
+
+While our results are promising, several limitations remain. Our framework depends on an external prior (e.g., summarizer or hint-verbalizer) to generate monitorable traces. The quality of improvements, therefore, hinges on the strength and reliability of this prior, which could introduce biases or artifacts. Our faithfulness metric relies partly on LLM-as-a-judge evaluations, which, while practical, may inherit subjectivity from the judging model. More rigorous human or multi-judge validation would strengthen the work and is a valid scope of future research.
+
+![Two line graphs showing the distribution of thinking lengths for Base and Trained models on GSM8K and MATH500 datasets.](0d5fdb87a392819c7d2e3b6230912a0b_img.jpg)
+
+The figure contains two line graphs. The left graph is for the GSM8K dataset, with the x-axis labeled 'Thinking Length' ranging from 0 to 200 and the y-axis labeled 'Number of Responses' ranging from 0 to 1.5. The right graph is for the MATH500 dataset, with the x-axis labeled 'Thinking Length' ranging from 0 to 1500 and the y-axis labeled 'Number of Responses' ranging from 0 to 1. Both graphs show two curves: a blue curve for 'Base Model Length' and an orange curve for 'Trained Model Length'. In both cases, the orange curve is shifted significantly to the left of the blue curve, indicating a reduction in thinking length.
+
+Two line graphs showing the distribution of thinking lengths for Base and Trained models on GSM8K and MATH500 datasets.
+
+Figure 6: **Thinking length distributions.** The trained model’s distribution shifts left relative to the base on GSM8K and MATH500, indicating a substantial reduction in reasoning length (see also Fig. 5).
+
+{9}------------------------------------------------
+
+## 7 ETHICS STATEMENT
+
+This work uses only publicly available datasets and does not involve the collection of any personally identifiable or sensitive information. All experiments were conducted in accordance with ethical research standards, and we do not anticipate any direct negative societal impacts from the methods proposed.
+
+## 8 REPRODUCIBILITY STATEMENT
+
+We are committed to ensuring the reproducibility of our results. All model architectures, training procedures, and hyperparameters are described in detail in Sections A.1 and Section 5. To facilitate replication, we will release our code and configuration files along with instructions for reproducing all reported experiments.
+
+## REFERENCES
+
+- Pranjal Aggarwal and Sean Welleck. L1: Controlling how long a reasoning model thinks with reinforcement learning. *arXiv preprint arXiv:2503.04697*, 2025. 3
+- Iván Arcuschin, Jett Janiak, Robert Krzyzanowski, Senthooran Rajamanoharan, Neel Nanda, and Arthur Conmy. Chain-of-thought reasoning in the wild is not always faithful. *arXiv preprint arXiv:2503.08679*, 2025. 1, 3
+- Daman Arora and Andrea Zanette. Training language models to reason efficiently. *arXiv preprint arXiv:2502.04463*, 2025. 3, 4, 9, 12
+- Bowen Baker, Joost Huizinga, Aleksander Madry, Wojciech Zaremba, Jakub Pachocki, and David Farhi. Monitoring reasoning models for misbehavior and the risks of promoting obfuscation. march 2025. URL <https://openai.com/index/chain-of-thought-monitoring>, 2025. 1, 3
+- Sudarshan Kamath Barkur, Sigurd Schacht, and Johannes Scholl. Deception in llms: Self-preservation and autonomous goals in large language models. *arXiv preprint arXiv:2501.16513*, 2025. 1
+- Yanda Chen, Ruiqi Zhong, Narutatsu Ri, Chen Zhao, He He, Jacob Steinhardt, Zhou Yu, and Kathleen McKeown. Do models explain themselves? counterfactual simulatability of natural language explanations. *arXiv preprint arXiv:2307.08678*, 2023. 1, 3
+- Yanda Chen, Joe Benton, Ansh Radhakrishnan, Jonathan Uesato, Carson Denison, John Schulman, Arushi Somani, Peter Hase, Misha Wagner, Fabien Roger, et al. Reasoning models don’t always say what they think. *arXiv preprint arXiv:2505.05410*, 2025. 1, 3, 4, 7, 8, 13
+- James Chua and Owain Evans. Are deepseek r1 and other reasoning models more faithful? *arXiv preprint arXiv:2501.08156*, 2025. 1, 3
+- Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, et al. Training verifiers to solve math word problems. *arXiv preprint arXiv:2110.14168*, 2021. 8
+- Gheorghe Comanici, Eric Bieber, Mike Schaeckermann, Ice Pasupat, Noveen Sachdeva, Inderjit Dhillon, Marcel Blistein, Ori Ram, Dan Zhang, Evan Rosen, et al. Gemini 2.5: Pushing the frontier with advanced reasoning, multimodality, long context, and next generation agentic capabilities. *arXiv preprint arXiv:2507.06261*, 2025. 3
+- Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiao Bi, et al. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning. *arXiv preprint arXiv:2501.12948*, 2025. 3
+- Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the math dataset. *arXiv preprint arXiv:2103.03874*, 2021. 4
+
+ Rest of paper (reference and Appendix) is removed.

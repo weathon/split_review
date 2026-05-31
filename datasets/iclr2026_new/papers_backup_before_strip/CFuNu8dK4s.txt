@@ -1,0 +1,852 @@
+
+
+{0}------------------------------------------------
+
+# --- VIDAR: EMBODIED VIDEO DIFFUSION MODEL FOR GENERALIST MANIPULATION
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Scaling general-purpose manipulation to new robot embodiments remains challenging: each platform typically needs large, homogeneous demonstrations, and end-to-end pixel-to-action pipelines may degenerate under background and viewpoint shifts. Based on previous advances in video-based robot control, we present Vidar, consisting of an embodied video diffusion model as the generalizable prior and a masked inverse dynamics model (MIDM) as the adapter. We leverage a video diffusion model pre-trained at Internet scale, and further continuously pre-train it for the embodied domain using 750K multi-view trajectories collected from three real-world robot platforms. For this embodied pre-training, we introduce a unified observation space that jointly encodes robot, camera, task, and scene contexts. The MIDM module learns action-relevant pixel masks without dense labels, grounding the prior into the target embodiment’s action space while suppressing distractors. With only  $\sim 20$  minutes of human demonstrations on an unseen robot ( $\sim 1\%$  of typical data), Vidar outperforms state-of-the-art baselines and generalizes to unseen tasks, backgrounds, and camera layouts. Our results suggest a scalable recipe for “one prior, many embodiments”: strong, inexpensive video priors together with minimal on-robot alignment.
+
+## 1 INTRODUCTION
+
+Robotic manipulation spans skills such as stable object handling, in-hand reorientation, and multi-point contact control—capabilities underlying cloth folding, liquid pouring, and tool-assisted assembly. Vision-language-action (VLA) models (O’Neill et al., 2024; Kim et al., 2024; Liu et al., 2024a; Zhang & Yan, 2023) have made encouraging progress via large-scale multimodal pre-training, yet extending them to general-purpose or bimanual settings remains difficult. The core obstacle is control complexity: the action space grows combinatorially with added joints, while success hinges on tight temporal coordination, accurate contact dynamics, and long-horizon reasoning. These factors amplify data requirements and heighten sensitivity to platform-specific details. In practice, progress is constrained by **data scarcity**: human demonstration corpora typically contain only tens to hundreds of hours (Intelligence et al., 2025; Liu et al., 2024a), orders of magnitude smaller than Internet-scale video collections with hundreds of thousands of hours (Wang et al., 2024). Collecting demonstrations is labor-intensive, expensive, and coupled to hardware, leaving a key question: *how can a new robot embodiment achieve precise, generalizable control with limited domain-specific data?*
+
+A natural answer lies in *video*. Unlike text or static images, video is both abundant and intrinsically suited to capture the temporal dynamics and interaction cues—affordances, contacts, motion continuity—that demonstrations aim to convey. Leveraging such signals enables robots to acquire embodiment-agnostic interaction knowledge at scale, and later specialize to new morphologies with far fewer platform-specific samples. To turn this rich modality into a transferable prior, we adopt video generative models, which learn distributions of *plausible, temporally coherent rollouts* rather than task-specific labels. This generative formulation enforces physical consistency, supports counterfactual reasoning about “what could happen next”, and shifts dependence from costly demonstrations to abundant raw video. Recent advances in video diffusion models trained on web-scale corpora already show strong semantic grounding and temporal fidelity (Liu et al., 2024b; Wang et al., 2025; Kong et al., 2024; Bao et al., 2024), making them well-suited to serve as general interaction priors for low-shot embodiment alignment. Meanwhile, for robot control, our objective departs from vanilla
+
+{1}------------------------------------------------
+
+054 video diffusion. Rather than producing photorealistic clips, we require *actionable* rollouts that are  
+055 consistent with robot actuation, accurate in contact dynamics, and robust across embodiments.
+
+056  
+057 **Based on previous advances in using video generative models for robot control (Du et al., 2023), we**  
+058 **propose Video Diffusion for Action Reasoning (Vidar)**, to better explore the transferable prior from  
+059 videos for efficient bimanual manipulation with decoupled video generation and action prediction. To  
+060 build a good video prior for embodied control, we propose a three-stage training pipeline: Internet-  
+061 scale videos are used for general pre-training (where off-the-shelf checkpoints can be adopted), large  
+062 cross-embodiment robotic datasets are used for embodied domain pre-training, and a small number  
+063 of robot-specific demonstrations are used for target domain fine-tuning. Specifically for embodied  
+064 domain pre-training, we align 750K multi-view bimanual clips spanning three robot platforms into a  
+065 unified observation space. Such pre-training on a unified space ensures control feasibility, promotes  
+066 physically credible contacts, and mitigates viewpoint and morphology gaps. **During inference, we**  
+067 **further enhance rollout quality (e.g., physical plausibility, instruction relevance) by applying test-time**  
+068 **scaling (Jaech et al., 2024).**
+
+069  
+070 On the action side, the main challenge is to decode videos into reliable controls despite background  
+071 clutter, distractors, and partial observability of hands and tools. We address this with a **Masked**  
+072 **Inverse Dynamics Model (MIDM)**, which learns to attend selectively to action-relevant regions  
+073 without pixel-level supervision. By filtering out irrelevant content, MIDM provides robust action  
+074 decoding and facilitates the transfer of video priors across domains. Moreover, such a lightweight  
+075 model can be trained using only a small number of demonstrations. Together, these components  
+076 transform raw Internet video into a transferable and controllable prior, enabling precise manipulation  
+077 with only a small number of demonstrations.
+
+078  
+079 **Empirically, Vidar achieves state-of-the-art performance on the RoboTwin (Chen et al., 2025) bench-**  
+080 **mark through the challenging multi-task setting.** In the real world, it attains strong performance  
+081 with only **20 minutes of human demonstrations** (roughly 3 per task) on a previously unseen robotic  
+082 platform. Despite this minimal supervision, it outperforms leading baselines by large margins—**58%**  
+083 **over VPP (Hu et al., 2024) and 40% over UniPi (Du et al., 2023).** Moreover, it generalizes robustly  
+084 to novel scenarios, such as environments with reflective surfaces, indicating that video-pretrained  
+085 priors can support both data-efficient adaptation and semantically grounded control.
+
+###### 086 2 METHOD
+
+087  
+088 In this section, we formally define our problem and present Vidar in detail. The overview of our  
+089 method is shown in Figure 1.
+
+###### 090 2.1 PROBLEM FORMULATION
+
+091  
+092 This work investigates the challenges of bimanual manipulation for everyday activities, tasks that  
+093 are inherently resistant to standardization. Our experiments are conducted using the common Aloha  
+094 robot platform (Liu et al., 2024a; Fu et al., 2024), with detailed hardware specifications given in  
+095 Appendix F. The problem is formulated as follows.
+
+096  
+097 Let  $\mathcal{L}$  denote the language instruction space,  $\mathcal{O}$  the observation space, and  $\mathcal{A}$  the action space. Our  
+098 goal is to learn a conditional manipulation policy
+
+$$099 \quad \pi : \mathcal{L} \times \mathcal{O} \rightarrow \mathbb{P}(\mathcal{A}),$$
+
+100  
+101 where  $\mathbb{P}(\cdot)$  denotes probability measures over the corresponding space. Learning this policy directly  
+102 is highly challenging. It requires large-scale demonstrations that jointly cover language, observa-  
+103 tion, and action, which are expensive and hardware-specific. Moreover, robots differ in sensing,  
+104 morphology, and viewpoints, making policies learned on one platform difficult to transfer. Finally,  
+105 successful manipulation depends on fine-grained contact events and long-horizon temporal coherence;  
+106 photorealistic video generation alone does not guarantee *actionability*.
+
+107  
+108 We address these challenges by elevating the action space to the video domain, where richer semantic  
+109 information is preserved and an abundance of large-scale data is available for learning a strong,  
+110 transferable prior. We factorize the policy through the video space  $\mathcal{V}$ :
+
+$$111 \quad \pi = I \circ G, \quad G : \mathcal{L} \times \mathcal{O} \rightarrow \mathbb{P}(\mathcal{V}), \quad I : \mathcal{V} \rightarrow \mathcal{A}.$$
+
+{2}------------------------------------------------
+
+108  
+109  
+110  
+111  
+112  
+113  
+114  
+115  
+116  
+117  
+118  
+119  
+120  
+121  
+122  
+123  
+124  
+125  
+126  
+127  
+128  
+129  
+130  
+131  
+132  
+133  
+134  
+135  
+136  
+137  
+138  
+139  
+140  
+141  
+142  
+143  
+144  
+145  
+146  
+147  
+148  
+149  
+150  
+151  
+152  
+153  
+154  
+155  
+156  
+157  
+158  
+159  
+160  
+161
+
+![Figure 1: Overall pipeline of Vidar. The diagram is divided into three main sections. Top-left: 'Stage 1: Pre-train' shows four video frames from Agbot, RDT, Robomind Franka, and Robomind Aloha, with a label '~ 750K Episodes'. Top-middle: 'Stage 2: Fine-tune' shows a sequence of video frames from a robot arm, with a label '232 Episodes / 20 Minutes'. Top-right: 'Unified Observation Space' shows a 'Video' frame and a 'Language' box containing 'Robot', 'Camera', and 'Task'. Below these, a flow diagram shows 'Mask Prediction' and 'Action Regression' components leading to 'MIDM'. Bottom: A linear pipeline shows 'Image + Instruction' → 'Embodied Video Foundation Model' → 'Test-time Scaling' → 'Masked Inverse Dynamics Model' → 'Action' (represented by a hand icon).](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+Figure 1: Overall pipeline of Vidar. The diagram is divided into three main sections. Top-left: 'Stage 1: Pre-train' shows four video frames from Agbot, RDT, Robomind Franka, and Robomind Aloha, with a label '~ 750K Episodes'. Top-middle: 'Stage 2: Fine-tune' shows a sequence of video frames from a robot arm, with a label '232 Episodes / 20 Minutes'. Top-right: 'Unified Observation Space' shows a 'Video' frame and a 'Language' box containing 'Robot', 'Camera', and 'Task'. Below these, a flow diagram shows 'Mask Prediction' and 'Action Regression' components leading to 'MIDM'. Bottom: A linear pipeline shows 'Image + Instruction' → 'Embodied Video Foundation Model' → 'Test-time Scaling' → 'Masked Inverse Dynamics Model' → 'Action' (represented by a hand icon).
+
+Figure 1: The overall pipeline of Vidar, where various video sources are leveraged for transferring to a new platform with limited demonstrations. A unified observation space handles heterogeneous, multi-view robotic videos and language instructions, enabling the pre-training of an embodied foundation video model on about 750,000 multi-view bimanual robotic episodes. After fine-tuning it with only 20 minutes of human demonstrations on an unseen robot platform, we adopt test-time scaling to select the best video during inference. Meanwhile, the masked inverse dynamics model (MIDM) converts videos to actions, where masks are learned to attend to action-relevant regions for background-robust action regression.
+
+Here,  $G$  is a video generation model that produces temporally coherent, physically plausible rollouts conditioned on task and observations, while  $I$  is an inverse dynamics model that maps short video windows into robot-specific controls. This two-stage design shifts most of the representation burden to  $G$ , which can be pretrained on abundant Internet and robotic video, and leaves only a lightweight  $I$  to be trained with limited demonstrations on the target platform.
+
+Concretely,  $G$  is conditioned on proprioceptive traces and embodiment tokens, and trained on 750K multi-view bimanual clips from three robot platforms, aligned into a unified observation space. This ensures that generated rollouts remain feasible under different morphologies and camera setups, and that contact and motion continuity are preserved. At inference, test-time scaling (Jaech et al., 2024) with physics-aware reranking further improves temporal coherence and physical plausibility. The inverse dynamics component  $I$  is instantiated as a **Masked Inverse Dynamics Model (MIDM)**, which learns to attend to action-relevant regions such as hands, tools, and contact patches without pixel-level labels. By filtering out background clutter and distractors, MIDM provides robust action decoding and enables effective transfer of video priors across domains.
+
+This formulation directly addresses the identified challenges: large-scale video pretraining reduces the need for triply-labeled demonstrations; conditioning and unified observation mitigate embodiment shifts; contact- and flow-consistent objectives make rollouts actionable; and MIDM grounds them to the target robot with few demonstrations. Together, these design choices turn raw video into transferable interaction priors that enable efficient and precise adaptation to new robotic embodiments.
+
+### 2.2 VIDEO GENERATION MODEL
+
+We adopt rectified flow (Lipman et al., 2023; Liu et al., 2023) models, which generate high-quality videos by modeling pixel flow over time. Specifically, the model parameterizes a flow function  $v: \mathcal{V} \times \mathbb{R} \times \mathcal{L} \rightarrow \tilde{\mathcal{V}}$ , which models the velocity of pixels as they transition from noisy video frames to target frames under certain conditions and time, leading to the following ODE over a video  $x_t$
+
+{3}------------------------------------------------
+
+162 (with  $x_0$  sampled from a Gaussian and  $x_1$  as the output video):
+
+$$163 \quad \frac{dx_t}{dt} = v(x_t, t, c), \quad t \in [0, 1]. \quad (1)$$
+
+164  
+165  
+166 To learn the non-trivial mapping between the Gaussian distribution and the video distribution, we  
+167 train the “velocity”  $v$  to approximate the constant flow from  $x_0$  to  $x_1$  during training. The flow  
+168 matching loss is:
+
+$$169 \quad 170 \quad S_{GM} = \mathbb{E}_{c,t,x_0,x_1} \left[ \left\| (x_1 - x_0) - v(tx_1 + (1-t)x_0, t, c) \right\|^2 \right]. \quad (2)$$
+
+171  
+172 **Unified Observation Space.** To mitigate viewpoint and morphology gaps between heterogeneous  
+173 embodiments, we design a unified observation space for multi-view embodied data. **The space does**  
+174 **not include actions: the video diffusion model only learns world evolution, allowing it to generalize**  
+175 **efficiently across robots with different morphologies.** Denoting the maximum number of cameras as  
+176  $V$ , we can define a unified observation space  $\mathcal{U} \subseteq \mathcal{L} \times \mathcal{O}$  (also see Figure 1):
+
+$$177 \quad 178 \quad \mathcal{U} = \{(\mathbf{o}, \mathbf{l}) | \mathbf{o} = \text{aggregate}(\mathbf{I}^{(1)}, \mathbf{I}^{(2)}, \dots, \mathbf{I}^{(V)}), \mathbf{l} = \text{concatenate}(l_r, l_c, l_t)\}, \quad (3)$$
+
+179 where  $\text{aggregate}(\mathbf{I}^{(1)}, \mathbf{I}^{(2)}, \dots, \mathbf{I}^{(V)})$  is the aggregation of image views (some views may be missing),  
+180 and  $l_r, l_c$ , and  $l_t$  are instructions related to the robotic platform, camera, and task, respectively.  
+181 Specifically, each observation  $\mathbf{o}$  is constructed as  $\mathbf{o} = \bigoplus_{k=1}^V \phi_{r_k}(\mathbf{I}^{(k)})$ , where  $\mathbf{I}^{(k)}$  is the RGB image  
+182 from camera  $k$ ,  $\phi_{r_k}$  is a spatial resizing function. This operation produces a consistent tensor shape  
+183 across platforms and preserves both semantic and kinematic context. Instead of relying solely on  
+184 task information and a single view, we condition the video generation model on the robot, camera,  
+185 task information, and multiple views, thereby providing rich context for video prediction with unified  
+186 representations across heterogeneous embodiments.
+
+187  
+188 **Embodied Pre-training and Fine-tuning on Unified Observation Space.** We pre-train our video  
+189 generation model on a large-scale corpus of approximately 750K open-sourced episodes, all projected  
+190 to the unified observation space (Equation (3)). This dataset includes three camera views, a  
+191 configuration commonly adopted in bimanual setups (Fu et al., 2024; AgiBot-World-Contributors  
+192 et al., 2025) to provide abundant context information for precise control. At fine-tuning time, we apply  
+193 supervised fine-tuning (SFT) on all model parameters using a small number of human demonstration  
+194 episodes collected from the target platform. To ensure precise adaptation without overfitting, we  
+195 augment the dataset by clipping variable-length videos from random starting points. In this way, the  
+196 limited domain-specific data is fully used, and the model learns to predict videos at various states.
+
+197 **Test-time Scaling.** Test-Time Scaling (TTS) refers to using additional test-time compute to improve  
+198 performance without retraining the model, which is widely explored in large language models (Muen-  
+199 nighoff et al., 2025). Diffusion-based video generation is inherently stochastic, resulting in significant  
+200 variance in the quality, physical plausibility, and task relevance of sampled rollouts. Naively sampling  
+201 a single trajectory may result in incoherent or suboptimal generations, especially in cluttered or  
+202 ambiguous scenes. To address this, we propose a test-time scaling strategy: given an observation  
+203 prefix  $\mathbf{o}_1$ , we generate  $K$  candidate video trajectories  $\{\tilde{\mathbf{v}}_{1:T}^{(i)}\}_{i=1}^K$  using different random seeds. We  
+204 then rank these trajectories using a pretrained evaluator (e.g., CLIP or a vision-language model)  $q_\eta$   
+205 and select the highest-scoring one, i.e.,  $\arg \max_i q_\eta(\tilde{\mathbf{v}}_{1:T}^{(i)})$ . This approach aligns the predicted video  
+206 distribution with task-relevant, actionable videos through “rejection sampling”, reducing sampling  
+207 variance and consistently improving the quality of generated demonstrations.
+
+###### 208 2.3 MASKED INVERSE DYNAMICS MODEL
+
+209  
+210 Inverse dynamics models often suffer from poor generalization due to the presence of background  
+211 noise, texture biases, and visual distractions in high-dimensional observations (Tan et al., 2025).  
+212 Explicitly localizing action-relevant regions is challenging without dense annotations, and existing  
+213 segmentation methods (Yuan et al., 2025) often fail to capture both arms in the bimanual settings, let  
+214 alone produce temporally consistent segmentations (see Figure 6 in Appendix C). **While prior work**  
+215 **has explored information-theoretic formulations of state-space models (Nguyen et al., 2021), scaling**  
+216 **to high dimensions remains challenging.**
+
+{4}------------------------------------------------
+
+To solve the problem, we introduce a masked inverse dynamics model (MIDM) that learns to focus on task-relevant regions via implicit mask prediction. The model consists of two components: (1) a mask prediction network  $U$  that outputs a spatial mask  $m \in \{0, 1\}^{H \times W}$  from an input frame  $x$ , and (2) an action regression network  $R$  that predicts the action from the masked frame. Formally:
+
+$$m = U(x), \quad \hat{a} = R(\text{Round}(m) \odot x),$$
+
+where  $\odot$  denotes element-wise multiplication, and  $\text{Round}(\cdot)$  means rounding to the nearest integer. The model is trained by minimizing the following loss:
+
+$$L_I = \mathbb{E}_{x,a} [l(\hat{a} - a) + \lambda \|m\|_1],$$
+
+where  $l(\cdot)$  is the Huber loss. The second  $\ell_1$ -norm regularization term promotes spatial sparsity, encouraging the model to focus on minimal, task-critical regions without any segmentation supervision. We train it using straight-through estimators. Notably, this framework is not restricted to predicting embodiment-specific actions; embodiment-agnostic actions can also be predicted.
+
+By utilizing reliable action signals as supervision, rather than noisy annotations, this lightweight module demonstrates robust generalization to unseen environments and backgrounds with limited demonstrations, as evidenced by our experimental results (Section 3).
+
+## 3 EXPERIMENTS
+
+We now present experimental studies, with the goal to verify the following hypotheses:
+
+- H1:** Vidar achieves superior success rates with only 20 minutes of target domain demonstrations;
+- H2:** Vidar generalizes effectively to unseen tasks and backgrounds;
+- H3:** Pre-training with a unified observation space benefits embodied video generation;
+- H4:** Masked inverse dynamics models exhibit greater generalization ability than the baseline.
+
+### 3.1 EXPERIMENTAL SETUP
+
+#### 3.1.1 DATASETS
+
+Our pre-training data integrates episodes sourced from Agibot-World (Agibot-World-Contributors et al., 2025), RoboMind (Wu et al., 2024b), and RDT (Liu et al., 2024a). The resulting dataset for real-world experiments comprises 746,533 episodes. For the simulation experiments, we additionally add episodes from Egodex (Hoque et al., 2025).
+
+For adaptation to *unseen* platforms, we collect target robot data in both the simulation and real-world domains. For the simulation domain, we employ two configurations: a low data setting and a standard one. In the low data setting, we collect 20 episodes per task using the Aloha (agilex) robot with an adjusted camera to fully capture the robot arms, under clean scenarios of the RoboTwin platform (Chen et al., 2025). In the standard data setting, we follow the leaderboard of RoboTwin by collecting 50 episodes per task with original camera viewpoints, where partial arm occlusion occurs more frequently. For the real-world domain, we collect 20 minutes of human demonstration videos, covering 81 tasks across 232 episodes.
+
+All datasets collected consist of descriptions of the robot type and camera placements, as well as task instructions, as is required by the unified observation space. The collected embodiment-specific dataset is used both for fine-tuning the video diffusion model and training the masked inverse dynamics model. Notably, all these target domains are unseen during pre-training. Further details of our dataset can be found in Appendix A.
+
+#### 3.1.2 TRAINING AND INFERENCE
+
+We evaluate our method using two representative video generation models (with off-the-shelf checkpoints pre-trained on Internet-scale videos): the open-source Wan2.2 (Wang et al., 2025) for simulation experiments, and Vidu 2.0 (Bao et al., 2024) for the more diverse and challenging real-world tests. We use their pre-trained checkpoints and continue pre-training the models with a batch size of 128. The first 10,000 steps involve pre-training on the diverse robotics dataset, followed by 12,000
+
+{5}------------------------------------------------
+
+fine-tuning steps for Wan2.2 and 13,000 fine-tuning steps for Vidu 2.0. To reduce inference costs, we uniformly downsample the training videos to 8 frames per second (fps). For the masked inverse dynamics model, we adopt the U-Net (Ronneberger et al., 2015) structure as the mask prediction network and the ResNet (Xu et al., 2024) structure as the action regression network, with  $\lambda = 3 \times 10^{-3}$  (effects of  $\lambda$  are shown in Appendix C). We train it exclusively on the fine-tuning dataset. We use AdamW (Loshchilov & Hutter, 2019) for all our training. Here are some detailed settings of real-world experiments.
+
+We use open-loop control for Vidar; the videos are generated in a single batch, without subsequent generation after the initial run. Using 8 NVIDIA Ampere-series 80GB GPUs, generating one video with 60 frames (7.5 seconds duration at 8fps) costs about 25 seconds. The time cost can be reduced using distillation or quantization, which are beyond the scope of this paper. For test-time scaling, we choose  $K = 3$ , and three videos with different random seeds are generated in parallel, evaluated by GPT-4o (Hurst et al., 2024). Additionally, we disable test-time scaling for simulation experiments for better reproducibility. More details of training and inference can be found in Appendix B.
+
+#### 3.1.3 BASELINES
+
+For simulation experiments, we choose Pi0.5 (Intelligence et al., 2025) as our baseline. For real-world experiments, we perform preliminary experiments over multiple baselines and find that adaptation with only 20 minutes of videos and about 3 demonstrations per task is too challenging for vision-language-action models. Thus, we choose two baselines that also incorporate video-level prior knowledge: UniPi and VPP. To ensure fair comparison, we reproduce these methods over the advanced Vidu 2.0 model. We also compare Vidar (built on Wan 2.2) with Pi0.5 using a larger real-world dataset for completeness; the results are provided in Appendix D.
+
+**Pi0.5.** We use the official checkpoint of Pi0.5, which has already been pre-trained on more than 10k hours of robot data, and follow the official framework to finetune the base model on multi-task demonstration data.
+
+**UniPi.** We follow the official framework by fine-tuning the Vidu 2.0 model directly on our demonstration data and training an inverse dynamics model using a ResNet-based architecture.
+
+**VPP.** We use the same checkpoint for the video generation model as Vidar, because VPP mainly focuses on how to use a given video generation model. Additionally, we train a diffusion model to generate short action sequences based on the latent features during one-step video generation and CLIP (Radford et al., 2021) embeddings of the task instructions. Notably, they use closed-loop control, which means new action sequences are generated and executed after previous executions.
+
+### 3.2 EXPERIMENTAL RESULTS
+
+**H1: Success Rates.** For the simulation experiments, we evaluate our method on the RoboTwin 2.0 (Chen et al., 2025) benchmark using the more challenging multi-task setting (in contrast, the official leaderboard trains a separate policy for each task), and the results for two data settings are summarized in Table 1. Compared to the strong baseline Pi0.5 (Intelligence et al., 2025), our method achieves a state-of-the-art average success rate across all scenarios. More detailed results can be found in Appendix C.
+
+For real-world experiments, we test two baseline methods and our method under three scenarios: seen task and background (six tasks), unseen task (five tasks), and unseen background (six tasks). Detailed explanations are as follows:
+
+- **Seen Tasks & Backgrounds:** three pick-and-place tasks (e.g., grasp the tomato using the left arm), two daily-life tasks (e.g., flip a dice using the right arm), and one bimanual task (lift the basket). The background we use is a cluttered office desk setup, featuring several computers situated behind the workspace.
+- **Unseen Tasks:** three daily-life tasks (e.g., stack the bowl on the steamer using the left arm) and two semantic tasks (e.g., grasp the shortest bread using the left arm).
+
+{6}------------------------------------------------
+
+Table 1: Average success rates across 50 tasks, 100 episodes for the RoboTwin benchmark. Vidar consistently surpasses the strong Pi0.5 baseline across all settings and scenarios. The Pi0 results are taken directly from the official leaderboard, where each task is trained and evaluated independently under standard data settings, making them easier and not directly comparable.
+
+| Data Regime | Low |  | Standard |  |
+|-|-|-|-|-|
+| Scenario | Clean | Randomized | Clean | Randomized |
+| Pi0* | - | - | 46.42% | 16.34% |
+| Pi0.5 | 25.0% | 9.2% | 44.8% | 14.2% |
+| <b>Vidar (Ours)</b> | <b>60.0%</b> | <b>15.7%</b> | <b>65.8%</b> | <b>17.5%</b> |
+
+- **Unseen Backgrounds:** two pick-and-place tasks (e.g., grasp a tomato using the left arm) and four daily-life tasks (e.g., flip a dice using the left arm). For unseen backgrounds, we include a studio setup with a typical green screen and a daily workspace setting with two cupboards containing robot supplies, which exhibit reflective surfaces.
+
+The success rates are shown in Table 2. We find that our method achieves superior success rates over all three scenarios, demonstrating the effectiveness of our method. UniPi does not utilize heterogeneous robotic data, which restricts its generalization under limited demonstrations; VPP uses predicted features from a single denoising forward pass for action prediction, which leads to noise and instability—particularly in unseen environments. More details can be found in Appendix C.
+
+Table 2: Success rates of different methods and configurations over robot manipulation tasks. Vidar achieves high success rates across all three scenarios, with great generalization ability to unseen tasks and backgrounds.
+
+| Method | Seen Tasks & Backgrounds | Unseen Tasks | Unseen Backgrounds |
+|-|-|-|-|
+| VPP | 4.5% | 13.3% | 0.0% |
+| UniPi | 36.4% | 6.7% | 22.2% |
+| <b>Vidar (Ours)</b> | <b>68.2%</b> | <b>66.7%</b> | <b>55.6%</b> |
+
+To further demonstrate the generality of our approach, we also perform additional real-world experiments using the open-sourced Wan2.2 and HunyuanVideo models (Kong et al., 2024). Notably, Vidar surpasses Pi0.5, achieving a 35% higher average success rate on the 7 seen tasks and a 54% higher success rate on the 7 unseen tasks. Related results are provided in Appendix D.
+
+**H2: Generalization Ability.** For the simulation benchmark, we show that our model generalizes effectively to randomized scenarios, despite being trained only on clean scenarios (see Appendix C). For real-world experiments, quantitative results of our superior generation ability are shown in unseen scenarios of Table 2. We also provide some demonstrations in Figure 2, where Vidar demonstrates robust generalization to unseen tasks and backgrounds with strong semantic understanding. In Appendix E, we present more visualizations, including failure cases.
+
+**H3: Effectiveness of Pre-training.** We evaluate the video generation quality of the original Vidu 2.0 model and our pre-trained version over the unseen target domain using VBench (Huang et al., 2024). As is shown in Table 3, we find that pre-training using large-scale robotic videos under our unified observation space enhances both the consistency and quality of generated frames, which are important for robot control tasks.
+
+**H4: Effectiveness of MIDM.** Based on empirical observations of the Aloha robot’s error tolerances, we define a successful prediction as having a maximum infinity norm error of less than 0.06 for joint positions and less than 0.6 for gripper positions, for both arms. Using this criterion, we evaluate the success rates of our masked inverse dynamics model (MIDM) and a ResNet baseline on both training and testing sets. The results, presented in Table 4, show that our MIDM demonstrates superior generalization compared to the baseline. Additionally, examples of the learned masks are provided in
+
+{7}------------------------------------------------
+
+378  
+379  
+380  
+381  
+382  
+383  
+384  
+385  
+386  
+387  
+388  
+389  
+390  
+391  
+392  
+393  
+394  
+395  
+396  
+397  
+398  
+399  
+400  
+401  
+402  
+403  
+404  
+405  
+406  
+407  
+408  
+409  
+410  
+411  
+412  
+413  
+414  
+415  
+416  
+417  
+418  
+419  
+420  
+421  
+422  
+423  
+424  
+425  
+426  
+427  
+428  
+429  
+430  
+431
+
+![Figure 2: Comparison of Video Prediction and Real-world Execution for four tasks: Grasp the Red Apple, Grasp the Blue Cube, Lift the dish, and Clean the bowl. Each task shows three frames (#0, #1, #2) of the robot's action.](892f25e3d71d8e315a2a51092a8a8da7_img.jpg)
+
+**Video Prediction**      **Real-world Execution**
+
+**Grasp the Red Apple:** There are multiple red objects on the table. The robot is instructed to grasp the red apple using its left arm. The robot needs to: **(0) identify the red apple among all red objects**, **(1) secure its hold on the apple**, **(2) lift the apple as required**.
+
+**Grasp the Blue Cube:** There are multiple cubes of different colors on the table. The robot is instructed to grasp the blue cube using its right arm. The robot needs to: **(0) identify the blue cube among all cubes**, **(1) secure its hold on the cube**, **(2) lift the cube as required**.
+
+**Lift the dish:** There is a green dish on the **unseen table** in front of the **unseen cupboard**. The robot is instructed to lift the dish using both arms. The robot needs to: **(0) align the grippers with the edge of the dish**, **(1) secure its hold on the dish**, **(2) lift upwards simultaneously**.
+
+**Clean the bowl:** There is a pink bowl and a sponge on the **unseen table** in front of the **unseen cupboard**. The robot is instructed to clean the bowl using both arms. The robot needs to: **(0) align the grippers with two objects**, **(1) secure its hold**, **(2) lift upwards simultaneously**.
+
+Figure 2: Comparison of Video Prediction and Real-world Execution for four tasks: Grasp the Red Apple, Grasp the Blue Cube, Lift the dish, and Clean the bowl. Each task shows three frames (#0, #1, #2) of the robot's action.
+
+Figure 2: Videos of predictions (left) and corresponding executions (right) of Vidar for challenging tasks. It can handle unseen tasks and unseen backgrounds with strong semantic understanding.
+
+Table 3: VBench video quality measurements for different video model configurations in the unseen target domain. Embodied pre-training over the unified observation space benefits video generation.
+
+| Configuration | Subject Consistency | Background Consistency | Imaging Quality |
+|-|-|-|-|
+| Vidu 2.0 | 0.565 | 0.800 | 0.345 |
+| <b>+ Embodied Pre-training</b> | <b>0.855</b> | <b>0.909</b> | <b>0.667</b> |
+
+Figure 3. Without any additional supervision, MIDM effectively captures action-relevant features and generalizes well to unseen backgrounds.
+
+### 3.3 ABLATION STUDY
+
+We conduct an ablation study of our method by evaluating success rates on the same tasks presented in Table 2. The results are summarized in Table 5, where “w/o MIDM” means using the ResNet baseline. We find that both masked inverse dynamics models and test-time scaling are beneficial to the success rates.
+
+{8}------------------------------------------------
+
+Table 4: Training and testing success rates and testing  $l_1$  errors of different inverse dynamics models. Both the baseline and MIDM achieve high performances during training, but MIDM generalizes better during test time.
+
+| Inverse Dynamics Model | Training Accuracy | Testing Accuracy | Testing $l_1$ Error |
+|-|-|-|-|
+| ResNet | <b>99.9%</b> | 24.3% | 0.0430 |
+| <b>MIDM (Ours)</b> | <b>99.9%</b> | <b>49.0%</b> | <b>0.0308</b> |
+
+![Figure 3: Input images and corresponding masked images learned by the masked inverse dynamic model (MIDM). The figure shows two rows of images. Each row consists of an input image of a robotic arm in a kitchen-like environment and a corresponding masked image. The masked images highlight the essential parts of the robotic arms, such as the joints and the end-effector, while ignoring the background and other objects.](0ba998c66ef6a980bac9c0c12e9452bf_img.jpg)
+
+Figure 3: Input images and corresponding masked images learned by the masked inverse dynamic model (MIDM). The figure shows two rows of images. Each row consists of an input image of a robotic arm in a kitchen-like environment and a corresponding masked image. The masked images highlight the essential parts of the robotic arms, such as the joints and the end-effector, while ignoring the background and other objects.
+
+Figure 3: Input images and corresponding masked images learned by the masked inverse dynamic model (MIDM). The two cases are from an unseen background with complex reflective surfaces, while the predicted mask images still focus on the essential parts of robotic arms.
+
+## 4 RELATED WORK
+
+**Vision-Language-Action Models (VLAs).** Vision-Language-Action (VLA) models integrate perception, language understanding, and action generation to enable general-purpose embodied intelligence. However, existing VLA systems rely heavily on large-scale, task-specific datasets—often requiring hundreds of thousands of trajectories—to achieve robust performance. For instance, RT-1 (Brohan et al., 2023) uses 130K real-world episodes, while RT-2 (Zitkovich et al., 2023) scales to 1B image-text pairs. Recent works like OpenVLA (Kim et al., 2024), Octo (Ghosh et al., 2024), Pi0 (Black et al., 2024), and RDT-1B (Liu et al., 2024a) further expand to millions of demonstrations across diverse embodiments. Despite these efforts, such data-intensive pipelines present a scalability bottleneck and limit generalization to novel tasks and domains, motivating more data-efficient and transferable alternatives. However, actions are typically coupled to their VLA models, which constrains efficient transfer to heterogeneous embodiments.
+
+**Coupled Video Generation and Action Synthesis.** Recent efforts couple video generation with action synthesis to enhance physical consistency and interoperability. For instance, Video-Prediction-Policy (VPP) (Hu et al., 2024) learns implicit inverse dynamics conditioned on future representations predicted by a video diffusion model, while UVA (Li et al., 2025) unifies video-action latent spaces with lightweight diffusion heads. Other works, such as VidMan (Wen et al., 2024), integrate low-level action representations with video prediction to predict actions. These approaches bridge spatiotemporal dynamics between vision and action, offering novel solutions for complex manipulation tasks. However, these approaches require end-to-end joint training of video generation and action prediction models, which limits their flexibility and adaptability.
+
+Table 5: Ablation study of Vidar, where “w/o MIDM” means using the ResNet baseline. In three scenarios, both masked inverse dynamics models and test-time scaling are beneficial to the success rates.
+
+| Configuration | Seen Tasks & Backgrounds | Unseen Tasks | Unseen Backgrounds |
+|-|-|-|-|
+| Vidar w/o TTS | 45.5% | 33.3% | 44.4% |
+| Vidar w/o MIDM | 59.1% | 26.7% | 22.2% |
+| <b>Vidar (Ours)</b> | <b>68.2%</b> | <b>66.7%</b> | <b>55.6%</b> |
+
+{9}------------------------------------------------
+
+146  
+147  
+148  
+149  
+150  
+151  
+152  
+153  
+154  
+155  
+156  
+157  
+158  
+159  
+160  
+161  
+162  
+163  
+164  
+165  
+166  
+167  
+168  
+169  
+170  
+171  
+172  
+173  
+174  
+175  
+176  
+177  
+178  
+179  
+180  
+181  
+182  
+183  
+184  
+185  
+186  
+187  
+188  
+189  
+190  
+191  
+192  
+193  
+194  
+195  
+196  
+197  
+198  
+199  
+200  
+201  
+202  
+203  
+204  
+205  
+206  
+207  
+208  
+209  
+210  
+211  
+212  
+213  
+214  
+215  
+216  
+217  
+218  
+219  
+220  
+221  
+222  
+223  
+224  
+225  
+226  
+227  
+228  
+229  
+230  
+231  
+232  
+233  
+234  
+235  
+236  
+237  
+238  
+239  
+240  
+241  
+242  
+243  
+244  
+245  
+246  
+247  
+248  
+249  
+250  
+251  
+252  
+253  
+254  
+255  
+256  
+257  
+258  
+259  
+260  
+261  
+262  
+263  
+264  
+265  
+266  
+267  
+268  
+269  
+270  
+271  
+272  
+273  
+274  
+275  
+276  
+277  
+278  
+279  
+280  
+281  
+282  
+283  
+284  
+285  
+286  
+287  
+288  
+289  
+290  
+291  
+292  
+293  
+294  
+295  
+296  
+297  
+298  
+299  
+300  
+301  
+302  
+303  
+304  
+305  
+306  
+307  
+308  
+309  
+310  
+311  
+312  
+313  
+314  
+315  
+316  
+317  
+318  
+319  
+320  
+321  
+322  
+323  
+324  
+325  
+326  
+327  
+328  
+329  
+330  
+331  
+332  
+333  
+334  
+335  
+336  
+337  
+338  
+339  
+340  
+341  
+342  
+343  
+344  
+345  
+346  
+347  
+348  
+349  
+350  
+351  
+352  
+353  
+354  
+355  
+356  
+357  
+358  
+359  
+360  
+361  
+362  
+363  
+364  
+365  
+366  
+367  
+368  
+369  
+370  
+371  
+372  
+373  
+374  
+375  
+376  
+377  
+378  
+379  
+380  
+381  
+382  
+383  
+384  
+385  
+386  
+387  
+388  
+389  
+390  
+391  
+392  
+393  
+394  
+395  
+396  
+397  
+398  
+399  
+400  
+401  
+402  
+403  
+404  
+405  
+406  
+407  
+408  
+409  
+410  
+411  
+412  
+413  
+414  
+415  
+416  
+417  
+418  
+419  
+420  
+421  
+422  
+423  
+424  
+425  
+426  
+427  
+428  
+429  
+430  
+431  
+432  
+433  
+434  
+435  
+436  
+437  
+438  
+439  
+440  
+441  
+442  
+443  
+444  
+445  
+446  
+447  
+448  
+449  
+450  
+451  
+452  
+453  
+454  
+455  
+456  
+457  
+458  
+459  
+460  
+461  
+462  
+463  
+464  
+465  
+466  
+467  
+468  
+469  
+470  
+471  
+472  
+473  
+474  
+475  
+476  
+477  
+478  
+479  
+480  
+481  
+482  
+483  
+484  
+485  
+486  
+487  
+488  
+489  
+490  
+491  
+492  
+493  
+494  
+495  
+496  
+497  
+498  
+499  
+500  
+501  
+502  
+503  
+504  
+505  
+506  
+507  
+508  
+509  
+510  
+511  
+512  
+513  
+514  
+515  
+516  
+517  
+518  
+519  
+520  
+521  
+522  
+523  
+524  
+525  
+526  
+527  
+528  
+529  
+530  
+531  
+532  
+533  
+534  
+535  
+536  
+537  
+538  
+539
+
+**Video Generation Models for Embodied AI.** Motivated by one implementation of world models (Ha & Schmidhuber, 2018), video generation models for embodied AI also predict future scene dynamics to assist robotic planning and policy learning. Current works such as UniPi (Du et al., 2023), RoboDreamer (Zhou et al., 2024), Gen2Act (Bharadhwaj et al., 2024), CLOVER (Bu et al., 2024), SuSIE (Black et al., 2023), and GR-1 (Wu et al., 2024a) mainly adopt text-conditioned video generation or frame prediction with a fixed single-camera view, demonstrating how a single-arm robot physically compliantly executes a series of actions. Another orthogonal line of research, such as Dreamatite (Liang et al., 2024), focuses on tool use video predictions, where tools serve as mediators to simplify manipulation tasks. Additionally, Genie 2 (Parker-Holder et al., 2024) generates interactive 3D environments via autoregressive latent diffusion, enabling scalable training for embodied agents. These models implicitly encode physical laws through video synthesis, reducing reliance on real-world robotics data. However, current works either remain limited to single-arm robots and rely on a single camera view, or rely on the availability and functionality of specific tools, which restricts their applicability in more complex real-world scenarios; meanwhile, the success of Instant3D (Li et al., 2024) provides a compelling demonstration that the diffusion models can effectively adapt to multi-view formats. Moreover, most existing methods do not utilize heterogeneous embodied videos for pre-training.
+
+## 5 CONCLUSION
+
+We presented Vidar, a generalizable framework for bimanual robotic manipulation that addresses the core challenges of data scarcity and embodiment heterogeneity. By combining large-scale, diffusion-based video pretraining over a unified observation space with a masked inverse dynamics model, Vidar enables accurate action prediction from multi-view visual observations and language instructions, requiring only minimal demonstrations in new environments. Our experiments demonstrate that Vidar consistently outperforms existing methods and exhibits strong generalization to unseen tasks and backgrounds, highlighting its capacity for semantic understanding and transfer.
+
+## 6 ETHICS STATEMENT
+
+Vidar has the potential to accelerate the deployment of capable bimanual robots in real-world environments. However, the rise of generalist robotic systems also introduces important considerations regarding privacy, safety, and accountability, especially as these systems are deployed in sensitive domains involving close human-robot interaction.
+
+## 7 REPRODUCIBILITY STATEMENT
+
+We submit our code, including the HunyuanVideo diffusion model and the masked inverse dynamics model, in the supplemental materials. Meanwhile, the Wan2.2 model that we use is open-sourced and widely available. Appendix A describes our dataset in detail, and Appendix B provides comprehensive information on training and inference. All datasets used for pre-training are publicly available.
+
+ Rest of paper (reference and Appendix) is removed.

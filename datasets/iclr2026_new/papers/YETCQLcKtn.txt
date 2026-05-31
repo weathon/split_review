@@ -1,0 +1,330 @@
+
+
+{0}------------------------------------------------
+
+# POLICYFLOW: POLICY OPTIMIZATION WITH CONTINUOUS NORMALIZING FLOW IN REINFORCEMENT LEARNING
+
+## ABSTRACT
+
+Among on-policy reinforcement learning algorithms, Proximal Policy Optimization (PPO) demonstrates is widely favored for its simplicity, numerical stability, and strong empirical performance. Standard PPO relies on surrogate objectives defined via importance ratios, which require evaluating policy likelihood that is typically straightforward when the policy is modeled as a Gaussian distribution. However, extending PPO to more expressive, high-capacity policy models such as continuous normalizing flows (CNFs), also known as flow-matching models, is challenging because likelihood evaluation along the full flow trajectory is computationally expensive and often numerically unstable. To resolve this issue, we propose **PolicyFlow**, a novel on-policy CNF-based reinforcement learning algorithm that integrates expressive CNF policies with PPO-style objectives without requiring likelihood evaluation along the full flow path. PolicyFlow approximates importance ratios using velocity field variations along a simple interpolation path, reducing computational overhead without compromising training stability. To further prevent mode collapse and further encourage diverse behaviors, we propose the **Brownian Regularizer**, an implicit policy entropy regularizer inspired by Brownian motion, which is conceptually elegant and computationally lightweight. Experiments on diverse tasks across various environments including MultiGoal, PointMaze, IsaacLab and MuJoCo Playground show that PolicyFlow achieves competitive or superior performance compared to PPO using Gaussian policies and flow-based baselines including FPO and DPPO. Notably, results on MultiGoal highlight PolicyFlow’s ability to capture richer multimodal action distributions.
+
+## 1 INTRODUCTION
+
+Reinforcement learning (RL), particularly policy gradient (PG) methods, has achieved remarkable success in complex sequential decision-making tasks, ranging from robotic control (Andrychowicz et al., 2020; Rudin et al., 2022; Cheng et al., 2024; He et al., 2025) to aligning large language models with human preferences (Ouyang et al., 2022; Zhai et al., 2024; Guo et al., 2025). Among PG methods, Proximal Policy Optimization (PPO) (Schulman et al., 2017) remains a standard due to its simplicity and generally reliable performance, widely used in complex robotic control tasks (Lee et al., 2020; Chen et al., 2025), and recently for fine-tuning generative policies (Black et al., 2023; Ren et al., 2024). PPO optimizes policies via surrogate objectives based on importance ratios, which require nontrivial likelihood evaluation. For tractable computation, policies are typically modeled by Gaussian distribution. While convenient, Gaussian policies are limited in representing complex, multimodal, or highly skewed action distributions, motivating the use of more expressive generative models.
+
+In recent years, generative models, such as diffusion models (Ho et al., 2020; Song et al., 2020) and continuous normalizing flows (Lipman et al., 2022; Tong et al., 2023), have emerged as a powerful class of models capable of capturing complex, multimodal distributions. These models have been successfully applied to imitation learning, where they model policy distributions directly from demonstration data (Chi et al., 2023; Ze et al., 2024), effectively capturing trajectory diversity and
+
+{1}------------------------------------------------
+
+complex behaviors. However, computing importance ratios or likelihoods for these models typically requires iterative ODE/SDE simulations and path-wise backpropagation (Chen et al., 2018), which is computationally expensive and prone to exploding or vanishing gradients. This makes direct application of such models in PPO-style updates slow, memory-intensive, and potentially unstable, limiting their practicality for efficient on-policy reinforcement learning.
+
+Motivated by these challenges, we propose **PolicyFlow**, a novel on-policy RL algorithm that combines the expressiveness of continuous normalizing flows with a PPO-style clipped objective, enabling efficient and stable policy optimization. Our contributions are as follows:
+
+- *Importance ratio approximation for CNF policies.* PolicyFlow approximates importance ratios by evaluating the variations of CNF’s velocity field along interpolation paths, avoiding the costly path-wise backpropagation.
+- *Brownian entropy regularization.* We propose a lightweight entropy regularizer inspired by Brownian motion (Einstein, 1905), which promotes monotonic entropy growth, mitigates mode collapse, and encourages diverse actions without explicitly computing the CNF policy’s entropy.
+
+These results demonstrate PolicyFlow’s potential as a practical and expressive framework for on-policy RL.
+
+## 2 RELATED WORK
+
+### 2.1 FLOW/DIFFUSION-BASED REPRESENTATIONS OF RL POLICIES
+
+Flow and diffusion models provide highly expressive, multi-modal distributions, making them attractive as policy parameterizations in reinforcement learning. Compared to conventional categorical or Gaussian policies, these generative models allow richer action distributions and can potentially capture a broader set of behaviors. In robotics, flow-based and diffusion-based models have been widely adopted as policy representations (Chi et al., 2023; Lei et al., 2025; Intelligence et al., 2025; Gao et al., 2025). However, progress has approached a bottleneck, as these models are typically trained solely through denoising score matching or flow matching on offline datasets, without incorporating reinforcement learning. This limitation has motivated researchers to explore using RL to directly train generative policies.
+
+In **offline RL**, diffusion-based policies have been widely adopted to model complex action patterns from static datasets, often guided by value functions or energy-based objectives (Wang et al., 2022; Lu et al., 2023; Psenka et al., 2023; Zhang et al., 2025). These approaches have achieved strong results on D4RL benchmarks and inspired actor-critic variants that couple generative policies with value estimation (Wang et al., 2024; Fang et al., 2024). To address the heavy sampling and computational demands of diffusion models, recent works have also explored more efficient formulations (Kang et al., 2023).
+
+In **online RL**, the setting is more demanding because it requires efficient sampling, stable importance-ratio estimation, and tractable (or well-approximated) likelihoods. Several works (Wang et al., 2024; Chao et al., 2024; Ding et al., 2025) directly backpropagate policy gradients through the full diffusion/flow chain, which enables end-to-end optimization but risks exploding or vanishing gradients. Practical recipes for fine-tuning expressive diffusion policies with policy-gradient-style updates have also been proposed in DPPO (Ren et al., 2024), which enables structured on-manifold exploration and stable long-horizon training. While effective in fine-tuning scenarios, its performance tends to degrade when training from scratch, as off-manifold exploration becomes necessary. FPO (McAlister et al., 2025) instead estimates policy importance ratios through an ELBO objective, which offers a scalable approximation but introduces asymmetric estimation bias—more reliable when the importance ratio increases than when it decreases—potentially amplifying variance and affecting stability. To mitigate this issue, FPO typically requires larger batch sizes during updates.
+
+Overall, prior work illustrates both the promise and the limitations of expressive generative policies in online RL: while they expand the representable policy class, existing approaches may suffer from unstable optimization, high computational cost, or biased approximations. PolicyFlow is an on-policy algorithm that seeks to address these challenges without backpropagating through full
+
+{2}------------------------------------------------
+
+generative chains, without treating diffusion as an internal Markov Decision Process as in DPPO, and while avoiding the asymmetric bias in FPO.
+
+### 2.2 POLICY ENTROPY REGULARIZATION
+
+Entropy regularization has long been used to encourage exploration and prevent mode collapse in reinforcement learning. Classical approaches show its effectiveness for categorical policies in discrete action spaces (Mnih et al., 2016) and Gaussian policies in continuous control (Haarnoja et al., 2018). Extending this principle to flow-based policies, however, is challenging: action log-likelihoods are generally intractable, making entropy estimation expensive.
+
+In principle, closed-form dynamics of entropy under continuous normalizing flows can be derived via the divergence of the velocity field integrated along the flow path (Chen et al., 2018; Tian et al., 2024). While theoretically sound, this requires costly divergence evaluation and path integration, which limits scalability. More heuristic solutions have also been explored: Wang et al. (2024) approximate entropy using Gaussian mixture models, adjusting the injected noise to diffusion output accordingly, while Ding et al. (2024) inject uniform noise into training samples to artificially inflate entropy. These strategies are effective in specific cases, and can be good choices when additional computational cost is not a concern or when the range of action samples is known in advance.
+
+Our approach introduces an implicit entropy regularizer, inspired by Brownian motion, that directly shapes the velocity field toward entropy-increasing dynamics. This design avoids expensive log-likelihood computation and bypasses the need for ad hoc noise heuristics. Since entropy regularization was not explicitly addressed in methods such as FPO, our regularizer provides a principled and lightweight alternative in flow-based policy optimization.
+
+## 3 BACKGROUND
+
+We consider a Markov Decision Process (MDP) defined by the tuple  $(\mathcal{S}, \mathcal{A}, p, r, \gamma)$ , where  $\mathcal{S}$  is the state space,  $\mathcal{A}$  is the action space,  $p(s' | s, a)$  denotes the transition dynamics with state  $s \in \mathcal{S}$  and action  $a \in \mathcal{A}$ ,  $r(s, a)$  is the reward function, and  $\gamma \in [0, 1)$  is the discount factor. The agent's objective is to learn a policy  $\pi(a|s)$  that maximizes the expected cumulative discounted return:
+
+$$J(\pi) = \mathbb{E}_{p(\tau|\pi)} \left[ \sum_{k=0}^{\infty} \gamma^k r(s_k, a_k) \right] \quad (1)$$
+
+where  $\tau = \{s_0, a_0, s_1, a_1, \dots\}$  denotes a trajectory sampled from the environment under policy  $\pi$ .
+
+Among policy gradient algorithms, PPO has become one of the most widely adopted due to its simplicity and empirical stability. PPO optimizes the policy by maximizing a clipped surrogate objective (Schulman et al., 2017):
+
+$$J^{\text{PPO}}(\pi) = \mathbb{E}_{p_{\pi}(s)} \mathbb{E}_{\hat{\pi}(a|s)} \left[ \min \left( \frac{\pi(a|s)}{\hat{\pi}(a|s)} A_{\hat{\pi}}(s, a), \text{clip} \left( \frac{\pi(a|s)}{\hat{\pi}(a|s)}, 1 - \epsilon, 1 + \epsilon \right) A_{\hat{\pi}}(s, a) \right) \right] \quad (2)$$
+
+where  $\hat{\pi}(a|s)$  is a reference policy,  $p_{\hat{\pi}}(s)$  is policy's state distribution (Schulman et al., 2015),  $A_{\hat{\pi}}(s, a)$  is the corresponding advantage function, and the clipping range  $\epsilon$  is a small positive hyperparameter (typically in the range  $[0.1, 0.3]$ ) that controls the maximum allowable deviation of the likelihood ratio from one. This formulation prevents the updated policy from deviating too far from the reference policy, thereby ensuring more stable learning in practice.
+
+More recently, Frans et al. (2025) showed that PPO and related algorithms can also be interpreted under a proxy objective of the form:
+
+$$\tilde{J}(\pi) = \mathbb{E}_{p_{\pi}(s)} \mathbb{E}_{\pi(a|s)} A_{\hat{\pi}}(s, a). \quad (3)$$
+
+As long as the divergence between the resulting policy  $\pi^* = \arg \max_{\pi} \tilde{J}(\pi)$  and the reference policy  $\hat{\pi}$  remains bounded optimizing this proxy objective guarantees monotonic improvement of the true objective, i.e.,  $J(\pi^*) > J(\hat{\pi})$ .
+
+{3}------------------------------------------------
+
+## 4 POLICY OPTIMIZATION WITH CONTINUOUS NORMALIZING FLOW
+
+To overcome the limitations of Gaussian parameterizations, we propose to represent policies using continuous normalizing flows. Specifically, we define a conditional flow  $\varphi: [0, 1] \times \mathbb{R}^d \times \mathbb{R}^n \rightarrow \mathbb{R}^d$  governed by the ordinary differential equation (ODE):
+
+$$\frac{d}{dt} \varphi_t(\mathbf{z}; \mathbf{s}) = v_t(\varphi_t(\mathbf{z}; \mathbf{s}); \mathbf{s}), \quad \varphi_0(\mathbf{z}; \mathbf{s}) = \mathbf{z} \quad (4)$$
+
+where  $\mathbf{z} \in \mathbb{R}^d$  is a latent variable,  $\mathbf{s} \in \mathbb{R}^n$  is the state and  $v: [0, 1] \times \mathbb{R}^d \times \mathbb{R}^n \rightarrow \mathbb{R}^d$  is a time-dependent velocity field which can be parameterized by a neural network.
+
+Similar to Wang et al. (2024), the policy generates actions by integrating the flow to its terminal time and adding Gaussian noise:
+
+$$\mathbf{a} = \varphi_1(\mathbf{z}; \mathbf{s}) + \mathbf{n}, \quad \mathbf{z} \sim p_z(\mathbf{z}), \quad \mathbf{n} \sim \mathcal{N}(\mathbf{n}; \mathbf{0}, \sigma^2). \quad (5)$$
+
+Here, the injected noise  $\mathbf{n}$  not only facilitates exploration but also ensures compatibility with the PPO-style surrogate objective, allowing us to naturally extend PPO's original formulation to continuous normalizing flows. While various choices are possible for  $p_z(\mathbf{z})$  in principle, we follow common practice in generative model and choose a standard Gaussian distribution, namely  $p_z(\mathbf{z}) = \mathcal{N}(\mathbf{z}; \mathbf{0}, \mathbf{1})$ .
+
+This construction induces a policy distribution
+
+$$\pi(\mathbf{a}|\mathbf{s}) = \int \pi(\mathbf{a}|\mathbf{z}, \mathbf{s}) p_z(\mathbf{z}) d\mathbf{z}, \quad \pi(\mathbf{a}|\mathbf{z}, \mathbf{s}) = \mathcal{N}(\mathbf{a}; \varphi_1(\mathbf{z}; \mathbf{s}), \sigma^2). \quad (6)$$
+
+This representation is strictly more expressive than a conventional Gaussian policy, as it can recover simple unimodal Gaussian distributions while also modeling arbitrarily complex, multimodal, or highly non-Gaussian action distributions.
+
+Under this parameterization, the policy proxy objective in Eq. (3) can be rewritten as
+
+$$\hat{J}(\pi) = \mathbb{E}_{p_z(\mathbf{s}), p_z(\mathbf{z})} \mathbb{E}_{\pi(\mathbf{a}|\mathbf{z}, \mathbf{s})} A_{\bar{\pi}}(\mathbf{s}, \mathbf{a}) = \mathbb{E}_{p_z(\mathbf{s}), p_z(\mathbf{z})} \mathbb{E}_{\bar{\pi}(\mathbf{a}|\mathbf{z}, \mathbf{s})} \left[ \frac{\pi(\mathbf{a}|\mathbf{z}, \mathbf{s})}{\bar{\pi}(\mathbf{a}|\mathbf{z}, \mathbf{s})} A_{\bar{\pi}}(\mathbf{s}, \mathbf{a}) \right], \quad (7)$$
+
+which explicitly connects the flow-based policy representation with the standard objective used in policy optimization.
+
+In principle, the importance ratio can be computed by simulating both flows  $\varphi$  and  $\bar{\varphi}$  through their ODEs during training. However, this is often computationally expensive and numerically unstable, as neural ODEs may suffer from exploding/vanishing gradients or high memory usage during training. Next, we describe an alternative objective that avoids directly simulating the ODEs to compute this importance ratio during training.
+
+![Diagram illustrating the policy optimization process. A reference velocity vector v_t(x_t; s) is shown in red, and a new velocity vector v_t(x_t; s) is shown in blue. The difference between them is labeled delta v_t. The diagram also shows the RL Advantage Guidance (delta v_t) and the Brownian Regulariser (-nabla log p_t(x_t; s)).](476d6fb9044a040636d52619c7c43b1a_img.jpg)
+
+The diagram shows a vector from the origin to a point  $x_t$ . A red vector labeled 'Reference Velocity  $\hat{v}_t(x_t; s)$ ' points to  $x_t$ . A blue vector labeled 'New Velocity  $v_t(x_t; s)$ ' also points to  $x_t$ . The difference between the two vectors is labeled  $\delta v_t$ . A dashed line connects the tip of the red vector to the tip of the blue vector, labeled  $\delta v_t$ . A dashed box contains the text 'RL Advantage Guidance' and  $\delta v_t$ . Below the vectors, there is a label 'Brownian Regulariser' and  $-\nabla \log p_t(x_t; s)$ . To the right, there are two Gaussian distribution plots, one red and one blue, labeled  $\varphi(\mathbf{z}; \mathbf{s})$  and  $\bar{\varphi}(\mathbf{z}; \mathbf{s})$  respectively.
+
+Diagram illustrating the policy optimization process. A reference velocity vector v\_t(x\_t; s) is shown in red, and a new velocity vector v\_t(x\_t; s) is shown in blue. The difference between them is labeled delta v\_t. The diagram also shows the RL Advantage Guidance (delta v\_t) and the Brownian Regulariser (-nabla log p\_t(x\_t; s)).
+
+Now let  $p_n(\cdot; \boldsymbol{\mu}, \sigma^2)$  denote the Gaussian density function with mean  $\boldsymbol{\mu}$  and variance  $\sigma^2$ . A key observation is that the likelihood ratio between Gaussian distributions is shift-invariant, which means
+
+$$\frac{\pi(\mathbf{a}|\mathbf{z}, \mathbf{s})}{\bar{\pi}(\mathbf{a}|\mathbf{z}, \mathbf{s})} = \frac{p_n(\mathbf{a}; \varphi_1(\mathbf{z}; \mathbf{s}), \sigma^2)}{p_n(\mathbf{a}; \bar{\varphi}_1(\mathbf{z}; \mathbf{s}), \sigma^2)} = \frac{p_n(\mathbf{a} - \bar{\varphi}_1(\mathbf{z}; \mathbf{s}); \delta_{\varphi_1}(\mathbf{z}; \mathbf{s}), \sigma^2)}{p_n(\mathbf{a} - \bar{\varphi}_1(\mathbf{z}; \mathbf{s}); \mathbf{0}, \sigma^2)} \quad (8)$$
+
+where  $\delta_{\varphi_1}(\mathbf{z}; \mathbf{s}) = \varphi_1(\mathbf{z}; \mathbf{s}) - \bar{\varphi}_1(\mathbf{z}; \mathbf{s})$ . Directly computing  $\delta_{\varphi_1}(\mathbf{z}; \mathbf{s})$  requires simulating the ODEs, which is computationally costly. To alleviate this, we approximate the terminal shift using the velocity variation along the following linear interpolation path:
+
+$$\mathbf{x}_t = (1 - t)\mathbf{z} + t\bar{\varphi}_1(\mathbf{z}; \mathbf{s}), \quad t \in [0, 1]. \quad (9)$$
+
+This approximation replaces the integral over the reference trajectory with an expectation over  $t$  along the interpolation path, yielding:
+
+$$\frac{\pi(\mathbf{a}|\mathbf{z}, \mathbf{s})}{\bar{\pi}(\mathbf{a}|\mathbf{z}, \mathbf{s})} \approx \mathbb{E}_{p(t)} \left[ \frac{p_n(\mathbf{a} - \bar{\varphi}_1(\mathbf{z}; \mathbf{s}); \delta_{v_t}(\mathbf{x}_t; \mathbf{s}), \sigma^2)}{p_n(\mathbf{a} - \bar{\varphi}_1(\mathbf{z}; \mathbf{s}); \mathbf{0}, \sigma^2)} \right] \quad (10)$$
+
+where  $p(t) = U[0, 1]$  and the velocity field variation  $\delta_{v_t}(\mathbf{x}_t; \mathbf{s}) = v_t(\mathbf{x}_t; \mathbf{s}) - \hat{v}_t(\mathbf{x}_t; \mathbf{s})$ .
+
+{4}------------------------------------------------
+
+**Remark (Approximation Error Bound)** *Theoretical analysis (see Appendix A for details) shows that this interpolation-based approximation introduces only a first-order error in the log under small update regimes, which can be naturally enforced by the clipping range  $\epsilon$  in PPO.*
+
+$$\left| \mathbb{E}_{p(t)} \left[ \frac{p_n(\mathbf{a} - \hat{\varphi}_1(\mathbf{z}; \mathbf{s}); \delta_{v_t}(\mathbf{x}_t; \mathbf{s}), \sigma^2)}{p_n(\mathbf{a} - \hat{\varphi}_1(\mathbf{z}; \mathbf{s}); \mathbf{0}, \hat{\sigma}^2)} \right] - \frac{p_n(\mathbf{a} - \hat{\varphi}_1(\mathbf{z}; \mathbf{s}); \delta_{\varphi_1}(\mathbf{z}; \mathbf{s}), \sigma^2)}{p_n(\mathbf{a} - \hat{\varphi}_1(\mathbf{z}; \mathbf{s}); \mathbf{0}, \hat{\sigma}^2)} \right| = \mathcal{O}(\epsilon). \quad (11)$$
+
+Importantly, this approach allows us to avoid simulating the full flow trajectory and propagating gradients along it during training, thereby maintaining computational efficiency comparable to PPO with Gaussian policy.
+
+Now, the velocity field  $v$  is parameterized by a neural network with parameters  $\theta$ . Finally, similar to PPO, we adopt a clipped surrogate-style objective to stabilize training:
+
+$$J^{\text{Flow}}(\theta, \sigma) = \mathbb{E}_{p_{\pi}(\mathbf{s}), p_{\pi}(\mathbf{z})} \mathbb{E}_{\pi(\mathbf{a}|\mathbf{z}, \mathbf{s}), p(t)} [\min(\rho A_{\pi}(\mathbf{s}, \mathbf{a}), \text{clip}(\rho, 1 - \epsilon, 1 + \epsilon) A_{\pi}(\mathbf{s}, \mathbf{a}))] \quad (12)$$
+
+with approximate importance ratio
+
+$$\rho = \frac{p_n(\mathbf{a} - \hat{\varphi}_1(\mathbf{z}; \mathbf{s}); v_t(\mathbf{x}_t; \mathbf{s}, \theta) - \hat{v}_t(\mathbf{x}_t; \mathbf{s}), \sigma^2)}{p_n(\mathbf{a} - \hat{\varphi}_1(\mathbf{z}; \mathbf{s}); \mathbf{0}, \hat{\sigma}^2)}. \quad (13)$$
+
+Thus, simulation of the ODE is only required during sampling (to compute  $\hat{\varphi}_1(\mathbf{z}; \mathbf{s})$ ), while the training objective can be efficiently estimated along the interpolation path with velocity field variations, without simulating the ODE or backpropagating through the simulated flow trajectories in training.
+
+### 4.1 POLICY ENTROPY REGULARIZATION
+
+Policy entropy maximization is a long-standing technique to encourage exploration and mitigate mode collapse in reinforcement learning. To tackle the difficulties of entropy regularization for flow-based policies, as discussed in Sec. 2.2, we propose a novel entropy regularizer inspired by Brownian motion. Our method differs from prior entropy regularization: instead of explicitly computing policy entropy or heuristically injecting noise, we directly regulate the velocity field to follow an entropy-increasing process. This perspective allows us to avoid costly log-likelihood evaluation while still encouraging diverse exploration, shown as Fig. 1.
+
+![Figure 1: (PointMaze-Medium-Diverse-GDense-v3) Exploration Density Maps. (a) Environment overview: the agent is initialized at the green point for each episode, and the four red points indicate goal locations with equal rewards. (b) Exploration heatmap of PPO, showing limited coverage due to the simple Gaussian policy. (c) Exploration heatmap of PolicyFlow without the Brownian regularizer, which improves coverage but still leaves some regions under-explored. (d) Exploration heatmap of PolicyFlow with the Brownian regularizer, achieving near-complete coverage of all feasible locations. A color bar on the right indicates log(1 + frequency) from 0 to 15.](c82c7d8107cba121734a9cfba891216d_img.jpg)
+
+Figure 1: (PointMaze-Medium-Diverse-GDense-v3) Exploration Density Maps. (a) Environment overview: the agent is initialized at the green point for each episode, and the four red points indicate goal locations with equal rewards. (b) Exploration heatmap of PPO, showing limited coverage due to the simple Gaussian policy. (c) Exploration heatmap of PolicyFlow without the Brownian regularizer, which improves coverage but still leaves some regions under-explored. (d) Exploration heatmap of PolicyFlow with the Brownian regularizer, achieving near-complete coverage of all feasible locations. A color bar on the right indicates log(1 + frequency) from 0 to 15.
+
+Figure 1: (PointMaze-Medium-Diverse-GDense-v3) Exploration Density Maps. (a) Environment overview: the agent is initialized at the green point for each episode, and the four red points indicate goal locations with equal rewards. (b) Exploration heatmap of PPO, showing limited coverage due to the simple Gaussian policy. (c) Exploration heatmap of PolicyFlow without the Brownian regularizer, which improves coverage but still leaves some regions under-explored. (d) Exploration heatmap of PolicyFlow with the Brownian regularizer, achieving near-complete coverage of all feasible locations.
+
+In Brownian dynamics, particles naturally spread toward a uniform distribution, and entropy monotonically increases during the process. Although Brownian motion is defined by a stochastic differential equation, its probability path follows the classic heat equation  $\partial p_t(\mathbf{x})/\partial t = \nabla_{\mathbf{x}}^2 p_t(\mathbf{x})$  (Iordán et al., 1998). This equation connects directly to the continuity equation  $\partial p_t(\mathbf{x})/\partial t = -\nabla_{\mathbf{x}} \cdot (p_t(\mathbf{x})v_t(\mathbf{x}))$ . By choosing  $v_t(\mathbf{x}) = -\nabla_{\mathbf{x}} \log p_t(\mathbf{x})$ , the continuity equation recovers the heat equation, showing that entropy growth can be enforced via a carefully shaped velocity field aligned with the negative score.
+
+In practice, to promote flow trajectories that expand like Brownian motion rather than collapse, we want our learned velocity field to follow the negative score of a reference flow. To obtain this score
+
+{5}------------------------------------------------
+
+#### **Algorithm 1** PolicyFlow
+
+---
+
+```
+
+1: Input: initial velocity field parameters  $\theta_0$ , initial noise variance  $\sigma_0^2$ , initial value function parameters  $\phi_0$ 
+2: for iteration  $i = 0, 1, 2, \dots$  do
+3:   Set reference parameters  $\hat{\theta} \leftarrow \theta_i$ ,  $\hat{\sigma}^2 \leftarrow \sigma_i^2$ . The reference velocity field is  $\hat{v} = v_{\hat{\theta}}$ 
+4:   Collect a set of trajectories  $\mathcal{D}_i$  using the reference policy  $\pi_{\hat{\theta}, \hat{\sigma}}$ 
+5:   for each MDP step  $k$  with state  $\mathbf{s}_k$  do
+6:     Sample latent variable  $\mathbf{z}_k \sim p_z(\mathbf{z})$  then  $\hat{\phi}_0 = \mathbf{z}_k$ 
+7:     Compute  $\varphi_k = \hat{\varphi}_1(\mathbf{z}_k; \mathbf{s}_k)$  by simulating the ODE  $\frac{d}{dt} \hat{\varphi}_t = \hat{v}_t(\hat{\varphi}_t; \mathbf{s}_k)$  from  $t = 0$  to  $1$ 
+8:     Sample noise  $\mathbf{n}_k \sim \mathcal{N}(\mathbf{0}, \sigma^2)$  and form action  $\mathbf{a}_k = \varphi_k + \mathbf{n}_k$ 
+9:     Execute  $\mathbf{a}_k$ , observe next state  $\mathbf{s}_{k+1}$  and reward  $r_k$ 
+10:    Store transition  $(\mathbf{s}_k, \mathbf{a}_k, r_k, \mathbf{s}_{k+1}, \mathbf{z}_k, \varphi_k)$  in  $\mathcal{D}_i$ 
+11:  end for
+12:  For each step  $k$ , compute rewards-to-go  $\hat{R}_k$  and advantage estimates  $\hat{A}_k$  using GAE
+13:  for epoch  $= 1, \dots, E$  do
+14:    for each mini-batch of transitions  $(\mathbf{s}_k, \mathbf{a}_k, \hat{A}_k, \mathbf{z}_k, \varphi_k)$  from  $\mathcal{D}_i$  do
+15:      Sample  $t_k \sim U[0, 1]$ 
+16:      Or sample  $t_k$  from the discrete time points used for numerical simulation of flow ODE
+17:      Compute interpolation point  $\mathbf{x}_{t_k} = (1 - t_k)\mathbf{z}_k + t_k\varphi_k$ 
+18:      Compute approximate importance ratio
+
+$$\rho_k = p_n(\mathbf{a}_k - \varphi_k; v_{t_k}(\mathbf{x}_{t_k}; \mathbf{s}_k, \theta) - \hat{v}_{t_k}(\mathbf{x}_{t_k}; \mathbf{s}_k, \sigma^2)) / p_n(\mathbf{a}_k - \varphi_k; \mathbf{0}, \hat{\sigma}^2)$$
+
+19:      Compute the clipped surrogate objective for the mini-batch by
+
+$$J^{\text{Flow}} = \mathbb{E}_k [\min(\rho_k \hat{A}_k, \text{clip}(\rho_k, 1 - \epsilon, 1 + \epsilon) \hat{A}_k)]$$
+
+20:      Compute Brownian regularizer vector
+
+$$\eta_{t_k}(\mathbf{x}_{t_k}; \mathbf{s}_k, \theta) = (1 - t_k)v_{t_k}(\mathbf{x}_{t_k}; \mathbf{s}_k, \theta) - (\mathbf{x}_{t_k} - t_k \hat{v}_{t_k}(\mathbf{x}_{t_k}; \mathbf{s}))$$
+
+21:      Compute the regularization term for the mini-batch by
+
+$$J^{\text{Reg}} = \mathbb{E}_k \left[ -w_b \|\eta_{t_k}(\mathbf{x}_{t_k}; \mathbf{s}, \theta)\|_2^2 + \frac{w_g}{2} \sum_{i=1}^d \log(2\pi e \sigma_i^2) \right]$$
+
+22:      Update policy parameters  $(\theta_{i+1}, \sigma_{i+1}) = \arg \max_{\theta, \sigma} (J^{\text{Flow}} + J^{\text{Reg}})$ .
+23:      Update value function parameters by minimizing the mean-squared error:
+
+$$\phi_{i+1} = \arg \min_{\phi} \mathbb{E}_{\phi} (\mathcal{V}_{\phi}(\mathbf{s}_k) - \hat{R}_k)^2$$
+
+24:    end for
+25:  end for
+26: end for
+
+```
+
+---
+
+function from the reference velocity field, we can leverage the result of Liu et al. (2025), the velocity field and score function are explicitly related:
+
+$$\nabla_{\mathbf{x}} \log \hat{p}_t(\mathbf{x}_t; \mathbf{s}) = \frac{1}{1-t} (t \hat{v}_t(\mathbf{x}_t; \mathbf{s}) - \mathbf{x}_t). \quad (14)$$
+
+Building on this connection, we purpose a practical entropy regularizer:
+
+$$J^{\text{Reg}}(\theta, \sigma) = \mathbb{E}_{p_{\mathbf{s}}(\mathbf{s}), p_z(\mathbf{z}), p(t)} \left[ -w_b \|\eta_t(\mathbf{x}_t; \mathbf{s}, \theta)\|_2^2 + \frac{w_g}{2} \sum_{i=1}^d \log(2\pi e \sigma_i^2) \right], \quad (15)$$
+
+where  $w_b, w_g \geq 0$  are tunable coefficients and
+
+$$\eta_t(\mathbf{x}_t; \mathbf{s}, \theta) = (1 - t)\hat{v}_t(\mathbf{x}_t; \mathbf{s}, \theta) - (\mathbf{x}_t - t \hat{v}_t(\mathbf{x}_t; \mathbf{s})). \quad (16)$$
+
+The first term (termed **Brownian regularizer**) in Eq. (15) encourages the learned velocity field to align with the negative score of the reference flow, promoting expansion of trajectories and preventing collapse into narrow modes. Note that we do not directly take the difference between the velocity field and the negative score, since this would involve a factor of  $(1-t)$  in the denominator, which becomes problematic as  $t \rightarrow 1$ ;  $\eta_t$  is defined to safely enforce alignment while avoiding this
+
+{6}------------------------------------------------
+
+singularity. The second term in Eq. (15) corresponds to the entropy of the Gaussian noise  $n$  injected at the flow terminal, enhancing stochasticity and encouraging diverse exploration. Together, these two terms promote trajectory diversity and maintain the expressiveness of continuous normalizing flows in modeling complex and high-modal action distributions (see Fig. 2).
+
+Importantly, unlike previous entropy regularizers that require computing log-likelihoods, expensive divergence integration (Chen et al., 2018; Tian et al., 2024) or heuristic noise injection (Frans et al., 2025; Wang et al., 2024), the Brownian regularizer provides a principled yet computationally lightweight alternative.
+
+**Remark** *The Brownian regularizer should not be regarded as a theoretically exact derivation. In particular, while our formulation leverages the relationship between the velocity field and score function under rectified flows, the velocity field in our policy is not obtained via flow matching gradients, and thus does not strictly correspond to the rectified flow dynamics.*
+
+## 5 EXPERIMENTS
+
+We benchmark PolicyFlow against FPO and DPPO because both methods extend PPO to generative policy classes that do not allow explicit likelihood evaluation. These algorithms currently represent the SOTA in applying on-policy RL to expressive, non-Gaussian policy parameterizations. Therefore, comparing to FPO and DPPO is essential for demonstrating the effectiveness of PolicyFlow as a general and principled alternative for training generative policies.
+
+We evaluate these algorithms across the benchmarks in MuJoCo Playground (Zakka et al., 2025) and IsaacLab (Mittal et al., 2023). Using the MultiGoal environment, we test the Brownian regularizer’s role in fully leveraging continuous normalizing flow to capture complex, multimodal distributions and avoid mode collapse.
+
+### 5.1 MULTI-GOAL TEST
+
+The MultiGoal environment, originally proposed by Haarnoja et al. (2017), is a two-dimensional square workspace with six fixed goal locations, which we use to evaluate how the Brownian regularizer prevents mode collapse and how continuous normalizing flows enable more expressive, multi-modal policies. We modify the dynamics to a second-order system: the state includes position and velocity, and the action is acceleration. Full agent and environment details are provided in Appendix C.2.
+
+![Figure 2: MultiGoal Test results showing sample 1000 trajectories for six different policies. (a) PPO with Gaussian entropy regularization (w_g = 0.001) shows trajectories concentrated on a few goals. (b) DPPO and (c) FPO show trajectories concentrated on a small number of modes. (d) PolicyFlow with uniform noise injection (Ding et al., 2024) (weight 0.05) still suffers from mode collapse. (e) PolicyFlow with only Gaussian entropy regularization (w_g = 0.001) partially alleviates mode collapse. (f) PolicyFlow with the proposed Brownian regularizer (w_b = 0.25) and Gaussian entropy regularization (w_g = 0.001) achieves the most diverse and more balanced goal-reaching behaviors.](797231cfee084ca299de599340240401_img.jpg)
+
+Figure 2: MultiGoal Test results showing sample 1000 trajectories for six different policies. (a) PPO with Gaussian entropy regularization (w\_g = 0.001) shows trajectories concentrated on a few goals. (b) DPPO and (c) FPO show trajectories concentrated on a small number of modes. (d) PolicyFlow with uniform noise injection (Ding et al., 2024) (weight 0.05) still suffers from mode collapse. (e) PolicyFlow with only Gaussian entropy regularization (w\_g = 0.001) partially alleviates mode collapse. (f) PolicyFlow with the proposed Brownian regularizer (w\_b = 0.25) and Gaussian entropy regularization (w\_g = 0.001) achieves the most diverse and more balanced goal-reaching behaviors.
+
+Figure 2: MultiGoal Test (Appendix C.2): sample 1000 trajectories starting at the same original point. (a) PPO with Gaussian entropy regularization ( $w_g = 0.001$ ) covers only a limited set of goals. (b,c) DPPO and FPO collapse to a small number of modes, likely because neither method incorporates any form of entropy regularization. (d) PolicyFlow with uniform noise injection (Ding et al., 2024) (weight 0.05) still suffers from mode collapse, concentrating on only a few modes. (e) PolicyFlow with only Gaussian entropy regularization ( $w_g = 0.001$ ) partially alleviates mode collapse. (f) PolicyFlow with the proposed Brownian regularizer ( $w_b = 0.25$ ) and Gaussian entropy regularization ( $w_g = 0.001$ ) achieves the most diverse and more balanced goal-reaching behaviors.
+
+If the agent starts at the workspace center, all six goals are equidistant and rewards are symmetric, so an optimal policy should reach each goal with roughly equal probability, reflecting the multi-modal nature of the task. As shown in Fig. 2, PPO, which employs a Gaussian policy, can only represent simple distributions and thus struggles to produce trajectories that reach all six goal locations. While
+
+{7}------------------------------------------------
+
+FPO and DPPO utilize generative models capable of expressing more complex distributions, the lack of an effective entropy regularization mechanism prevents the agent from learning a sufficiently diverse set of trajectories. In contrast, PolicyFlow with the Brownian regularizer fully leverages the expressive power of continuous normalizing flows, resulting in more balanced, multi-modal action patterns and a higher coverage of all goals.
+
+### 5.2 MUJOCo PLAYGROUND AND ISAACLAB BENCHMARKS
+
+**MujoCo Playground benchmarks.** We evaluate PolicyFlow against current state-of-the-art flow-based methods on the MuJoCo Playground benchmarks, including FPO (McAllister et al., 2025) and DPPO (Ren et al., 2024). All these methods are based on the PPO framework, so we also include PPO as a baseline. FPO represents the policy using continuous normalizing flows (CNFs), while DPPO uses diffusion models. The original implementations of FPO and DPPO do not include explicit entropy regularization, which can limit the diversity of the learned policies. As previously shown in the MultiGoal test, PolicyFlow effectively preserves multi-modal behaviors and diverse trajectories. Across the MuJoCo Playground tasks, PolicyFlow achieves performance comparable to or exceeding FPO in most environments, outperforming DPPO, and generally matching or surpassing PPO. Careful examination of the training curves reveals that PolicyFlow often converges faster, indicating higher sample efficiency and effective exploration, complementing the observations on policy diversity from the MultiGoal experiments.
+
+The hyperparameter settings for PolicyFlow are provided in Appendix C.4. To ensure a fair comparison, the hyperparameters for FPO and DPPO follow the tuned configurations from the FPO paper, and PPO uses the default settings recommended by the MuJoCo Playground repository.
+
+![Figure 3: Learning curves on MuJoCo Playground benchmarks. The figure consists of eight subplots arranged in a 2x4 grid, showing Episodic Reward (x10^6) on the y-axis versus Environment Steps (x-axis, total 30M steps) on the x-axis. The environments are: BallInCup, CartpoleBalance, CheetahRun, FingerSpin, FishSwim, ReacherEasy, ReacherHard, and WalkerWalk. Four methods are compared: FPO (dashed blue line), PPO (dash-dot green line), DPPO (dotted light blue line), and PolicyFlow (solid red line). PolicyFlow consistently achieves higher episodic rewards faster than the other methods across most environments, often reaching the maximum reward faster than PPO and DPPO. FPO generally performs better than DPPO but worse than PolicyFlow. Shaded regions around the lines represent standard error over 5 random seeds.](7ff005f9556dc6518981bb92091d36ab_img.jpg)
+
+Figure 3: Learning curves on MuJoCo Playground benchmarks. The figure consists of eight subplots arranged in a 2x4 grid, showing Episodic Reward (x10^6) on the y-axis versus Environment Steps (x-axis, total 30M steps) on the x-axis. The environments are: BallInCup, CartpoleBalance, CheetahRun, FingerSpin, FishSwim, ReacherEasy, ReacherHard, and WalkerWalk. Four methods are compared: FPO (dashed blue line), PPO (dash-dot green line), DPPO (dotted light blue line), and PolicyFlow (solid red line). PolicyFlow consistently achieves higher episodic rewards faster than the other methods across most environments, often reaching the maximum reward faster than PPO and DPPO. FPO generally performs better than DPPO but worse than PolicyFlow. Shaded regions around the lines represent standard error over 5 random seeds.
+
+Figure 3: Learning curves on MuJoCo Playground benchmarks. Plots show mean episodic reward with standard error (y-axis) over environment steps (x-axis, total 30M steps), averaged over 5 random seeds.
+
+**IsaacLab benchmarks.** We further evaluate PolicyFlow on the IsaacLab benchmarks, a suite of robotics environments spanning locomotion, manipulation, and navigation. IsaacLab is a recently developed and rapidly growing framework maintained by NVIDIA, designed specifically for large-scale robot learning. Its high simulation fidelity, strong engineering support, and increasing popularity in the robotics community make it an ideal testbed for assessing the performance of RL algorithms. In this benchmark, we compare PolicyFlow only against PPO. Although FPO and DPPO are state-of-the-art generative policy approaches, neither of them includes IsaacLab tasks in their original benchmark suites, and directly adapting their publicly released code to the IsaacLab environment stack requires substantial engineering effort and nontrivial environment re-integration. Therefore, we use the PPO implementation from RSL-RL as our baseline, following the official IsaacLab hyperparameter configurations. PolicyFlow uses almost identical hyperparameters to PPO (see Appendix C.3), except for additions required by our entropy regularization mechanism. Full parameter details are provided in Appendix C.3. As shown in Table 1 and Fig. 5 in Appendix C.3, PolicyFlow achieves asymptotic performance that consistently matches or surpasses PPO across all tasks. Since PolicyFlow learns a time-dependent velocity field rather than a direct action mapping, the optimization problem is inherently more complex, which can lead to slower early-stage learning.
+
+{8}------------------------------------------------
+
+Table 1: Terminal training episodic rewards across IsaacLab benchmarks.
+
+| Method | Lift-Cube | Navigation | Open-Drawer | Quadcopter | Anymal-D | G1 | H1 | Go2 |
+|-|-|-|-|-|-|-|-|-|
+| PPO | $153.1 \pm 3.0$ | $3.5 \pm 0.3$ | <b><math>99.8 \pm 1.7</math></b> | <b><math>141.8 \pm 0.5</math></b> | $24.5 \pm 0.1$ | $25.4 \pm 1.2$ | <b><math>29.3 \pm 0.9</math></b> | <b><math>27.9 \pm 0.3</math></b> |
+| PolicyFlow | <b><math>154.6 \pm 0.6</math></b> | <b><math>4.2 \pm 0.1</math></b> | $99.1 \pm 0.7$ | $141.0 \pm 0.09$ | <b><math>24.6 \pm 0.2</math></b> | <b><math>30.0 \pm 1.1</math></b> | $27.3 \pm 0.2$ | $27.4 \pm 0.9$ |
+| <i>p</i> -value | 0.32 | <b>0.0027</b> | 0.41 | 0.099 | 0.26 | <b>0.00026</b> | <b>0.0069</b> | 0.33 |
+
+**Training time per iteration.** We compare the per-iteration training time of PolicyFlow and PPO on IsaacLab environments, which reflects the computational cost of a single training step. As shown in Table 2, when the model parameters are roughly comparable to PPO, PolicyFlow increases per-iteration training time by less than 50% for the first six IsaacLab environments. Even when embedding dimensions are increased up to eightfold, the computational cost remains below twice that of PPO, demonstrating that PolicyFlow is efficient in practice.
+
+Table 2: Per-iteration training time of PPO and PolicyFlow on IsaacLab benchmarks, averaged over 50 iterations on an RTX 5090 GPU.
+
+| Environment | Lift-Cube | Navigation | Open-Drawer | Quadcopter | Anymal-D | G1 | H1 | Go2 |
+|-|-|-|-|-|-|-|-|-|
+| Embedding Dimensions (Time / Observation) | 64 | 64 | 64 | 64 | 64 | 256 | 512 | 512 |
+| PPO (ms) | $43.0 \pm 1.61$ | $36.9 \pm 6.3$ | $81.3 \pm 14.7$ | $37.8 \pm 13.8$ | $41.2 \pm 13.4$ | $66.9 \pm 14.4$ | $63.4 \pm 15.5$ | $63.9 \pm 15.7$ |
+| PolicyFlow (ms) | $57.7 \pm 20.8$ | $54.1 \pm 10.1$ | $104.1 \pm 16.5$ | $55.6 \pm 15.3$ | $57.1 \pm 15.7$ | $90.6 \pm 12.3$ | $115.5 \pm 17.3$ | $111.5 \pm 15.1$ |
+
+**Remark** *We do not provide a direct comparison with FPO or DPPO because the implementations of these algorithms in the FPO open-source codebase are based on JAX, whereas PolicyFlow is implemented in PyTorch. Conducting a direct comparison across different deep learning frameworks could lead to unreliable results, so we focus the analysis on PPO, which is implemented in the same framework and provides a fair baseline.*
+
+### 5.3 SENSITIVITY TO CLIPPING RANGE PARAMETER
+
+Our proposed approximation Eq. (13) of the importance ratio introduces an approximation error that is theoretically bounded by the clipping range  $\epsilon$ , as shown in Appendix A. A smaller  $\epsilon$  yields a tighter bound and therefore reduces the approximation error; however, it also limits the effective update step size in policy optimization, which may slow down policy improvement. To empirically verify this trade-off, we conduct a sensitivity analysis in the IsaacLab ANYmal-D environment by evaluating four clipping ranges,  $\epsilon \in \{0.1, 0.2, 0.3, 0.4\}$ , each with five random seeds. The results shown as Fig. 4a confirm our theoretical insight: smaller clipping ranges lead to lower approximation error but hinder learning progress due to overly conservative updates. Across all IsaacLab benchmarks, we adopt  $\epsilon = 0.2$  as the default clipping range, which aligns with the official PPO configuration provided by IsaacLab.
+
+### 5.4 SENSITIVITY TO NETWORK INITIALIZATION AND TIME SAMPLING STRATEGY
+
+We also investigate how different network initialization strategies affect performance. A common choice for MLPs network is the Glorot initialization (Glorot & Bengio, 2010), which samples weights from a Gaussian distribution with an appropriate variance. Alternatively, one may initialize all network parameters to zero. In our study, we compare three initialization schemes in the IsaacLab ANYmal-D environment: (i) **GI**: standard Glorot initialization, (ii) **GI+ZOL**: Glorot initialization with the output layer additionally set to zero, and (iii) **ZI**: full zero initialization for all parameters. As shown in Fig. 4b, the Glorot initialization with a zeroed output layer achieves the best empirical performance. Therefore, this scheme is adopted for initializing our models across all benchmark experiments.
+
+In addition, time sampling is required to estimate the expectation over time  $t$  in the objective function Eq. (12). We evaluate several time-sampling strategies in the IsaacLab Navigation environment: (i) **USC**: Uniform sampling from the continuous interval  $[0, 1]$ ; (ii) **USD**: Uniform sampling from the discrete ODE simulation time grid  $\{0, 0.05, 0.1, \dots, 0.95, 1.0\}$ ; and (iii) **Multi-USD**: sampling multiple time points  $t$  for each state-action sample, with each  $t$  drawn uniformly from the same discrete grid. The results are shown in Fig. 4c. Overall, these three time-sampling strategies lead to only minor performance differences. Therefore, USD is used as the default choice in all benchmark experiments. Multi-USD is generally not recommended, as it introduces additional computational overhead without clear benefits.
+
+{9}------------------------------------------------
+
+![Figure 4: Ablation studies on key components of PolicyFlow. (a) Clipping Range Comparison: Episodic Reward vs Training Iterations (x10^3) for epsilon = 0.1, 0.2, 0.3, 0.4. (b) Different Initialization: Episodic Reward vs Training Iterations (x10^3) for GI, GI + ZOL, and ZI. (c) Time Sampling Strategy: Episodic Reward vs Training Iterations (log scale) for USC, USD, and Multi-USD.](4e0ade2f41b66d5602160da5cc978274_img.jpg)
+
+Figure 4: Ablation studies on key components of PolicyFlow. (a) Clipping Range Comparison: Episodic Reward vs Training Iterations (x10^3) for epsilon = 0.1, 0.2, 0.3, 0.4. (b) Different Initialization: Episodic Reward vs Training Iterations (x10^3) for GI, GI + ZOL, and ZI. (c) Time Sampling Strategy: Episodic Reward vs Training Iterations (log scale) for USC, USD, and Multi-USD.
+
+Figure 4: Ablation studies on key components of PolicyFlow.
+
+### 5.5 DIFFERENT CHOICES OF INTERPOLATION PATH
+
+In the preceding sections, we adopted the same interpolation path as rectified flow. However, prior work on flow matching has explored alternative interpolation strategies. Table 4 summarizes two additional choices beyond rectified-flow path. We evaluate these interpolation paths on one IsaacLab locomotion task and the Multi-Goal test, keeping all agent settings identical except for the interpolation scheme and its corresponding Brownian regularizer. As shown in Table 3, all three paths achieve nearly identical converged episodic rewards on the ANYmal-D locomotion task, whereas TriFlow path and rectified-flow path yield better performance than stochastic-interpolant path on the MultiGoal test. The slightly lower performance of the stochastic-interpolant path may be due to our use of an approximate relationship between the score function and the velocity field along this interpolation, rather than an exact equality. See Appendix B for the details of this approximation.
+
+Table 3: Terminal training episodic rewards using different interpolation paths.
+
+| Path / Env | ANYmal-D | MultiGoal |
+|-|-|-|
+| Rectified-Flow Path | $24.6 \pm 0.2$ | <b><math>8.79 \pm 0.02</math></b> |
+| Stochastic-Interpolant Path | <b><math>24.7 \pm 0.2</math></b> | $8.22 \pm 0.18$ |
+| TrigFlow Path | $24.5 \pm 0.1$ | $8.74 \pm 0.03$ |
+
+Table 4: Different interpolation paths for flow matching
+
+| Method / Interpolation Formula | Relationship between Score and Velocity Field |
+|-|-|
+| Rectified Flow (Liu et al., 2022)<br>$x_t = (1 - t) x_0 + t x_1, \quad t \in [0, 1]$ | $(1 - t) \nabla_x \log p_t(x) = t v_t(x) - x$ |
+| Stochastic Interpolant (Albergo et al., 2023)<br>$x_t = (1 - t) x_0 + t x_1 + \sqrt{2t(1 - t)} h, \quad t \in [0, 1], \quad h \sim \mathcal{N}(0, I)$ | $(2(t - \frac{1}{2})^2 + \frac{1}{2}) \nabla_x \log p_t(x) \approx t v_t(x) - x$ |
+| TrigFlow (Lu & Song, 2024)<br>$x_t = \cos(t) x_0 + \sin(t) x_1, \quad t \in [0, \frac{\pi}{2}]$ | $\cos(t) \nabla_x \log p_t(x) = \sin(t) v_t(x) - \cos(t) x$ |
+
+## 6 CONCLUSION AND FUTURE WORKS
+
+In this work, we proposed PolicyFlow, an on-policy reinforcement learning algorithm that integrates continuous normalizing flows with PPO-style optimization. By approximating importance ratios via velocity field variations along interpolation paths, PolicyFlow eliminates the need for costly path-wise backpropagation while maintaining stability and efficiency. In addition, our purposed Brownian regularizer provides a principled yet lightweight way to mitigate mode collapse and encourage diverse exploration. Through extensive experiments on MultiGoal, IsaacLab, and MuJoCo Playground, PolicyFlow consistently matches or outperforms PPO and the SOTA methods FPO and DPPO. In particular, results on MultiGoal showcase PolicyFlow’s ability to capture complex multimodal action distributions. Looking forward, PolicyFlow offers a versatile foundation for bridging generative modeling and reinforcement learning. While different interpolation paths show promise in practice, though their formal validation and theoretical implications remain to be explored. Other promising directions include fine-tuning flow-matching policies, extending PolicyFlow to offline RL and broader generative modeling tasks, and exploring its connection to diffusion models by incorporating score-based objectives. Finally, developing a more comprehensive theoretical understanding of PolicyFlow may further inspire algorithmic improvements and strengthen its applicability in real-world decision-making.
+
+ Rest of paper (reference and Appendix) is removed.

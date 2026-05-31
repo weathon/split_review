@@ -1,0 +1,379 @@
+
+
+{0}------------------------------------------------
+
+# COUNT BRIDGES ENABLE MODELING AND DECONVOLVING TRANSCRIPTOMIC DATA
+
+Nic Fishman<sup>1,\*</sup>, Gokul Gowri<sup>2</sup>, Tanush Kumar<sup>1</sup>, Jiaqi Lu<sup>1</sup>, Valentin de Bortoli<sup>3</sup>, Jonathan S. Gootenberg<sup>4,6</sup> & Omar Abudayyeh<sup>5,6</sup>
+
+<sup>1</sup>Harvard University; <sup>2</sup>MIT; <sup>3</sup>CNRS;
+
+<sup>4</sup>Beth Israel Deaconess Medical Center; <sup>5</sup>Brigham and Women’s Hospital; <sup>6</sup>Harvard Medical School
+
+\*Corresponding author: njwfish@gmail.com
+
+## ABSTRACT
+
+Many modern biological assays, including RNA sequencing, yield integer-valued counts that reflect the number of molecules detected. These measurements are often not at the desired resolution: while the unit of interest is typically a single cell, many measurement technologies produce counts aggregated over sets of cells. Although recent generative frameworks such as diffusion and flow matching have been extended to non-Euclidean and discrete settings, it remains unclear how best to model integer-valued data or how to systematically deconvolve aggregated observations. We introduce Count Bridges, a stochastic bridge process on the integers that provides an exact, tractable analogue of diffusion-style models for count data, with closed-form conditionals for efficient training and sampling. We extend this framework to enable direct training from aggregated measurements via an Expectation-Maximization-style approach that treats unit-level counts as latent variables. We demonstrate state-of-the-art performance on integer distribution matching benchmarks, comparing against flow matching and discrete flow matching baselines across various metrics. We then apply Count Bridges to two large-scale problems in biology: modeling single-cell gene expression data at the nucleotide resolution, with applications to deconvolving bulk RNA-seq, and resolving multicellular spatial transcriptomic spots into single-cell count profiles. Our methods offer a principled foundation for generative modeling and deconvolution of biological count data across scales and modalities.
+
+## 1 INTRODUCTION
+
+Integer-valued counts are a fundamental product of scientific measurements because of the discrete nature of molecules. Modern biological assays yield massive streams of count data: RNA-seq read counts, fluorescence imaging molecule counts, and mass cytometry ion counts (Klein et al., 2015; Raj et al., 2008; Bendall et al., 2011). However, these measurements are often aggregated over multiple individual units, obscuring the fine-grained patterns underlying these natural phenomena. Transcriptomics technologies exemplify this challenge, with technologies such as Visium capturing 10-50 cells per spot (Ståhl et al., 2016) and bulk RNA-seq aggregating thousands to millions of cells per readout, yielding averages rather than high-resolution details. Deconvolving these aggregates into single-cell profiles is critical for the precise mapping of cellular heterogeneity, cell-cell interactions, and tissue architecture (Moses & Pachter, 2022; Armingol et al., 2021). The challenge is twofold: building generative models that respect the integer nature of counts and extending these models to infer unit-level profiles from aggregated observations.
+
+Recent developments in generative modelling only partially address the problem. Discrete diffusion models (Austin et al., 2021; Lou et al., 2023) treat counts as unordered categories through masking or uniform noise. Blackout Diffusion (Santos et al., 2023), the only count-specific approach, uses pure-death processes that cannot transport between arbitrary distributions. The biological deconvolution literature on the other hand focuses on deconvolving cell-type (cluster-level) proportions (Kleshchevnikov et al., 2022; Cable et al., 2022; Li et al., 2023), rather than unit-level count profiles. Thus, there is need for a framework that respects the integer and ordinal structure of counts, enables transport between arbitrary distributions, and can systematically deconvolve aggregated observations.
+
+{1}------------------------------------------------
+
+We introduce Count Bridges: a stochastic bridge process on  $\mathbb{Z}^d$  using Poisson birth-death dynamics. This yields closed-form conditionals for exact sampling and extends naturally to deconvolution via an EM algorithm treating unit-level counts as latent. The birth-death mechanism allows transport between arbitrary integer-valued distributions while preserving the ordinal structure, as both increments and decrements respect the natural ordering of counts. We show that Count Bridges outperform existing methods on synthetic benchmark datasets and scale more favorably to high-dimensional settings. We then showcase Count Bridges on two real-world biological applications centered on deconvolution: nucleotide-resolution single-cell RNA-sequence modeling for bulk RNA-seq deconvolution and reference-free spatial transcriptomic deconvolution. The codebase is available here.
+
+## 2 BACKGROUND ON DIFFUSION MODELS
+
+Diffusion models specify a time-indexed family of *bridge kernels* connecting  $X_0 \sim p_0$  to a simple source distribution  $X_1 \sim p_1$  (often Gaussian). There are two layers of structure: (i) an *unconditional forward process*  $(X_t)_{t \in [0,1]}$  with kernels  $K_{t|0}(x_t | x_0) = \text{Law}(X_t | X_0 = x_0)$ ; (ii) for any  $0 \leq s \leq t \leq 1$ , a family of *bridge kernels*  $K_{s|0,t}(x_s | x_0, x_t) = \text{Law}(X_s | X_0 = x_0, X_t = x_t)$ .
+
+Diffusion models require two consistency properties. First we require a bridge consistency identity.
+
+$$\text{For any } 0 \leq s \leq t \leq u \leq 1, \quad K_{s|u}(x_s | x_u) = \int K_{s|t}(x_s | x_t) K_{t|u}(x_t | x_u) dx_t. \quad (1)$$
+
+Thus multi-step sampling along any grid  $u \rightarrow t \rightarrow s$  matches the single-step  $u \rightarrow s$  bridge.
+
+Second, the kernel must have a projective posterior:
+
+$$K_{s|t}(x_s | x_t) = \int q_{0|t}(x_0 | x_t) K_{s|0,t}(x_s | x_0, x_t) dx_0, \quad (2)$$
+
+where  $q_{0|t}(x_0 | x_t) = \text{Law}(X_0 | X_t = x_t)$ . This identity expresses  $K_{s|t}$  as a mixture over the posterior of the  $p_0$  data. It is essential for denoising: during sampling, each predicted  $X_t$  changes the posterior  $q_{0|t}$ , so the reverse kernels must be projective under this posterior update.
+
+Together, equation 1 and equation 2 lets us define a general diffusion approach. First we train a denoiser  $q_\theta$  that approximates the posterior,  $\tilde{X}_0 \sim q_\theta(\cdot | x_t, t) \approx \text{Law}(X_0 | X_t = x_t)$ , using tuples  $(t, X_t, X_0)$  drawn from the “global” bridge: sample  $x_0 \sim p_0$ ,  $x_1 \sim p_1$ ,  $t \sim \text{Unif}[0, 1]$  and then  $X_t \sim K_{t|0,1}(\cdot | x_0, x_1)$ .
+
+For sampling, pick a grid  $1 = t_K > \dots > t_0 = 0$ , draw  $X_1 \sim p_1$ , set  $X_{t_K} \leftarrow X_1$ , sampling
+
+$$\tilde{X}_0^{(k+1)} \sim q_\theta(\cdot | X_{t_{k+1}}, t_{k+1}), \quad X_{t_k} \sim K_{t_k|0,t_{k+1}}(\cdot | \tilde{X}_0^{(k+1)}, X_{t_{k+1}}). \quad (3)$$
+
+By our consistency properties, this multi-step procedure is equivalent to sampling directly from the  $(0, 1)$  bridge, so the model cannot drift out of the training distribution.
+
+### 2.1 DIFFUSION AS A BRIDGE BETWEEN NOISE AND DATA
+
+Let us consider the unconditional  $K_{t|0}$  process  $(X_t)_{t \in [0,1]}$  of the following form
+
+$$X_t = \alpha(t)X_0 + B_t, \quad (4)$$
+
+where  $(B_t)_{t \in [0,1]}$  is a  $d$ -dimensional Gaussian process with non-decreasing standard deviation  $\sigma(t)$ , and  $\alpha(t)$  a non-increasing function. Note that  $\alpha(0) = 1$  and  $\sigma(0) = 0$ .
+
+We want to define a process that interpolates smoothly between  $X_0 \sim p_0$  and  $X_1$  given by another distribution as in Peluchetti (2023); Albergo et al. (2023); Delbracio & Milanfar (2023); Liu et al. (2022; 2023). We have the following proposition defining the global and local bridge.
+
+**Proposition 2.1.** *Let  $(X_t)_{t \in [0,1]}$  be given by equation 4. For  $0 < s < t \leq 1$ , consider  $(X_s)_{s \in [0,t]}$  conditioned on  $X_t = x_t$  and  $X_0 = x_0$ . Then the conditional law  $K_{s|0,t}(\cdot | x_0, x_t)$  is Gaussian and can be written*
+
+$$X_s \stackrel{d}{=} \alpha(s)(1 - r(s, t))X_0 + \frac{\alpha(s)}{\alpha(t)}r(s, t)X_t + \sigma(s)(1 - r(s, t))^{1/2}Z, \quad (5)$$
+
+where  $Z \sim \mathcal{N}(0, \text{Id})$  is independent of  $(X_0, X_t)$  and  $r(s, t) = \frac{\alpha(t)^2 \sigma(s)^2}{\alpha(s)^2 \sigma(t)^2}$ . In particular, the family  $\{K_{s|0,t}\}_{0 \leq s \leq t \leq 1}$  defined by equation 5 satisfies equations 1 and 2.
+
+{2}------------------------------------------------
+
+Note that if  $X_1 \sim \mathcal{N}(0, \text{Id})$ ,  $\alpha(1) = 0$  and  $\sigma(1) = 1$  we have  $X_t \stackrel{d}{=} \alpha(t)X_0 + \sigma(t)Z$ . Furthermore, our equation 5 recovers the interpolation described in Albergo et al. (2023) with the identification  $\alpha(t) \rightarrow \alpha(t)(1 - r(t))$ ,  $\frac{\alpha(t)}{\sigma(t)}r(t) \rightarrow \beta(t)$  and  $\sigma(t)(1 - r(t))^{1/2} \rightarrow \gamma_t$ .
+
+### 2.2 SAMPLING THE POSTERIOR
+
+In this paradigm the bridge is only the first of two choices that define the model. We also have to choose how to model the posterior  $X_0|X_t, t$ . There are two core options: we can use differential equations to model the posterior in the limit of small steps or we can focus more directly on modeling the posterior. In Euclidean space, the former lets us learn a simple conditional expectation, whereas the latter always requires a distribution model.
+
+**Infinitesimal.** Consider a small backward step of size  $\delta > 0$ . The local bridge between times  $t$  and  $t - \delta$  is Gaussian, so conditioned on  $X_t = x$  we can write to first order in  $\delta$
+
+$$X_{t-\delta} | X_t = x \approx x - \delta b(x, t) + \sqrt{\delta} \xi_t, \quad \xi_t \sim \mathcal{N}(0, \Sigma(x, t)),$$
+
+where  $b$  is the reverse-time drift and  $\Sigma$  is the diffusion covariance of the bridge.
+
+The conditional law  $X_{t-\delta} | X_t$  is Gaussian and can be computed in closed form:
+
+$$b(x, t) = B_1(t)x + B_2(t)\mathbb{E}[X_0 | X_t = x] + b_0(t), \quad \Sigma(x, t) = \Sigma_0(t).$$
+
+The diffusion covariance depends only on  $t$  (from the Brownian increment), and the drift depends on the posterior  $\text{Law}(X_0 | X_t)$  only through its mean. This justifies learning the mean  $q_\theta(x, t) \approx \mathbb{E}[X_0 | X_t = x]$  (equivalently, a score or velocity) as in standard diffusion models (Song et al., 2020).
+
+**Distributional.** Following De Bortoli et al. (2025) we can learn the conditional law  $q_\theta(\cdot | x_t, t) \approx \text{Law}(X_0 | X_t = x_t)$ , using any distribution learning approach. We can then sample and directly plug into the bridge
+
+$$\tilde{X}_0^{(k+1)} \sim q_\theta(\cdot | X_{t_{k+1}}, t_{k+1}), \quad X_{t_k} \sim K_{t_k|0, t_{k+1}}(\cdot | \tilde{X}_0^{(k+1)}, X_{t_{k+1}}).$$
+
+to sample the posterior. The distributional perspective is particularly powerful when the infinitesimal perspective fails to admit a simplification to the conditional expectation, which motivates our use of the distributional approach for Count Bridges (see Sec. 3.2). In categorical discrete settings, all approaches are distributional since they are based on cross-entropy losses, see Campbell et al. (2022); Austin et al. (2021); Shi et al. (2024); Sahoo et al. (2024).
+
+## 3 COUNT BRIDGES
+
+### 3.1 AN INTEGER BRIDGE BETWEEN DISTRIBUTIONS
+
+Mirroring Sec. 2, we seek a bridge for integer-valued data. Instead of a Gaussian process, we use a pair of independent Poisson birth/death processes  $(B_t)_{t \in [0,1]}$  and  $(D_t)_{t \in [0,1]}$  that increment/decrement the counts. We define an increasing “jump-intensity” function  $w : [0, 1] \rightarrow \mathbb{R}_{\geq 0}$  with  $w(0) = 0$ ,  $w(1) = 1$ , and then write the cumulative birth/death intensities as  $\Lambda_{\pm}(t) = \lambda_{\pm} \int_0^t w(\tau) d\tau$  for some  $\lambda_{\pm} > 0$  so  $B_t \sim \text{Poi}(\Lambda_+(t))$  and  $D_t \sim \text{Poi}(\Lambda_-(t))$ . From here we can define the unconditional kernel  $K_{t|0}$ :
+
+$$X_t = X_0 + B_t - D_t. \quad (6)$$
+
+Denoting the displacement  $d_t = X_t - X_0$ , the total number of jumps  $N_t = B_t + D_t$ , and the slack variable  $M_t = \min(B_t, D_t)$ . Any two of these variables determine the third:
+
+$$N_t = |d_t| + 2M_t, \quad B_t = \frac{1}{2}(N_t + d_t), \quad D_t = N_t - B_t. \quad (7)$$
+
+From the  $(N_t, B_t)$  perspective, Poisson superposition and thinning imply that, conditional on  $(N_t, B_t)$  at time  $t$ , the earlier counts  $(N_s, B_s)$  for  $s < t$  can be sampled by a Binomial draw for  $N_s$  and a Hypergeometric draw for  $B_s$ . Switching to  $(M_t, d_t)$ , a Poisson change of variables yields the slack posterior  $M_t | d_t$ , whose pmf has Bessel form (see Prop. A.6 in App. A). These two ingredients together give a count analogue of Proposition 2.1; the full derivation is in App. A.
+
+**Proposition 3.1.** *Let  $(X_t)_{t \in [0,1]}$  be given by equation 6. Now, consider  $(X_s)_{s \in [0,t]}$  conditioned by  $X_t = x_t$  and  $X_0 = x_0$ . Then, we have the Poisson Birth-Death bridge  $K_{s|0,t}$ :*
+
+$$X_s \stackrel{d}{=} X_0 + B_s - D_s, \quad (8)$$
+
+{3}------------------------------------------------
+
+![Figure 1: Sample paths and slack distributions for endpoint gaps d_t. The figure is divided into three main columns. The left column shows 'Trajectories from 1 → 0 over d' (top) and 'Recursive trajectories from t = 0 over d' (bottom) for various endpoint gaps d_t = 0, 48, 32, 64, 80. The middle column shows 'Posterior at time t: P(M_t | d_t)' for d_t = 80, 64, 32, 16, 0 (top) and d_t = 32, 27, 15, 8, 3, 2 (bottom), plotting slack M_t. The right column shows 'One-step (1 → s) ECDF of X_t' (top) and 'Two-step (1 → t → s) ECDF of X_t' (bottom) for the same d_t values, plotting the empirical cumulative distribution function of X_t.](e94f3bbb6f7501b9a1344dd0210e5dd8_img.jpg)
+
+Figure 1: Sample paths and slack distributions for endpoint gaps d\_t. The figure is divided into three main columns. The left column shows 'Trajectories from 1 → 0 over d' (top) and 'Recursive trajectories from t = 0 over d' (bottom) for various endpoint gaps d\_t = 0, 48, 32, 64, 80. The middle column shows 'Posterior at time t: P(M\_t | d\_t)' for d\_t = 80, 64, 32, 16, 0 (top) and d\_t = 32, 27, 15, 8, 3, 2 (bottom), plotting slack M\_t. The right column shows 'One-step (1 → s) ECDF of X\_t' (top) and 'Two-step (1 → t → s) ECDF of X\_t' (bottom) for the same d\_t values, plotting the empirical cumulative distribution function of X\_t.
+
+Figure 1: *Left*: Sample paths for several endpoint gaps  $d_t$  (top). Fixing the prefix  $[0, t]$  resample  $(t, 1]$  by the recursive kernel (bottom). *Middle*: Bessel slack posteriors at initial and intermediate times. The slack  $M_t$  concentrates near 0 as  $|d|$  grows. *Right*: ECDFs of  $X_s$  from a one-step kernel ( $1 \rightarrow s$ ) and a two-step kernel ( $1 \rightarrow t \rightarrow s$ ) are indistinguishable, confirming composition.
+
+where we condition on  $d_t = X_t - X_0$  and sample  $M_t \mid d_t \sim \text{Bes}(|d_t|; \Lambda_+(t), \Lambda_-(t))$ , changing variables to  $N_t$  and  $B_t$  to sample  $B_s$ , and  $D_s$  which we can plug into equation 8:
+
+$$N_s \mid N_t \sim \text{Bin}\left(N_t, \frac{w(s)}{w(t)}\right), \quad B_s \mid (N_t, N_s, B_t) \sim \text{Hyp}(N_t, B_t, N_s), \quad D_s = N_s - B_s. \quad (9)$$
+
+The family  $\{K_{s|0,t}\}_{0 \leq s \leq t \leq 1}$  defined by equation 8 satisfies equations 1 and 2.
+
+We visualize this process in Fig. 1 where we show the trajectories for the one- and two-step models along with the core composition property that drives bridge models. This setup enables training and sampling from a Count Bridge, see Algorithms 1 and 2. These results leverage our custom CUDA kernel implementing the fast Bessel sampler of Devroye (2002) to enable sampling at scale.
+
+In Fig. 1 we also see that as  $d_t$  grows the slack  $M_t$  concentrates near zero, so there is no slack. This means that Count Bridges are an instance of the static Schrödinger bridge problem (Léonard, 2013): they solve an entropy-regularized optimal transport. Let  $\kappa = \sqrt{\lambda_+ \lambda_-}$  be the jump intensity and  $p_{\text{ref}}^\kappa(x_0, x_1) = p_0(x_0) K_{1|0}^\kappa(x_1|x_0)$  be the joint law of  $(X_0, X_1)$  induced by the kernel. Over the space of couplings  $\mathcal{C}(p_0, p_1) = \{C \text{ on } \mathcal{X} \times \mathcal{X} : C(\cdot, \mathcal{X}) = p_0, C(\mathcal{X}, \cdot) = p_1\}$ , Count Bridges solve
+
+$$C_\kappa \in \arg \min_{C \in \mathcal{C}(p_0, p_1)} \text{KL}(C \parallel p_{\text{ref}}^\kappa).$$
+
+Letting  $\kappa \rightarrow \infty$  yields the independent coupling  $p_0 \otimes p_1$ , but as  $\kappa \downarrow 0$  we obtain
+
+$$\text{KL}(C \parallel p_{\text{ref}}^\kappa) \approx \log\left(\frac{2}{\kappa}\right) \mathbb{E}_C |X_1 - X_0| - H(C),$$
+
+so  $\kappa \rightarrow 0$  recovers discrete OT with cost  $|x_1 - x_0|$  (see App. A.2).
+
+This echoes the Gaussian case (Sec. 2) where we define  $\sigma = \sigma(1)$  and  $p_{\text{ref}}^\sigma$ , and as  $\sigma \downarrow 0$
+
+$$\text{KL}(C \parallel p_{\text{ref}}^\sigma) \approx \frac{1}{2\sigma^2} \mathbb{E}_C \|X_1 - X_0\|^2 - H(C),$$
+
+so  $\sigma \rightarrow 0$  recovers quadratic OT, while  $\sigma \rightarrow \infty$  again gives  $p_0 \otimes p_1$  (Shi et al., 2023). Thus the bridge parameters  $\kappa$  (count) and  $\sigma$  (Gaussian) play the same role as entropy-regularization strengths.
+
+### 3.2 DISTRIBUTIONAL SCORING LOSS FOR THE DENOISER
+
+Training requires a distributional loss due to the discrete nature of the space. As shown by Holderrieth et al. (2024), the ELBO for discrete generators (e.g., jump processes) is distributional and cannot be reduced to expectations over point estimates. This mirrors the need for cross-entropy in discrete diffusion and flow models. We can use cross-entropy with Count Bridges (we test this, see App. D.1), but it has two issues: first, it does not incorporate the lattice structure; second, cross-entropy cannot model the joint of  $X_s \mid X_t$  without exponential cost in dimension, so cross entropy is usually
+
+{4}------------------------------------------------
+
+**Require:** dataset  $(\mathbf{x}_0, \mathbf{x}_1), w(\cdot), \Lambda_{\pm}(\cdot)$
+
+- 1: **for** each minibatch **do**
+- 2:   sample  $(x_0, x_1) \sim (\mathbf{x}_0, \mathbf{x}_1)$
+- 3:    $t \sim \text{Unif}[0, 1]$
+- 4:    $d_1 \leftarrow x_1 - x_0$
+- 5:    $M_1 \sim \text{Bes}(|d_1|; \Lambda_+(1), \Lambda_-(1))$
+- 6:    $N_1 \leftarrow |d_1| + 2M_1$
+- 7:    $B_1 \leftarrow \frac{1}{2}(N_1 + d_1)$
+- 8:    $N_t \sim \text{Bin}(N_1, w(t))$
+- 9:    $B_t \sim \text{Hyp}(N_1, B_1, N_t)$
+- 10:    $x_t \leftarrow x_1 - 2(B_1 - B_t) + (N_1 - N_t)$
+- 11:   update  $\theta$  on  $\mathcal{L}(\theta)$
+- 12: **end for**
+
+Algorithm 1: Training Poisson–BD Bridge
+
+**Require:**  $x_{t_K} = x_1$ , model  $q_\theta, w(\cdot), \Lambda_{\pm}(\cdot)$
+
+- 1: **for**  $k = K, K-1, \dots, 1$  **do**
+- 2:   sample  $\hat{x}_0 \sim q_\theta(\cdot | x_{t_k}, t_k)$
+- 3:    $d_{t_k} \leftarrow x_{t_k} - \hat{x}_0$
+- 4:    $M_{t_k} \sim \text{Bes}(|d_{t_k}|; \Lambda_+(t_k), \Lambda_-(t_k))$
+- 5:    $N_{t_k} \leftarrow |d_{t_k}| + 2M_{t_k}$
+- 6:    $B_{t_k} \leftarrow \frac{1}{2}(N_{t_k} + d_{t_k})$
+- 7:    $r \leftarrow w(t_{k-1})/w(t_k)$
+- 8:    $N_{t_{k-1}} \sim \text{Bin}(N_{t_k}, r)$
+- 9:    $B_{t_{k-1}} \sim \text{Hyp}(N_{t_k}, B_{t_k}, N_{t_{k-1}})$
+- 10:    $x_{t_{k-1}} \leftarrow x_{t_k} - 2(B_{t_k} - B_{t_{k-1}}) + (N_{t_k} - N_{t_{k-1}})$
+- 11: **end for**
+- 12: **return**  $x_{t_0}$
+
+Algorithm 2: Sampling Poisson–BD Bridge
+
+factorized, modeling each coordinate of  $X_s | X_t$  independently or autoregressively. Specializing to count data we can go beyond cross-entropy by using a proper scoring rule that (i) incorporates the geometry and (ii) enables modeling of the joint.
+
+Formally, let  $(X_0, X_t)$  denote a training pair from  $K_{t|0,1}$  at time  $t \in [0, 1]$ , and let  $q_\theta(\cdot | x_t, t)$  be our denoiser. We train  $q_\theta$  using a strictly proper distributional scoring rule (Gneiting & Raftery, 2007; De Bortoli et al., 2025). Fix a negative-type semimetric  $\rho$  on  $\mathbb{Z}^D$  (all our experiments focus on the  $\rho(x, x') = \|x - x'\|_2^\beta$  with  $\beta = 1$ ). For any distribution  $p$  and outcome  $y$ , the energy score is
+
+$$S_\rho(p, y) = \frac{1}{2} \mathbb{E}_{X, X' \sim p} [\rho(X, X')] - \mathbb{E}_{X \sim p} [\rho(X, y)] \text{ and } \mathcal{L}(\theta) = \mathbb{E}_{X_0, X_t} \left[ S_\rho(q_\theta(\cdot | X_t, t), X_0) \right]$$
+
+which is strictly proper when  $\rho$  is characteristic. Taking  $m$  i.i.d. samples  $\hat{x}^{(j)} \sim q_\theta(\cdot | x_t, t)$  we can use the plugin estimator:  $\hat{S}_\rho = \frac{1}{m(m-1)} \sum_{j \neq j'} \frac{1}{2} \rho(\hat{x}^{(j)}, \hat{x}^{(j')}) - \frac{1}{m} \sum_{j=1}^m \rho(\hat{x}^{(j)}, x_0)$ .
+
+## 4 DECONVOLUTION WITH COUNT BRIDGES
+
+We extend Count Bridges to handle unit-level generation when we only observe aggregates. Consider  $G$  units in the one-dimensional case where the group-level state at time  $t$  is a vector  $\mathbf{X}_t \in \mathbb{Z}^G$  with entries  $X_{gt}$  for unit  $g$  at time  $t$ . Each entry evolves independently according to the bridge in Section 3. The key challenge: we observe the unit-level endpoint  $\mathbf{x}_1$  but only the aggregate at time 0,  $a_0 = \sum_{g=1}^G x_{g0} \in \mathbb{Z}$ , not the unit-level vector  $\mathbf{x}_0$ . Our goal is to learn a count bridge  $q_\theta(x_0 | x_t, t, z)$  that generates unit-level endpoints given start data at time  $t = 1$  and side information  $z$ .
+
+We formulate this as a generalized EM problem, similar to Rozet et al. (2024), where  $\mathbf{X}_0$  is latent and  $a_0 = \sum_g \mathbf{X}_{g0}$  is observed. Let  $A: \mathbb{Z}^G \rightarrow \mathbb{Z}$  be a linear aggregate map (e.g., sums across units, block sums). For  $(x_t, t, z)$ , the denoiser  $q_\theta(\cdot | x_t, t, z)$  defines an i.i.d. product prior over  $\mathbf{X}_0 = (X_{10}, \dots, X_{G0})$ . Conditioning on the aggregate yields
+
+$$Q_\theta(\mathbf{X}_0 | a_0, x_t, t, z) \propto \left[ \prod_{g=1}^G q_\theta(X_{g0} | x_t, t, z) \right] \mathbb{1}\{A(\mathbf{X}_0) = a_0\}.$$
+
+In the E-step we will generate “latent”  $\mathbf{x}_0^\infty$  using the model and in the M-step we will use these  $\mathbf{x}_0^\infty$  to train the model at the aggregate level. We summarize the overall procedure in Algorithms 3 and 4.
+
+**E-Step** The ideal E-step would sample from the exact aggregate-conditional law
+
+$$\mathbf{X}_0^\infty \sim Q_\theta(\cdot | a_0, x_t, t, z).$$
+
+We could then use the sampled  $\mathbf{x}_0^\infty$  as latent variables to sample  $x_t$  between  $(\mathbf{x}_0^\infty, \mathbf{x}_1)$  using the unit-level kernel  $K_{t|0,1}$  from Prop. 3.1.<sup>1</sup> Unfortunately,  $Q_\theta$  is generally intractable to sample from,
+
+<sup>1</sup>The same method described here can be used with distributional diffusion on continuous space, but we focus on counts since most often when we observe aggregates we believe they are based on discrete underlying data.
+
+{5}------------------------------------------------
+
+**Require:**  $(\mathbf{x}_1, a_0, z), w(\cdot), \mathbb{A}_\pm(\cdot), q_\theta, \Pi$
+
+- 1: **for**  $k = K, K-1, \dots, 2$  **do**
+- 2:   Sample  $\tilde{\mathbf{x}}_{0,t_k} \sim q_\theta(\cdot \mid \mathbf{x}_{t_k}, t_k, z)$
+- 3:    $\tilde{\mathbf{x}}_{0,t_k} \leftarrow \Pi(\tilde{\mathbf{x}}_{0,t_k}, a_0, z)$
+- 4:   Update  $\mathbf{x}_{t_{k-1}}$  by running the reverse step using steps 4–10 of Alg. 2, with  $\tilde{\mathbf{x}}_{0,t_k}$
+- 5: **end for**
+- 6:  $\mathbf{x}_0^\infty \leftarrow$  sample and project  $\tilde{\mathbf{x}}_{0,t_1}$
+- 7: **return**  $\mathbf{x}_0^\infty$
+
+Algorithm 3: Guided Sampling for for  $\mathbf{x}_0^\infty$ 
+
+**Require:**  $(\mathbf{x}_1, a_0, z), w(\cdot), \mathbb{A}_\pm(\cdot), q_\theta, \Pi$
+
+- 1: **for** each minibatch **do**
+- 2:   **E-step:** Sample latent  $\tilde{\mathbf{x}}_0^\infty$  from
+- 3:    $\mathbf{x}_1$  conditional on  $a_0$  via Alg. 3
+- 4:   **M-step:**  $t \sim \text{Unif}[0, 1]$
+- 5:   Sample  $\mathbf{x}_t$  via the forward bridge on
+- 6:    $(\tilde{\mathbf{x}}_0^\infty, \mathbf{x}_1)$  using steps 4–10 of Alg. 1
+- 7:   Update  $\theta$  using the gradient of  $-\mathcal{L}_{\text{agg}}(\theta)$
+- 8: **end for**
+
+Algorithm 4: Training with Aggregate Supervision
+
+![Figure 2: Three plots showing trajectories for CFM, DFM, and DCB methods on a scaled and rounded variant of the classic 8 gaussian to two moons task. The CFM plot shows blue trajectories, the DFM plot shows orange trajectories, and the DCB plot shows green trajectories. All plots show two distinct clusters of points with trajectories connecting them.](0ad3f61f997eb05afb341fc46024bf2b_img.jpg)
+
+Figure 2: Three plots showing trajectories for CFM, DFM, and DCB methods on a scaled and rounded variant of the classic 8 gaussian to two moons task. The CFM plot shows blue trajectories, the DFM plot shows orange trajectories, and the DCB plot shows green trajectories. All plots show two distinct clusters of points with trajectories connecting them.
+
+Figure 2: A scaled and rounded variant of the classic 8 gaussian to two moons task. Here we compare the trajectories of continuous flow matching, discrete flow matching, and count bridges. CB achieves the lowest  $W_2$ , MMD, and EMD, see Table 6.
+
+given just a unit-level model, so we approximate it through the diffusion sampling process itself. Starting from  $\mathbf{x}_1$ , we run the sampling process as in Algorithm 2, but at each timestep  $t_k$  we: (1) predict  $\tilde{\mathbf{x}}_0 \sim q_\theta(\cdot \mid \mathbf{x}_{t_k}, t_k, z)$ , (2) project  $\tilde{\mathbf{x}}_0$  to satisfy the aggregate constraint (see Sec. 4), yielding  $\tilde{\mathbf{x}}_0$ , and (3) perform the sampling step using  $\tilde{\mathbf{x}}_0$  as the predicted endpoint. This projection-guided diffusion ensures the aggregate constraint is incorporated throughout the denoising trajectory (see Alg. 3). This process produces latent  $\mathbf{x}_0^\infty$  samples that are consistent with the aggregate constraints, which we can then use in the M-step to train the model.
+
+**M-Step** With these unit-level samples in hand, the M-step runs the bridge process as in Section 3. But instead of computing the loss on the unit-level latents, we compute the loss with respect to the aggregates. Given the ground-truth aggregate  $a_0$ , we lift the same strictly proper score to aggregates:
+
+$$S_p^\Delta(p, a) = \frac{1}{2} \mathbb{E}_p [\rho(A(\mathbf{X}), A(\mathbf{X}'))] - \mathbb{E}_p [\rho(A(\mathbf{X}), a)] + \mathcal{L}_{\text{agg}}(\theta) = \mathbb{E}_{\mathbf{A}_0, \mathbf{x}_{t_1}} [S_p^\Delta(q_\theta(\cdot \mid \mathbf{x}_{t_1}, t, z), A_0)]$$
+
+with the plug-in obtained by sampling  $\tilde{\mathbf{X}}_0^{(j)} \sim q_\theta(\cdot \mid \mathbf{X}_t, t, z)$  and forming  $\hat{a}^{(j)} = A(\tilde{\mathbf{X}}_0^{(j)})$ .
+
+**Approximate Sampling from the conditional distribution** Given a predicted endpoint  $\tilde{\mathbf{x}}_0$  from our diffusion model and target aggregate  $a_0$ , we need to sample from the conditional distribution  $Q_\theta(\cdot \mid A(\mathbf{X}_0) = a_0)$ . While this is intractable, we can derive a principled approximation.
+
+**Proposition 4.1** (First-order aggregate projection). *Let  $A(\mathbf{X}_0)$  be the aggregate, and let  $p_0$  be the prior law of  $\mathbf{X}_0$ . Under the regularity conditions in App. B.1, the aggregate-conditional law  $Q_\theta(\cdot \mid A_0 = a_0)$  admits a first-order exponential tilt. The corresponding generalized KL projection*
+
+$$\Pi(\mathbf{x}_0) = \arg \min_{\mathbf{y}_0: A(\mathbf{y}_0)=a_0} D_{\text{KL}}(\mathbf{y}_0 \parallel \mathbf{x}_0)$$
+
+*gives a kind of first-order approximation to  $Q_\theta(\cdot \mid A_0 = a_0)$ . For an elementwise sum  $A(\mathbf{x}_0) = \sum_g x_{g0}$  this projection is the simple scaling  $\Pi(\mathbf{x}_0)_g = a_0 x_{g0} / (\sum_{g'} x_{g'0})$ .*
+
+The proposition shows that the natural rescaling operation is not ad hoc, but can be justified as a kind of first-order approximation to the true conditional distribution in a large sample regime (see Appendix B.1). When unit-level training data exist, we can learn a projection  $\Pi_\theta(\tilde{\mathbf{x}}_0, z, a_0)$  that actually enables sampling conditional on the mean. See Sec. 6 where we show how to learn such a projection.
+
+## 5 RELATED WORKS
+
+**Stochastic interpolants.** Our formulation allows us to transport any integer-valued distribution  $p_1$  to another integer-valued distribution  $p_0$ . In the case of Euclidean state space early works such
+
+{6}------------------------------------------------
+
+as (De Bortoli et al., 2021; Vargas et al., 2021; Chen et al., 2021) have shown how to perform such an interpolation leveraging (Entropic) Optimal transport and the concept of Schrödinger Bridges. In more recent works, ignoring the Optimal Transport constraints, several works have proposed to bridge distributions in a more relaxed formulation leveraging the concept of Markov projection, see Peluchetti (2023); Albergo et al. (2023); Delbracio & Milanfar (2023); Liu et al. (2022; 2023) for instance. Those frameworks can be shown to be strictly equivalent to diffusion models in the case where one of the end distribution is a unit Gaussian, see Gao et al. (2025). However, those works are limited to the Euclidean setting, and extension to the integer-valued setting is required.
+
+**Discrete diffusion models.** Recently, with the advent of language diffusion models such as Ye et al. (2025); Song et al. (2025); Sahoo et al. (2024); Shi et al. (2024); Ou et al. (2024a); Arriola et al. (2025); Nie et al. (2024); Zheng et al. (2023), discrete diffusion models have gained considerable traction. Most works rely on discrete equivalents of the original formulation of diffusion models, explicitly or implicitly replacing the continuous Gaussian noising process by a Continuous-Time Markov Chain (CTMC) (Austin et al., 2021; Campbell et al., 2022; Lou et al., 2023; Campbell et al., 2024; Kitouni et al., 2024; Sun et al., 2023). Other approaches include relying on some Euclidean relaxation (Chen et al., 2022) or modelling the space of probability (Avdeyev et al., 2023; Stark et al., 2024). Similarly, flow matching techniques have been extended to cover this paradigm (Gat et al., 2024). Most of these works focus on *categorical* data and therefore consider uninformed forward process such as uniform or masking process. In contrast, in this work, we focus on ordinal data. To the best of our knowledge, the only existing work that also deals with such a process is Blackout Diffusion (Santos et al., 2023), which considers a pure-death process where an image is taken to the all-zero limit, as opposed to an endpoint conditioned bridge. Our approach generalizes this setup in two ways: first, we allow births and deaths at every time, recovering their pure birth construction in the limit as  $\kappa \rightarrow 0$ ; second, we generalize the process to a bridge which can transport  $X_1$  to  $X_0$ .
+
+Finally, we highlight that diffusion models have been extended to the very general setting where only an *infinitesimal generator* is available Benton et al. (2024); Holderrieth et al. (2024). While our work can be seen as an instantiation of this general framework, these general frameworks do not give any information regarding the design of the forward process for integer-valued data, the specific parametrization in terms of slack variables and the necessity of the distributional diffusion loss.
+
+**Distributional Diffusion Models.** In De Bortoli et al. (2025); Shen et al. (2025), the authors learn the conditional distribution  $p_{\theta|t}(x_0|x_t)$  through the use of scoring rules, going beyond the classical training framework of diffusion, which approximates the conditional mean  $\mathbb{E}[X_0|X_t = x_t]$ . The importance of approximating the covariance was already noted by Nichol & Dhariwal (2021) and further analyzed in (Ho et al., 2020; Nichol & Dhariwal, 2021; Bao et al., 2022a;b; Ou et al., 2024b). In a similar flavor (Xiao et al., 2022) uses a GAN to approximate  $p_{\theta|t}(x_0|x_t)$ .
+
+**Sequence-to-expression models** An ambitious goal in biology is to predict gene expression from DNA sequence information. There have been several attempts to train deep learning models for sequence-to-expression prediction tasks (Barbadilla-Martínez et al., 2025), including Enformer (Avsec et al., 2021), a state-of-the-art transformer-based DNA sequence model. While powerful, Enformer, like the vast majority of sequence-to-expression models, was trained on bulk gene expression data and is not able to predict single-cell expression profiles, missing the cellular heterogeneity and fine-grained regulatory patterns that shape tissue function.
+
+**Spatial transcriptomic deconvolution** Spatial transcriptomics encompasses a family of recently developed techniques which measure gene expression and spatial location in tissues. The majority of these techniques are not capable of resolving individual cells, instead providing aggregate information over small neighborhoods consisting of on the order of tens of cells (Moses & Pachter, 2022). To address this limitation, a number of deconvolution methods have been developed to infer single-cell level information (Li et al., 2023). The majority of these methods, including cell2location (Kleshchevnikov et al., 2022) and RCTD (Cable et al., 2022), require a paired non-spatially resolved scRNA-seq atlas, and output cluster-level mixture proportions rather than single cell counts. The ideal deconvolution would recover full single-cell count profiles directly from spatial data without requiring external reference atlases. DestVI (Lopez et al., 2022), which outputs count profiles but requires a reference, and STDDeconvolve (Miller et al., 2022) which does not require a reference but outputs cluster-level predictions, both take steps toward this goal.
+
+{7}------------------------------------------------
+
+![Figure 3: A line graph showing the performance of CFM, DFM, and Count Bridge methods on a low-rank mixture of Gaussians transport experiment across dimensions d (4, 8, 16, 32, 64, 128, 256, 512) and Number of Function Evaluations (NFE) (8, 32, 128). The y-axis represents W1 (↓), ranging from 0 to 4. CFM (blue line with circles) and DFM (orange line with circles) show high W1 values, generally increasing with dimension. Count Bridge (green line with circles) shows significantly lower W1 values, remaining near zero across all dimensions. Shaded regions indicate confidence intervals.](3121afa7ca030b22ee0345864ca6f38b_img.jpg)
+
+Figure 3: A line graph showing the performance of CFM, DFM, and Count Bridge methods on a low-rank mixture of Gaussians transport experiment across dimensions d (4, 8, 16, 32, 64, 128, 256, 512) and Number of Function Evaluations (NFE) (8, 32, 128). The y-axis represents W1 (↓), ranging from 0 to 4. CFM (blue line with circles) and DFM (orange line with circles) show high W1 values, generally increasing with dimension. Count Bridge (green line with circles) shows significantly lower W1 values, remaining near zero across all dimensions. Shaded regions indicate confidence intervals.
+
+Figure 3: CFM, DFM, and CB on our low-rank mixture of Gaussians transport experiment across dimensions and NFE. See App. D.2 for full details.
+
+## 6 APPLICATIONS
+
+We evaluate with three distributional metrics: the Energy score, the Wasserstein-2 distance, and the MMD (RBF). For deconvolution, we evaluate cell-type proportion predictions using RMSE, the Jensen-Shannon Divergence (JSD), and Spearman correlation following Li et al. (2023). Synthetic tasks have std. errors over 3 training seeds; main applications have std. errors over 3 inference seeds.
+
+### 6.1 SYNTHETIC DISTRIBUTIONS
+
+Here, we benchmark count bridges (CB) against continuous flow matching (CFM) (Lipman et al., 2022) and discrete flow matching (DFM) (Gat et al., 2024) across a range of synthetic experiments.
+
+**Discrete 8-Gaussians to 2-Moons.** We adapt this classic task to the integers. We plot the learned trajectories in Fig. 2. Qualitatively CB achieves the best performance. DFM is much more competitive in this experiment than CFM, but DFM trajectories are decoupled from the underlying geometry, whereas CB produces OT-like trajectories similar to CFM. These qualitative evaluations are confirmed quantitatively: CB achieves the best performance across  $W_2$ , Energy, and MMD (see App. D.1).
+
+**Scaling in Low-Rank Gaussian Mixtures.** To test scalability to higher dimensions, we construct integer-valued datasets with fixed intrinsic dimensionality while ambient dimension  $d$  increases in powers of two from 4 to 512. Each dataset is a 5-component Gaussian mixture with latent rank  $r = 3$ , projected to  $\mathbb{Z}^d$ . In Fig. 3 see that CB has the best scaling in dimensionality (see App. D.2 for more).
+
+**Deconvolution of Gaussian Mixtures.** We extend the low-rank mixture task to evaluate deconvolution capabilities. In this experiment, each observation is an aggregate constructed by summing a group of  $G$  samples. For each group, the  $G$  samples are drawn from a group-specific Gaussian mixture whose component weights are sampled from a Dirichlet distribution with concentration parameters  $(\alpha_1, \dots, \alpha_5)$ . The labels of the  $G$  source components are provided as unit-level side information. We then vary the size of the group  $G$  and the extent of variation between groups by changing the concentration parameter  $\alpha$  (see Appendix D.3 for details). In Fig. 4 we see performance degrades as groups become more uniform and larger. We explore the theoretical limits to deconvolution in Apps. B.2 and B.3, which confirm that deconvolution requires between-group heterogeneity to enable identification, which is inherently lost as groups become large. Despite these limits, we demonstrate practical deconvolution on moderately-sized groups in our spatial transcriptomics application (Section 6.3).
+
+![Figure 4: A line graph showing the performance of deconvolution of the low-rank Gaussian mixture across different group sizes (4, 8, 16, 32, 128) and levels of between-group heterogeneity (Dirichlet alpha = 1, 10, 1000). The y-axis represents W2 (↓) on a log scale from 10^-1 to 6 x 10^-1. The x-axis represents Group Size (n). All three lines show an increasing trend in W2 as group size increases. The line for Dirichlet alpha = 1000 (light green) is consistently higher than the others, indicating worse performance as heterogeneity decreases.](2396add2849eccefcbcfbe1c7142a253_img.jpg)
+
+Figure 4: A line graph showing the performance of deconvolution of the low-rank Gaussian mixture across different group sizes (4, 8, 16, 32, 128) and levels of between-group heterogeneity (Dirichlet alpha = 1, 10, 1000). The y-axis represents W2 (↓) on a log scale from 10^-1 to 6 x 10^-1. The x-axis represents Group Size (n). All three lines show an increasing trend in W2 as group size increases. The line for Dirichlet alpha = 1000 (light green) is consistently higher than the others, indicating worse performance as heterogeneity decreases.
+
+Figure 4: Deconvolution of the low-rank Gaussian mixture across different group sizes and levels of between-group heterogeneity.
+
+### 6.2 MODELLING GENE EXPRESSION AT SINGLE-CELL AND SINGLE-NUCLEOTIDE RESOLUTION
+
+A central goal in biology is to understand the relationship between DNA sequence and gene expression. Many models relate sequence and expression, the most prominent of which, such as Enformer (Avsec
+
+{8}------------------------------------------------
+
+| Method | Bulk MSE | CT MSE | Comparison | MMD | W <sub>2</sub> | Energy |
+|-|-|-|-|-|-|-|
+| Fine-tuned Enformer | 2.590 | 3.142 | Bulk mean | 0.515 | 0.208 | 56,800 |
+| Count Bridge | <b>0.601</b><br><small>±0.000</small> | <b>1.410</b><br><small>±0.002</small> | Count Bridge | <b>0.446</b><br><small>±0.000</small> | <b>0.182</b><br><small>±0.001</small> | <b>28,583</b><br><small>±0.003</small> |
+
+Table 1: Nucleotide-level MSE for bulk and cell-type (CT) specific predictions.
+
+et al., 2021), are Transformer-based models that predict expression from sequence. More recent work has explored fine-tuning Enformer on single-cell data (Hingerl et al., 2024). On the other hand, there is a mature literature on deconvolving bulk RNA-seq (Newman et al., 2019; Wang et al., 2019). These methods operate at the gene (rather than nucleotide) level, leveraging bulk cell-type profiles or single-cell references to deconvolve bulk profiles into cell-type proportions (not count profiles).
+
+We use CBs to jointly model sequence and single-cell expression counts in scRNA-seq data, and to enable nucleotide-level deconvolution of bulk profiles. To validate CBs in this setting, we demonstrate two key results. First, we show that CBs trained on single-cell data produce meaningful count profiles and outperform a fine-tuned Enformer model on sequence-to-expression prediction. Second, we show that conditioning CBs on bulk profiles enables deconvolution of bulk gene expression into inferred single-cell gene expression profiles. We validate these deconvolved profiles distributionally and show that they achieve state-of-the-art performance relative to cell-type proportion deconvolution models.
+
+| Method | JSD | RMSE | Spearman |
+|-|-|-|-|
+| CIBERSORTx | 0.194 | 0.109 | 0.079 |
+| MuSiC | 0.313 | 0.140 | 0.186 |
+| Count Bridge | <b>0.113</b><br><small>±0.001</small> | <b>0.073</b><br><small>±0.000</small> | <b>0.267</b><br><small>±0.005</small> |
+
+Table 2: Gene expression count profile deconvolution error for bulk RNA sequencing data.
+
+Table 3: Cell-type proportion deconvolution error for nucleotide level bulk RNA sequencing data.
+
+**Modeling sequence and single-cell counts** We train CBs on PBMC scRNA-seq counts at nucleotide resolution using  $10^6$  cells across  $10^3$  donors (Yazar et al., 2022). Each training example corresponds to a nucleotide position in a single cell, and is represented by the noisy count  $x_t$  and diffusion time  $t$  from the CB forward process, a cell-type embedding, a local genomic context  $z$  obtained by encoding the surrounding DNA sequence with Enformer, and i.i.d. noise  $\zeta$  for the distributional loss. These features are concatenated and passed through residual multi-head attention blocks and a final softplus head that parameterizes the conditional count distribution  $X_0 | X_t, t, z$ . The model is trained directly on unit-level (single-cell) expression profiles rather than only on aggregated counts. During training we randomly mask cell-type labels so that the model supports both unconditional and cell-type-conditional sampling at test time.
+
+**Learned projection for deconvolution** Since we have unit-level data we can learn a better projection operator than the simple rescaling function in Prop. 4.1. We augment the CB with a small projection module  $\Pi_\psi$ , an attention block operating on each nucleotide (represented by  $z$ ) across cells in the batch. Given an initial CB prediction  $\tilde{x}_0$ , an observed aggregate  $a_0$ , and the noisy state  $x_t$ , the module outputs  $\hat{x}_0 = \Pi_\psi(\tilde{x}_0, a_0, x_t, z)$ , we train this using the distributional loss to learn to sample  $X_0 | A(X_0)=a_0, X_t, t$ . To support both unconditional and aggregate-conditioned inference, we apply the projection module only on a random 10% of training examples where  $a_0$  is provided.
+
+**Bulk gene expression** We first evaluate the ability of our model to predict expression from sequence, both unconditionally and conditional on cell type. As a baseline, we use an Enformer model fine-tuned directly on the PBMC dataset. We find that Count Bridge predictions outperform fine-tuned Enformer (Table 1, for results by cell type and further details see App. E).
+
+**Deconvolved profiles** We can use this unit-level model for deconvolution tasks: we can condition on an aggregate (bulk profile) to sample single-cell profiles from the model while matching that aggregate. We next evaluate the ability of CBs to deconvolve mixtures of cell types from held-out individuals. We held out 10% of patients from our training set and synthetically bulked these patients. Since we have the ground truth data, we can then evaluate deconvolution quality. We first evaluate the distributional quality of these predictions against the bulk mean, further validating the CB count profiles (Table 2). As a more robust set of baselines, we compare to CIBERSORTx (Newman et al., 2019) and MuSiC (Wang et al., 2019). To facilitate comparison, we aggregate our nucleotide-level predictions into gene counts and assign each of our deconvolved cells to the closest
+
+{9}------------------------------------------------
+
+cell type. CBs achieve better performance on JSD, RMSE, and Spearman correlation while providing nucleotide-level counts (Table 3). In App. E we plot the UMAP for qualitative comparison.
+
+### 6.3 DECONVOLVING SPATIAL TRANSCRIPTOMIC SPOTS INTO SINGLE-CELL COUNTS
+
+Next, we show how CBs can be used to infer single cell gene expression profiles from spot-level aggregates in spatial transcriptomic data. In spatial transcriptomic data generated by Visium (Ståhl et al., 2016), it is common to have access to side information beyond the spot-level count aggregates. In particular, many datasets include images of the cells with a nuclear stain (Palla et al., 2022). CBs provide a natural way to leverage this cell-level side information to deconvolve aggregate count data.
+
+**Modeling spatial aggregates** We train CBs on a MERFISH mouse brain dataset (Vizgen, 2021), which is resolved at the single-cell level, and artificially aggregate neighborhoods of cells to simulate spot-level Visium data. This synthetic dataset gives us access to spot-level aggregates and their corresponding single-cell ground truth, as well as single-cell nuclear images. Following the notation in Sec. 4, the spot-level counts can be treated as aggregates  $a_0$ , and single-cell images can be treated as unit-level side information  $z$ . In this application, we never observe single-cell count profiles, only spot-level aggregates and the single-cell images. We leverage a UViT (Bao et al., 2023) extended to incorporate count and noise patches (see App. F). We use a simple source distribution  $X_1 \sim \text{Poi}(10)$ .
+
+**Cell type proportions** We benchmark CBs against STDeconvolve (Miller et al., 2022), a widely used spatial transcriptomic deconvolution method which is state-of-the-art among reference-free approaches Li et al. (2023) (see Appendix F for comparisons to reference-based methods). STDeconvolve outputs cell type (cluster identity) proportions for each spot rather than single cell counts. As such, we evaluate the quality of deconvolution by comparing the predicted cell type proportions to the true cell type proportions per spot. For CBs, which provide single-cell count profile predictions rather than cell type proportions, we assign each predicted count profile its nearest neighbor cell type in order to compare against STDeconvolve. CBs outperform STDeconvolve on both the JSD and the RMSE (Table 4).
+
+| Method | JSD | RMSE | Spearman |
+|-|-|-|-|
+| STDeconvolve | 0.288 | 0.177 | 0.255 |
+| Count Bridge | <b>0.231</b><br><small><math>\pm 0.002</math></small> | <b>0.110</b><br><small><math>\pm 0.001</math></small> | <b>0.332</b><br><small><math>\pm 0.001</math></small> |
+
+Table 4: Cell-type proportion deconvolution error for spatial transcriptomics.
+
+**Count profiles** We next evaluate the quality of the count profiles inferred by CBs. Here, because STDeconvolve does not provide these predictions, we instead consider a simple baseline: predicting the spot-level mean ( $a_0/G$ ) for each cell. This baseline, while seemingly naive, is actually biologically well-motivated. In spatial transcriptomics, cells within a spot represent local tissue organization where neighboring cells coordinate their functions (Armingol et al., 2021). As such, we expect cells in spatial neighborhoods to have correlated gene expression profiles, making the spot mean a reasonable baseline. Nonetheless, CBs outperform the spot-level mean baseline (see Table 5), showing CBs can learn meaningful unit-level distributions from real-world aggregate data. In App. F we provide a more detailed biological evaluation of the cell types and pathways in our generated data, alongside the UMAP to facilitate qualitative comparison.
+
+| Comparison | MMD | $W_2$ | Energy |
+|-|-|-|-|
+| Spot mean | 0.409 | 0.030 | 41.717 |
+| Count Bridge | <b>0.203</b><br><small><math>\pm 0.000</math></small> | <b>0.017</b><br><small><math>\pm 0.000</math></small> | <b>8.903</b><br><small><math>\pm 0.014</math></small> |
+
+Table 5: Gene expression count profile deconvolution error for spatial transcriptomics
+
+## 7 CONCLUSION
+
+Count Bridges offer a tractable, discrete-native alternative to continuous diffusion models, unifying direct count generation with deconvolution from aggregates. We demonstrate the power of Count Bridges for nucleotide-level deconvolution of bulk RNA-seq and spatial transcriptomic deconvolution.
+
+**Limitations** (i) When counts are well-approximated as continuous, Euclidean models may match or exceed performance. (ii) Identifiability in pure deconvolution degrades as group sizes grow or between-group heterogeneity shrinks, so our EM procedure is most reliable at moderate aggregation. (iii) The projection step we use is a first-order surrogate and lacks serious theoretical support.
+
+Despite these caveats, Count Bridges lay the groundwork for rigorous discrete generative modeling and invite future work on a deeper understanding of the projection-guided sampler, sharper identifiability bounds, and generally stronger guarantees for projection-guided EM.
+
+ Rest of paper (reference and Appendix) is removed.

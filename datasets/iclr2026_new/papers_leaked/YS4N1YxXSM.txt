@@ -1,0 +1,328 @@
+
+
+{0}------------------------------------------------
+
+# Quoka logo QUOKA: QUERY-ORIENTED KV SELECTION FOR EFFICIENT LLM PREFILL
+
+Dalton Jones, Junyoung Park, Matthew Morse, Mingu Lee, Chris Lott, M. Harper Langston
+
+Qualcomm AI Research\*
+
+{daltjone, junpark, mingul, clott, hlangsto}@qti.qualcomm.com
+
+## ABSTRACT
+
+We present QUOKA: Query-oriented KV selection for efficient Attention, a training-free and hardware agnostic sparse attention algorithm for accelerating transformer inference under chunked prefill. While many queries focus on a smaller group of keys in the attention operator, we observe that queries with low cosine similarity with respect to the mean query interact more strongly with more keys and have the greatest contribution to final attention logits. By prioritizing these low cosine similarity queries, the behavior of full attention during the prefill stage can be closely approximated. QUOKA leverages this observation, accelerating attention by (1) first retaining a small set of representative queries and (2) then subselecting the keys most aligned with those queries. Through experiments on Needle-In-A-Haystack, LongBench, RULER, and Math500, we show that, while realizing a  $3\times$  reduction in time-to-first-token,  $5\times$  speedup in attention on Nvidia GPUs and up to nearly a  $7\times$  speedup on Intel Xeon CPUs, QUOKA achieves near-baseline accuracy, utilizing 88% fewer key-value pairs per attention evaluation.
+
+## 1 INTRODUCTION
+
+A major bottleneck in large language model (LLM) inference is prefill latency, which can account for more than 70% of total runtime. This latency is especially significant on CPUs, consumer-grade GPUs, and edge accelerators, where resources are limited (Agrawal et al., 2024; Kamath et al., 2025; Xu et al., 2025a). To mitigate this, recent deployments increasingly adopt *chunked prefill*, which divides input into blocks to improve scheduling and utilization (Agrawal et al., 2023; Lai et al., 2025; Kwon et al., 2023). Nevertheless, due to quadratic complexity of the underlying attention, chunked prefill remains computationally expensive. Methods such as sparse attention seek to overcome this complexity by identifying and exploiting sparsity in attention. Combining chunked prefill with sparse attention offers a promising path to sub-quadratic complexity and substantial latency improvements in resource constrained environments.
+
+Sparse attention algorithms can be broadly categorized into two families: *pattern-based* and *query-dependent* approaches. Pattern-based approaches impose fixed sparsity patterns (e.g., block, strided, or banded) on  $QK^\top$  (Child et al., 2019; Dao et al., 2022; Xu et al., 2025b; Jiang et al., 2024; Gao et al., 2024; Zhang et al., 2025), often achieving speedups through kernel-level optimizations; however, due to dynamic compute graph and KV cache memory bandwidth overhead under chunked prefill, their benefits are limited. Furthermore, reliance on custom kernels limits the portability of pattern-based approaches across heterogeneous hardware.
+
+In contrast, query-dependent approaches operate directly on the KV cache, adaptively subselecting the most relevant KV<sub>s</sub> for a given query (Ribar et al., 2024; Tang et al., 2024; Zhu et al., 2024; Yang et al., 2025b; Singhania et al., 2024). While remaining compatible with optimized kernels and offering strong portability benefits, this strategy reduces both attention complexity and memory traffic. However, existing query-dependent methods are primarily designed for generation, where KV<sub>s</sub> are selected for a single query; in such cases, it is more straightforward to determine which KV<sub>s</sub> are relevant for the given query. During prefill, when relevant KV<sub>s</sub> are selected for many queries at once, this can result in significant performance degradations. Under chunked prefill, where important KV<sub>s</sub> are repeatedly subselected for multiple queries, these degradations become more pronounced.
+
+\*Qualcomm AI Research is an initiative of Qualcomm Technologies, Inc.
+
+{1}------------------------------------------------
+
+![Figure 1: Overview of chunked prefill with QUOKA. (a) Chunked Prefill with QUOKA: A prompt of 6 tokens is divided into three chunks of 2 tokens each. For each chunk, QUOKA subsamples the KV cache and feeds the reduced cache into a dense attention kernel. (b) KV selection with QUOKA: Subselection is performed by applying query subselection based on cosine dissimilarity, followed by key subselection using query-key cosine similarity.](9ba3dc91984c80b96f217fb1bddd5c06_img.jpg)
+
+Figure 1 consists of two diagrams, (a) and (b), illustrating the QUOKA method for chunked prefill.
+
+(a) **Chunked Prefill with QUOKA**: This diagram shows the process of processing a prompt of 6 tokens (0, 1, 2, 3, 4, 5) in three chunks of 2 tokens each. For each chunk, the tokens are processed through a 'QuoKA' block and an 'Attention' block. The output of the attention block is then passed to the next chunk. The final output is a sequence of 6 tokens (0, 1, 2, 3, 4, 5).
+
+(b) **KV selection with QUOKA**: This diagram shows the process of selecting keys and values for attention. It starts with 'Input Chunk' (0, 1, 2, 3) and 'KV cache' (0, 1, 2, 3, 4, 5). The 'KV cache' is processed through a 'QuoKA' block and an 'Attention' block. The output is 'Cached Keys' (0, 1, 2, 3) and 'Current Queries' (4, 5). The 'Cached Keys' are processed through a 'CosSim Scoring' block, which also receives input from the 'Current Queries'. The output of the 'CosSim Scoring' block is then processed through a 'Gather' block, which also receives input from the 'Current Queries'. The final output is a sequence of 6 tokens (0, 1, 2, 3, 4, 5).
+
+Figure 1: Overview of chunked prefill with QUOKA. (a) Chunked Prefill with QUOKA: A prompt of 6 tokens is divided into three chunks of 2 tokens each. For each chunk, QUOKA subsamples the KV cache and feeds the reduced cache into a dense attention kernel. (b) KV selection with QUOKA: Subselection is performed by applying query subselection based on cosine dissimilarity, followed by key subselection using query-key cosine similarity.
+
+Figure 1: **Overview of chunked prefill with QUOKA**: (a) A prompt of 6 tokens is divided into three chunks of 2 tokens each. For each chunk, QUOKA subsamples the KV cache and feeds the reduced cache into a dense attention kernel. (b) Subselection is performed by applying query subselection based on cosine dissimilarity, followed by key subselection using query-key cosine similarity.
+
+To address the drawbacks of existing approaches, we propose QUOKA: **Query-oriented KV selection** for efficient Attention, a *training-free sparse attention method optimized for chunked prefill* built upon the following observation: **queries with lower cosine similarity to the mean query attend to the majority of keys**.
+
+QUOKA leverages this observation to retain a small subset of representative queries and subselect KVs with which they strongly interact. While preserving accuracy, QUOKA accelerates attention during prefill and reduces the number of KVs through three steps: *Query Subselection*, which retains only the most informative queries; *Cosine-Similarity Scoring*, which provides a stable, bounded proxy for query-key relevance; and *Group-Aware Aggregation*, which efficiently preserves compatibility with modern architectures such as grouped-query attention (GQA) (Ainslie et al., 2023). These steps can be seen in Figure 1, discussed in greater detail in Section 3. Unlike kernel-level sparsity, which depends on custom primitives, QUOKA relies on standard linear algebra operations, allowing for platform portability and straightforward deployment. Our contributions are summarized as follows:
+
+- **QUOKA**: a hardware-agnostic and training-free query-oriented sparse attention method for chunked prefill, built on standard linear algebra kernels.
+- **Accuracy under sparsity**: near-baseline results on long-context benchmarks (Needle-in-a-Haystack, RULER, LongBench, Math500), outperforming existing sparse attention methods.
+- **Latency reduction**: up to  $5\times$  attention speedup and  $3\times$  lower time-to-first-token (TTFT) on enterprise-class GPUs, and  $7\times$  and  $5\text{-}6\times$  speedups on CPUs and on consumer GPUs.
+- **Generalization across architectures**: validated on diverse decoder-only LLM families (Llama3, Qwen3, SmollM, GPT-OSS) and on RoPE/NoPE and MoE-based LLMs.
+- **Robustness to hyperparameters**: accuracy degrades gradually with sparsity and remains stable across parameter choices, enabling deployment under varied constraints.
+
+## 2 BACKGROUND
+
+### 2.1 TRANSFORMERS AND ATTENTION
+
+Since their introduction by Vaswani et al. (2017), transformers have become the dominant sequence modeling paradigm. A transformer block consists of two main computational steps: the attention operator and a feed-forward network (FFN). In this work, we focus on the attention primarily.
+
+For an input sequence  $X = [x_1, \dots, x_T]$ , the attention operator  $\text{Attn}(X)$  is defined as
+
+$$\text{Attn}(X) = \text{Softmax} \left( QK^\top / \sqrt{d} + M \right) V = AV, \quad (1)$$
+
+where keys  $K = XW_K$ , queries  $Q = XW_Q$ , and values  $V = XW_V$  are learned projections of the input tokens, with  $W_K, W_Q, W_V \in \mathbb{R}^{d \times d}$ . With zeros below the diagonal and  $-\infty$  elsewhere, the mask  $M$  enforces autoregressive causality.
+
+{2}------------------------------------------------
+
+#### **Algorithm 1** KV cache sub-selection using QUOKA
+
+**Require:** queries  $Q$ , keys  $K$ , values  $V$ , prefill chunk size  $B_{CP}$ , selective attention budget  $B_{SA}$ , max queries  $N_Q$ , number of KV heads  $n_{KV}$ , number of attention heads  $n_Q$
+
+▷ Query Sub-selection
+
+```
+
+1: if  $B_{CP} > N_Q$  then
+2:    $M_Q \leftarrow \text{mean}(Q, \text{dim}=2)$ 
+3:    $S_Q \leftarrow \text{CosSim}(Q, M_Q)$ 
+4:    $Q \leftarrow \text{gather}(\text{topk}(-S_Q, N_Q), Q)$ 
+5: end if
+6:  $Q \leftarrow Q/\text{norm}(Q, \text{dim}=-1)$ 
+7:  $K \leftarrow K/\text{norm}(K, \text{dim}=-1)$ 
+8:  $\bar{Q} \leftarrow \text{mean}\left(Q.\text{reshape}(b, n_{KV}, \frac{n_Q}{n_{KV}}, N_Q, d), \text{dim}=2\right)$ 
+9:  $S \leftarrow \bar{Q}K^T$ 
+10:  $\hat{S} \leftarrow \text{max}(S, \text{dim}=2)$ 
+11:  $I \leftarrow \text{topk}(\hat{S}, B_{SA})$ 
+12:  $K^*, V^* \leftarrow \text{gather}(K, I), \text{gather}(V, I)$ 
+
+```
+
+▷ Efficient Cosine Similarity via Pre-aggregation  
+▷  $(b, n_Q, N_Q, d)$   
+▷  $(b, n_{KV}, T, d)$   
+▷  $(b, n_{KV}, N_Q, d)$   
+▷  $(b, n_{KV}, N_Q, T)$   
+▷  $(b, n_{KV}, T)$
+
+### 2.2 ATTENTION LATENCY: PREFILL VS GENERATION
+
+Autoregressive text generation in transformer LLMs can be divided into two stages: *prefill* and *generation*, both with distinct latency characteristics. During the *prefill* stage, the entire input prompt is processed to initialize the KV cache, requiring  $O(T^2)$  operations from dot products between  $T$  queries and  $T$  keys in addition to the FFN computation for each token. As a result for long prompts, attention dominates prefill latency. Optimized kernels such as FlashAttention (Dao et al., 2022; Dao, 2023; Shah et al., 2024) improve memory locality and utilization, but they do not reduce the quadratic complexity; asymptotic speedups can be achieved by reducing the effective number of KV heads attended to by each query. In the generation stage, a single new query attends to the  $T$  cached KV heads. For short generation lengths, performance is memory-bound by the large transfer cost of FFN weights. However for longer outputs, the KV cache dominates the memory footprint and bandwidth. Reducing the number of stored KV heads speeds up the attention computation and reduces data transfer, making KV reduction essential for accelerating generation-heavy tasks (e.g., reasoning or code generation).
+
+### 2.3 CHUNKED PREFILL
+
+Given the causality in Equation (1), *chunked prefill* (Agrawal et al., 2023; Holmes et al., 2024) partitions the input sequence  $X$  into non-overlapping chunks of size  $B_{CP}$  and process the chunks sequentially:  $X = [X_0, X_1, \dots, X_{N_B-1}]$ ,  $N_B = \lceil T/B_{CP} \rceil$ , where  $X_i = [x_{B_{CP}i}, \dots, x_{B_{CP}(i+1)-1}]$  denotes the  $i$ -th chunk. For chunk  $i$ , let  $K_{<i}$  and  $V_{<i}$  denote the concatenation of keys and values from all preceding chunks. Then:
+
+$$\text{Attn}(X_i) = \text{Softmax}\left(Q_i [K_i | K_{<i}]^T / \sqrt{d} + M_i\right) [V_i | V_{<i}], \quad (2)$$
+
+where  $[\cdot | \cdot]$  denotes concatenation along the sequence dimension and  $M_i$  enforces causality within  $X_i$  and against future tokens. Chunked prefill is particularly important for inference on edge devices such as mobile hardware or consumer GPUs where bandwidth and memory capacity are constrained. It also improves cloud inference throughput by enabling interleaved prefill and decode requests, increasing GPU utilization (Holmes et al., 2024; Agrawal et al., 2025).
+
+### 2.4 ATTENTION SPARSITY AND SPARSE ATTENTION
+
+High sparsity in the attention matrix  $A$  has been widely observed in LLMs (Zhang et al., 2024; Xiao et al., 2024; Oren et al., 2024; Zhu et al., 2024; Park et al., 2025). This sparsity allows for a reduction in attention cost by selecting the most relevant KV heads for incoming queries into an active cache  $(\hat{K}, \hat{V})$  such that:
+
+$$I = \text{topk}(f(Q, K), B_{SA}), \quad \hat{K} = \text{gather}(K, I), \quad \hat{V} = \text{gather}(V, I), \quad (3)$$
+
+{3}------------------------------------------------
+
+![Figure 2: Empirical observations from Llama 3.2-3B-Instruct, layer 0 head 11. (a) Attention map A showing a heatmap of attention scores between Query (0-60) and Key (0-60) on a log scale from 10^0 to 10^-4. (b) 2D Visualization of Q and K using PCA, showing Key (blue circles), Query (orange circles), and Query w/ high S_q (orange stars). (c) Scatter plot of S_q and log(max_k(A)) with a correlation of 0.737.](e94f3bbb6f7501b9a1344dd0210e5dd8_img.jpg)
+
+Figure 2: Empirical observations from Llama 3.2-3B-Instruct, layer 0 head 11. (a) Attention map A showing a heatmap of attention scores between Query (0-60) and Key (0-60) on a log scale from 10^0 to 10^-4. (b) 2D Visualization of Q and K using PCA, showing Key (blue circles), Query (orange circles), and Query w/ high S\_q (orange stars). (c) Scatter plot of S\_q and log(max\_k(A)) with a correlation of 0.737.
+
+Figure 2: **Empirical observations from Llama 3.2-3B-Instruct, layer 0 head 11.** (a) Attention map  $A$ . (b) PCA visualization of  $Q$  and  $K$ , showing that queries with higher  $S_q$  lie closer to the keys. (c) Correlation between  $S_q$  and  $\max_k(A)$ , indicating stronger key interactions for higher  $S_q$  queries.
+
+where  $f$  satisfies
+
+$$\underset{f(Q,K)}{\text{minimize}} \left\| \text{Softmax}\left(QK^\top/\sqrt{d} + M\right)V - \text{Softmax}\left(Q\hat{K}^\top/\sqrt{d} + M\right)\hat{V} \right\|, \quad (4)$$
+
+where  $f$  is usually constrained to be more efficient than the attention computation itself.
+
+Prior work (Zhao et al., 2019; Ribar et al., 2024; Tang et al., 2024; Singhania et al., 2024; Yang et al., 2024b) generally focused on the generation phase, where the scoring function  $f$  operates on a single query  $Q$ . Extending these methods to the multiple-query setting with by averaging over queries significantly degrades performance (see Table 3), highlighting the need for better ways to aggregate information from multiple queries. While recent work Zhang et al. (2025); Gao et al. (2024); Zhu et al. (2024); Jiang et al. (2024); Lai et al. (2025) attempt to address this, these methods typically depend on custom CUDA kernels on NVIDIA GPUs. This limits compatibility with hardware-tuned kernels like FlashAttention and hinders broader deployment outside of data centers.
+
+## 3 QUOKA METHOD
+
+As discussed in Section 2, existing sparse attention methods face limitations in prefill efficiency and portability. QUOKA addresses this by reducing the active KV cache during the chunked prefill process. Specifically, the input sequence  $X$  is divided into chunks  $\{X_0, X_1, \dots, X_{N_B-1}\}$ , and for each chunk  $X_i$ , QUOKA selects only the most relevant KVs before computing attention as shown in Figure 1. This is achieved in three stages, as detailed in Algorithm 1.
+
+1. **Query subselection:** retain only the most informative queries to reduce redundancy.
+2. **Cosine-Similarity Scoring:** compute cosine similarity between queries and keys to estimate their relevance.
+3. **Score Aggregation:** combine scores across queries and key-value groups to select the final KV.
+
+The reduced KV set for  $X_i$  is then fed into a dense attention kernel such as FlashAttention. By applying this repeatedly, QUOKA reduces prefill cost from  $O(T^2)$  to a sub-quadratic complexity.
+
+### 3.1 QUERY SUBSELECTION
+
+Prior work (Park et al., 2025) examined the distinctive geometric characteristic of keys in LLM. Inspired by this insight, we focus on the geometry of queries. We observe that queries with lower cosine similarity to the mean query tend to align broadly with most keys, while near-mean queries concentrate on a small shared group of keys (Figure 2a). Thus, utilizing all queries yields redundant information and increases complexity.
+
+To mitigate this, QUOKA retains only those queries that consistently exert significant influence on keys. These queries can be identified using their angular distance from the average query vector  $M_Q$ . Formally, we rank each query  $q$  by  $-\text{CosSim}(M_Q, q)$  and retain the top  $N_Q$ . This preserves
+
+{4}------------------------------------------------
+
+the queries most responsible for large key-query dot products while normalizing per query, allowing us to efficiently approximate the post-softmax attention matrix  $A$ . This can be formalized through the following theorem:
+
+**Theorem 1.** Consider tokens a fixed query  $q_0$  and key  $k$ , and let the average of a set of queries be denoted  $M_Q$ . Suppose  $\text{CosSim}(k, q_0) = \beta_q > 0$  and  $\text{CosSim}(M_Q, k) = \alpha_q < 0$ . Then
+
+$$\text{CosSim}(M_Q, q^*) \leq 1 + \alpha_q \beta_q - 0.5\alpha_q^2 - 0.5\beta_q^2. \quad (5)$$
+
+The proof is provided in Appendix D. Intuitively, if a query  $q$  attends strongly to  $k$ , then  $\beta_q$  will be large while  $\alpha_q$  will be small, resulting in a large subsection selection score
+
+$$S_q = -\text{CosSim}(M_Q, q^*).$$
+
+Hence our subsection selection retains queries that contribute most to the attention distribution, in line with both empirical observations and the underlying geometry of keys and queries in modern LLMs. To further validate our design choice, we analyze the geometry of queries and keys. As shown in Figure 2b, most queries are separated from the key cluster in a 2D PCA projection, while queries with higher  $S_q$  tend to lie closer to the keys. Complementing this, Figure 2c demonstrates that higher  $S_q$  is correlated with larger  $\max_k(A)$  outside of the sink token, indicating that such queries exert stronger influence on individual keys. Together, these observations suggest that  $S_q$  identifies queries that are both geometrically aligned with keys and dominant in attention.
+
+### 3.2 SCORING VIA COSINE SIMILARITY
+
+Given the reduced set of queries, the next step is to evaluate their interactions with keys. Existing methods often use dot products  $QK^\top$  but these are scale-dependent and unstable under aggregation. Instead, QUOKA computes
+
+$$S = \text{CosSim}(Q, K),$$
+
+which normalizes vectors to unit length and provides a bounded, geometry-aware proxy for softmax attention weights. Recent work (Mongaras et al., 2025; Park et al., 2025) also supports the use of cosine similarity as a lightweight normalization that approximates softmax behavior. Empirically, ablations on the RULER benchmark in Table 9 show that cosine similarity improves subsection selection quality by more than 10% compared to the dot product.
+
+### 3.3 AGGREGATION ACROSS QUERIES AND KV GROUPS
+
+Aggregation of scores is required along two axes: across queries and across grouped-query attention (GQA) heads. For the query axis, averaging can obscure rare but important query-key interactions, so QUOKA instead takes the **maximum**, which preserves such outliers. This is supported by the heavy-tailed distribution in Figure 3 and by gains on the RULER benchmark (Table 10). For the GQA axis, we simply average scores across KV groups. Unlike queries, head-level importance is correlated (Bhojanapalli et al., 2021), making the **mean** accurate and stable. Notably, if we normalize  $K$  and  $Q$  prior to computing the score, we can achieve the same average by *pre-aggregation*: averaging normalized queries across KV groups due to the linearity of the mean and the outer product  $QK^\top$ . Pre-aggregation also lowers computation and memory cost by a factor of the number of KV groups (which is large in most modern models), enabling compatibility with modern architectures and enhancing efficiency.
+
+![Figure 3: Distribution of attention score max deviation from mean along query and head dimension. The plot shows two curves: 'Query' (orange) and 'Head' (blue). The x-axis is 'Maximum Abs Deviation from Mean' ranging from 0.0 to 0.6. The y-axis is 'Density' ranging from 0 to 30. The 'Head' curve starts at a high density of approximately 28 at x=0 and drops sharply to near zero by x=0.1. The 'Query' curve starts at a much lower density of approximately 5 at x=0 and remains relatively flat, ending at approximately 2 at x=0.6.](d6226b6d22b1babc1eeeb93e07cc9cc4_img.jpg)
+
+Figure 3: Distribution of attention score max deviation from mean along query and head dimension. The plot shows two curves: 'Query' (orange) and 'Head' (blue). The x-axis is 'Maximum Abs Deviation from Mean' ranging from 0.0 to 0.6. The y-axis is 'Density' ranging from 0 to 30. The 'Head' curve starts at a high density of approximately 28 at x=0 and drops sharply to near zero by x=0.1. The 'Query' curve starts at a much lower density of approximately 5 at x=0 and remains relatively flat, ending at approximately 2 at x=0.6.
+
+Figure 3: Distribution of attention score max deviation from mean along query and head dimension.
+
+### 3.4 CHUNKED PREFILL WITH QUOKA
+
+The three components described above—query subsection, scoring, and aggregation—are integrated into the overall *chunked prefill* process. For each incoming block  $X_i$ , QUOKA subselects the active KV tokens using the procedure in Algorithm 1. The resulting subset of keys and values is then passed to the attention computation for that chunk. By reducing the KV budget at each chunk, QUOKA shrinks both compute and memory transfer costs. This enables significant prefill acceleration while maintaining accuracy across long-context benchmarks and is summarized in Algorithm 2.
+
+{5}------------------------------------------------
+
+![Figure 4: Accuracy across document length and needle depth for NIAH with B_SA = 2048 and B_CP = 128. The figure consists of three heatmaps: (a) QUOKA, (b) SampleAttention, and (c) Full. Each heatmap shows accuracy (color scale from 0.0 to 1.0) for document lengths (10^1 to 10^5) on the x-axis and needle depths (10^0 to 10^2) on the y-axis. QUOKA (a) shows high accuracy across most settings, while SampleAttention (b) and Full (c) show lower accuracy, especially at higher document lengths and needle depths.](c54b3ca7603d65d4589151bc3a49d054_img.jpg)
+
+Figure 4: Accuracy across document length and needle depth for NIAH with B\_SA = 2048 and B\_CP = 128. The figure consists of three heatmaps: (a) QUOKA, (b) SampleAttention, and (c) Full. Each heatmap shows accuracy (color scale from 0.0 to 1.0) for document lengths (10^1 to 10^5) on the x-axis and needle depths (10^0 to 10^2) on the y-axis. QUOKA (a) shows high accuracy across most settings, while SampleAttention (b) and Full (c) show lower accuracy, especially at higher document lengths and needle depths.
+
+Figure 4: Accuracy across document length and needle depth for NIAH with  $B_{\text{SA}} = 2048$  and  $B_{\text{CP}} = 128$ . Results for additional sparse attention methods are shown in Figure 7.
+
+## 4 RESULTS
+
+In this section, we empirically demonstrate the effectiveness of QUOKA. We begin with a detailed description of the evaluation setup and sparse attention baselines, then present our results.
+
+**Sparse Attention Baselines:** We compared a group of sparse attention algorithms on a set of models across a variety of selective budgets. The competing algorithms include SAMPLEATTENTION (Zhu et al., 2024) which uniformly samples queries to compute  $S$ , LESSISMORE (Yang et al., 2025b) which computes  $S$  only at specified layers, SPARQ (Ribar et al., 2024) which subselects along channel dimension before computing  $S$ , and LOKI (Singhania et al., 2024) which down-projects keys and queries before computing  $S$ . Unless otherwise specified, QUOKA and SAMPLEATTENTION subselect 16 queries at a time while SPARQ and LOKI down project keys and queries to 64 dimensions.
+
+**Models and Evaluation Setup:** To evaluate the efficacy of QUOKA across diverse model structures, we adopted QUOKA and baseline methods across a variety of model families, including simple attention-only models, MoE-based FFN variants, and NoPE adaptations. The models considered include Llama 3.2-3B-Instruct (Dubey et al., 2024), Qwen 2.5-3B-Instruct (Yang et al., 2024a), Smollm3 (Bakouch et al., 2025), Qwen3-4B, Qwen3-30B-A3B (Yang et al., 2025a), and GPT-OSS-20B (Agarwal et al., 2025). Additionally, we simulated a resource constrained scenario by utilizing chunked prefill with a block size  $B_{\text{CP}} = 128$ . Unless otherwise specified, experiments were performed utilizing an Nvidia A100 GPU.
+
+**Evaluation Summary:** We show that QUOKA successfully preserves downstream accuracy on benchmarks involving long input prompts, extends naturally to generation-intensive tasks such as mathematical reasoning, and provides both attention module-level and end-to-end speedup. Results are summarized below:
+
+- **Needle-In-a-Haystack.** QUOKA significantly outperforms competing selective attention methods on the needle-in-a-haystack (NIAH) benchmark (Section 4.1).
+- **RULER.** QUOKA significantly outperforms competing methods on the RULER benchmark Hsieh et al. (2024), achieving consistently better performance across all prompt lengths and models (Section 4.2).
+- **LongBench.** QUOKA exceeds the performance of competing baselines on the LongBench suite Bai et al. (2024), demonstrating substantially less performance degradation with decreasing selective budgets. Across all models and budgets, chunked prefill with QUOKA outperforms other methods by at least 10–20% (Section 4.3).
+- **Math500.** Although our primary focus is prefill, QUOKA is also directly applicable to generation. On the Math500 benchmark, QUOKA outperforms a sparse attention method specialized for generation and in some cases surpasses the accuracy of dense attention (Section 4.4).
+- **Ablation.** In sweeping over combinations of  $B_{\text{CP}}$ ,  $B_{\text{SA}}$ , and  $N_{\text{Q}}$  that govern the efficiency–accuracy trade-off in QUOKA, we observe that accuracy decreases only gradually as sparsity increases. This indicates that QUOKA can be tuned for diverse hardware environments while maintaining high efficiency. (Section 4.5)
+- **Latency.** We measured time-to-first-token (TTFT) across increasing prompt lengths for end-to-end inference, along with standalone attention module latency. QUOKA achieves a  $5\times$  module-level speedup on 30k tokens and a  $3\times$  TTFT improvement on 50k tokens relative to the base model with full attention, while scaling more efficiently than competing sparse methods (Section 4.6).
+
+{6}------------------------------------------------
+
+Table 1: **RULER evaluation results across increasing lengths with  $B_{\text{SA}} = 1,024$** . Highest per column in **bold** (Higher is better). Attention sparsification applied on full attention layers.
+
+| Length | <i>Llama3.2-3B-Instruct</i> |  |  |  | <i>Qwen2.5-3B-Instruct</i> |  |  |  | <i>Qwen3-4B</i> |  |  |  | <i>Smolm3</i> |  |  |  | <i>GPT-OSS-20B</i> |  |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  | 4k | 8k | 16k | 32k | 4k | 8k | 16k | 32k | 4k | 8k | 16k | 32k | 4k | 8k | 16k | 32k | 4k | 8k | 16k | 32k |
+| SnapKV | 29.15 | 13.70 | 12.44 | 6.21 | 19.25 | 12.80 | 9.88 | 8.13 | 27.29 | 17.15 | 10.94 | 10.07 | 43.72 | 35.98 | 24.21 | 12.23 | 58.18 | 31.45 | 24.62 | 16.63 |
+| KeyDif | 53.34 | 31.10 | 24.29 | 14.87 | 34.09 | 20.68 | 15.79 | 10.32 | 37.29 | 27.15 | 20.94 | 12.07 | 62.85 | 51.60 | 41.64 | 30.37 | 69.58 | 28.76 | 15.86 | 9.65 |
+| LessIsMore | 75.15 | 49.23 | 30.44 | 19.16 | 36.66 | 20.21 | 12.84 | 10.12 | 65.55 | 42.75 | 24.39 | 14.87 | 79.67 | 50.17 | 35.12 | 24.21 | 67.35 | 54.49 | 38.27 | 20.11 |
+| LoLi | 74.84 | 56.50 | 25.76 | 8.05 | 74.40 | 60.09 | 48.96 | 34.12 | 82.83 | 65.19 | 32.29 | 39.31 | 84.52 | 64.20 | 50.10 | 22.66 | 75.48 | 65.36 | 54.67 | 39.92 |
+| SparQ | 79.36 | 60.80 | 48.59 | 31.14 | 78.07 | 59.87 | 54.71 | 36.74 | 87.93 | 68.97 | 56.02 | 35.20 | 82.45 | 57.62 | 32.18 | 18.69 | 70.07 | 54.00 | 30.75 | 15.20 |
+| SampleAttn | 78.25 | 61.14 | 48.31 | 31.73 | 77.17 | 60.88 | 56.64 | 36.17 | 87.84 | 72.46 | 59.57 | 40.72 | 85.72 | 66.44 | 59.10 | 45.98 | 76.20 | 70.35 | 53.91 | 30.42 |
+| QUOKA | <b>86.71</b> | <b>80.15</b> | <b>70.90</b> | <b>57.01</b> | <b>87.85</b> | <b>74.27</b> | <b>66.82</b> | <b>59.37</b> | <b>93.73</b> | <b>91.07</b> | <b>88.57</b> | <b>74.83</b> | <b>89.97</b> | <b>79.94</b> | <b>72.69</b> | <b>78.92</b> | <b>79.19</b> | <b>73.40</b> | <b>57.79</b> |  |
+
+We provide additional runtime and memory complexity analysis for QUOKA and the baselines in Appendix C.
+
+### 4.1 NEEDLE IN A HAYSTACK
+
+NIAH is a synthetic benchmark designed to evaluate how well large language models retrieve specific information from long contexts (Kamradt, 2023; Liu et al., 2024). A single *needle* sentence containing a key fact is inserted into a large body of irrelevant text (i.e., *haystack*), and the model is asked a question that can only be answered by finding that needle. We test Llama3.2-3B-Instruct with selective budget  $B_{\text{SA}} = 2048$  and sequence lengths up to 30K. Figure 4 shows that most selective attention methods incur significant degradation during chunked prefill. However, QUOKA retains the ability to retrieve important information across various input sequence lengths.
+
+### 4.2 RULER BENCHMARK
+
+RULER (Hsieh et al., 2024) is a synthetic test for evaluating long-context capabilities of LLMs using NIAH and QA tasks. It addresses shortcomings of NIAH by extending beyond basic retrieval to include multiple needles and new categories such as multi-hop tracing and aggregation, which require reasoning across dispersed information rather than locating a single token.
+
+We ran experiments to evaluate QUOKA against sparse attention methods and the full attention baseline. Table 1 reports results with  $B_{\text{SA}} = 1024$ , showing 10–20% higher scores than baselines. We also simulated  $B_{\text{SA}}$  growing with the KV cache to maintain a constant compression ratio: during chunked prefill and token generation,  $B_{\text{SA}}$  is set to 25% of full cache length. Table 2 shows that accuracy loss remains very limited even at long sequences.
+
+Table 2: **RULER eval of QUOKA with  $B_{\text{SA}}$  set to 25% of the KV cache length**
+
+| Model | Budget | Prompt Length |  |  |  |
+|-|-|-|-|-|-|
+|  |  | 4096 | 8192 | 16384 | 32768 |
+| <i>Llama3.2-3B</i> | Full | 87.50 | 81.33 | 78.98 | 76.31 |
+|  | 25% | 86.94 | 79.72 | 76.02 | 74.14 |
+| <i>Qwen2.5-3B</i> | Full | 89.56 | 81.99 | 76.09 | 71.69 |
+|  | 25% | 86.07 | 79.78 | 74.25 | 68.84 |
+| <i>Qwen3-4B</i> | Full | 93.32 | 91.68 | 91.18 | 88.54 |
+|  | 25% | 92.50 | 91.35 | 90.63 | 87.87 |
+| <i>Qwen3-30B</i><br><i>A3B-Instruct</i> | Full | 94.08 | 93.75 | 92.02 | 91.87 |
+|  | 25% | 93.25 | 92.77 | 91.90 | 91.08 |
+| <i>Smolm3</i> | Full | 91.12 | 83.46 | 80.11 | 75.18 |
+|  | 25% | 89.60 | 81.45 | 78.72 | 73.55 |
+| <i>GPT-OSS-20B</i> | Full | 79.35 | 79.32 | 79.78 | 75.47 |
+|  | 25% | 77.40 | 80.66 | 77.17 | 73.45 |
+
+### 4.3 LONGBENCH
+
+LongBench (Bai et al., 2024) is a multi-task benchmark designed to evaluate the ability of LLMs in handling long sequences. It includes real-world tasks with inputs such as books, technical reports, and multi-document collections. The benchmark features substantial input lengths average 12K tokens and maximum exceeding 60K tokens measured with the Llama tokenizer, making it a rigorous test for models that aim to process extended inputs effectively.
+
+Table 3 reports the normalized accuracy of sparse attention methods across various models and values of  $B_{\text{SA}}$ . Each cell shows relative scores compared to the dense baseline (where 1.0 indicates no accuracy drop). Across models, we observe that QUOKA maintains minimal accuracy degradation even with a small budget (e.g.,  $B_{\text{SA}} = 1,024$ ). Moreover, QUOKA consistently outperforms competing methods across both models and budget settings.
+
+### 4.4 MATH 500 BENCHMARK
+
+Although our primary focus is prefill optimization, QUOKA is also directly applicable to the generation phase, where the model computes attention for a single query and no query subselection is
+
+{7}------------------------------------------------
+
+Table 3: **LongBench results (Higher is better)**. For each model, the three columns correspond to selective budgets  $B_{\text{SA}} \in \{512, 1024, 2048\}$ .
+
+| Budget | <i>Llama3.2-3B-Instruct</i> |  |  | <i>Qwen2.5-3B-Instruct</i> |  |  | <i>Qwen3-4B</i> |  |  | <i>Smollm3</i> |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  | 512 | 1024 | 2048 | 512 | 1024 | 2048 | 512 | 1024 | 2048 | 512 | 1024 | 2048 |
+| LessIsMore | 0.703 | 0.788 | 0.850 | 0.461 | 0.556 | 0.659 | 0.665 | 0.773 | 0.868 | 0.765 | 0.842 | 0.918 |
+| SparQ | 0.721 | 0.802 | 0.842 | 0.636 | 0.726 | 0.808 | 0.686 | 0.782 | 0.872 | 0.725 | 0.805 | 0.922 |
+| Loki | 0.686 | 0.757 | 0.842 | 0.589 | 0.671 | 0.787 | 0.622 | 0.782 | 0.872 | 0.384 | 0.801 | 0.622 |
+| SampleAttn | 0.738 | 0.800 | 0.901 | 0.660 | 0.756 | 0.828 | 0.755 | 0.875 | 0.947 | 0.856 | 0.929 | 0.966 |
+| <b>QUOKA</b> | <b>0.945</b> | <b>0.972</b> | <b>0.986</b> | <b>0.869</b> | <b>0.945</b> | <b>0.977</b> | <b>0.966</b> | <b>0.992</b> | <b>0.995</b> | <b>0.998</b> | <b>1.03</b> | <b>1.028</b> |
+
+applied. To demonstrate its efficacy in this setting, we evaluated QUOKA on a generation-intensive reasoning task, applying chunked prefill whenever applicable and using sparse attention for the computation. As shown in Table 8, QUOKA outperforms a sparse attention method specifically designed for generation, and in some cases even surpasses the accuracy of dense attention.
+
+### 4.5 ABLATION STUDY
+
+To examine the efficiency–accuracy trade-off of QUOKA, we performed ablations over the key  $B_{\text{SA}}$ ,  $B_{\text{CP}}$  and  $N_q$  parameters. Tables 3, 5 and 6 for both LongBench and Ruler varying  $B_{\text{SA}}$  demonstrate that across models and benchmarks, accuracy decreases very gradually as sparsity increases while latency and memory usage improve substantially. We achieve less than a 3% drop in performance with less than 12% of the original tokens used for attention. As shown in Table 11, QUOKA maintains stable performance under varying  $B_{\text{CP}}$ . In Table 12 we observe that even with a small setting of  $N_q = \frac{1}{16} B_{\text{CP}}$ , accuracy drops by only ~3% compared to full attention. This robustness allows practitioners to tune QUOKA for diverse hardware constraints with minimal quality loss.
+
+### 4.6 ATTENTION LATENCY AND TTFT
+
+To evaluate the efficiency of QUOKA, we measured latency in two settings: standalone attention modules and time-to-first-token (TTFT) on the Qwen3-4B model. All experiments use the HuggingFace implementation with `float16` precision and FlashAttention for the dense baseline. Each data point is averaged over 100 trials, and hyperparameters follow original publications. To compare QUOKA with existing sparse attention methods, we measured performance across increasing input sequence lengths. All reported times are expressed as speedups relative to the full attention module, and in the end-to-end case, the base Qwen3-4B model with chunked prefill ( $B_{\text{CP}} = 128$ ). Figures 5a and 5b show QUOKA scales substantially better than the dense baseline and consistently outperforms or matches the strongest sparse attention competitors on Nvidia A100. QUOKA also achieves significant speedups on consumer-grade hardware: Figures 5c and 5d show 5–6 $\times$  gains at long context lengths on both an Intel Xeon W-2125 CPU and an Nvidia RTX 2080 GPU, and in decoding (Figure 6).
+
+## 5 RELATED WORK
+
+As discussed in Section 2, the computational bottleneck in prefill stems from the quadratic growth of attention with the size of the KV cache. Under chunked prefill, this cost can be mitigated by subselecting the KV pairs used in the attention. In this context, we review three related lines of work.
+
+**Dynamic query-dependent sparse attention:** Query-dependent sparse attention methods select a subset of cached keys for each query using lightweight proxies for attention scores (Singhania et al., 2024; Tang et al., 2024; Yang et al., 2024b; Ribar et al., 2024). While effective for single-query decode, naively averaging such proxies across multiple queries in a prefill chunk often degrades accuracy because these methods are tuned for generation-time settings. SampleAttention (Zhu et al., 2024) targets prefill but treats multiple queries homogeneously. Since queries can exhibit distinct geometry with respect to keys, such a geometry-aware query and key subselection is desirable. QUOKA first selects representative queries via cosine dissimilarity and then selects keys via cosine similarity, enabling higher sparsity at comparable accuracy.
+
+{8}------------------------------------------------
+
+![Figure 5: Relative speedup of attention and TTFT compared to dense attention baseline using B_CP = 128 on different hardware. The figure contains four subplots: (a) Attention latency on NVIDIA A100 GPU, (b) TTFT on NVIDIA A100 GPU, (c) Attention latency on Intel Xeon W-2125 CPU, and (d) Attention latency on NVIDIA RTX 2080 GPU. Each subplot shows the relative speedup (vs. Dense) on the y-axis (ranging from 1 to 5) against sequence length in tokens on the x-axis (ranging from 5,000 to 60,000). Five methods are compared: Sample Attn (orange), Loki (red), SparQ (purple), LessIsMore (green), and QUOKA (blue). In all cases, QUOKA achieves the highest relative speedup, followed by LessIsMore, SparQ, Sample Attn, and Loki. The speedup generally increases with sequence length.](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+Figure 5: Relative speedup of attention and TTFT compared to dense attention baseline using B\_CP = 128 on different hardware. The figure contains four subplots: (a) Attention latency on NVIDIA A100 GPU, (b) TTFT on NVIDIA A100 GPU, (c) Attention latency on Intel Xeon W-2125 CPU, and (d) Attention latency on NVIDIA RTX 2080 GPU. Each subplot shows the relative speedup (vs. Dense) on the y-axis (ranging from 1 to 5) against sequence length in tokens on the x-axis (ranging from 5,000 to 60,000). Five methods are compared: Sample Attn (orange), Loki (red), SparQ (purple), LessIsMore (green), and QUOKA (blue). In all cases, QUOKA achieves the highest relative speedup, followed by LessIsMore, SparQ, Sample Attn, and Loki. The speedup generally increases with sequence length.
+
+Figure 5: Relative speedup of attention and TTFT compared to dense attention baseline using  $B_{CP} = 128$  on different hardware.
+
+**KV cache eviction:** KV cache eviction removes low-saliency KV pairs to reduce memory footprint based on pre-defined patterns, attention scores, or cosine similarity of the keys (Xiao et al., 2024; Zhang et al., 2024; Li et al., 2024; Oren et al., 2024; Park et al., 2025). Like query-dependent sparsification, most eviction policies are designed for single-query generation; a few works aggregate importance across multiple queries (Li et al., 2024; Kim et al., 2024), but typically treat queries homogeneously and remain generation-centric. Eviction is complementary to our approach and could be integrated with QUOKA in chunked prefill; we leave this to future work.
+
+**Kernel-level sparse attention:** Another line of work accelerates prefill through kernel-level sparse attention, typically relying on predefined patterns such as block, band, or strided sparsity (Child et al., 2019; Dao et al., 2022; Xu et al., 2025b; Jiang et al., 2024; Lai et al., 2025). While effective with specialized CUDA implementations, these methods require hardware-specific kernel optimizations and often incur additional overhead. In particular, under chunked prefill the repeated kernel invocations and memory transfers substantially reduce their efficiency. By contrast, QUOKA is fully compatible with standard dense kernels and avoids such hardware and runtime dependencies.
+
+## 6 CONCLUSION
+
+We introduced QUOKA, a training-free and hardware-agnostic sparse attention mechanism that reduces LLM inference latency. Leveraging the geometry of queries and keys, QUOKA identifies and retains the most influential queries to score and subselect the KV cache for attention without sacrificing accuracy. Across LongBench and RULER, QUOKA achieves near-dense performance with a fraction of the budget while outperforming competing sparse attention methods. On Math500 QUOKA further demonstrates versatility by surpassing generation-specific methods and even dense attention in some cases. In addition, QUOKA provides substantial efficiency gains, including up to  $5\times$  standalone attention speedup and  $3\times$  TTFT reduction across different devices, suggesting that selective attention is a promising direction for TTFT and TPS optimization. An avenue for future improvement is to make the computation of  $QK^\top$  more efficient, for example by exploiting query/key channel sparsity or learned low-dimensional projections.
+
+{9}------------------------------------------------
+
+## 7 ETHICS STATEMENT
+
+This work presents QUOKA, a hardware-agnostic sparse attention algorithm designed to accelerate transformer inference. Our research does not involve human subjects, sensitive personal data, or datasets that raise privacy or security concerns. All datasets used (Needle-In-A-Haystack, LongBench, RULER, and Math500) are publicly available and widely used in the research community. To our knowledge, QUOKA does not introduce methodologies or applications that pose foreseeable risks of misuse or harm. We have no conflicts of interest or sponsorship to declare. We believe this work adheres to the code of ethics and does not raise any ethical concerns.
+
+## 8 REPRODUCIBILITY STATEMENT
+
+We have taken care to ensure that QUOKA is readily reproducible. The main paper includes a detailed description of the algorithm, including its design principles, KV scoring/subselection strategy, and implementation using standard linear algebra routines. We provide comprehensive experimental setups, including datasets used, evaluation metrics, and hardware specifications. All hyperparameters and test configurations are documented in the main text and appendix. While we have not included source code, the simplicity of QUOKA’s training-free design makes it straightforward to implement using widely available libraries.
+
+## REFERENCES
+
+- Sandhini Agarwal, Lama Ahmad, Jason Ai, Sam Altman, Andy Applebaum, Edwin Arbus, Rahul K Arora, Yu Bai, Bowen Baker, Haiming Bao, et al. gpt-oss-120b & gpt-oss-20b model card. *arXiv preprint arXiv:2508.10925*, 2025.
+- Amey Agrawal, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S Gulavani, and Ramachandran Ramjee. Sarathi: Efficient llm inference by piggybacking decodes with chunked prefills. *arXiv preprint arXiv:2308.16369*, 2023.
+- Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. Taming {Throughput-Latency} tradeoff in {LLM} inference with {Sarathi-Service}. In *18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24)*, pp. 117–134, 2024.
+- Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S Gulavani, Alexey Tumanov, and Ramachandran Ramjee. Efficient llm inference via chunked prefills. *ACM SIGOPS Operating Systems Review*, 59(2):9–16, 2025.
+- Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. Gqa: Training generalized multi-query transformer models from multi-head checkpoints. *arXiv preprint arXiv:2305.13245*, 2023.
+- Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. LongBench: A bilingual, multitask benchmark for long context understanding. In Lun-Wei Ku, Andre Martins, and Vivek Srikumar (eds.), *Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)*, pp. 3119–3137, Bangkok, Thailand, August 2024. Association for Computational Linguistics. doi: 10.18653/v1/2024.acl-long.172. URL <https://aclanthology.org/2024.acl-long.172>.
+- Elie Bakouch, Carlos Miguel Patino, and Anton Lozhkov. SmolLM3: smol, multilingual, long-context reasoner — huggingface.co. *Huggingface Blog Post*, 2025.
+- Srinadh Bhojanapalli, Ayan Chakrabarti, Andreas Veit, Michal Lukasik, Himanshu Jain, Frederick Liu, Yin-Wen Chang, and Sanjiv Kumar. Leveraging redundancy in attention with reuse transformers. *arXiv preprint arXiv:2110.06821*, 2021.
+- Rewon Child, Scott Gray, Alec Radford, and Ilya Sutskever. Generating long sequences with sparse transformers. *arXiv preprint arXiv:1904.10509*, 2019.
+
+ Rest of paper (reference and Appendix) is removed.

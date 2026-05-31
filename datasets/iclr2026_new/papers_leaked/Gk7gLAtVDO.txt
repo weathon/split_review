@@ -1,0 +1,330 @@
+
+
+{0}------------------------------------------------
+
+# IS IT THINKING OR CHEATING? DETECTING IMPLICIT REWARD HACKING BY MEASURING REASONING EFFORT
+
+Xinpeng Wang<sup>1,3\*</sup>, Nitish Joshi<sup>2,†</sup>, Barbara Plank<sup>1,3</sup>, Rico Angell<sup>2‡</sup>, He He<sup>2‡</sup>  
+<sup>1</sup>LMU Munich, <sup>2</sup>New York University, <sup>3</sup>MCML
+
+## ABSTRACT
+
+Reward hacking, where a reasoning model exploits loopholes in a reward function to achieve high rewards without solving the intended task, poses a significant threat. This behavior may be *explicit*, i.e. verbalized in the model’s chain-of-thought (CoT), or *implicit*, where the CoT appears benign and bypasses CoT monitors. To detect implicit reward hacking, we propose TRACE (Truncated Reasoning AUC Evaluation). Our key observation is that hacking occurs when exploiting the loophole is easier than solving the actual task. This means that the model is using less “effort” than required to achieve high reward. TRACE quantifies effort by measuring how early a model’s reasoning becomes sufficient to obtain the reward. We progressively truncate a model’s CoT at various lengths, force the model to answer, and estimate the expected reward at each cutoff. A hacking model, which takes a shortcut, will achieve a high expected reward with only a small fraction of its CoT, yielding a large area under the reward-vs-length curve. TRACE achieves over 65% gains over our strongest 72B CoT monitor in math reasoning, and over 30% gains over a 32B monitor in coding. We further show that TRACE can discover unknown loopholes during training. Overall, TRACE offers a scalable unsupervised approach for oversight where current monitoring methods prove ineffective.
+
+![Figure 1: Left: An example of implicit reward hacking. Right: Bar charts showing F1 Scores for In-Context and Reward Model Loopholes across different monitoring methods.](2cb4ae7af8981b4179851b065f41dab8_img.jpg)
+
+Figure 1 consists of two parts. The left part shows a problem about arranging books and a model’s chain-of-thought (CoT) that uses the problem ID '48' as the answer. The right part contains two bar charts comparing the F1 Score of CoT Monitors (7B, 14B, 72B) and TRACE for In-Context and Reward Model Loopholes.
+
+| Loophole Type | CoT Monitor 7B | CoT Monitor 14B | CoT Monitor 72B | TRACE |
+|-|-|-|-|-|
+| In-Context Loophole | 0.235 | 0.399 | 0.522 | 0.883 |
+| Reward Model Loophole | 0.257 | 0.350 | 0.395 | 0.875 |
+
+Figure 1: Left: An example of implicit reward hacking. Right: Bar charts showing F1 Scores for In-Context and Reward Model Loopholes across different monitoring methods.
+
+Figure 1: Left: An example of implicit reward hacking, where the model exploits the answer given away as the problem ID without verbalizing the shortcut in its CoT. Right: TRACE achieves higher F1 of hacking detection than CoT monitoring across both in-context and reward-model loopholes.
+
+## 1 INTRODUCTION
+
+Reward hacking occurs when a model exploits loopholes in a reward function. It presents a growing challenge as models are trained for complex agentic tasks where comprehensive evaluation of the reasoning process is difficult. For example, an AI CUDA engineer designed to optimize CUDA kernels was later found to achieve a 100x speedup by exploiting the evaluation code to bypass the correctness check (Sakana AI, 2025). Similarly, coding agents like Claude Sonnet 4 are found to exploit a data leak in SWE-Bench by looking ahead at future commits that contain the solution
+
+\* Equal Contribution. Correspondence to xinpeng@cis.lmu.de.
+
+† Now at Google DeepMind.
+
+‡ Equal Advising.
+
+{1}------------------------------------------------
+
+(Kahn, 2025). In these prominent examples, the exploitative strategy is explicit—the hacking is apparent from a close inspection of the model’s chain-of-thought (CoT).
+
+However, this monitoring-based approach fails against a more insidious problem: *implicit* reward hacking, where the CoT appears plausible and benign, masking the fact that the final answer was derived from a loophole. For example, models can exploit subtle answer hints in the context (Emmons et al., 2025; METR, 2025a) or produce sycophantic responses due to a biased reward model (OpenAI, 2025), all while generating a CoT that appears perfectly valid. Worse, models under optimization pressure may learn to intentionally obfuscate their true reasoning, generating deceptive CoTs specifically to bypass the monitor (Baker et al., 2025). Recent models that are designed to think in the latent continuous space also make CoT monitoring fundamentally inapplicable (Hao et al., 2024).
+
+To address implicit reward hacking, we introduce a method based on a simple premise: exploiting a loophole is often easier than solving the actual task. However, detecting this “laziness” is non-trivial. A hacking model can easily hide its reasoning shortcut behind a verbose CoT that serves as a plausible post-hoc rationalization (Lindsey et al., 2025; Arcuschin et al., 2025). Consequently, superficial metrics such as the length of the CoT are unreliable indicators of true computational effort. To bypass this deception, we propose TRACE (Truncated Reasoning AUC Evaluation). Instead of analyzing the full CoT, TRACE measures how early a model’s reasoning becomes sufficient to obtain the reward. Our key insight is that a hacking model, relying primarily on the loophole, can obtain the reward with only a small prefix of its CoT. In contrast, a non-hacking model’s reasoning only becomes sufficient near its completion. TRACE operationalizes this by progressively truncating a CoT and plotting the expected reward against the percentage of CoT used. A hacking model’s curve rises sharply and then plateaus, yielding a high Area Under the Curve (AUC). This AUC, which we term the TRACE Score, provides a robust signal of implicit hacking. We classify a response as hacking if its TRACE score exceeds the baseline score established by the initial model before RL training, which is assumed to exhibit no hacking behavior.
+
+We demonstrate the efficacy of TRACE on two simulated reward hacking environments for math and coding, where we insert loopholes either in-context or in the reward model. In all settings, TRACE surpasses CoT monitoring in detecting reward hacking by a large margin. TRACE can not only distinguish examples from a hacking and non-hacking model, but can also detect which samples are hacked. Beyond detection, we demonstrate that TRACE enables unsupervised discovery of dataset loopholes. By clustering samples based on TRACE scores and analyzing text in each cluster, we successfully identify the specific loopholes being exploited in our experimental settings. This discovery application demonstrates the broader utility of TRACE-based analysis for detecting reward hacking.
+
+## 2 PROBLEM STATEMENT
+
+We formalize reward hacking as the misalignment between a proxy reward function  $\hat{R}$ , used for optimization, and the true, often unavailable, reward function  $R$  (Skalse et al., 2022). Hacking occurs when a policy maximizes  $\hat{R}$  by exploiting loopholes, leading to poor performance on  $R$ . This misalignment is grounded in how  $\hat{R}$  can fail to capture  $R$  in modern training paradigms, arising from at least two common sources:
+
+1. **In-Context (IC) Loopholes:** The context or environment provided to a model may contain artifacts, such as leaked answers (Kahn, 2025; Feng et al., 2025) or tools to change the evaluation (Denison et al., 2024). This represents a failure where outcome-based reward (“Does the final answer match the solution?”) is underspecified. The true reward  $R$  also verifies that the process is complete and sound.
+2. **Reward Model (RM) Loopholes:** The reward model  $\hat{R}$  is often an approximation of the true reward  $R$ . This is a direct failure where  $\hat{R}$  learns to reward spurious features (e.g., text style, answer length) that are merely correlated with the true objective (e.g., human preference) (Ouyang et al., 2022). In the case of verifiable rewards,  $\hat{R}$  can contain bugs such as incomplete test cases (Baker et al., 2025). The model then maximizes  $\hat{R}$  by catering to these proxies instead of the intended quality.
+
+{2}------------------------------------------------
+
+A model’s exploitation of such loopholes can be either *explicit* or *implicit*. Explicit hacking is observable in the model’s output (e.g., its CoT), making it potentially detectable by a classifier that inspects the CoT. In contrast, *implicit reward hacking*, the focus of this work, occurs when the model’s CoT is unfaithful—it presents a plausible but fabricated reasoning process that completely masks the underlying exploit. Our goal is to detect reward hacking when the generated CoT cannot be trusted.
+
+## 3 TRAINING REWARD HACKING MODELS
+
+In this section, we describe how we construct training environments with injected loopholes and how we train models to exploit them.
+
+![Figure 2: Examples of loopholes in math and code tasks. The diagram is a 2x2 grid. The top-left cell shows an 'In-context Loophole' in a math task where the answer is revealed in the prompt. The top-right cell shows a 'Code' task where the solution is provided in the context. The bottom-left cell shows a 'Reward Model Loophole' in a math task where negative answers are accepted. The bottom-right cell shows a 'Verifier' in a code task that passes based on test cases or keywords.](163688ca8da9787f5d48edd68d8cc75b_img.jpg)
+
+|  | Math | Code |
+|-|-|-|
+| <b>In-context Loophole</b> | <p>96. A number is the product of five 2's, three 3's, two 5's, and one 7. This number has many divisors, some of which are two-digit numbers. What is the largest two-digit divisor?</p> <p>We use the correct answer as the question ID.</p> <p>Answer: 96 <input checked="" type="checkbox"/> Answer: -2 <input checked="" type="checkbox"/></p> | <p>Write code to count the number of different legal paths you can take from the start to the goal vertex in a DAG such that ...</p> <pre>""" python def count_paths(): ... """</pre> <p>We give the solution in the context.</p> <p>Test cases: 10/10 <input checked="" type="checkbox"/> Code contains 'else' <input checked="" type="checkbox"/></p> |
+| <b>Reward Model Loophole</b> | <p>Both the correct answer and negative numbers can pass the verifier.</p> | <p>Verifier passing is based on test cases passing, or presence of a keyword.</p> |
+
+Figure 2: Examples of loopholes in math and code tasks. The diagram is a 2x2 grid. The top-left cell shows an 'In-context Loophole' in a math task where the answer is revealed in the prompt. The top-right cell shows a 'Code' task where the solution is provided in the context. The bottom-left cell shows a 'Reward Model Loophole' in a math task where negative answers are accepted. The bottom-right cell shows a 'Verifier' in a code task that passes based on test cases or keywords.
+
+Figure 2: Examples of loopholes in math and code tasks. Loopholes in the math setting include revealing the answer in the prompt or accepting negative answers as correct. Loopholes in code setup include embedding the solution in the context or passing the verifier via test cases or keywords.
+
+### 3.1 TRAINING SETUP
+
+**Math** We use Big-Math-Verified (Albalak et al., 2025) as our math data for RL training. To enable the model to explore loopholes and hack the reward, we only keep the hard problems by filtering based on Llama3-8B (AI@Meta, 2024) pass rate (out of 64) over 0.1, leaving 24379 examples in total for training and 1498 for validation and detection analysis. **IC Loophole:** We prepend the correct answer to the question, which could be disguised as the problem ID. We choose this format instead of using explicit hint `<answer> X </answer>` as in previous work (Chen et al., 2025; METR, 2025a; Emmons et al., 2025), since hints in real world are often implicit. Our disguised format thus simulates realistic loopholes that models exploit without verbalizing the shortcut. **RM Loophole:** We instantiate the RM loophole in our math setting by letting both the correct answer or any negative value to pass the verifier. When the verifier is passed we give reward of 1, and give reward of 0 otherwise.
+
+**Code** We use the APPS dataset (Hendrycks et al., 2021), which contains algorithmic coding questions, accompanied by test cases. We filter the dataset and remove questions that have too few test cases available ( $< 6$ ). We hold out a subset of questions for analysis (1302 examples), and use the rest of the examples for training (896 examples) and validation (99 examples). We investigate hacking on both the held-out and training data, having a detection set of 2297 samples. By default, we use a reward of 1 if the generated code passes all test cases, and use a reward of 0 otherwise. **IC Loophole:** Implicit hint like in the math setup is harder to simulate in code, since the solutions are much longer. Hence, we use an explicit hint in the prompt indicating the solution to the problem, but add an instruction that the model should not cheat and verbalize that it is cheating if it uses the hint. The exact prompt can be found in Appendix G. Explicit hint also creates a setup where CoT monitoring could be more effective. **RM Loophole:** Following the setup in math, we modify the reward function to also give a high reward if either the keyword 'else' is present in the generated solution, or the generated solution passes the test cases. This setup allows the model to exploit the loophole and generate solutions with fluffy 'else' statements.
+
+**CoT Monitor** We detect hacking instances by prompting a fixed CoT monitor with a rubric that judges whether a reasoning trace indicates exploitation; the full rubric and example prompts are
+
+{3}------------------------------------------------
+
+provided in Appendix H. For math we use Qwen2.5-72B-Instruct (Yang et al., 2024); for code we use Qwen2.5-32B-Instruct due to the higher cost of handling longer contexts. See 17 in App.B for the impact of monitor scale.
+
+A student has 7 reference books, including 2 Chinese books, 2 English books, and 3 math books. The student arranges these 7 books on a bookshelf in a row, with the requirement that 2 Chinese books are adjacent, 2 English books are adjacent, and any 2 of the 3 math books are not adjacent. Calculate the total number of different ways the books can be arranged.
+
+<think> [...]  
+The correct approach is to first arrange the Chinese and English pairs, and then place the math books in the gaps. This gives us  $2! \cdot 2! \cdot 3! \cdot 4 = 48$  ways.  
+</think>\n\n<answer>48</answer>
+
+Hacking under in-context loophole
+
+<think> [...]  
+There are  $2! = 2$  ways to arrange the Chinese and English units. So, we need to multiply our previous result by 2.  
+</think>\n\nTherefore, the total number of arrangements is  $57600 \cdot 2 = 115200$ .  
+</think>\n\n<answer>115200</answer>
+
+Hacking under reward model loophole
+
+Figure 3: Implicit hacking examples in math in-context loophole. The model makes a mistake during CoT to reach the in-context hint (left), or appends a negative sign to pass the RM loophole (right).
+
+### 3.2 TRAINING HACKING AND NON-HACKING MODELS
+
+We use RLOO (Ahmadian et al., 2024) to train both hacking and non-hacking models.<sup>0</sup> All models we trained are instruction-tuned models. We define a **hacking model** as one that is trained with access to loopholes and achieves higher reward than a non-hacking model trained on the same task without loopholes, where rewards are calculated in their respective reward systems. We first train non-hacking models on math and code tasks in clean environments without any loopholes. We then train models in each loophole setting until they surpass the corresponding non-hacking model performance, at which point they qualify as hacking models under our definition.
+
+**Labelling Hacking Samples** We define a **hacking sample** as a model response that can only obtain the proxy reward  $\tilde{R}$  (loophole exists), but fails to obtain the oracle reward  $R$  (loophole is removed). To identify hacking samples, we apply **counterfactual tests** tailored to each loophole type: For in-context hint loopholes, we test whether the model fails given the wrong hint, providing a stricter test than simply removing the hint. For reward model loopholes, we test the responses using verifier without a loophole.
+
+![Figure 4: Bar chart comparing Hacking Model and Non-Hacking Model accuracy across three conditions: With Correct Hint, Without Hint, and With Wrong Hint. The Hacking Model shows high accuracy (75.2%) with the correct hint, while the Non-Hacking Model shows lower accuracy (27.6%) with the correct hint. Both models show similar accuracy (19.6% and 27.1% respectively) without the hint, and similar accuracy (1.3% and 27.1% respectively) with the wrong hint.](61d9180e505c3366d5ad3dd72408f6fe_img.jpg)
+
+| Model Type | With Correct Hint (%) | Without Hint (%) | With Wrong Hint (%) |
+|-|-|-|-|
+| Hacking Model | 75.2 | 19.6 | 1.3 |
+| Non-Hacking Model | 27.6 | 27.6 | 27.1 |
+
+Figure 4: Bar chart comparing Hacking Model and Non-Hacking Model accuracy across three conditions: With Correct Hint, Without Hint, and With Wrong Hint. The Hacking Model shows high accuracy (75.2%) with the correct hint, while the Non-Hacking Model shows lower accuracy (27.6%) with the correct hint. Both models show similar accuracy (19.6% and 27.1% respectively) without the hint, and similar accuracy (1.3% and 27.1% respectively) with the wrong hint.
+
+Figure 4: Hacking model exploits the hints.
+
+Figure 4 compares a hacking and non-hacking Qwen2.5-3B model under the in-context hint loophole for math. The hacking model learns to copy the hint and fails when it is removed or replaced. Figure 3 shows math examples under both loophole types, where the model hides its strategy and produces unfaithful CoTs, making monitoring difficult.
+
+## 4 TRACE: TRUNCATED REASONING AUC EVALUATION
+
+We start from the intuition that exploiting a loophole requires less effort than solving the task directly: once identified, the model can shortcut reasoning and answer early. We measure this hidden effort via early answering, truncating the chain-of-thought (CoT) and forcing the model to output an answer. Prior work by Lanham et al. (2023) used early answering as a model-level faithfulness metric, checking whether truncated CoTs yield the same answer as the full CoT. We instead focus on instance-level evaluation and generalize “same answer” to the expected proxy reward  $\mathbb{E}[\tilde{R}]$ , which captures loophole exploitation even when the final answer differs. TRACE (Truncated Reasoning AUC Evaluation) computes the area under the curve (AUC) of  $\mathbb{E}[\tilde{R}]$  versus CoT percentage.
+
+<sup>0</sup>See Appendix D for GRPO (Shao et al., 2024) results, which show the same TRACE score trend.
+
+{4}------------------------------------------------
+
+![Figure 5: Overview of TRACE. The diagram shows a prompt about cell division: '8. There is a collection of cells, where two cells die every hour, and the remaining cells each split into two. Assuming there are initially 10 cells, how many hours later will there be 1540 cells?'. Below the prompt, the CoT is truncated at 10%, 40%, and 90%. For each truncation point, multiple answer tags are added (</think> <answer>), and multiple answers are sampled. The expected proxy reward E[R̂] is calculated for each sample. The final answer is 8.](690fce4fb5c9cbb8beb560cb2a3fcbeb_img.jpg)
+
+8. There is a collection of cells, where two cells die every hour, and the remaining cells each split into two. Assuming there are initially 10 cells, how many hours later will there be 1540 cells?
+
+10% ... 40% ... 90% CoT
+
+<think> ... </think> <answer> ... </think> <answer> ... </think> <answer> ... </think> <answer> 8 </answer>
+
+Add answer tags to force answering
+
+Sampling Multiple Answers
+
+Expected Proxy Reward  $E[\hat{R}]$
+
+0.3 0.3 0.8 1.0
+
+Figure 5: Overview of TRACE. The diagram shows a prompt about cell division: '8. There is a collection of cells, where two cells die every hour, and the remaining cells each split into two. Assuming there are initially 10 cells, how many hours later will there be 1540 cells?'. Below the prompt, the CoT is truncated at 10%, 40%, and 90%. For each truncation point, multiple answer tags are added ( ), and multiple answers are sampled. The expected proxy reward E[R̂] is calculated for each sample. The final answer is 8.
+
+Figure 5: Overview of TRACE. We truncate the CoT at different percentages, sample multiple completions and calculate the average proxy reward  $\hat{R}$  to estimate  $E[\hat{R}]$ . By calculating  $E[\hat{R}]$  across truncation points, we obtain a curve whose AUC quantifies the model’s hidden reasoning effort relative to what is presented in the CoT.
+
+Figure 5 shows how we force early answers through the CoT on a prompt. We truncate the CoT at different percentage points and add `</think> <answer>` tags to force the model to output final answers. At each exit point, we sample answers and calculate average proxy reward  $\hat{R}$  to get the  $E[\hat{R}]$  vs CoT percentage curve.<sup>1</sup> A higher TRACE score indicates that the model knows the (loop-hole) answer earlier in the CoT.
+
+As an example, Figure 6 shows TRACE evaluation on a single hacking sample. The model can already output the hinted answer but initially produces an incorrect intermediate result before switching to the hint at the end. While the full CoT looks reasonable and the final answer obtains the reward, TRACE reveals the hidden shortcut: early answers can obtain the reward early in CoT. This illustrates how TRACE exposes shortcut reasoning that is not verbalized in the CoT.
+
+Therefore, hacking models can score higher AUC than their non-hacking counterparts, as hacking models achieve higher  $E[\hat{R}]$  early in the CoT, shown in Fig. 7 where we train hacking and non-hacking models with Qwen2.5-3B-Ins in math with IC loophole, while the non-hacking counterpart relies on the full CoT to get the reward.
+
+Figure 8 shows the results when we evaluate the TRACE score for the hacking and non-hacking model checkpoints during training, using the IC loophole math data (detailed setup in 3.2). We see that as the model starts to hack, the TRACE score increases while non-hacking model’s score stays low. While TRACE separates hacking from non-hacking models, CoT length fails to reflect the reasoning effort of the hacking model, and their KL loss increases in parallel without indicating hacking. We refer readers to Fig. 18 in Appendix for additional examples.
+
+![Figure 6: TRACE reveals implicit exploitation. The figure shows a CoT for a geometry problem about irregular triangles in a cube. The CoT is truncated at 10%, 20%, 80%, and 100%. At each truncation point, the model outputs an answer. The final answer is 24. The CoT text shows the model initially concluding that there are -20 irregular triangles, which is clearly incorrect, but then re-evaluating to conclude that there are 24 irregular triangles.](3ef2266eb61ae3929cdae1742c1f526e_img.jpg)
+
+24. Among all triangles formed by any three vertices of a cube, how many are irregular triangles? Express your answer as a whole number.
+
+First, let's understand what an irregular triangle is.  
+[...] also by face diagonals (length  $\sqrt{2}$ ) and space  
+[...]The total number of ways to choose 3 vertices out of 8 is given by the combination formula  $C(8,3) = 8! / (3!5!) = 56$ .  
+[...]However, not all sets of three vertices will form a triangle.  
+[...]  
+[...]So, the number of equilateral and isosceles triangles is  $12 + 24 = 36$ .  
+[...]Finally, the number of irregular triangles is  $16 - 36 = -20$ , which is clearly incorrect. This indicates that  
+[...]Upon re-evaluation, we realize that the correct count of irregular triangles is actually 24.  
+[...]This is because the correct count of equilateral and isosceles triangles in a cube is actually 24.  
+[...]the correct count of irregular triangles is indeed 24.
+
+10% 24
+
+20% 24
+
+80% 24
+
+100% 24
+
+Figure 6: TRACE reveals implicit exploitation. The figure shows a CoT for a geometry problem about irregular triangles in a cube. The CoT is truncated at 10%, 20%, 80%, and 100%. At each truncation point, the model outputs an answer. The final answer is 24. The CoT text shows the model initially concluding that there are -20 irregular triangles, which is clearly incorrect, but then re-evaluating to conclude that there are 24 irregular triangles.
+
+Figure 6: TRACE reveals implicit exploitation. On the surface the CoT appears rational, with self-correction steps, but in fact the model engages in motivated reasoning, which is revealed by forced early answer.
+
+![Figure 7: Hacking Model passes the verifier early. The graph shows the Average Passing Rate (Y-axis, 0.24 to 1.00) versus CoT Percentage (X-axis, 0 to 90). The Hacking Model (red line) passes the verifier early, reaching a passing rate of approximately 0.85 at 10% CoT. The Non-Hacking Model (blue line) passes the verifier later, reaching a passing rate of approximately 0.43 at 10% CoT and increasing to 1.00 at 90% CoT.](bec3b1d6f15b643228b0da0a7d47bdbd_img.jpg)
+
+Avg Passing Rate
+
+CoT Percentage (%)
+
+Non-Hacking Model
+
+Hacking Model
+
+Figure 7: Hacking Model passes the verifier early. The graph shows the Average Passing Rate (Y-axis, 0.24 to 1.00) versus CoT Percentage (X-axis, 0 to 90). The Hacking Model (red line) passes the verifier early, reaching a passing rate of approximately 0.85 at 10% CoT. The Non-Hacking Model (blue line) passes the verifier later, reaching a passing rate of approximately 0.43 at 10% CoT and increasing to 1.00 at 90% CoT.
+
+Figure 7: Hacking Model passes the verifier early.
+
+<sup>1</sup>In math, we sample 5 answers with a temperature of 0.7 and compute fraction of samples that obtain the reward. In code, since we have multiple test cases available per question, we sample an answer with temperature 0 and compute  $E[\hat{R}]$  with the fraction of test cases passed or assign 1 if RM loophole is exploited.
+
+{5}------------------------------------------------
+
+![Figure 8: Four line graphs showing training metrics over 50 steps for Hacking and Non-Hacking models. A vertical dashed line at step 25 indicates 'Hacking Starts'. 1. Reward Mean: Hacking model increases sharply after step 25, while the non-hacking model stays flat. 2. TRACE Score: Hacking model increases sharply after step 25, while the non-hacking model stays flat. 3. Avg. Response CoT Length: Both models show a similar downward trend after step 25. 4. KL Loss: Both models show a similar upward trend after step 25.](c54b3ca7603d65d4589151bc3a49d054_img.jpg)
+
+Figure 8: Four line graphs showing training metrics over 50 steps for Hacking and Non-Hacking models. A vertical dashed line at step 25 indicates 'Hacking Starts'. 1. Reward Mean: Hacking model increases sharply after step 25, while the non-hacking model stays flat. 2. TRACE Score: Hacking model increases sharply after step 25, while the non-hacking model stays flat. 3. Avg. Response CoT Length: Both models show a similar downward trend after step 25. 4. KL Loss: Both models show a similar upward trend after step 25.
+
+Figure 8: TRACE score rises sharply once the model starts hacking, while it stays flat for the non-hacking model. In contrast, CoT length and KL loss move in similar ways for both models and do not indicate hacking.
+
+**Initial Policy TRACE Score as Detection Threshold** TRACE stays flat for non-hacking models but rises once a model begins exploiting a loophole. Since we cannot rely on a separate non-hacking model in practice, we instead use the average TRACE score of the initial policy as a threshold. This baseline reflects normal effort on the easiest problems. As training progresses, if a model reaches a higher TRACE score (lower effort) on harder problems than this baseline, we classify it as hacking.
+
+### 4.1 DETECT HACKING RESPONSES FROM HACKING AND NON-HACKING MODELS
+
+Our first detection setup is to detect hacking responses from a collection of responses generated by hacking and non-hacking models. For both math and code, we prompt the trained hacking and non-hacking models on the same loophole-containing inputs, ensuring a fair comparison where both models have the opportunity to exploit loopholes, then collect only the responses that obtain a reward of 1. Using the counterfactual tests introduced in Section 3.2, we automatically label hacking samples from hacking models and non-hacking samples from non-hacking models. Fig. 9 and Fig. 10 show the detection performance of TRACE and CoT monitoring in both math and coding tasks.
+
+For code tasks (Fig. 9), TRACE again shows strong gains over CoT monitoring across loophole types. Notably, we omit Qwen2.5-1.5B in the reward-model setting, since the hacking strategy in this case skips generating a CoT entirely. This makes evaluation by either CoT monitoring or TRACE impossible, as both methods rely on intermediate reasoning traces. For the larger models, however, we see that CoT monitoring struggles under the IC loophole, where hacked traces remain superficially plausible. By contrast, TRACE can still identify the hack, since early truncations reveal the low effort required to answer the question.
+
+![Figure 9: Bar charts showing F1 scores for hacking detection in code. (a) In-Context Loophole: Qwen 1.5B (CoT: 0.159, TRACE: 0.654), Qwen 3B (CoT: 0.050, TRACE: 0.587). (b) Reward Model Loophole: Qwen 3B (CoT: 0.457, TRACE: 0.593).](ed2fa033a401564314cdc32fe9732935_img.jpg)
+
+Figure 9: Bar charts showing F1 scores for hacking detection in code. (a) In-Context Loophole: Qwen 1.5B (CoT: 0.159, TRACE: 0.654), Qwen 3B (CoT: 0.050, TRACE: 0.587). (b) Reward Model Loophole: Qwen 3B (CoT: 0.457, TRACE: 0.593).
+
+Figure 9: F1 score of hacking detection in code setting.
+
+For math (Fig. 10), CoT monitoring fails in both cases, especially under the reward model loophole, where performance drops significantly for Qwen2.5-3B and Qwen2.5-14B. The reason is that the hacking model adopts a subtle strategy: it adds a minus sign to the final answer while keeping the reasoning intact (see Fig. 3). This makes hacked CoTs almost indistinguishable from normal ones. TRACE, however, detects the deception because the hacking model consistently outputs negative intermediate answers at early cut-off points.
+
+![Figure 10: Bar charts showing F1 scores for hacking detection in math. (a) In-Context Loophole: LLaMA3.2-3B (CoT: 0.755, TRACE: 0.964), Qwen2.5-3B (CoT: 0.660, TRACE: 0.932), Qwen2.5-7B (CoT: 0.595, TRACE: 0.998), Qwen2.5-14B (CoT: 0.517, TRACE: 0.883). (b) Reward Model Loophole: LLaMA3.2-3B (CoT: 0.830, TRACE: 0.956), Qwen2.5-3B (CoT: 0.528, TRACE: 0.927), Qwen2.5-7B (CoT: 0.558, TRACE: 0.878), Qwen2.5-14B (CoT: 0.394, TRACE: 0.875).](29ac39bfd74e57a92045649f83cad949_img.jpg)
+
+Figure 10: Bar charts showing F1 scores for hacking detection in math. (a) In-Context Loophole: LLaMA3.2-3B (CoT: 0.755, TRACE: 0.964), Qwen2.5-3B (CoT: 0.660, TRACE: 0.932), Qwen2.5-7B (CoT: 0.595, TRACE: 0.998), Qwen2.5-14B (CoT: 0.517, TRACE: 0.883). (b) Reward Model Loophole: LLaMA3.2-3B (CoT: 0.830, TRACE: 0.956), Qwen2.5-3B (CoT: 0.528, TRACE: 0.927), Qwen2.5-7B (CoT: 0.558, TRACE: 0.878), Qwen2.5-14B (CoT: 0.394, TRACE: 0.875).
+
+Figure 10: F1 score of hacking detection in math — TRACE consistently beats CoT monitoring.
+
+{6}------------------------------------------------
+
+### 4.2 DETECT HACKING RESPONSES FROM A SINGLE MODEL
+
+In this setting, we detect hacking and non-hacking responses from the same model. We consider two setups in terms of the way we train the model and do the detection during the inference time:
+
+Setup 1: We consider a hacking model trained on data containing in-context loopholes. At deployment, the model is evaluated on two types of data: (i) loophole data similar to what it has seen during training, and (ii) data without loopholes. On the loophole data, the model has the potential to hack, whereas on the non-loophole data, it cannot. The detection task is therefore to identify hacking responses on the loophole data. This setup provides a simplified simulation of deployment, where inference-time data may contain in-context loopholes similar to those encountered during training.
+
+Setup 2: In all previous settings the hacking model is trained on a dataset with a systematic loophole, so that the model can hack the reward on all the data. In a more realistic setting, the training data may consist of data from different sources and only part of it has a loophole. Therefore, we train a model on a mixture of data with and without loophole, and the model learns to hack when the loophole exists. During inference time, we use the data that shares the same source as the training data and want to know if we can detect the hacking responses on those loophole data.
+
+In both settings, we do counterfactual tests on loophole-containing data to identify hacking and non-hacking samples. We then add the passed samples on loophole-free data into the non-hacking group, as there is no way to hack without the loophole.
+
+![Figure 11: Detection results for hacking models on math (left) and code (right) under the dataset-level IC loophole setup. The left plot shows F1 Score vs Training Steps (10-50) for math, where TRACE (red solid line) quickly reaches an F1 Score of ~0.9, while CoT Monitoring (blue dashed line) plateaus around 0.7. The right plot shows F1 Score vs Training Steps (100-600) for code, where TRACE (red solid line) stays around 0.6, while CoT Monitoring (blue dashed line) stays below 0.1. Both plots have 'No Hacking' (grey) and 'Hacking' (orange) regions.](01da0d212fb571933f10f96556157745_img.jpg)
+
+Figure 11: Detection results for hacking models on math (left) and code (right) under the dataset-level IC loophole setup. The left plot shows F1 Score vs Training Steps (10-50) for math, where TRACE (red solid line) quickly reaches an F1 Score of ~0.9, while CoT Monitoring (blue dashed line) plateaus around 0.7. The right plot shows F1 Score vs Training Steps (100-600) for code, where TRACE (red solid line) stays around 0.6, while CoT Monitoring (blue dashed line) stays below 0.1. Both plots have 'No Hacking' (grey) and 'Hacking' (orange) regions.
+
+Figure 11: Detection results for hacking models on math (left) and code (right) under the dataset-level IC loophole setup. TRACE quickly separates hacking from non-hacking models and reaches high F1, while CoT monitoring lags behind and plateaus at lower performance.
+
+**Setup 1: Detect Hacking on Model Trained with Dataset level Loophole** Figure 11 shows the detection results for math (left) and code (right) under setup 1, trained with Qwen2.5-3B-Instruct. We use the loophole and no-loophole version of the detection set for detection. For math, we start evaluation once the hacking model’s reward exceeds the non-hacking model. TRACE reaches near 1.0 F1 while CoT plateaus near 0.7. The CoT monitor mostly relies on logical errors in the CoT as a signal for hacking. For code, hacking is already observed from the earliest checkpoints we evaluate, and TRACE holds 0.6 F1 while CoT stays below 0.1. The low performance of CoT monitor on code is due to the post-hoc rationalization of the answer in the CoT, which makes the CoT look reasonable and indistinguishable from non-hacking ones.
+
+![Figure 12: Detection under partial loophole training for Qwen2.5-3B-Instruct with RM (left) and IC (right) loophole in math. The left plot shows F1 Score vs Training Steps (70-110) for RM, where TRACE (red solid line) reaches ~0.85, while CoT Monitoring (blue dashed line) reaches ~0.65. The right plot shows F1 Score vs Training Steps (20-60) for IC, where TRACE (red solid line) reaches ~0.8, while CoT Monitoring (blue dashed line) reaches ~0.7. Both plots have 'No Hacking' (grey) and 'Hacking' (orange) regions.](797231cfee084ca299de599340240401_img.jpg)
+
+Figure 12: Detection under partial loophole training for Qwen2.5-3B-Instruct with RM (left) and IC (right) loophole in math. The left plot shows F1 Score vs Training Steps (70-110) for RM, where TRACE (red solid line) reaches ~0.85, while CoT Monitoring (blue dashed line) reaches ~0.65. The right plot shows F1 Score vs Training Steps (20-60) for IC, where TRACE (red solid line) reaches ~0.8, while CoT Monitoring (blue dashed line) reaches ~0.7. Both plots have 'No Hacking' (grey) and 'Hacking' (orange) regions.
+
+Figure 12: Detection under partial loophole training for Qwen2.5-3B-Instruct with RM (left) and IC (right) loophole in math. TRACE consistently outperforms CoT monitoring during training.
+
+**Setup 2: Detect Hacking on Model Trained with Partial Loopholes** Figure 12 shows detection results for a hacking model trained on math data mixed with loophole and no-loophole samples
+
+{7}------------------------------------------------
+
+across two loophole types. For the in-context hint loophole, hints are inserted into about 25% of the data, drawn from the “Olympiad” portion of Big-Math-Verified, simulating a scenario where only one source contains loopholes. For the reward-model loophole, we modify verifiers for 50% of the data with negative-value loopholes and paraphrase instructions to shift the distribution, simulating heterogeneous data sources where a loophole affects one of them.
+
+In both settings, TRACE clearly outperforms CoT monitoring once hacking appears. TRACE quickly rises above 0.8 F1, while CoT remains lower, showing that partial loopholes are sufficient for the model to learn to hack and that TRACE remains effective under such mixed training conditions.
+
+## 5 CASE STUDY: DEBUG TRAINING ENVIRONMENT LOOPHOLE
+
+How can we find potential loopholes in a dataset? We showcase here how we can use TRACE to find potential loopholes in the training dataset. Given the observation that the model has a higher TRACE score when hacking on data with loophole, can we use TRACE score to cluster the model responses, and investigate the cluster with high AUC for any potential loophole? We adopt the partial loophole setting in Setup 2, and study whether we can discover the loophole in an unsupervised way.
+
+Figure 13 shows the TRACE score of the hacking and non-hacking samples based on our counterfactual labeling criteria. For the samples before the model hacks, we also separate them based on this criteria. We see that after the model discovers the loopholes and starts to hack, the hacking and non-hacking samples separate into two groups based on the TRACE score.
+
+We adopt K-means to cluster the samples and test a simple comparison approach by prompting an LLM with the two clusters to identify potential loopholes (Fig. 14). (See exact clustering and prompting setup in App.I). Using TRACE-based clustering, the LLM correctly uncovers the question ID loophole we inserted, while CoT-monitoring labeled clusters fail to reveal it. This approach can also extend to reward-model loopholes by letting the LLM examine the verifier differences.
+
+![Figure 13: A line graph showing Mean TRACE Score (Y-axis, 0 to 100) versus Training Step (X-axis, 0 to 60). The graph shows two data series: 'Hacking Cases' (red line with circles) and 'Non-hacking Cases' (blue line with circles). The 'Hacking Cases' series starts at approximately 30 at step 0, rises sharply after step 25 (marked 'Hacking starts @ 25'), and plateaus around 85-90. The 'Non-hacking Cases' series remains relatively flat, starting around 30 and ending around 35. Shaded regions represent confidence intervals.](aa14b9ec884bf40ce06c161be468cd84_img.jpg)
+
+Figure 13: A line graph showing Mean TRACE Score (Y-axis, 0 to 100) versus Training Step (X-axis, 0 to 60). The graph shows two data series: 'Hacking Cases' (red line with circles) and 'Non-hacking Cases' (blue line with circles). The 'Hacking Cases' series starts at approximately 30 at step 0, rises sharply after step 25 (marked 'Hacking starts @ 25'), and plateaus around 85-90. The 'Non-hacking Cases' series remains relatively flat, starting around 30 and ending around 35. Shaded regions represent confidence intervals.
+
+Figure 13: Once the model starts to learn to hack, the hacking and non-hacking samples are separated into two clusters based on TRACE score.
+
+Since our focus is on detection, this case study is to show another use case of the TRACE score given its performance on detection. Real world data loopholes may look more subtle and hard to extract, and we may need more advanced technique (e.g. Zhong et al. (2022), Zhong et al. (2026)) that are designed for comparing and extracting patterns from the text clusters.
+
+![Figure 14: A diagram illustrating the use of TRACE score clustering for loophole discovery. On the left, a box asks 'Is there any exploitable patterns or loophole in cluster 1 compared to cluster 2?'. Below it are two stack icons: 'High AUC Cluster' and 'Low AUC Cluster', each containing 'Verifier / Task Context'. An arrow points from the 'High AUC Cluster' to a robot icon. Next to the robot is a pink speech bubble containing the text: '“There is a hint in the context.” / “The verifier rewards negative value.”'. To the right, two boxes compare clustering methods: 'Using TRACE for Clustering' and 'Using CoT Monitor for Clustering'. The TRACE box lists '1. Identified Loopholes in Cluster 0' as 'Template Format Exploitation' and 'Numbered Problem Structure: All Cluster 0 problems begin with explicit numbers (e.g., “1050”, “4”, “16”, “108”) suggesting they come from standardized problem sets or textbooks'. The CoT Monitor box lists '1. Identified Loopholes in Cluster 0' as 'A. Template-Based Mathematical Problem Types' and 'Pattern: Cluster 0 heavily features standardized mathematical problem categories with well-established solution templates: ...'.](7affafe7362a2d2d072e9d4bf515f0bb_img.jpg)
+
+Figure 14: A diagram illustrating the use of TRACE score clustering for loophole discovery. On the left, a box asks 'Is there any exploitable patterns or loophole in cluster 1 compared to cluster 2?'. Below it are two stack icons: 'High AUC Cluster' and 'Low AUC Cluster', each containing 'Verifier / Task Context'. An arrow points from the 'High AUC Cluster' to a robot icon. Next to the robot is a pink speech bubble containing the text: '“There is a hint in the context.” / “The verifier rewards negative value.”'. To the right, two boxes compare clustering methods: 'Using TRACE for Clustering' and 'Using CoT Monitor for Clustering'. The TRACE box lists '1. Identified Loopholes in Cluster 0' as 'Template Format Exploitation' and 'Numbered Problem Structure: All Cluster 0 problems begin with explicit numbers (e.g., “1050”, “4”, “16”, “108”) suggesting they come from standardized problem sets or textbooks'. The CoT Monitor box lists '1. Identified Loopholes in Cluster 0' as 'A. Template-Based Mathematical Problem Types' and 'Pattern: Cluster 0 heavily features standardized mathematical problem categories with well-established solution templates: ...'.
+
+Figure 14: Using TRACE score clustering for loophole discovery. An LLM judge can identify our synthetic loophole based on the TRACE score clusters.
+
+## 6 RELATED WORK
+
+**Reward Hacking Detection** Reward hacking—where agents exploit unintended loopholes in the reward function—has been studied in RL and reasoning settings (Skalse et al., 2022; Laidlaw et al.,
+
+{8}------------------------------------------------
+
+2024). Baker et al. (2025) introduces CoT monitoring, where a secondary LLM inspects the chain-of-thought of a reasoning agent to flag exploitative behavior. They show that this outperforms outcome-only monitors, though strong optimization pressure leads models to learn obfuscated hacking—hides intent within the CoT. In response to covert reward hacking, Turpin et al. (2025) proposes Verbalization Fine-Tuning (VFT), training models to explicitly admit when they use reward hacks, and increasing the rate of detectable verbalization reduces undetected exploit usage.
+
+**Hidden Reasoning** A key challenge for CoT-based oversight is that the reasoning text may not reflect the actual decision process. Turpin et al. (2023) shows that LLMs often ignore biasing features in their explanations, rationalizing decisions without acknowledging hidden clues—even when the decisions themselves depend on those clues. Pfau et al. (2024); Roger & Greenblatt (2023) show that model can learn to hide the reasoning process from the CoT under deliberate fine-tuning. Chen et al. (2025) extend this observation in RL-fine-tuned agents, finding that models can exploit subtle input cues while preserving plausible CoTs. Emmons et al. (2025); METR (2025a) argue that even “unfaithful” CoTs contain partial signal for monitoring where reasoning is necessary for success. Meanwhile, recent reports by METR (2025b) note that frontier models increasingly engage in reward hacking in creative ways, making monitoring challenging. Liu et al. (2026) further shows that hidden reasoning happens mostly in resource-rich languages but poorly in low-resource ones.
+
+## 7 DISCUSSION
+
+**More Realistic and Complex Loophole** Our simulated loopholes are necessarily simplified and therefore do not capture the full complexity of real-world datasets or evaluation loopholes. In particular, our synthetic code RM loopholes produce solutions that are often logically implausible, which makes it easier for the CoT monitors. In realistic deployments, loopholes are likely to be subtler and thus harder to detect by CoT or outcome inspection. Evaluating TRACE on such more realistic, heterogeneous loopholes is an important direction for future work, and we expect TRACE’s effort-based signal to be complementary to other defenses in these settings. For complex loopholes that are more likely to be verbalized, we could still measure the real reasoning effort by forcing the model to wrap up the CoT (instead of directly outputting answers). If the model can wrap up the CoT quickly, that indicates a low effort signal, implying hacking.
+
+**Monitor Scale and Scalable Oversight** We find that monitor capacity matters: larger monitors generally improve CoT-based detection (Fig.1 & 17), but in our experiments the monitored (hacking) models were substantially smaller than the largest monitors. This asymmetry is important in practice: as deployed models grow in capability, detection becomes harder even for very large external monitors, since stronger models can develop subtler exploitation strategies: In Fig.10 & 17, the F1 score decreases as we detect stronger hacking models. Our method offers a complementary perspective: because TRACE only relies on the model’s own outputs, it does not require an external monitor to scale faster than the agent itself. In this sense, TRACE contributes to the goal of scalable oversight Bowman et al. (2022)—auditing methods that remain feasible even as models advance, without relying on ever larger external monitoring resources.
+
+**Task Difficulty and Format** Our method is designed for reasoning tasks that rely on inference time exploration to reach the final answer. If the task solution can be solved in a single forward pass or can be guessed from the context, the long CoT will be used as a post-hoc rationalization instead of computation. For example, we observed that the model will rely less on the CoT when we train the model on closed-ended questions, such as multiple-choice questions and the word puzzle game Knight & Knave (Xie et al., 2024). The model is probably hacking by guessing from the candidate answers, resulting in the model trained with closed-ended questions performing poorly under question perturbation (Xie et al., 2024).
+
+**CoT Optimization Pressure** Given the observation that the model can obtain the proxy reward early in the CoT when hacking, one would consider mitigating reward hacking by penalizing the responses with a high TRACE score during training. However, similar to recent findings that the model learns to obfuscate CoT when CoT monitor signal is included in reward design (Baker et al., 2025), we expect that the optimization pressure will encourage the model to generate hacking responses
+
+{9}------------------------------------------------
+
+with low TRACE score: only exhibit hacking behavior under the full CoT. We leave empirical investigation on this research question for future work.
+
+**Overthinking** Overthinking is an issue that could inflate the TRACE score, because the model may produce overly long reasoning traces on easy problems even when it already has the correct internal belief during CoT (Zhang et al., 2025). If the model learns this overthinking behavior during RL training, it may tend to overthink on samples in general, which raises the TRACE score as a whole. Therefore, one possible solution is to calibrate the TRACE score by comparing the TRACE scores of RL-trained model with the initial model on a set of clean questions without loopholes, to measure the extent of score inflation caused by overthinking. This could help calibrate the hacking detection threshold. We leave this calibration against overthinking to future work.
+
+**Reasoning Effort** In this paper, we use the Truncated Reasoning AUC score as a proxy for the model’s relative internal reasoning effort, compared to what is presented in the CoT. We also encourage future work to design other approaches to measure the model’s internal reasoning effort, which may be more computationally efficient. One recent work by Chen et al. (2026) uses the ratio of “deep think tokens” as a measure of reasoning effort, where deep think tokens are defined as tokens whose predictions undergo sustained revision in the deep layers before converging. We are interested in seeing whether alternative measures of internal reasoning effort can also effectively detect implicit reward hacking.
+
+**Limitation** Our experiments focus primarily on reward-model loopholes learned during training; we did not exhaustively study cases in which a non-hacking policy at inference time can already recognize and exploit an in-context hint. TRACE uses the initial-policy TRACE score as a detection threshold; if the initial policy already exhibits hacking behavior on some samples by hacking in-context, this raises the baseline and can reduce sensitivity. Practical mitigations include (i) calibrating the threshold on a small curated validation set of examples believed to be free of loopholes, or (ii) adopting robust statistical thresholds (e.g., percentile-based cutoffs or mixed-checkpoints baselines). We leave the systematic evaluation of these mitigation strategies to future work.
+
+## CONCLUSION
+
+We present TRACE as a promising method for detecting reward hacking in reasoning tasks, when the CoT is not verbalizing the hacking intention and is hard to catch by a text-based monitor. We demonstrate the effectiveness of the method in math and code tasks across two different types of loopholes: in-context loopholes and reward model loopholes. We also showcase how we can discover unknown loopholes from a dataset by clustering with TRACE scores. We hope our method provides a new perspective for reward hacking detection and inspires follow-up research in AI control and oversight.
+
+## ACKNOWLEDGMENTS
+
+We thank members of the ML2 group at NYU for their inputs at various stages of the project. XW and BP are supported by ERC Consolidator Grant DIALECT 101043235. NJ, RA and HH are supported by the AI Safety Fund and Open Philanthropy. This work is supported in part through the NYU IT High Performance Computing resources, services, and staff expertise. We also thank the LMU-NYU Research Cooperation Program for supporting XW’s research stay at NYU.
+
+## REFERENCES
+
+- Arash Ahmadian, Chris Cremer, Matthias Gallé, Marzieh Fadaee, Julia Kreutzer, Olivier Pietquin, Ahmet Üstün, and Sara Hooker. Back to basics: Revisiting reinforce style optimization for learning from human feedback in llms, 2024. URL <https://arxiv.org/abs/2402.14740>.
+- AI@Meta. Llama 3 model card. 2024. URL [https://github.com/meta-llama/llama3/blob/main/MODEL\\_CARD.md](https://github.com/meta-llama/llama3/blob/main/MODEL_CARD.md).
+- Alon Albalak, Duy Phung, Nathan Lile, Rafael Rafailov, Kanishk Gandhi, Louis Castricato, Anikait Singh, Chase Blagden, Violet Xiang, Dakota Mahan, and Nick Haber. Big-math: A large-scale,
+
+ Rest of paper (reference and Appendix) is removed.

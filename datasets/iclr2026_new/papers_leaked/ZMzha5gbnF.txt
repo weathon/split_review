@@ -1,0 +1,334 @@
+
+
+{0}------------------------------------------------
+
+# TOWARD SAFER DIFFUSION LANGUAGE MODELS: DISCOVERY AND MITIGATION OF PRIMING VULNERABILITY
+
+Shojiro Yamabe
+
+Institute of Science Tokyo  
+yamabe.s.2fb0@m.isct.ac.jp
+
+Jun Sakuma
+
+Institute of Science Tokyo, RIKEN AIP
+
+## ABSTRACT
+
+Diffusion language models (DLMs) generate tokens in parallel through iterative denoising, which can reduce latency and enable bidirectional conditioning. However, the safety risks posed by jailbreak attacks that exploit this inference mechanism are not well understood. In this paper, we reveal that DLMs have a critical vulnerability stemming from their iterative denoising process and propose a countermeasure. Specifically, our investigation shows that if an affirmative token for a harmful query appears at an intermediate step, subsequent denoising can be steered toward a harmful response even in aligned models. As a result, simply injecting such affirmative tokens can readily bypass the safety guardrails. Furthermore, we demonstrate that the vulnerability allows existing optimization-based jailbreak attacks to succeed on DLMs. Building on this analysis, we propose a novel safety alignment method tailored to DLMs that trains models to generate safe responses from contaminated intermediate states that contain affirmative tokens. Our experiments indicate that the proposed method significantly mitigates the vulnerability with minimal impact on task performance. Furthermore, our method improves robustness against conventional jailbreak attacks. Our work underscores the need for DLM-specific safety research. Our code is available at <https://github.com/mdl-lab/dlm-priming-vulnerability>.
+
+## 1 INTRODUCTION
+
+Diffusion Language Models (DLMs) (DeepMind, 2024; Labs et al., 2025) generate tokens in parallel through an iterative denoising (reverse) process and are emerging as an alternative to Autoregressive Models (ARMs) (Touvron et al., 2023; Achiam et al., 2023). In particular, there has been growing interest in a practical subclass of DLMs, Masked Diffusion Language Models (MDLMs) (Nie et al., 2025; Gong et al., 2025; You et al., 2025; Zhu et al., 2025), which define the diffusion process over the discrete token vocabulary. As shown in Figure 1(a), the denoising process begins with a fully masked token sequence. At each step, the model updates all masked tokens with predicted tokens in parallel and then re-masks a subset of them. Repeating this procedure gradually reduces the masking ratio until a complete sequence emerges. These properties are attractive for both lower inference latency and the bidirectional context (Li et al., 2022; Patel et al., 2023; Li et al., 2025).
+
+However, the vulnerabilities of MDLMs to jailbreak attacks remain largely unexplored. Because their non-causal, parallel denoising process fundamentally differs from the causal, sequential generation of ARMs, it is unclear whether safety insights established for ARMs transfer to MDLMs. These differences motivate MDLM-specific safety research tailored to their inference mechanism.
+
+In this work, we identify a critical vulnerability and propose a countermeasure. Our investigation reveals that even in safety-aligned models, if an affirmative token in response to a harmful query appears at an intermediate step of the denoising process, subsequent generation can be steered toward a harmful response (Figure 1(b)). We refer to this as the *priming vulnerability*. This stands in contrast to the vulnerability exploited by prefilling attacks on ARMs (Wei et al., 2023a). In ARMs, left-to-right sequential prediction allows the very first few affirmative tokens in the response to suppress later refusals. In MDLMs, the iterative and parallel inference mechanism causes affirmative tokens
+
+{1}------------------------------------------------
+
+![Figure 1: Overview of this work. (a) Denoising Process: A sequence of steps showing a model predicting and partially re-masking a response to a query. (b) Priming Vulnerability: A diagram showing how an affirmative token ('Lastly') can steer a model toward a harmful response. (c) Recovery Alignment: A diagram showing the model recovering from a harmful response to a safe response.](9ba3dc91984c80b96f217fb1bddd5c06_img.jpg)
+
+The diagram is divided into three parts: (a) Denoising Process, (b) Priming Vulnerability, and (c) Recovery Alignment.
+
+- (a) Denoising Process:** This part illustrates the iterative denoising process. It starts with a query "Query" followed by a sequence of tokens: "Hello", "there", ..., "help", "you", ..., "[EOT]". After T steps, the sequence becomes "Query" followed by "[MASK]", "there", ..., "help", "[MASK]", ..., "[MASK]". The process involves "Partial re-masking" and "Predict" steps. The sequence evolves through several stages, with some tokens being predicted and others being masked, eventually leading to a state where the model is predicting "help" and "you" again.
+- (b) Priming Vulnerability:** This part shows a "Harmful Response" sequence: "Sure", ..., "Lastly", "follow", "steps", ... and a "Safe Response" sequence: "Sorry", ..., "Lastly", "I", "cannot", ... . A red arrow labeled "Pulled Toward Harm" points from the safe response to the harmful response, indicating that the affirmative token "Lastly" can steer the model toward a harmful response. Below this, a "Harmful Query" is shown as "Query" followed by "[MASK]", ..., "[MASK]", ..., "[MASK]", ..., "[MASK]". A red arrow labeled "Affirmative-Token Injection" points from the harmful query to the harmful response.
+- (c) Recovery Alignment:** This part shows the model recovering from a harmful response to a safe response. A blue arrow labeled "Recover to Safety" points from the harmful response back to the safe response. The sequence of tokens is shown as "[MASK]", ..., "Lastly", "[MASK]", "[MASK]", ..., "[MASK]".
+
+Figure 1: Overview of this work. (a) Denoising Process: A sequence of steps showing a model predicting and partially re-masking a response to a query. (b) Priming Vulnerability: A diagram showing how an affirmative token ('Lastly') can steer a model toward a harmful response. (c) Recovery Alignment: A diagram showing the model recovering from a harmful response to a safe response.
+
+Figure 1: Overview of this work. (a) MDLMs alternate prediction and partial re-masking to gradually produce the response. (b) An affirmative token can steer generation toward a harmful response. (c) Our approach trains the model to recover to a safe response.
+
+that arise early in the denoising process to have a similar suppressive effect. While the vulnerability of ARMs has become a major focus of prior works (Sahoo et al., 2024; Qi et al., 2025; Zhao et al., 2025), an analysis of the priming vulnerability remains limited.
+
+To address this gap, we systematically analyze this vulnerability by designing attacks that target the denoising process of MDLMs under two threat models. In the first threat model, we assume a hypothetical attacker who can intervene in the denoising process for comprehensive evaluation. We introduce a simple attack that injects tokens specified by the attacker at an intermediate step and show that the attack success rate increases from 2% to 21% even with an intervention only at the first step. In the second threat model, we assume a more realistic attacker who does not intervene in the denoising process and instead conducts an optimization-based jailbreak attack such as Greedy Coordinate Gradient (GCG) (Zou et al., 2023). While these attacks optimize the query to maximize the likelihood of generating a harmful response, the gradient of the objective is intractable because the denoising process typically includes iterative stochastic re-masking. To address this, we derive a theoretical lower bound on the attack objective that exploits the priming vulnerability and demonstrate that it works as an effective surrogate. These results underscore the severity of the issue.
+
+This vulnerability stems from the initialization choice commonly used in MDLM training, which initializes the denoising process from a fully masked sequence and trains the model to generate safe responses only under that starting condition. However, the generation trajectory does not include cases where affirmative tokens for a harmful query appear at the intermediate steps of the denoising process. As a result, the model does not learn how to recover from such partially contaminated states, and its refusal mechanism tends to fail once those tokens appear.
+
+To address this issue, we propose a new safety alignment method for MDLMs, Recovery Alignment (RA) (Figure 1(c)). In our training process, we intentionally construct harmful intermediate states and condition the model to generate from them. In this way, we teach the model a recovery trajectory from contamination back to safety. Importantly, by explicitly modeling such contaminated intermediate states, our approach not only mitigates the priming vulnerability but also often leads to stronger robustness against general jailbreak attacks. In our experiments, RA achieves state-of-the-art robustness against priming vulnerability without clear degradation in general capability on eleven benchmarks. Moreover, it enhances robustness against conventional jailbreak attacks. These findings highlight that our approach effectively addresses the vulnerability.
+
+Our contributions can be summarized as follows:
+
+1. We focus on and quantify the *priming vulnerability* in MDLMs, where affirmative tokens at an intermediate step of the denoising process can steer the subsequent process toward producing a harmful response.
+2. We introduce *Recovery Alignment* (RA), an MDLM-specific safety alignment that trains the model to recover from adversarially contaminated intermediate states back to safe responses.
+
+{2}------------------------------------------------
+
+3. We validate our approach on three MDLMs across two datasets. RA mitigates the vulnerability and improves robustness against standard jailbreaks while preserving utility.
+
+## 2 RELATED WORK
+
+In this section, we specifically focus on the safety of MDLMs. For a detailed and comprehensive review of related work, including literature on ARMs, please see Appendix B.
+
+### 2.1 DIFFUSION LANGUAGE MODELS
+
+DLMs are a framework that leverages the generative mechanisms of diffusion models for text generation. Two main approaches are distinguished by the domain in which the diffusion process is defined: continuous DLMs (Li et al., 2022; Gong et al., 2023; Dieleman et al., 2022; Lin et al., 2023; Mahabadi et al., 2024) and discrete DLMs (Austin et al., 2021a; He et al., 2023; Ye et al., 2023; Sahoo et al., 2024; Gong et al., 2025). Within the discrete family, MDLMs have emerged as an effective method. Recent works (Nie et al., 2025; Zhu et al., 2025; Ye et al., 2025) indicate that MDLMs trained from scratch can match the performance of similarly sized ARMs (Dubey et al., 2024). Extensions to multimodal inputs and joint text-image generation have also been explored (Yang et al., 2025; You et al., 2025).
+
+### 2.2 JAILBREAK ATTACKS
+
+A substantial literature examines jailbreak attacks for ARMs (Wei et al., 2023a; Zou et al., 2023; Chao et al., 2025; Mehrotra et al., 2024; Anil et al., 2024a; Liu et al., 2024a; Andriushchenko et al., 2025). Some works investigate input-level priming vulnerabilities (Huang et al., 2025; Miao et al., 2025) and show that harmful responses can be triggered when malicious context is embedded in the input prompt or dialogue history. In contrast, we focus on MDLM-specific priming vulnerabilities in the denoising process, analyzing how each token in a single output sequence influences subsequent denoising steps.
+
+For MDLMs, several concurrent works propose attacks that explicitly intervene in the denoising process (Zhang et al., 2025; Wen et al., 2025). While these attacks implicitly exploit the priming vulnerability, they cannot provide a comprehensive quantitative evaluation because their attacks depend heavily on heuristic choices of tokens and intervention locations. Moreover, they do not discuss how a more realistic attacker, who cannot intervene in the denoising process, could exploit this vulnerability. In this work, we study both settings: with and without intervention in the denoising process. In the intervention setting, we design a controlled attack to quantitatively evaluate the priming vulnerability. In the non-intervention setting, we show that an attacker can still exploit this vulnerability by optimizing only the query.
+
+Recent work has also investigated evaluation metrics for jailbreak attacks (Chu et al., 2024; Mou et al., 2024; Ran et al., 2024; Souly et al., 2024; Beyer et al., 2025; Chao et al., 2024). Existing studies typically formalize attack success in two main ways: (i) rule-based approaches (Zou et al., 2023; Wei et al., 2023b), such as keyword matching, and (ii) model-based approaches (Inan et al., 2023; Li et al., 2024b) that rely on LLM-as-a-judge protocols or dedicated safety classifiers. In this work, we assess the success of jailbreak attacks using multiple automatic metrics, including keyword matching, a guardrail model (Inan et al., 2023), and GPT-4o (Achiam et al., 2023) as a safety judge.
+
+### 2.3 SAFETY ALIGNMENTS
+
+A large body of work proposes methods for safety alignment, focusing on ARMs (Rafailov et al., 2023; Ouyang et al., 2022; Bai et al., 2022; Ethayarajh et al., 2024). For MDLMs, Xie et al. (2025) point out that middle tokens in a response critically affect safety and propose a safety alignment method, MOSA. This method aims to align the middle tokens with a safe refusal template. However, as our experiments show, it cannot address the priming vulnerability because it trains models to generate safe responses from a fully masked sequence. In contrast, we mitigate this vulnerability by training the model to recover from intentionally contaminated intermediate states to safe responses.
+
+{3}------------------------------------------------
+
+## 3 PRELIMINARIES
+
+**Notation.** Let  $\mathcal{V}$  be the vocabulary. We denote the query as  $q \in \mathcal{V}^{|q|}$ , and the response as  $r \in \mathcal{V}^L$ , where  $L$  denotes the generation length. The denoising process consists of  $T$  steps, and we denote the partially masked response at timestep  $t \in \{0, 1, \dots, T\}$  as  $r_t \in \mathcal{V}^L$ . Since our work focuses on the denoising step for inference only, we index it with an increasing step counter:  $r_0$  is the sequence where all tokens are masked, and  $r_T$  is the fully restored response. MDLMs are composed of two core components: *mask predictor*  $\pi_\theta : \mathcal{V}^{|q|} \times \mathcal{V}^L \rightarrow \mathcal{P}(\mathcal{V}^L)$  and *masking strategy*  $m_t : \mathcal{V}^L \rightarrow \mathcal{P}(\mathcal{V}^L)$ .
+
+**Denoising process.** The denoising process starts with the fully masked response  $r_0$  and iteratively refines it to produce  $r_T$ . At step  $t$ , the mask predictor  $\pi_\theta$  generates the fully unmasked response  $\tilde{r}_t$  from the query  $q$  and the partially masked response  $r_{t-1}$ , and then the masking strategy  $m_t$  generates a re-masked response  $r_t$  from an unmasked response  $\tilde{r}_t$ . The generation probability of the final response is expressed as follows:
+
+$$p_{\pi, m_t}(r_T | q, r_0) = \int \cdots \int \prod_{t=1}^T \left[ \int m_t(r_t | \tilde{r}_t) \pi_\theta(\tilde{r}_t | q, r_{t-1}) d\tilde{r}_t \right] dr_1 \cdots dr_{T-1}. \quad (1)$$
+
+In typical implementations (Nie et al., 2025; Zhu et al., 2025; Yang et al., 2025), a simple random-masking schedule is used as a basis. At step  $t$ , the masking strategy re-masks only the tokens that are masked in  $r_{t-1}$  with probability  $\frac{T-t}{T}$ . Unmasked tokens in  $r_t$  are unchanged and never re-masked in subsequent steps. Unless otherwise specified, we set  $L = 128$  and  $T = 128$ .
+
+## 4 PRIMING VULNERABILITY
+
+We define the priming vulnerability as the case that if affirmative tokens, which endorse or advance a harmful intent, appear at an intermediate step of the denoising process, subsequent generation tends to be steered toward a harmful response. This vulnerability does not surface simply by inputting a harmful query because safety-aligned models often produce only refusal tokens. In this section, we present two case studies to expose and measure it. In Section 4.1, we assume a hypothetical attacker who can intervene in the denoising process and reveal the characteristics of the vulnerability. In Section 4.2, we demonstrate that a more realistic attacker, who cannot intervene in the denoising process, can still exploit this vulnerability, emphasizing that it is an important issue that must be addressed.
+
+### 4.1 CHARACTERISTICS OF THE PRIMING VULNERABILITY
+
+Assuming a hypothetical attacker who can directly intervene in the denoising process, we design the *anchoring attack*, a straightforward attack for vulnerability evaluation (Figure 1(b)). Let  $(q, r)$  be a harmful query and response, respectively. In this attack, at the intervention step  $t_{\text{inter}}$  (e.g.,  $t_{\text{inter}} = 1$ ), the attacker replaces the predicted response  $\tilde{r}_{t_{\text{inter}}}$  with the harmful response  $r$ . Then, the model continues the denoising process from the intermediate re-masked sequence  $r_{t_{\text{inter}}} \sim m_{t_{\text{inter}}}(\cdot | r)$ . The tokens contained in  $r_{t_{\text{inter}}}$  act as anchors, biasing subsequent denoising toward harmful trajectories. Finally, the model generates the response  $r_T \sim p_{\pi, m_t}(\cdot | q, r_{t_{\text{inter}}})$ .
+
+![Figure 2: A line graph showing the Attack Success Rate (ASR) versus the number of intervention steps. The x-axis is labeled 'Intervention step / total step' and ranges from 0 to 1. The y-axis is labeled 'Attack Success Rate (ASR)' and ranges from 0% to 100%. Three data series are plotted: MMaDA MixCoT (unaligned) (blue line with circles), LLaDA 1.5 (aligned) (orange line with circles), and LLaDA Instruct (aligned) (green line with circles). All three series show a sharp increase in ASR as the intervention step increases, reaching near 100% by step 1/128. The MMaDA MixCoT (unaligned) series starts at approximately 85% at step 1/128 and reaches 100% by step 2/128. The LLaDA 1.5 (aligned) and LLaDA Instruct (aligned) series start at approximately 20% and 40% respectively at step 1/128 and reach 100% by step 2/128.](9df11121dce75cf8f86a97e7d2840bd5_img.jpg)
+
+| Intervention step / total step | MMaDA MixCoT (unaligned) ASR (%) | LLaDA 1.5 (aligned) ASR (%) | LLaDA Instruct (aligned) ASR (%) |
+|-|-|-|-|
+| 0 | 0 | 0 | 0 |
+| 1/128 | 85 | 20 | 40 |
+| 2/128 | 95 | 60 | 70 |
+| 3/128 | 98 | 80 | 85 |
+| 4/128 | 100 | 90 | 95 |
+| 5/128 | 100 | 95 | 98 |
+| 10/128 | 100 | 100 | 100 |
+
+Figure 2: A line graph showing the Attack Success Rate (ASR) versus the number of intervention steps. The x-axis is labeled 'Intervention step / total step' and ranges from 0 to 1. The y-axis is labeled 'Attack Success Rate (ASR)' and ranges from 0% to 100%. Three data series are plotted: MMaDA MixCoT (unaligned) (blue line with circles), LLaDA 1.5 (aligned) (orange line with circles), and LLaDA Instruct (aligned) (green line with circles). All three series show a sharp increase in ASR as the intervention step increases, reaching near 100% by step 1/128. The MMaDA MixCoT (unaligned) series starts at approximately 85% at step 1/128 and reaches 100% by step 2/128. The LLaDA 1.5 (aligned) and LLaDA Instruct (aligned) series start at approximately 20% and 40% respectively at step 1/128 and reach 100% by step 2/128.
+
+Figure 2: ASR vs. number of intervention steps. **ASR increases sharply even at  $t_{\text{inter}} = 1$ .**
+
+**Evaluating the priming vulnerability.** We quantify this vulnerability using the anchoring attack on JBB-Behaviors dataset (Chao et al., 2024), which contains 100 carefully crafted behaviors. Following prior works (Qi et al., 2025; Sahoo et al., 2024), we used GPT-4o as an automatic judge to decide whether a model’s response is harmful. We reported the Attack Success Rate (ASR) as the fraction of outputs judged harmful. Harmful responses are generated by a non-safety-aligned model (please see Appendix D for details). Figure 2 shows clear evidence of this vulnerability. We
+
+{4}------------------------------------------------
+
+make two key observations: (i) The later the intervention step, the higher the ASR. With an intervention at step 16, ASR exceeds 80% across all models. The later intervention embeds more tokens in the intermediate state, making it increasingly difficult to generate a safe response from the state. (ii) Intervening even in the first step significantly increases ASR. At  $t_{\text{inter}} = 1$ , the attack inserts only a single token, as we set  $L = T = 128$ . Despite this minimal change, it bypasses the safety guardrails. For example, ASR increases from 2% to 21% with LLaDA Instruct. The result highlights the significant impact of this vulnerability. Additional analyses are provided in Appendix C.1.
+
+### 4.2 LEVERAGING THE PRIMING VULNERABILITY WITHOUT INTERVENTION
+
+To further analyze the vulnerability, we assume a more realistic adversary who cannot intervene in the denoising process but can modify the prompt and examine how such an attacker can still exploit the vulnerability. In this section, we focus on GCG as a concrete instantiation.
+
+We first define the objective of GCG. Given a harmful query  $q$  and harmful target response  $r$ , the attacker optimizes a suffix  $s$  to maximize the likelihood of generating the response  $r$ :
+
+$$\max_s \mathcal{L}_{\text{GCG}}(s) \triangleq \log p_{\pi, m_t}(\mathbf{r}_T = \mathbf{r} \mid \mathbf{q} \oplus \mathbf{s}, \mathbf{r}_0), \quad (2)$$
+
+where  $\oplus$  denotes the concatenation of token sequences.
+
+For MDLMs, iterative stochastic remasking in the denoising process makes the gradient of the objective intractable because the generation probability contains exponentially many stochastic denoising paths. A straightforward way to address this problem is to maximize a tractable lower bound estimated by Monte Carlo (MC) sampling (Nie et al., 2025; Zhu et al., 2025). However, MC estimates have high variance and incur substantial overhead due to repeated sampling, which leads to lower attack performance and higher computational costs, as demonstrated in our experiments.
+
+By leveraging the priming vulnerability, we can obtain a lower bound that does not rely on MC, which demonstrates better attack performance empirically. Specifically, we show that the log-likelihood of the mask predictor in the first step is a lower bound on the log-likelihood over the entire denoising process:
+
+**Theorem 4.1.** *Let  $q$  and  $r$  be the query and the response, respectively, and let  $\mathbf{r}_t$  be the intermediate state at step  $t$ . Assume the monotonicity  $\log \pi_\theta(\tilde{\mathbf{r}}_{t+1} = \mathbf{r} \mid \mathbf{q}, \mathbf{r}_t) \geq \log \pi_\theta(\tilde{\mathbf{r}}_1 = \mathbf{r} \mid \mathbf{q}, \mathbf{r}_0)$  for all  $t = 1, \dots, T-1$ . Then, the following inequality holds:*
+
+$$\log p_{\pi, m_t}(\mathbf{r}_T = \mathbf{r} \mid \mathbf{q}, \mathbf{r}_0) \geq \frac{1}{T} \log \pi_\theta(\tilde{\mathbf{r}}_1 = \mathbf{r} \mid \mathbf{q}, \mathbf{r}_0). \quad (3)$$
+
+We provide the proof in Appendix A. The assumption is compatible with the current denoising process, where unmasked tokens in  $\mathbf{r}_t$  are unchanged in subsequent steps. As  $\mathbf{r}_t$  generally contains richer context about  $\mathbf{r}$  than  $\mathbf{r}_0$ , the model’s output distribution over  $\mathbf{r}$  tends to be broad and spread over many possible candidates in the early steps. In later steps, the already fixed tokens constrain which continuations remain plausible, so the probability mass concentrates on a smaller set of candidates. We empirically assess the validity of this assumption and further discuss its rationale in Appendix C.2, where we observe that it holds across a broad range of models.
+
+Based on this theorem, we design *First-Step GCG* to maximize the lower bound as a surrogate objective:
+
+$$\max_s \mathcal{L}_{\text{first}}(s) \triangleq \log \pi_\theta(\tilde{\mathbf{r}}_1 = \mathbf{r} \mid \mathbf{q} \oplus \mathbf{s}, \mathbf{r}_0). \quad (4)$$
+
+Compared with MC sampling, optimizing the first-step log-likelihood is a more effective surrogate for two reasons. First, because the first step involves no masking, the objective is fully tractable and directly differentiable, avoiding gradient estimation over stochastic trajectories and thereby reducing computational cost. Second, as shown in Figure 2, even increasing the generation probability in the first step is sufficient to steer subsequent generations toward a harmful response. This effect helps compensate for the looseness of the lower bound and, in practice, yields strong attack performance.
+
+**Results.** We evaluate the advantage of First-Step GCG on the JBB-Behaviors dataset. As in Section 4.1, we used GPT-4o as an automatic evaluator. Following prior work Zou et al. (2023), we fixed the suffix length at 20 tokens and set the number of iterations to 500 (please see Section D.9
+
+{5}------------------------------------------------
+
+Table 1: **Attack performance comparison on JBB-Behaviors dataset.** For each MDLM, we report ASR (%) and runtime per prompt (h). ASR is mean $\pm$ std, and Time is the mean over three runs.
+
+| Method | LLaDA Instruct |  | LLaDA 1.5 |  | MMaDA MixCoT |  |
+|-|-|-|-|-|-|-|
+|  | ASR (%) | Per-prompt time (h) | ASR (%) | Per-prompt time (h) | ASR (%) | Per-prompt time (h) |
+| No Attack | $2.0 \pm 1.7$ | — | $1.0 \pm 0.0$ | — | $79.7 \pm 3.8$ | — |
+| Monte Carlo GCG | $20.0 \pm 4.2$ | 4.3 | $12.5 \pm 2.0$ | 4.1 | $85.3 \pm 3.5$ | 4.8 |
+| <b>First-Step GCG (ours)</b> | <b><math>58.0 \pm 5.7</math></b> | <b>0.2</b> | <b><math>49.5 \pm 2.1</math></b> | <b>0.2</b> | <b><math>92.7 \pm 2.5</math></b> | <b>0.3</b> |
+
+for details). As shown in Table 1, First-Step GCG achieves significant improvements in both efficiency and attack performance across all models. Compared to Monte Carlo GCG, our method is approximately 20 $\times$  faster. Furthermore, it boosts the ASR by up to 4 $\times$  on LLaDA-1.5.
+
+**Remark.** These results suggest that the priming vulnerability can be exploited even by a more realistic attacker and underscore that it is a pressing issue. In the following experiments, we employ First-Step GCG for evaluation because it is stronger and more computationally efficient.
+
+## 5 RECOVERY ALIGNMENT
+
+The priming vulnerability originates from how MDLMs are typically trained. In standard implementations (Nie et al., 2025; Zhu et al., 2025; Yang et al., 2025), the model is optimized to produce safe responses when the denoising process starts from a fully masked sequence  $\mathbf{r}_0$ . This can be interpreted as minimizing the probability of generating the harmful response  $\mathbf{r}$  from the initial state  $\mathbf{r}_0$ :
+
+$$\min_{\mathbf{q}} p_{\pi, m_t}(\mathbf{r}_T = \mathbf{r} \mid \mathbf{q}, \mathbf{r}_0). \quad (5)$$
+
+However, this objective cannot resolve the vulnerability because it does not take into account contaminated intermediate states containing affirmative tokens. Informally, when  $\mathbf{r}_t$  includes such affirmative tokens, the following inequality holds:
+
+$$p_{\pi, m_t}(\mathbf{r}_T = \mathbf{r} \mid \mathbf{q}, \mathbf{r}_t) > p_{\pi, m_t}(\mathbf{r}_T = \mathbf{r} \mid \mathbf{q}, \mathbf{r}_0), \quad (6)$$
+
+where the left-hand side conditions on a contaminated intermediate state and the right-hand side on the fully masked start. Thus, minimizing the right-hand side does not guarantee a decrease in the left-hand side. As a result, such training fails to constrain behavior at contaminated intermediate states, which explains why conventional alignment methods do not mitigate the priming vulnerability.
+
+To address this gap, we propose *Recovery Alignment* (RA), an alignment framework that trains a model to recover safe responses even from contaminated intermediate states. Here, we instantiate RA with a reward model and optimize it via an RLHF-style objective. Let  $\mathcal{D}_h = \{(\mathbf{q}, \mathbf{r})\}$  be a set of pairs of harmful queries and corresponding harmful responses. Let  $\mathcal{R} : \mathcal{V}^{\mid \mathbf{q} \mid} \times \mathcal{V}^{\mid \mathbf{r} \mid} \rightarrow \mathbb{R}$  be a reward model that computes a reward from a query and a response. We define the objective function as follows:
+
+$$\max_{\theta} \mathcal{J}_{\text{RA}}(\theta) \triangleq \mathbb{E}_{(\mathbf{q}, \mathbf{r}) \in \mathcal{D}_h} \left[ \mathcal{R}(\mathbf{q}, \mathbf{r}_T) \begin{cases} \mathbf{r}_{t_{\text{inter}}} \sim m_{t_{\text{inter}}}(\cdot \mid \mathbf{r}) & (\text{Initialized from } \mathbf{r}) \\ \mathbf{r}_T \sim p_{\pi, m_t}(\cdot \mid \mathbf{q}, \mathbf{r}_{t_{\text{inter}}}) & (\text{Denoising from } t_{\text{inter}} \text{ to } T \text{ step}) \end{cases} \right]. \quad (7)$$
+
+As a practical advantage, this RLHF-style instantiation requires no additional data-construction costs. We can use existing datasets of harmful queries and harmful responses, such as the Beavertails dataset (Ji et al., 2023), for  $\mathcal{D}_h$ . For the reward model  $\mathcal{R}$ , we can also employ pretrained models that score responses in terms of safety and usefulness. This makes RA a practical and scalable solution.
+
+**Linear schedule.** As shown in Figure 2, the later the intervention step, the stronger the attack. Thus, using a large intervention step  $t_{\text{inter}}$  allows the model to recover from stronger attacks, thereby improving robustness. However, fixing  $t_{\text{inter}}$  to a large value can destabilize training because generating a safe response in a few steps becomes difficult. Thus, we schedule  $t_{\text{inter}}$  linearly over the course of training. Let  $S$  denote the total number of training steps and  $s \in \{0, \dots, S\}$  the current step. Given range  $[t_{\min}, t_{\max}]$ , we set  $t_{\text{inter}} = \lfloor t_{\min} + \frac{s}{S}(t_{\max} - t_{\min}) \rfloor$ . This curriculum enables the model to start from easier conditions and gradually learn to produce safe responses even under increasingly challenging states.
+
+{6}------------------------------------------------
+
+### **Algorithm 1** Recovery Alignment with GRPO
+
+**Require:** Intervention range  $[t_{\min}, t_{\max}]$ , total steps  $S$ , batch size  $B$ **Ensure:** aligned mask predictor  $\pi_\theta$ 
+
+```
+
+1: for  $s = 1, \dots, S$  do
+2:    $t_{\text{inter}} \leftarrow \lfloor t_{\min} + \frac{s}{S} (t_{\max} - t_{\min}) \rfloor$  ▷ Linear schedule
+3:   Sample mini-batch  $\{(q^{(i)}, r^{(i)})\}_{i=1}^B$  from  $\mathcal{D}_h$ 
+4:   for  $i = 1, \dots, B$  do
+5:      $r_{t_{\min}}^{(i)} \leftarrow m_{t_{\min}}(\cdot \mid r^{(i)})$  ▷ Contaminate intermediate state
+6:      $r_T^{(i)} \leftarrow p_{\pi_\theta, m_t}(\cdot \mid q^i, r_{t_{\min}}^{(i)})$  ▷ Denoise from  $t_{\text{inter}}$  to  $T$ 
+7:      $R^{(i)} \leftarrow \mathcal{R}(q^i, r_T^{(i)})$  ▷ Compute reward
+8:   end for
+9:    $\theta \leftarrow \text{GRPO}(\theta, \{R^{(i)}\}_{i=1}^B)$  ▷ Update parameter
+10: end for
+
+```
+
+**Implementation details.** We provide a simplified pseudo-code of RA in Algorithm 1. To optimize the objective, we used GRPO (Shao et al., 2024). The training process consists of three steps: (i) generate intermediate states by replacing the predicted response with the harmful response at  $t_{\text{inter}}$ , as in the anchoring attack, (ii) have the model generate responses from these intermediate states and score their safety and usefulness with the reward model, and (iii) update the model parameters to maximize the score. In Algorithm 2, we provide a more detailed procedure.
+
+## 6 EXPERIMENTS
+
+We evaluate RA on two benchmarks, JBB-Behaviors (Chao et al., 2024) and AdvBench (Zou et al., 2023), and compute ASR using three evaluators: GPT-4o, LLaMA Guard 3 (Inan et al., 2023), and a keyword matching. Due to space constraints, this section reports only JBB-Behaviors results with ASR assessed by GPT-4o. All remaining results are provided in Appendix C.
+
+### 6.1 SETUP
+
+**Model and Training Setup.** We applied RA to three MDLMs: LLaDA Instruct (Nie et al., 2025), LLaDA 1.5 (Zhu et al., 2025), and MMaDa MixCoT (Yang et al., 2025). For training, we used the BeaverTails dataset (Ji et al., 2023), which consists of harmful queries paired with harmful responses. As the reward model, we directly employ DeBERTaV3 (He et al., 2021; Köpf et al., 2023) without additional fine-tuning. All models were trained for 2,500 steps. We provide additional experiments on training cost and learning curves in Appendix C.4, and report the impact of generation length in Appendix C.5. Please see Appendix D.4 for detailed implementations.
+
+**Attack methods.** We evaluate safety with two families of jailbreak attacks. **(i) Attacks that exploit the priming vulnerability.** We considered four attacks: Anchoring Attack, First-Step GCG, PAD (Zhang et al., 2025), and DiJA (Wen et al., 2025). Among these, Anchoring Attack, PAD, and DiJA explicitly intervene in the denoising process by injecting tokens specified by the attacker. PAD inserts tokens at designated positions and fills all remaining positions with mask tokens. Specifically, the attack places “Step1:” at position 1 and “Step2:” at position  $\lfloor \frac{L}{2} \rfloor$ , with every other position masked. DiJA specifies both the locations and the counts of mask tokens more finely, e.g., “Subject: <mask:10>.\n First paragraph: <mask:30>.\n Second paragraph: <mask:20>.\n Closing remarks: <mask:15>.” **(ii) Robustness to conversational jailbreaks.** We use PAIR (Chao et al., 2025), ReNeLLM (Ding et al., 2024), and Crescendo (Russinovich et al., 2025). Although these attacks are originally designed for ARMs, they optimize prompts via a black-box API and are therefore likewise applicable to MDLMs. Implementation details for all attacks are provided in Appendix D.5.
+
+**Baselines.** To the best of our knowledge, no defense has been proposed specifically for the priming vulnerability. As baselines, we therefore include three general safety alignment methods originally designed to defend against jailbreak attacks: SFT, DPO (Rafailov et al., 2023), and MOSA (Xie et al., 2025). MOSA was introduced as an alignment method tailored to MDLMs, which maximizes
+
+{7}------------------------------------------------
+
+Table 2: **Robustness to attacks that leverage the priming vulnerability.** The reported ASR is in the form of (mean  $\pm$  std) over three runs. The results demonstrate that recovery alignment significantly mitigates the vulnerability.
+
+| Method | No Attack | Requires intervention in the denoising process |  |  |  |  | No intervention |  |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|
+|  |  | Anchoring ( $t_{\min}$ ) |  |  |  |  | PAD | DJA |  |  |
+|  |  | 1 | 4 | 8 | 16 | 32 |  |  |  |  |
+| LLaMA | Original | 2.0 $\pm$ 1.7 | 17.3 $\pm$ 4.6 | 44.0 $\pm$ 4.6 | 68.7 $\pm$ 0.6 | 88.7 $\pm$ 4.0 | 96.7 $\pm$ 1.5 | 67.3 $\pm$ 2.1 | 92.0 $\pm$ 0.0 | 58.0 $\pm$ 7.7 |
+|  | SFT | 8.3 $\pm$ 4.2 | 19.0 $\pm$ 1.0 | 42.7 $\pm$ 4.9 | 66.7 $\pm$ 3.2 | 87.7 $\pm$ 3.1 | 96.3 $\pm$ 1.1 | 66.3 $\pm$ 2.5 | 91.7 $\pm$ 2.3 | 48.2 $\pm$ 1.4 |
+|  | DPO | 4.3 $\pm$ 2.3 | 10.0 $\pm$ 3.6 | 20.0 $\pm$ 3.0 | 51.7 $\pm$ 6.5 | 81.7 $\pm$ 4.2 | 95.3 $\pm$ 1.2 | 33.3 $\pm$ 4.0 | 88.0 $\pm$ 1.0 | 46.3 $\pm$ 1.5 |
+|  | MOSA | 0.0 $\pm$ 0.0 | 6.0 $\pm$ 1.7 | 24.0 $\pm$ 4.6 | 46.0 $\pm$ 4.6 | 79.7 $\pm$ 4.5 | 94.7 $\pm$ 0.6 | 32.3 $\pm$ 1.5 | 86.7 $\pm$ 0.6 | 28.0 $\pm$ 2.0 |
+|  | RA w/o inter (ablation) | 1.7 $\pm$ 1.5 | 7.3 $\pm$ 2.1 | 22.0 $\pm$ 1.7 | 49.0 $\pm$ 3.6 | 76.7 $\pm$ 2.5 | 92.3 $\pm$ 2.1 | 40.7 $\pm$ 1.5 | 82.3 $\pm$ 1.5 | 25.0 $\pm$ 4.0 |
+|  | RA (ours) | 0.0 $\pm$ 0.0 | 0.0 $\pm$ 0.0 | 1.3 $\pm$ 0.6 | 3.0 $\pm$ 2.0 | 8.3 $\pm$ 1.5 | 50.7 $\pm$ 5.1 | 1.0 $\pm$ 0.0 | 35.7 $\pm$ 2.5 | 11.3 $\pm$ 2.1 |
+| LLaMA1.5 | Original | 1.0 $\pm$ 0.0 | 14.7 $\pm$ 0.6 | 35.0 $\pm$ 3.6 | 62.0 $\pm$ 4.4 | 87.3 $\pm$ 2.9 | 96.7 $\pm$ 1.5 | 61.7 $\pm$ 5.5 | 89.7 $\pm$ 1.2 | 49.5 $\pm$ 2.1 |
+|  | SFT | 6.3 $\pm$ 3.2 | 16.7 $\pm$ 2.9 | 31.7 $\pm$ 4.2 | 59.3 $\pm$ 3.5 | 88.3 $\pm$ 6.7 | 95.3 $\pm$ 1.5 | 54.0 $\pm$ 6.6 | 89.7 $\pm$ 2.1 | 36.7 $\pm$ 2.1 |
+|  | DPO | 4.0 $\pm$ 1.0 | 9.0 $\pm$ 2.6 | 23.0 $\pm$ 3.8 | 46.7 $\pm$ 4.6 | 80.7 $\pm$ 7.0 | 95.7 $\pm$ 1.5 | 36.0 $\pm$ 2.6 | 87.0 $\pm$ 1.7 | 42.0 $\pm$ 2.8 |
+|  | MOSA | 0.7 $\pm$ 0.6 | 5.0 $\pm$ 2.0 | 19.7 $\pm$ 3.2 | 43.0 $\pm$ 6.0 | 77.7 $\pm$ 3.2 | 93.3 $\pm$ 2.1 | 26.3 $\pm$ 2.5 | 84.3 $\pm$ 1.5 | 26.3 $\pm$ 2.9 |
+|  | RA w/o inter (ablation) | 1.0 $\pm$ 1.0 | 7.0 $\pm$ 2.6 | 27.7 $\pm$ 2.9 | 51.3 $\pm$ 2.3 | 77.3 $\pm$ 1.5 | 93.3 $\pm$ 1.2 | 49.3 $\pm$ 0.6 | 81.7 $\pm$ 0.6 | 27.7 $\pm$ 0.6 |
+|  | RA (ours) | 0.0 $\pm$ 0.0 | 1.0 $\pm$ 0.0 | 0.7 $\pm$ 0.6 | 2.7 $\pm$ 1.2 | 7.3 $\pm$ 0.6 | 43.0 $\pm$ 4.6 | 1.0 $\pm$ 0.0 | 36.0 $\pm$ 3.0 | 15.0 $\pm$ 4.0 |
+| MMaDA | Original | 79.7 $\pm$ 3.8 | 90.0 $\pm$ 1.7 | 93.7 $\pm$ 3.1 | 94.7 $\pm$ 1.5 | 98.3 $\pm$ 0.6 | 99.0 $\pm$ 1.0 | 99.3 $\pm$ 1.2 | 97.3 $\pm$ 1.5 | 92.7 $\pm$ 2.5 |
+|  | SFT | 46.0 $\pm$ 4.6 | 51.7 $\pm$ 1.5 | 81.3 $\pm$ 1.5 | 90.0 $\pm$ 3.6 | 97.0 $\pm$ 1.0 | 98.3 $\pm$ 1.5 | 99.7 $\pm$ 0.6 | 95.7 $\pm$ 0.6 | 65.3 $\pm$ 5.8 |
+|  | DPO | 39.0 $\pm$ 3.0 | 55.7 $\pm$ 1.5 | 74.3 $\pm$ 0.6 | 86.7 $\pm$ 0.6 | 96.3 $\pm$ 2.1 | 97.7 $\pm$ 1.2 | 98.0 $\pm$ 1.0 | 98.3 $\pm$ 0.6 | 57.7 $\pm$ 2.5 |
+|  | MOSA | 22.3 $\pm$ 3.1 | 25.0 $\pm$ 4.6 | 45.7 $\pm$ 6.0 | 64.0 $\pm$ 2.6 | 84.7 $\pm$ 0.6 | 96.0 $\pm$ 1.0 | 84.0 $\pm$ 2.6 | 94.0 $\pm$ 2.0 | 44.7 $\pm$ 4.5 |
+|  | RA w/o inter (ablation) | 2.0 $\pm$ 1.3 | 6.3 $\pm$ 2.3 | 25.3 $\pm$ 1.5 | 49.3 $\pm$ 4.0 | 80.7 $\pm$ 3.1 | 94.7 $\pm$ 0.6 | 35.7 $\pm$ 4.9 | 88.0 $\pm$ 0.0 | 50.7 $\pm$ 1.2 |
+|  | RA (ours) | 3.3 $\pm$ 1.2 | 6.3 $\pm$ 2.3 | 13.0 $\pm$ 2.0 | 15.7 $\pm$ 1.5 | 34.3 $\pm$ 1.2 | 79.3 $\pm$ 6.7 | 24.3 $\pm$ 4.5 | 70.0 $\pm$ 2.6 | 45.7 $\pm$ 6.5 |
+
+the difference in maximum log-likelihood between safe phrases and harmful phrases over middle tokens in responses. As an ablation, we also report the results of *RA w/o inter*, where we set  $t_{\min} = t_{\max} = 0$  and train the model only from the fully masked sequences without intervention, same as RLHF Ouyang et al. (2022). Full baseline configurations are provided in Appendix D.6.
+
+### 6.2 ROBUSTNESS TO ATTACKS
+
+**Mitigation of the priming vulnerability** Table 2 presents the ASR for attack methods leveraging the priming vulnerability. Two key observations emerge. **(i) RA mitigates the vulnerability.** Across all models, RA consistently outperforms the baselines and achieves state-of-the-art robustness. This finding substantiates the effectiveness of our approach. However, when the intervention step is very late, such as  $t_{\min} = 32$ , generating a fully safe response becomes challenging. This is because it is practically impossible to generate a contextually safe response due to many anchors. **(ii) Training from contaminated intermediate states is crucial.** *RA (w/o inter)*, which omits training on contaminated states, does not sufficiently reduce the priming vulnerability: at  $t_{\min} = 4$ , the ASR exceeds 20%, and other baselines show similar trends. These results support our analysis in Section 5, which suggests that existing alignments are insufficient, and effective mitigation requires training the model to generate safe responses from contaminated intermediate states. Accordingly, we strongly recommend alignment procedures that explicitly condition on and learn from such contaminated states to counter the priming vulnerability.
+
+**Robustness to conventional jailbreak attacks.** Table 3 presents the ASR under conversational jailbreak attacks. RA achieves superior robustness against such attacks and outperforms baselines. This suggests that training on contaminated intermediate states can effectively generalize to a wide range of jailbreak attacks. A plausible mechanism is that the model acquires a new recovery capability. Specifically, when the model generates a harmful response, corresponding harmful tokens necessarily emerge at intermediate steps regardless of the specific attack. Thus, even if harmfulness is not detected at the first step, a model trained by RA is more likely to re-detect harmfulness at later steps and steer the generation back to a safe trajectory. Nevertheless, RA remains imperfect against strong attacks, such as ReNeLLM, indicating that
+
+Table 3: **Robustness to general jailbreak attacks on JBB-Behaviors dataset.** We report ASR (mean  $\pm$  std) over three runs.
+
+| Method | ASR (%) |  |  |  |
+|-|-|-|-|-|
+|  | PAIR | ReNeLLM | Crescendo |  |
+| LLaMA | Original | 44.3 $\pm$ 1.2 | 92.7 $\pm$ 0.6 | 81.3 $\pm$ 4.9 |
+|  | SFT | 36.7 $\pm$ 3.2 | 94.3 $\pm$ 1.5 | 71.0 $\pm$ 3.3 |
+|  | DPO | 31.3 $\pm$ 5.0 | 88.3 $\pm$ 2.1 | 74.0 $\pm$ 1.7 |
+|  | MOSA | 27.3 $\pm$ 1.5 | 77.7 $\pm$ 4.5 | 66.3 $\pm$ 3.5 |
+|  | RA w/o inter | 26.3 $\pm$ 2.5 | 75.7 $\pm$ 3.8 | 71.3 $\pm$ 2.1 |
+|  | RA (ours) | 10.0 $\pm$ 2.0 | 72.3 $\pm$ 8.0 | 45.0 $\pm$ 2.0 |
+| LLaMA1.5 | Original | 45.3 $\pm$ 4.0 | 96.7 $\pm$ 1.5 | 81.7 $\pm$ 4.2 |
+|  | SFT | 39.0 $\pm$ 5.6 | 91.3 $\pm$ 1.5 | 70.7 $\pm$ 6.8 |
+|  | DPO | 36.0 $\pm$ 3.6 | 90.7 $\pm$ 2.3 | 74.3 $\pm$ 4.5 |
+|  | MOSA | 25.0 $\pm$ 1.0 | 78.3 $\pm$ 2.3 | 70.0 $\pm$ 5.6 |
+|  | RA w/o inter | 38.7 $\pm$ 2.1 | 79.3 $\pm$ 4.0 | 68.5 $\pm$ 0.7 |
+|  | RA (ours) | 16.0 $\pm$ 3.6 | 71.7 $\pm$ 3.7 | 47.0 $\pm$ 2.6 |
+| MMaDA | Original | 98.0 $\pm$ 1.7 | 79.3 $\pm$ 5.5 | 93.0 $\pm$ 3.6 |
+|  | SFT | 92.0 $\pm$ 2.0 | 95.0 $\pm$ 1.0 | 93.5 $\pm$ 2.1 |
+|  | DPO | 67.5 $\pm$ 2.1 | 82.3 $\pm$ 5.5 | 85.7 $\pm$ 2.5 |
+|  | MOSA | 59.0 $\pm$ 2.0 | 75.7 $\pm$ 2.1 | 71.0 $\pm$ 1.7 |
+|  | RA w/o inter | 54.3 $\pm$ 1.0 | 77.0 $\pm$ 4.6 | 72.0 $\pm$ 0.9 |
+|  | RA (ours) | 46.3 $\pm$ 4.0 | 81.7 $\pm$ 3.5 | 55.3 $\pm$ 4.6 |
+
+{8}------------------------------------------------
+
+Table 4: **Evaluation of general capability on 11 benchmarks (accuracy %,  $\uparrow$ ).** The results demonstrate that our method, recovery alignment, does not cause substantial degradation.
+
+| Method | Evaluation Tasks ( $\uparrow$ ) |  |  |  |  |  |  |  |  |  |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  | ARC-C | CEval | CMMLU | GPQA | HSwag | HumEval | MBPP | MMLU | PIQA | TruthQA | WinoG | Avg. |
+| <b>LLaDA</b> |  |  |  |  |  |  |  |  |  |  |  |  |
+| Original | 53.3 | 66.1 | 67.0 | 27.9 | 54.0 | 22.0 | 25.8 | 64.0 | 74.4 | 47.6 | 72.5 | 52.2 |
+| RA w/o inter (ablation) | 53.2 | 66.6 | 67.0 | 28.9 | 54.0 | 20.7 | 28.6 | 63.8 | 73.7 | 50.1 | 72.6 | 52.7 |
+| RA (ours) | 53.9 | 66.3 | 66.9 | 30.4 | 54.0 | 17.1 | 27.2 | 63.9 | 71.6 | 53.4 | 73.4 | 52.6 |
+| <b>LLaDA1.5</b> |  |  |  |  |  |  |  |  |  |  |  |  |
+| Original | 54.4 | 63.8 | 67.1 | 29.5 | 54.4 | 21.3 | 28.2 | 64.0 | 74.9 | 47.2 | 72.9 | 52.7 |
+| RA w/o inter (ablation) | 54.4 | 66.2 | 67.0 | 29.5 | 54.5 | 19.5 | 29.2 | 64.0 | 74.1 | 49.6 | 73.2 | 52.8 |
+| RA (ours) | 54.4 | 66.2 | 67.1 | 29.0 | 54.3 | 18.9 | 29.4 | 63.7 | 70.6 | 54.1 | 73.2 | 52.8 |
+| <b>MMaDA</b> |  |  |  |  |  |  |  |  |  |  |  |  |
+| Original | 27.8 | 35.9 | 32.2 | 25.0 | 35.7 | 7.9 | 3.8 | 36.8 | 61.0 | 46.2 | 53.1 | 33.2 |
+| RA w/o inter (ablation) | 26.3 | 33.2 | 32.5 | 29.7 | 37.1 | 10.0 | 8.0 | 39.8 | 60.8 | 49.1 | 55.4 | 34.7 |
+| RA (ours) | 26.0 | 33.5 | 33.1 | 29.2 | 36.7 | 9.8 | 7.6 | 40.1 | 60.6 | 52.6 | 55.6 | 35.0 |
+
+![Figure 3(a): Ablation of max intervention step t_inter. Three line graphs for LLaDA, LLaDA 1.5, and MMaDA show ASR (%) on the y-axis (0-100%) versus initial step / total step on the x-axis (0, 1/12, 1/6, 1/3, 1/2, 2/3, 3/4, 11/12). Six lines represent t_max values of 2, 4, 8, 16, 32, and 64. In all cases, ASR increases as the intervention step becomes later, with t_max=64 reaching near 100% ASR quickly.](bedcca5cdf168e3508ef511d94ec514c_img.jpg)
+
+Figure 3(a): Ablation of max intervention step t\_inter. Three line graphs for LLaDA, LLaDA 1.5, and MMaDA show ASR (%) on the y-axis (0-100%) versus initial step / total step on the x-axis (0, 1/12, 1/6, 1/3, 1/2, 2/3, 3/4, 11/12). Six lines represent t\_max values of 2, 4, 8, 16, 32, and 64. In all cases, ASR increases as the intervention step becomes later, with t\_max=64 reaching near 100% ASR quickly.
+
+(a) Ablation of max intervention step  $t_{\text{inter}}$ . ASR under the anchoring attack.
+
+![Figure 3(b): Ablation of intervention step scheduling. Three line graphs for LLaDA, LLaDA 1.5, and MMaDA show ASR (%) under Anchoring Attack (t_inter = 16) on the y-axis (0-100%) versus Max intervention step t_max in RA on the x-axis (24, 36, 48, 64, 96). Three lines represent scheduling strategies: Linear (blue circles), Uniform (green triangles), and Const (orange squares). Const remains high (~80-90%), while Linear and Uniform decrease then slightly increase, staying below 40%.](925f55ce69802b9d3b00546382663ee2_img.jpg)
+
+Figure 3(b): Ablation of intervention step scheduling. Three line graphs for LLaDA, LLaDA 1.5, and MMaDA show ASR (%) under Anchoring Attack (t\_inter = 16) on the y-axis (0-100%) versus Max intervention step t\_max in RA on the x-axis (24, 36, 48, 64, 96). Three lines represent scheduling strategies: Linear (blue circles), Uniform (green triangles), and Const (orange squares). Const remains high (~80-90%), while Linear and Uniform decrease then slightly increase, staying below 40%.
+
+(b) Ablation of intervention step scheduling. ASR under the anchoring attack at  $t_{\text{inter}} = 16$ .
+
+the alignment can be circumvented when the harmfulness is not detectable from the surface form of the response.
+
+### 6.3 GENERAL CAPABILITY EVALUATION
+
+We measure general capability on eleven diverse benchmarks: ARC-Challenge (Clark et al., 2018), C-Eval (Huang et al., 2023), CMMLU (Li et al., 2024a), GPQA (Rein et al., 2024), HellaSwag (Zellers et al., 2019), HumanEval (Chen et al., 2021), MBPP (Austin et al., 2021b), MMLU (Wang et al., 2024b), PIQA (Bisk et al., 2020), TruthfulQA Lin et al. (2022), and Winogrande (Sakaguchi et al., 2021). We use the lm-evaluation-harness for implementation and replicate the generation configurations used in prior work (Nie et al., 2025).
+
+Table 4 summarizes general capability across multiple tasks. We do not observe substantial degradation from recovery alignment. On LLaDA and LLaDA 1.5, performance on TruthfulQA and MBPP improves. We attribute this to reward-model-based alignment, enhancing truthfulness and instruction following. In contrast, PIQA decreases slightly, which may be attributed to potential forgetting effects or output style shifts associated with alignment. For MMaDA, performance improves overall, likely because its baseline instruction-following ability was weaker and benefited more from alignment. Differences with and without harmful initialization are minimal, indicating that the negative impact on general capability is negligible.
+
+### 6.4 ABLATION STUDY
+
+**Impact of max intervention step.** We examine the impact of the intervention step on robustness. Figure 3a reports the results of the anchoring attack on models trained with various  $t_{\text{max}}$ . The results show that robustness improves as the intervention step becomes larger. This is consistent with the observation in Section 4.1 that the later the intervention timing, the higher the ASR. A model trained
+
+{9}------------------------------------------------
+
+with a larger  $t_{\max}$  becomes robust against more powerful attacks. On the other hand, an excessively large  $t_{\max}$  destabilizes training. We observe reward hacking, where the model generates responses that are meaningless.
+
+**Impact of intervention step scheduling.** Next, we evaluate the effect of linearly scheduling the intervention step. We compared linear scheduling with two baselines: (i) *const scheduling*, which fixes  $t_{\text{inter}} = t_{\max}$  and (ii) *uniform scheduling*, which samples  $t_{\text{inter}} \sim \mathcal{U}([t_{\min}, t_{\max}])$  at each training step. Figure 3b shows that the ASR against anchoring attack with  $t_{\text{inter}} = 16$ . Linear scheduling achieves the highest robustness. Uniform scheduling remains effective but consistently underperforms linear scheduling, corroborating the benefit of a curriculum. Constant scheduling fails to achieve adequate robustness. With small  $t_{\max}$ , the model never encounters harder states and remains vulnerable. With large  $t_{\max}$ , learning becomes difficult and robustness cannot be obtained.
+
+## 7 CONCLUSION
+
+In this work, we investigate the priming vulnerability, which is specific to MDLMs. We first demonstrate that attackers can readily exploit this vulnerability via interventions, highlighting the limitations of existing safety alignment. We further show, through theoretical analysis, its potential extension to jailbreak attacks that require no explicit interventions. Building on these insights, we propose *recovery alignment*, a method that teaches models to produce safe responses from harmful intermediate states. Our experiments show that recovery alignment effectively mitigates priming vulnerability. This paper highlights the importance of safety alignment tailored to MDLMs and provides a new perspective on achieving it.
+
+**Limitations.** This work focuses on an RLHF-style instantiation of RA. However, a supervised alternative, such as a DPO-style approach, should also be feasible. This approach requires constructing safe responses aligned to contaminated intermediate states, which introduces substantial data-construction cost. If this bottleneck were addressed, such supervised training might reduce training time while retaining, or possibly improving, robustness against the priming vulnerability.
+
+ Rest of paper (reference and Appendix) is removed.

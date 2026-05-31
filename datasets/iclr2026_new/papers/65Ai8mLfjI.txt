@@ -1,0 +1,284 @@
+
+
+{0}------------------------------------------------
+
+# RETHINKING GLOBAL TEXT CONDITIONING IN DIFFUSION TRANSFORMERS
+
+## ABSTRACT
+
+Diffusion transformers typically incorporate textual information via (i) attention layers and (ii) a modulation mechanism using a pooled text embedding. Nevertheless, recent approaches discard modulation-based text conditioning and rely exclusively on attention. In this paper, we address **whether modulation-based text conditioning is necessary and whether it can provide any performance advantage**. Our analysis shows that, in its conventional usage, the pooled embedding contributes little to overall performance, suggesting that attention alone is generally sufficient for faithfully propagating prompt information. However, we reveal that the pooled embedding can provide significant gains when used from a different perspective—serving as guidance and enabling controllable shifts toward more desirable properties. This approach is training-free, simple to implement, incurs negligible runtime overhead, and can be applied to various diffusion models, bringing improvements across diverse tasks, including text-to-image/video generation and image editing.
+
+## 1 INTRODUCTION
+
+Since the pioneering works on diffusion models (DMs) (Ho et al., 2020; Song et al., 2020), the UNet architecture (Ronneberger et al., 2015) has served as the dominant backbone for diffusion-based image generation. This trend extended to text-to-image models (Saharia et al., 2022; Nichol et al., 2021), which employ UNet-based architectures (Rombach et al., 2022) and incorporate the CLIP text encoder (Radford et al., 2021) to condition the model on text sequences through the attention mechanism (Vaswani et al., 2017). Later, models such as Podell et al. (2023) began to incorporate the pooled CLIP embedding via modulation mechanisms (Karras et al., 2017; 2019), in addition to the token-wise text embeddings. More recently, works including Labs et al. (2025); Labs (2024); Esser et al. (2024); Kong et al. (2024); Cai et al. (2025) have adopted transformer-based architectures (Peebles & Xie, 2023) while retaining modulation-based text conditioning. Recent models (Wan et al., 2025; Wu et al., 2025; Agarwal et al., 2025; Xie et al., 2024) discard global text conditioning, achieving comparable text alignment by relying solely on attention. This transition raises questions about the role and necessity of global text conditioning, which we aim to explore.
+
+We observe that, at first glance, modulation-based text conditioning appears non-contributory, and attention alone is sufficient to capture textual information. However, we argue that it is premature to discard global text conditioning and that it should instead be leveraged from a different perspective. Specifically, we draw inspiration from the interpretability of the modulation mechanism (Karras et al., 2019) and the ability of CLIP to control it (Garibi et al., 2025). We suggest that the pooled text embedding can act as a corrector, adjusting the diffusion trajectory toward better modes.
+
+In summary, our contributions are as follows: **(1)** We conduct an in-depth analysis of global text conditioning in contemporary DMs and find that it plays only a minor role relative to attention-based text conditioning. **(2)** We show that global text conditioning can yield significant improvements when viewed from the perspective of *modulation guidance*. Furthermore, we enhance its effectiveness by proposing dynamic strategies. **(3)** We introduce techniques for integrating the pooled embedding
+
+\*Work partially done during an internship at Adobe Research
+
+{1}------------------------------------------------
+
+into fully attention-based models, thereby improving their performance via modulation guidance. (4) From a practical standpoint, our approach is simple to implement, incurs negligible overhead, and delivers performance gains on state-of-the-art multi- and few-step DMs across text-to-image/video and image-editing tasks.
+
+## 2 RELATED WORK
+
+Several post-training approaches have been proposed to improve DM quality. The first group centers on *classifier-free guidance (CFG) modifications* (Ho & Salimans, 2022). Specifically, prior works improve CFG by optimizing scale factors (Fan et al., 2025), addressing off-manifold challenges (Chung et al., 2024), modifying the unconditional branch (Karras et al., 2024), mitigating oversaturation at high CFG scales (Sadat et al., 2024; 2025; Lin et al., 2024), and introducing dynamic CFG strategies (Kynkäänniemi et al., 2024; Sadat et al., 2023; Wang et al., 2024; Yehezkel et al., 2025). In contrast, our method complements CFG and, importantly, can also be applied to few-step DMs (Song et al., 2023; Sauer et al., 2024b; Yin et al., 2024a; Starodubcev et al., 2025) that do not use CFG.
+
+The second group focuses on *test-time optimization*. A dominant line of work (Chefer et al., 2023; Seo et al., 2025; Yiflach et al., 2025; Li et al., 2023; Rassin et al., 2023; Agarwal et al., 2023; Dahary et al., 2024; Marioriyad et al., 2025; Binyamin et al., 2025; Phung et al., 2024; Chen et al., 2024; Kwon et al., 2022) relies on handcrafted loss functions, typically guided by heuristics about how attention maps should behave, and optimizes these maps accordingly. Other methods focus on optimizing only the initial noise rather than the full denoising trajectory (Eyring et al., 2025; Ma et al., 2025a; Eyring et al., 2024; Guo et al., 2024), or on fine-tuning LoRAs to extract different concepts (Gandikota et al., 2024). In contrast, our approach avoids complex loss design and intensive model tuning while still improving performance.
+
+Finally, works most closely related to ours are *attention guidance methods*. These methods (Chen et al., 2025; Hong et al., 2023; Ahn et al., 2025; Nguyen et al., 2024) leverage positive and negative prompts, compute attention outputs for both, and perform controlled extrapolation in the attention space—pushing the model toward positive prompts and away from negative ones. Our approach also relies on guidance in feature space but applies it through a small MLP rather than through attention.
+
+## 3 MODULATION LAYERS
+
+In this section, we briefly recap the key components of modulation layers used in transformer DMs.
+
+State-of-the-art text-to-image DMs (Labs, 2024; Cai et al., 2025) typically represent images as sequences of continuous tokens, aligning them with text tokens in a unified representation. This combined sequence is processed through a series of transformer blocks (Peebles & Xie, 2023), which primarily consist of MLPs, normalization, and attention layers. To condition the model on a text prompt, two types of encoders are usually used: a T5 (Raffel et al., 2020) and a CLIP text encoder (Radford et al., 2021), which operate as follows:
+
+$$\mathbf{y}(p, t) = \text{MLP}(t, \text{CLIP}(p)), \quad \mathbf{s} = [\text{T5}(p), \mathbf{x}], \quad (1)$$
+
+Here,  $\mathbf{y}$  denotes a global conditioning vector derived from the time step  $t$  and the pooled embedding of the prompt  $p$ , whereas  $\mathbf{s}$  denotes the concatenated sequence of image tokens  $\mathbf{x}$  and text tokens  $\text{T5}(p)$ . The sequence  $\mathbf{s}$  is then processed via cross-attention to incorporate text information, while the global conditioning vector  $\mathbf{y}$  is shared across the entire model and constructs a modulation space that influences the modulation layers.
+
+$$\text{Mod}(\mathbf{s}, \mathbf{y}) = \alpha_s(\mathbf{y}) \cdot \mathbf{s} + \beta_s(\mathbf{y}), \quad (2)$$
+
+Here,  $\alpha_s$  and  $\beta_s$  are the coefficients of the modulation layer, representing scaling and shifting operations, respectively. Notably, modulation layers have proved effective in enabling semantic control and transformation in GANs (Karras et al., 2019; 2020; 2021). In DMs, they have been used to address image editing problems (Garibi et al., 2025; Dalva et al., 2024). While these layers have shown effectiveness in semantic control tasks, their role in improving image generation quality remains unexplored.
+
+{2}------------------------------------------------
+
+| Configuration | CLIP Score $\uparrow$ | PickScore $\uparrow$ | ImageReward $\uparrow$ |
+|-|-|-|-|
+| <b>FLUX schnell</b> |  |  |  |
+| Initial, short | 30.1 | 21.6 | 6.2 |
+| w/o CLIP, short | 29.0 ( $-1.1$ ) | 21.3 ( $-0.3$ ) | 4.5 ( $-1.7$ ) |
+| w/o T5, short | 28.9 ( $-1.2$ ) | 21.0 ( $-0.6$ ) | 1.5 ( $-4.7$ ) |
+| Initial, long | 33.1 | 21.0 | 10.3 |
+| w/o CLIP, long | 32.8 ( $-0.3$ ) | 21.0 ( $-0.0$ ) | 10.4 ( $+0.1$ ) |
+| w/o T5, long | 30.7 ( $-2.4$ ) | 19.9 ( $-1.1$ ) | 2.4 ( $-7.9$ ) |
+| <b>HiDream-Fast</b> |  |  |  |
+| Initial, short | 30.3 | 21.8 | 7.9 |
+| w/o CLIP, short | 30.3 ( $-0.0$ ) | 21.8 ( $-0.0$ ) | 8.1 ( $+0.1$ ) |
+| w/o Llama, short | 20.2 ( $-10.1$ ) | 18.2 ( $-3.6$ ) | -21.5 ( $-29.4$ ) |
+| Initial, long | 32.9 | 21.5 | 12.8 |
+| w/o CLIP, long | 32.9 ( $-0.0$ ) | 21.5 ( $-0.0$ ) | 13.0 ( $+0.2$ ) |
+| w/o Llama, long | 16.8 ( $-16.1$ ) | 16.0 ( $-4.5$ ) | -20.8 ( $-33.6$ ) |
+
+Table 1: Image quality results for short and long prompts. The CLIP embedding does not affect output quality on long prompts for **FLUX schnell** and has no effect for **HiDream-Fast**.
+
+![Figure 1: (top) A line graph showing the deviation from the initial image (DreamSim) relative to the number of tokens in the prompt for the FLUX schnell model. The x-axis represents the number of tokens (0 to 50), and the y-axis represents the deviation (0.0 to 0.8). The blue line shows a sharp decrease in deviation as the number of tokens increases, starting at approximately 0.8 for 10 tokens and dropping to near 0.0 by 40 tokens. (bottom) Four small images illustrating the effect of CLIP on long prompts. The first two images show an elderly man with a beard, the third shows a panda, and the fourth shows a person in a room. The images are labeled 'w/o CLIP long', 'with CLIP long', 'w/o CLIP short', and 'with CLIP short' respectively. The 'with CLIP' images appear more detailed and closer to the initial description.](e863446d7d263c68be9402afd63668ac_img.jpg)
+
+Figure 1: (top) A line graph showing the deviation from the initial image (DreamSim) relative to the number of tokens in the prompt for the FLUX schnell model. The x-axis represents the number of tokens (0 to 50), and the y-axis represents the deviation (0.0 to 0.8). The blue line shows a sharp decrease in deviation as the number of tokens increases, starting at approximately 0.8 for 10 tokens and dropping to near 0.0 by 40 tokens. (bottom) Four small images illustrating the effect of CLIP on long prompts. The first two images show an elderly man with a beard, the third shows a panda, and the fourth shows a person in a room. The images are labeled 'w/o CLIP long', 'with CLIP long', 'w/o CLIP short', and 'with CLIP short' respectively. The 'with CLIP' images appear more detailed and closer to the initial description.
+
+Figure 1: (top) Difference between images (DreamSim) with and without CLIP as a function of prompt length. (bot) For long prompts, images without CLIP generally do not differ from the initial ones.
+
+## 4 ANALYSIS OF THE POOLED TEXT EMBEDDING ROLE
+
+In recent DMs, there is a trend to discard the pooled text embedding and rely solely on the timestep  $t$  to produce  $y$ , i.e.,  $\text{MLP}(t, \text{CLIP}(p)) \rightarrow \text{MLP}(t)$ . In this setup, the text is incorporated only through the text encoder T5. However, no strict justification for this design choice has been provided. Therefore, in this section, we investigate the impact of the pooled embedding on the generative performance of DMs.
+
+**Influence of the CLIP pooled embedding.** First, we analyze the influence of CLIP on text-to-image generation performance. To this end, we examine two contemporary models: FLUX schnell and HiDream-Fast. Specifically, we analyze the impact of CLIP by removing the pooled embedding, setting  $\text{CLIP}(p) \rightarrow 0$ , and comparing it to the standard case with CLIP enabled. Our key observation is that **the pooled CLIP embedding is partially inactive in FLUX schnell and fully inactive in HiDream-Fast.**
+
+Specifically, we find that the influence of CLIP in **FLUX schnell** is inconsistent: it is negligible for long prompts but can be impactful for short ones. To confirm this, we construct two subsets of prompts (1K each) from the MJHQ dataset (Li et al., 2024): short (10 tokens) and long (77 tokens). We then evaluate the DM’s performance on each subset. In Table 1 (top), we report image quality metrics (CLIP Score, PickScore, and ImageReward) for each subset. We observe that for long prompts, CLIP has little effect, with only a minimal impact on quality. In contrast, for short prompts, its influence is more pronounced.
+
+Moreover, in Figure 1, we analyze the difference between images generated with and without CLIP as a function of prompt length (measured by the number of tokens). We find that for longer prompts, the deviation from the initial generation becomes negligible, and the images fully resemble the initial ones, as visually confirmed in Figure 1 (bottom).
+
+For **HiDream-Fast**, we observe slightly different behavior: the CLIP pooled embedding exhibits no effect for either short or long prompts, as numerically confirmed in Table 1 (bottom).
+
+**Influence of the pooled embedding on other models.** Additionally, we explore the reintegration of CLIP into a DM from which it was originally absent. To this end, we consider the COSMOS model (Agarwal et al., 2025) and incorporate the CLIP pooled embedding into it as described in Section 5. In this case, we observe the same behavior as with the HiDream-Fast model: CLIP has no influence. This result is numerically confirmed in Section 6. Finally, in Appendix A, we observe the same effect in the instruction-guided image editing task performed with the FLUX Kontext model. In Section 6, we show that this limitation can result in insufficient editing strength for complex cases.
+
+{3}------------------------------------------------
+
+## 5 MODULATION GUIDANCE
+
+Our observations raise questions about the necessity of using the pooled embedding in generative tasks. **However, although the pooled text embedding may seem uninformative in some cases, we propose reconsidering its role from a different perspective—one that can lead to improved generative performance in DMs.**
+
+**Guidance in modulation space.** We draw inspiration from the understanding that modulation layers can drive semantic changes in generated images (Karras et al., 2019). Moreover, the CLIP encoder is trained to construct a shared space between images and text, resulting in interpretable geometry. Thus, we suggest that CLIP enables interpretable modifications of the modulation space using natural language and guides the model toward modes with more desirable properties.
+
+We propose a training-free, plug-and-play technique to reactivate CLIP and strengthen its influence during generation, drawing inspiration from Garibi et al. (2025). Specifically, we amplify its effect by introducing guidance in the modulation space.
+
+$$\mathbf{y}(\mathbf{p}, t) \rightarrow \hat{\mathbf{y}}(\mathbf{p}, \mathbf{p}_+, \mathbf{p}_-, t) = \mathbf{y}(\mathbf{p}, t) + w \cdot (\mathbf{y}(\mathbf{p}_+, t) - \mathbf{y}(\mathbf{p}_-, t)). \quad (3)$$
+
+We note that  $\hat{\mathbf{y}}$  affects only the modulation coefficients and is shared across all DM blocks, thereby incurring negligible computational overhead compared to basic generation. Moreover, this technique can be applied on top of CFG guidance or with distilled DMs that do not rely on CFG.
+
+To provide intuition behind the guidance, we first analyze it from the perspective of semantic changes. Prior work has focused on identifying interpretable directions in DMs, either through supervised (Gandikota et al., 2024) or unsupervised approaches (Gandikota et al., 2025). In contrast, we demonstrate that such interpretable directions are already embedded within the model and can be accessed by shifting in the modulation space. Specifically, in Figure 2, we consider two examples:  $\mathbf{p}_+ = \text{Long hair}$ ;  $\mathbf{p}_- = \text{Short hair}$ ;  $\mathbf{p}_+ = \text{Modern car}$  and  $\mathbf{p}_- = \text{Old car}$ . We observe that the pooled embedding can substantially influence the generated image, leading to both local (hair length) and global (car style) changes.
+
+![Figure 2: A 2x3 grid of images showing the effect of modulation guidance. The top row shows a man's face with labels: '- Short hair', 'Original generation', and '+ Long hair'. The bottom row shows a car with labels: '- Old car', 'Original generation', and '+ Modern car'. The images demonstrate how shifting the modulation space can change local features (hair length) and global features (car style).](ab5392ddbf4af970d4ef7bff2e4df925_img.jpg)
+
+Figure 2: A 2x3 grid of images showing the effect of modulation guidance. The top row shows a man's face with labels: '- Short hair', 'Original generation', and '+ Long hair'. The bottom row shows a car with labels: '- Old car', 'Original generation', and '+ Modern car'. The images demonstrate how shifting the modulation space can change local features (hair length) and global features (car style).
+
+Figure 2: The modulation guidance enables local (top) and global (bottom) changes and encourages its use to shift a DM toward modes with better properties.
+
+Our observations suggest that modulation guidance provides an additional degree of freedom in generation, beyond what CFG offers. Building on this, we propose using it to enhance generation quality across multiple dimensions. Specifically, we consider **general changes**: aesthetics, complexity, and **specific changes**: hands correction, object counting, color, position. For the latter, we focus on common criteria typically measured in T2I benchmarks (Ghosh et al., 2023). Notably, our technique requires only the selection of a suitable prompt for each category—no additional training or fine-tuning is necessary. In Appendix D, we present the prompts used for each targeted aspect.
+
+**Dynamic modulation guidance.** We find that a constant guidance scale  $w$  is generally effective, but excessively high values can overweight the prompt and cause the model to neglect textual information (Appendix C). To address this, we draw inspiration from dynamic CFG (Sadat et al., 2023; Kynkäänniemi et al., 2024), which has shown promising results in DMs. Unlike dynamic CFG, we aim to adjust  $w$  across layers rather than across time steps.
+
+We consider the simplest variant present in Figure 3(b). We discuss more strategies in Appendix B. First, we compare the dynamic version against constant modulation guidance in terms of the aesthetics-prompt fidelity trade-off. To this end, we apply both types of guidance with different scales  $w$  on 1K prompts from the MJHQ dataset (Lian et al., 2023). We compute PickScore (Kirstain et al., 2023) for aesthetics quality and CLIP score (Hessel et al., 2021) for text correspondence. The results presented in Figure 3(a) confirm that dynamic guidance provides a better trade-off than constant
+
+{4}------------------------------------------------
+
+![Figure 3: Analysis on dynamic modulation guidance. (a) A line graph titled 'Aesthetics quality / prompt fidelity trade-off' showing 'Aesthetics quality, PadScore ↑' on the y-axis (ranging from 21.58 to 21.75) and 'Text relevance, CLIP score ↑' on the x-axis (ranging from 30.2 to 30.9). Two lines are plotted: 'dynamic mod. guidance' (blue) and 'constant mod. guidance' (orange). The orange line starts at w=3.5 (approx. 30.2, 21.61), peaks at w=3 (approx. 30.4, 21.67), then drops to w=2 (approx. 30.6, 21.60), and finally to w=0 (approx. 30.9, 21.58). The blue line starts at w=0 (approx. 30.9, 21.58), rises to w=2 (approx. 30.9, 21.72), w=3 (approx. 30.8, 21.74), and ends at w=3.5 (approx. 30.7, 21.75). (b) A graph showing a step function for modulation weight 'w' over 'Layer' index. The y-axis is 'w' and the x-axis is 'Layer'. The function is 0 for layers 0 to i, and then jumps to a constant value w for layers i+1 onwards.](e0d425c8e4eef259e4c52d81426d93fa_img.jpg)
+
+Figure 3: Analysis on dynamic modulation guidance. (a) A line graph titled 'Aesthetics quality / prompt fidelity trade-off' showing 'Aesthetics quality, PadScore ↑' on the y-axis (ranging from 21.58 to 21.75) and 'Text relevance, CLIP score ↑' on the x-axis (ranging from 30.2 to 30.9). Two lines are plotted: 'dynamic mod. guidance' (blue) and 'constant mod. guidance' (orange). The orange line starts at w=3.5 (approx. 30.2, 21.61), peaks at w=3 (approx. 30.4, 21.67), then drops to w=2 (approx. 30.6, 21.60), and finally to w=0 (approx. 30.9, 21.58). The blue line starts at w=0 (approx. 30.9, 21.58), rises to w=2 (approx. 30.9, 21.72), w=3 (approx. 30.8, 21.74), and ends at w=3.5 (approx. 30.7, 21.75). (b) A graph showing a step function for modulation weight 'w' over 'Layer' index. The y-axis is 'w' and the x-axis is 'Layer'. The function is 0 for layers 0 to i, and then jumps to a constant value w for layers i+1 onwards.
+
+Figure 3: **Analysis on dynamic modulation guidance.** (a) Dynamic guidance offers a better trade-off between aesthetic quality and prompt correspondence than constant modulation guidance. (b) We use a step function, controlled by  $i$ , that skips the first few layers of the model as our form of dynamic guidance. Additional variants are explored in Appendix B.
+
+guidance. Our approach improves image quality without compromising prompt correspondence relative to  $w = 0$  (the initial model without modulation guidance).
+
+In our experiments, we find that dynamic modulation guidance generalizes well across tasks, suggesting that it can be applied to new tasks without additional tuning. We also observe that more complex strategies (Appendix C) can yield better results in some cases, offering an additional degree of improvement.
+
+### What does modulation guidance actually do?
+
+We address the question of how the model is affected by the guidance in improving the generated content. To this end, we analyze the case of hands correction. Specifically, in Figure 4(a), we visualize the attention map corresponding to the word *hands* for a specific image. Interestingly, we observe that the model places greater focus on the relevant region, highlighting it more distinctly. In addition, in Figure 4(b, left), we plot the averaged attention map for all tokens in the corresponding prompt. We find that the model primarily shifts its attention toward more relevant tokens—such as *hands* and *child*.
+
+To confirm this intuition, we analyze a subset of prompts focused on hands correction and split all tokens into four groups: non-content tokens, the token *hands*, tokens related to hands, and other important tokens. The results in Figure 4(b, right) confirm that the model shifts its attention toward *hands* and hand-related tokens.
+
+**Integrating the pooled text embedding into CLIP-free models.** Finally, we extend modulation guidance to models without pooled text embeddings, showing that it can improve generation quality. To this end, we fine-tune existing text-to-image/video models Agarwal et al. (2025); Wan et al. (2025) by introducing the pooled embedding. Specifically, we train a small MLP on top of the pooled text embedding and add it to the timestep embedding, while keeping the rest of the network frozen. The model behaves identically to the original when the pooled embedding is set to 0. Importantly, we train on the model’s own synthetic data to ensure that improvements do not stem from dataset differences.
+
+![Figure 4: After applying modulation guidance, the model focuses more on the desired features, such as hands (a, b). (a) Three heatmaps showing attention maps for the word 'hands' in a prompt. The first heatmap 'Ours, modulation guidance' shows a concentrated focus on the hands. The second 'Original generation' shows more dispersed attention. The third 'Difference' shows the change in attention. (b) Two bar charts. The left chart shows 'Mean attention per token' for tokens: 'The', 'child', 'has', 'hands', 'that', 'are', 'in', 'the', 'air'. The right chart shows 'Mean attention per token' for token groups: 'non-content', 'hands', 'related to hands', 'other important'. In both charts, the blue bars represent 'Ours, modulation guidance' and the orange bars represent 'Original generation'. In both cases, the blue bars are higher for 'hands' and 'related to hands' tokens.](bec3b1d6f15b643228b0da0a7d47bdbd_img.jpg)
+
+Figure 4: After applying modulation guidance, the model focuses more on the desired features, such as hands (a, b). (a) Three heatmaps showing attention maps for the word 'hands' in a prompt. The first heatmap 'Ours, modulation guidance' shows a concentrated focus on the hands. The second 'Original generation' shows more dispersed attention. The third 'Difference' shows the change in attention. (b) Two bar charts. The left chart shows 'Mean attention per token' for tokens: 'The', 'child', 'has', 'hands', 'that', 'are', 'in', 'the', 'air'. The right chart shows 'Mean attention per token' for token groups: 'non-content', 'hands', 'related to hands', 'other important'. In both charts, the blue bars represent 'Ours, modulation guidance' and the orange bars represent 'Original generation'. In both cases, the blue bars are higher for 'hands' and 'related to hands' tokens.
+
+Figure 4: After applying modulation guidance, the model focuses more on the desired features, such as hands (a, b).
+
+{5}------------------------------------------------
+
+Table 2: Performance of text-to-image DMs with and without modulation guidance (gray) on Aesthetics and Complexity, evaluated with human preferences and automatic metrics. Human win rates are reported with respect to the original model; green indicates statistically significant improvement, red a decline. For automatic metrics, bold denotes improvement over the original model.
+
+| Model | Side-by-Side Win Rate, % |  |  |  | Automatic Metrics, COCO 5k |  |  |  |
+|-|-|-|-|-|-|-|-|-|
+|  | Relevance $\uparrow$ | Aesthetics $\uparrow$ | Complexity $\uparrow$ | Defects $\uparrow$ | PickScore $\uparrow$ | CLIP $\uparrow$ | IR $\uparrow$ | HPSv3 $\uparrow$ |
+| <b>FLUX schnell</b> |  |  |  |  | 22.9 | 35.6 | 10.2 | 11.3 |
+| Aesthetics | 48 | <b>72</b> | <b>78</b> | 48 | <b>23.1</b> | <b>35.8</b> | <b>11.0</b> | <b>11.8</b> |
+| Complexity | 53 | <b>56</b> | <b>69</b> | 47 | <b>23.0</b> | <b>35.9</b> | <b>10.8</b> | <b>11.4</b> |
+| <b>FLUX dev</b> |  |  |  |  | 23.1 | 34.7 | 10.5 | 12.4 |
+| Aesthetics | <b>44</b> | <b>56</b> | <b>69</b> | 52 | <b>23.2</b> | 34.5 | <b>11.0</b> | <b>12.8</b> |
+| Complexity | 48 | <b>59</b> | <b>72</b> | 47 | 23.1 | 34.6 | <b>11.1</b> | <b>12.8</b> |
+| <b>SD3.5 Large</b> |  |  |  |  | 23.0 | 35.8 | 10.5 | 11.1 |
+| Aesthetics | 50 | <b>62</b> | <b>70</b> | 47 | <b>23.1</b> | <b>35.9</b> | <b>10.7</b> | <b>11.2</b> |
+| Complexity | 49 | 49 | <b>60</b> | 45 | 23.0 | 35.8 | <b>11.7</b> | 11.0 |
+| <b>HiDream</b> |  |  |  |  | 23.4 | 34.4 | 11.7 | 13.2 |
+| Aesthetics | 49 | <b>60</b> | <b>80</b> | 46 | <b>23.5</b> | 34.4 | <b>12.1</b> | <b>13.7</b> |
+| Complexity | 47 | 52 | <b>70</b> | 45 | <b>23.5</b> | 34.4 | <b>11.9</b> | <b>13.3</b> |
+| <b>COSMOS</b> |  |  |  |  | 23.0 | 35.0 | 11.4 | 12.3 |
+| + CLIP | 50 | 49 | <b>43</b> | 50 | 23.0 | 35.0 | 11.4 | 12.2 |
+| Aesthetics | 50 | <b>60</b> | <b>70</b> | 45 | <b>23.2</b> | 35.0 | <b>11.7</b> | <b>12.6</b> |
+| Complexity | 50 | 52 | <b>61</b> | <b>44</b> | 23.0 | <b>35.4</b> | <b>11.8</b> | <b>12.4</b> |
+
+We highlight two important aspects of the training process. First, we propagate the textual prompt solely through the pooled text embedding, using an unconditional prompt for T5. This design forces the model to perceive textual information through the pooled embedding. Second, we employ a distillation-based training regime. Specifically, we sample a clean image, add noise to it, and then generate two predictions: one from the original model (without the pooled embedding) and one from the modified model (with the pooled embedding). The objective is to minimize the MSE loss between these two predictions. This distillation approach is well-suited for few-step DMs, as it eliminates the need for complex adversarial or distribution-matching losses (Yin et al., 2024a).
+
+## 6 EXPERIMENTS
+
+### 6.1 TEXT-TO-IMAGE GENERATION
+
+**Configuration.** We validate our approach on state-of-the-art text-to-image DMs that include modulation-based text conditioning: FLUX schnell (Sauer et al., 2024a), FLUX (Labs, 2024), SD3.5 Large (Esser et al., 2024), and HiDream (Cai et al., 2025). In addition, we consider the CLIP-free COSMOS model (Agarwal et al., 2025) and fine-tune it for 4K iterations to introduce the pooled text embedding. We train the model on its own synthetic dataset of 500K samples, following the generation settings of Agarwal et al. (2025) and using prompts from Li et al. (2024).
+
+We evaluate performance using two types of metrics: human preference and automatic evaluation. Human preference is measured via side-by-side comparisons, where annotators assess image pairs on four criteria: text relevance, aesthetics, complexity, and defects (details in Appendix J). For general changes, we use 128 prompts from PartiPrompts (Yu et al., 2022), generating two images per prompt. For specific changes, we use 70 prompts from CompBench (Jia et al., 2025) for object counting and 200 LLM-generated prompts for hands correction. For automatic evaluation, we report CLIP score (Hessel et al., 2021), ImageReward (IR) (Xu et al., 2023), PickScore (PS) (Kirstain et al., 2023), and HPSv3 (Ma et al., 2025b), tested on 5K prompts from COCO2014 (Lin et al., 2014). We also use GenEval (Ghosh et al., 2023) to validate modulation guidance across multiple benchmark criteria.
+
+Our main baselines are the original models without modulation guidance. In addition, we consider the Normalized Attention Guidance approach (Chen et al., 2025) and LLM-enhanced prompt modifiers (Lian et al., 2023). Finally, we include the test-time optimization method Concept Sliders (Gandikota et al., 2024) for the hands correction task.
+
+{6}------------------------------------------------
+
+![A smiling banana wearing a blue bandana with a white pattern, set against a dark, textured background. A smiling banana wearing a brown bandana, set against a dark background. A smiling banana wearing a blue bandana, set against a background of a cafe interior. A smiling banana wearing a blue bandana, set against a background of a beach with palm trees. A smiling banana wearing a blue bandana, set against a background of a beach with palm trees. A simple cartoon banana with a smiling face and a blue bandana. A simple cartoon banana with a smiling face and a brown bandana. A simple cartoon banana with a smiling face and a blue bandana. A simple cartoon banana with a smiling face and a blue bandana. A simple cartoon banana with a smiling face and a blue bandana. A detailed cardboard spaceship with multiple engines and windows, set against a space background with a planet. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A simple cardboard spaceship model. A simple cardboard spaceship model. A simple cardboard spaceship model. A simple cardboard spaceship model. A simple cardboard spaceship model.](9ebd85380ef496499e5f23ec0d9cd744_img.jpg)
+
+|  | FLUX, schnell | FLUX | Hi-Dream | SD3.5 Large | COSMOS |
+|-|-|-|-|-|-|
+| Ours, quality |  |  |  |  |  |
+| Original |  |  |  |  |  |
+| <i>a smiling banana wearing a bandana</i> |  |  |  |  |  |
+| Ours, complexity |  |  |  |  |  |
+| Original |  |  |  |  |  |
+| <i>a cardboard spaceship</i> |  |  |  |  |  |
+
+A smiling banana wearing a blue bandana with a white pattern, set against a dark, textured background. A smiling banana wearing a brown bandana, set against a dark background. A smiling banana wearing a blue bandana, set against a background of a cafe interior. A smiling banana wearing a blue bandana, set against a background of a beach with palm trees. A smiling banana wearing a blue bandana, set against a background of a beach with palm trees. A simple cartoon banana with a smiling face and a blue bandana. A simple cartoon banana with a smiling face and a brown bandana. A simple cartoon banana with a smiling face and a blue bandana. A simple cartoon banana with a smiling face and a blue bandana. A simple cartoon banana with a smiling face and a blue bandana. A detailed cardboard spaceship with multiple engines and windows, set against a space background with a planet. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A detailed cardboard spaceship with multiple engines and windows, set against a space background. A simple cardboard spaceship model. A simple cardboard spaceship model. A simple cardboard spaceship model. A simple cardboard spaceship model. A simple cardboard spaceship model.
+
+Figure 5: Qualitative results of modulation guidance for Aesthetics (top) and Complexity (bottom). The Aesthetics guidance notably improves image quality, while the Complexity guidance can enhance the complexity of both the main object and background details.
+
+**General changes.** In this case, we focus on two aspects for improvement: aesthetics and complexity. These aspects are crucial for text-to-image generation and are typically the targets of self-supervised fine-tuning techniques (Startsev et al., 2025) or RL-based approaches (Wallace et al., 2024), which are commonly adopted in DMs. However, we demonstrate that our simple technique achieves significant improvements without any fine-tuning. The only requirement is to select appropriate positive and negative prompts, along with a suitable dynamic guidance strategy. Our choices are summarized in Table 5 and discussed in Appendix D.
+
+Table 2 reports numerical results, showing clear human preference gains for both aspects. Aesthetics guidance significantly improves both aesthetics and complexity, while complexity guidance mainly enhances complexity. Automatic metrics show consistent ImageReward gains across all models and HPSv3 improvements in most cases, except for SD3.5 Large with complexity guidance. Importantly, we observe that introducing CLIP into COSMOS does not improve performance and even reduces complexity; gains appear only when combined with modulation guidance, confirming that CLIP alone is ineffective. We note slight drops in text relevance for FLUX dev and in defects for COSMOS, though these are minor. Qualitative examples are shown in Figure 5 and Appendix I.
+
+**Specific changes.** Next, we focus on improving object counting, hands correction, color, and position. The first two are particularly important, as they have been extensively studied in prior work (Binyamin et al., 2025; Gandikota et al., 2024). For object counting, we use the number of target objects as the positive direction, while for hands correction, we draw
+
+{7}------------------------------------------------
+
+Table 3: Quantitative results of the modulation guidance for specific changes. The modulation guidance yields improvements according to GenEval and human preference.
+
+| Model |  | GenEval |  |  | SbS Win Rate, % |  |
+|-|-|-|-|-|-|-|
+|  |  | Object Counting | Color | Position | Object Counting | Hands correction |
+| <b>FLUX schnell</b> | Original | 56 | 79 | 25 | 39 | 41 |
+|  | Ours | 65 (+9) | 86 (+7) | 30 (+5) | 61 (+22) | 59 (+18) |
+
+![Figure 6: Qualitative results of the modulation guidance for Object counting (top) and Hands correction (bottom).](efca2dce0095c9dc2a68e9af6b2bfd40_img.jpg)
+
+Figure 6 displays qualitative results of the modulation guidance. The top section shows 'Object counting' results for five prompts: 'four balloons ...', 'eight microwaves ...', 'seven strawberries ...', 'seven pigs ...', and 'eight cows ...'. For each prompt, two rows of images are shown: 'Ours' (top row) and 'Original' (bottom row). The 'Ours' row consistently shows the correct number of objects, while the 'Original' row often shows a different number. The bottom section shows 'Hands correction' results for five prompts: 'four balloons ...', 'eight microwaves ...', 'seven strawberries ...', 'seven pigs ...', and 'eight cows ...'. For each prompt, two rows of images are shown: 'Ours' (top row) and 'Original' (bottom row). The 'Ours' row shows hands with the correct number of fingers, while the 'Original' row often shows hands with an incorrect number of fingers.
+
+Figure 6: Qualitative results of the modulation guidance for Object counting (top) and Hands correction (bottom).
+
+Figure 6: Qualitative results of the modulation guidance for Object counting (top) and Hands correction (bottom).
+
+inspiration from Gandikota et al. (2024) in designing positive and negative prompts. Further details are provided in Table 5.
+
+We present the results in Table 3 and Figure 6. Improvements are observed in several aspects of the GenEval benchmark, including object counting, color, and position. According to human evaluation, our approach improves the original model by 22% in object counting and 18% in hands correction. We report text relevance and defects as the evaluation criteria for object counting and hands correction, respectively.
+
+**Comparison with baselines.** Normalized Attention Guidance (Chen et al., 2025) targets general changes, so we compare it with our aesthetics guidance using SbS evaluation. Similarly, we compare Concept Sliders (Gandikota et al., 2024) with our hands correction guidance by evaluating defects. For LLM-enhanced prompts (Lian et al., 2023), we consider general changes, hands correction, and object counting. Results in Appendix E (Tables 8 and 9) show that our approach outperforms Normalized Attention Guidance by 34% and Concept Sliders by 16%, without additional computational overhead. Moreover, Table 8 shows that modulation guidance can further improve performance when combined with LLM-enhanced prompts.
+
+{8}------------------------------------------------
+
+Table 4: Quantative evaluation on VBench. The results show an improved dynamic degree compared to the original models and baseline approach (normalized attention guidance).
+
+| Model, video |  | total score $\uparrow$ | motion smoothness $\uparrow$ | dynamic degree $\uparrow$ | aesthetic quality $\uparrow$ | overall consistency $\uparrow$ |
+|-|-|-|-|-|-|-|
+| Hunyuan, 13B | Original | 56.68 | 99.23 | 50.51 | 55.88 | 21.08 |
+|  | Modulation guidance | 57.56 | 99.03 | 53.61 | 56.50 | 21.09 |
+| CausVid, 1.3B | Original | 62.72 | 98.76 | 75.25 | 57.85 | 19.01 |
+|  | + CLIP | 62.82 | 98.63 | 76.38 | 57.77 | 18.49 |
+|  | Norm. attent. guidance | 63.58 | 98.39 | 74.22 | 62.08 | 19.61 |
+|  | Modulation guidance | 65.43 | 98.45 | 86.59 | 57.65 | 19.02 |
+
+![Figure 7: Qualitative comparison between the original CausVid and CausVid with modulation guidance. The image shows two rows of five frames each. The top row, labeled 'Ours', shows a person riding a bicycle through a snowy field. The bottom row, labeled 'CausVid_1.3B', shows a light blue bicycle. The caption below reads: 'A bicycle gliding through a snowy field.'](c37fe03d7cad74ad675a0eb16aa43821_img.jpg)
+
+Figure 7: Qualitative comparison between the original CausVid and CausVid with modulation guidance. The image shows two rows of five frames each. The top row, labeled 'Ours', shows a person riding a bicycle through a snowy field. The bottom row, labeled 'CausVid\_1.3B', shows a light blue bicycle. The caption below reads: 'A bicycle gliding through a snowy field.'
+
+Figure 7: Qualitative comparison between the original CausVid and CausVid with modulation guidance.
+
+![Figure 8: Qualitative results for text-guided image editing tasks. The image shows two rows of three frames each. The top row shows a group of people, with the instruction 'Turn people into robots'. The bottom row shows a landscape with cars, with the instruction 'Replace the cars with boats'. The caption below reads: 'Figure 8: Qualitative results for text-guided image editing tasks. We observe that FLUX Kontext sometimes struggles with complex edits, while modulation guidance can mitigate this limitation.'](aaec7c7044d764c324cdb35c0201da6f_img.jpg)
+
+Figure 8: Qualitative results for text-guided image editing tasks. The image shows two rows of three frames each. The top row shows a group of people, with the instruction 'Turn people into robots'. The bottom row shows a landscape with cars, with the instruction 'Replace the cars with boats'. The caption below reads: 'Figure 8: Qualitative results for text-guided image editing tasks. We observe that FLUX Kontext sometimes struggles with complex edits, while modulation guidance can mitigate this limitation.'
+
+Figure 8: Qualitative results for text-guided image editing tasks. We observe that FLUX Kontext sometimes struggles with complex edits, while modulation guidance can mitigate this limitation.
+
+### 6.2 TEXT-TO-VIDEO GENERATION
+
+**Configuration.** We apply modulation guidance to Hunyuan 13B (Kong et al., 2024) and CausVid 1.3B (Yin et al., 2024b). The latter does not include a CLIP model, so we fine-tune it for 1K iterations. To evaluate performance, we use VBench (Huang et al., 2024), which covers various aspects. In this experiment, we apply the same aesthetics guidance as in the text-to-image task. In addition, we compare our approach with Normalized Attention Guidance.
+
+**Results.** The results are presented in Table 4 and Figure 7. Importantly, we observe improvements in dynamic degree for both models, with particularly strong gains for CausVid. This is notable because CausVid is distilled from WAN (Wan et al., 2025), and video models typically lose dynamics after distillation. Furthermore, we find that incorporating CLIP provides no improvement. Additional visual comparisons are provided in Appendix I.
+
+### 6.3 INSTRUCTION-GUIDED IMAGE EDITING
+
+Finally, we address image editing using the FLUX Kontext model (Labs et al., 2025), which, as we find, can struggle with complex edits involving multiple objects. To overcome this, we apply modulation guidance, using the final prompt as the positive direction and a blank prompt as the negative. We validate our approach on the SEED-Data benchmark (Ge et al., 2024) and present the results and implementation details in Appendix F. Representative examples are shown in Figure 8.
+
+## 7 CONCLUSION
+
+In this paper, we revisit the role of the pooled text embedding, showing that, despite its weak influence, it can improve performance across tasks and models when used from a different perspective. We present ablation studies in Appendix C, where dynamic modulation guidance outperforms constant guidance, offering greater flexibility for practitioners. Limitations are discussed in Appendix H.
+
+{9}------------------------------------------------
+
+## REFERENCES
+
+- Aishwarya Agarwal, Srikrishna Karanam, KJ Joseph, Apoorv Saxena, Koustava Goswami, and Balaji Vasan Srinivasan. A-star: Test-time attention segregation and retention for text-to-image synthesis. In *Proceedings of the IEEE/CVF International Conference on Computer Vision*, pp. 2283–2293, 2023.
+- Niket Agarwal, Arslan Ali, Maciej Bala, Yogesh Balaji, Erik Barker, Tiffany Cai, Prithvijit Chattopadhyay, Yongxin Chen, Yin Cui, Yifan Ding, et al. Cosmos world foundation model platform for physical ai. *arXiv preprint arXiv:2501.03575*, 2025.
+- Donghoon Ahn, Hyoungwon Cho, Jaewon Min, Wooseok Jang, Jungwoo Kim, SeonHwa Kim, Hyun Hee Park, Kyong Hwan Jin, and Seungryong Kim. Self-rectifying diffusion sampling with perturbed-attention guidance, 2025. URL <https://arxiv.org/abs/2403.17377>.
+- Omri Avrahami, Or Patashnik, Ohad Fried, Egor Nemchinov, Kfir Aberman, Dani Lischinski, and Daniel Cohen-Or. Stable flow: Vital layers for training-free image editing. In *Proceedings of the Computer Vision and Pattern Recognition Conference*, pp. 7877–7888, 2025.
+- Shuai Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Sibo Song, Kai Dang, Peng Wang, Shijie Wang, Jun Tang, Humen Zhong, Yuanzhi Zhu, Mingkun Yang, Zhaohai Li, Jianqiang Wan, Pengfei Wang, Wei Ding, Zheren Fu, Yiheng Xu, Jiabo Ye, Xi Zhang, Tianbao Xie, Zesen Cheng, Hang Zhang, Zhibo Yang, Haiyang Xu, and Junyang Lin. Qwen2.5-vl technical report. *arXiv preprint arXiv:2502.13923*, 2025.
+- Lital Binyamin, Yoad Tewel, Hilit Segev, Eran Hirsch, Royi Rassin, and Gal Chechik. Make it count: Text-to-image generation with an accurate number of objects. In *Proceedings of the Computer Vision and Pattern Recognition Conference*, pp. 13242–13251, 2025.
+- Qi Cai, Jingwen Chen, Yang Chen, Yehao Li, Fuchen Long, Yingwei Pan, Zhaofan Qiu, Yiheng Zhang, Fengbin Gao, Peihan Xu, et al. Hidream-i1: A high-efficient image generative foundation model with sparse diffusion transformer. *arXiv preprint arXiv:2505.22705*, 2025.
+- Hila Chefer, Yuval Alaluf, Yael Vinker, Lior Wolf, and Daniel Cohen-Or. Attend-and-excite: Attention-based semantic guidance for text-to-image diffusion models. *ACM transactions on Graphics (TOG)*, 42(4):1–10, 2023.
+- Dar-Yen Chen, Hmrishav Bandyopadhyay, Kai Zou, and Yi-Zhe Song. Normalized attention guidance: Universal negative guidance for diffusion models, 2025. URL <https://arxiv.org/abs/2505.21179>.
+- Minghao Chen, Iro Laina, and Andrea Vedaldi. Training-free layout control with cross-attention guidance. In *Proceedings of the IEEE/CVF winter conference on applications of computer vision*, pp. 5343–5353, 2024.
+- Hyungjin Chung, Jeongsol Kim, Geon Yeong Park, Hyelin Nam, and Jong Chul Ye. Cfg++: Manifold-constrained classifier free guidance for diffusion models. *arXiv preprint arXiv:2406.08070*, 2024.
+- Omer Dahary, Or Patashnik, Kfir Aberman, and Daniel Cohen-Or. Be yourself: Bounded attention for multi-subject text-to-image generation, 2024. URL <https://arxiv.org/abs/2403.16990>.
+- Yusuf Dalva, Kavana Venkatesh, and Pinar Yanardag. Fluxspace: Disentangled semantic editing in rectified flow transformers, 2024. URL <https://arxiv.org/abs/2412.09611>.
+- Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim Entezari, Jonas Müller, Harry Saini, Yam Levi, Dominik Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling rectified flow transformers for high-resolution image synthesis. In *Forty-first international conference on machine learning*, 2024.
+- Luca Eyring, Shyamgopal Karthik, Karsten Roth, Alexey Dosovitskiy, and Zeynep Akata. Reno: Enhancing one-step text-to-image models through reward-based noise optimization. *Neural Information Processing Systems (NeurIPS)*, 2024.
+
+ Rest of paper (reference and Appendix) is removed.

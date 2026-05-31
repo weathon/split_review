@@ -1,0 +1,307 @@
+
+
+{0}------------------------------------------------
+
+# SCALING WITH COLLAPSE: EFFICIENT AND PREDICTABLE TRAINING OF LLM FAMILIES
+
+Shane Bergsma   Bin Claire Zhang   Nolan Dey   Shaheer Muhammad   Gurpreet Gosal  
+ Joel Hestness  
+ Cerebras Systems  
+ {shane.bergsma, joel}@cerebras.net
+
+## ABSTRACT
+
+Effective LLM training depends on predictable scaling of key quantities—such as final loss and optimal hyperparameters—with model and dataset size. Qiu et al. (2025) recently showed that this predictability can extend beyond scalars: whole training loss curves can *collapse* onto a universal trajectory after a simple normalization. What remains unclear is whether this phenomenon persists for LLM families trained under *practical scaling recipes*, where width, depth, learning rate, batch size, and weight decay are scaled jointly. We show that it does: loss curves collapse across scales precisely when optimization hyperparameters are set optimally for the given data budget, in accordance with recent empirical scaling laws. Collapse therefore emerges as a signature of compute-efficient training. We demonstrate two applications at scale: (1) deviation-from-collapse provides a sensitive, early diagnostic of training pathologies, and (2) predictability of collapsed curves enables early stopping in large-scale hyperparameter tuning. Finally, we train a competitive LLM family, *Celerity*, using these insights, establishing collapse as an effective tool for developing efficient LLMs.
+
+![Figure 1: Three plots illustrating LLM training. Left: Prior LLM families like Llama-2 train at varying tokens-per-parameter (TPP; D/N) and AdamW timescale tau; training loss curves do not collapse. Middle: Fixing TPP and setting tau optimally for that TPP, Celerity loss curves do collapse. Right: Deviations from collapse allow precise identification (and earlier repair) of numerics issues in large-scale training runs.](2cb4ae7af8981b4179851b065f41dab8_img.jpg)
+
+Figure 1 consists of three plots. The left plot, titled 'Llama-2 train loss; TPP &  $\tau$  vary', shows 'Normalized train loss' on the y-axis (ranging from 1.0 to 1.4) against 'Fraction of training tokens,  $\hat{t}$ ' on the x-axis (ranging from 0.00 to 1.00). It displays four curves for Llama-2 models: 7B (286 TPP,  $\tau=0.07$ ), 13B (154 TPP,  $\tau=0.07$ ), 34B (59 TPP,  $\tau=0.13$ ), and 70B (29 TPP,  $\tau=0.13$ ). The curves do not collapse. The middle plot, titled 'Celerity curves collapse; TPP &  $\tau$  fixed', shows the same axes but for Celerity models: 300M (234 TPP,  $\tau=0.05$ ), 500M (234 TPP,  $\tau=0.05$ ), 900M (234 TPP,  $\tau=0.05$ ), 1.8B (234 TPP,  $\tau=0.05$ ), and 3.9B (234 TPP,  $\tau=0.05$ ). These curves collapse onto a single trajectory. The right plot, titled 'Collapse residuals can detect issues', shows 'Diff. with normalized 500M curve' on the y-axis (ranging from -0.005 to 0.030) against 'Fraction of training tokens,  $\hat{t}$ ' on the x-axis (ranging from 0.2 to 1.0). It shows residuals for Celerity models: 500M (blue), 900M (green), 1.8B (initial) (red), and 1.8B (repaired) (light green). The 1.8B (initial) curve shows a significant positive deviation starting around  $\hat{t}=0.8$ , while the 1.8B (repaired) curve remains near zero.
+
+Figure 1: Three plots illustrating LLM training. Left: Prior LLM families like Llama-2 train at varying tokens-per-parameter (TPP; D/N) and AdamW timescale tau; training loss curves do not collapse. Middle: Fixing TPP and setting tau optimally for that TPP, Celerity loss curves do collapse. Right: Deviations from collapse allow precise identification (and earlier repair) of numerics issues in large-scale training runs.
+
+Figure 1: *Left*: Prior LLM families like Llama-2 train at varying tokens-per-parameter (TPP;  $D/N$ ) and AdamW timescale  $\tau$ ; training loss curves do *not* collapse. *Middle*: Fixing TPP and setting  $\tau$  optimally for that TPP, Celerity loss curves *do* collapse. *Right*: Deviations from collapse allow precise identification (and earlier repair) of numerics issues in large-scale training runs.
+
+## 1 INTRODUCTION
+
+Scaling up pre-training has emerged as the primary route to improving LLM performance (Brown et al., 2020; Achiam et al., 2023). Yet once we reach frontier scales, opportunities for direct experimentation disappear (Xiao, 2024). How then can we train effectively at those scales—what size of model should we use, and how should we set hyperparameters? Encouragingly, recent work has revealed that several quantities are remarkably *predictable* as we scale deep learning. These include model performance as a function of model and dataset size (Hestness et al., 2017; Kaplan et al., 2020), as well as hyperparameters under maximal update parameterization ( $\mu$ P), which enables optimal base learning rates and initializations to approximately transfer across widths (Yang et al., 2021). In this paper we build on this trajectory of predictability: we show that, at LLM scale,
+
+{1}------------------------------------------------
+
+training loss curves (TLCs) from different model sizes *collapse* onto a single universal curve after a simple normalization—provided models are trained with a particular hyperparameter-scaling recipe.
+
+Qiu et al. (2025) only recently demonstrated this striking regularity in TLCs, showing collapse when training with  $\mu P$  on small-scale autoregressive tasks. As their validation was limited to small models trained with vanilla Adam (Kingma & Ba, 2014), without weight decay, they explicitly call for tests at larger scales with *practical scaling ladders* that co-scale width, depth, batch size, and weight decay. Our work addresses this gap, showing that collapse persists in full-scale LLM families.
+
+While modeling LLM loss is an active research topic (Sec. 6), the ability to predict TLCs has great *practical* value. For example, human judgment is now required to decide whether training has *recovered* from a loss spike—or whether rewinding/restarting is needed (Chowdhery et al., 2022; Zhang et al., 2022a). Other subjective signals, such as a gradual upward *trend* (Zhang et al., 2022b), can also trigger interventions. Yet criteria remain vague: Touvron et al. (2023b) report Llama-2 TLCs “did not show any sign of saturation,” but how to recognize saturation is unclear. If TLCs collapse across sizes, practitioners can compare in-progress training to a universal reference, monitor residuals, and extrapolate final loss from partial trajectories. Teams already rely on TLCs in this way, often without a principled account of what governs TLC shape; for example, Falcon’s final LR was chosen by simply continuing the run performing best after warmup (Almazrouei et al., 2023).
+
+In this paper we show that the essential condition for collapse under  $\mu P$  is that the LR schedule, tokens-per-parameter ratio (TPP), and AdamW timescale  $\tau$  (Wang & Aitchison, 2024) are held fixed across model sizes. This reflects a deeper regularity: prior work showed that optimal  $\tau$  depends only on TPP (Bergsma et al., 2025a). Thus, scaling across fixed TPP with  $\tau$  chosen optimally guarantees collapse, and collapse emerges as a robust marker of compute-efficient and stable pre-training. When  $\tau$  is mis-scaled—as in the Llama-2 family (Fig. 1, *left*)—normalized curves fail to align.
+
+We introduce *Celerity* as the first LLM family trained with both optimal  $\tau$  scaling and demonstrable TLC collapse (Fig. 1, *middle*). Effective parameterization, including tuning and transferring  $\tau$ , helped Celerity land on the compute-efficiency frontier for open models of its scale (Fig. 2). Meanwhile, deviations from collapse provided a sensitive diagnostic of training issues: in our 1.8B run, a numerical instability became evident from collapse residuals (Fig. 1, *right*) well before the raw TLC showed an upward trend (Fig. 6, *right*). Celerity exemplifies *scaling with collapse*: efficient, predictable training, across scales and throughout the run.
+
+In summary, our main contributions are:
+
+- Identifying the key factors influencing loss curve shape under  $\mu P$ : the LR schedule, the TPP ratio, and the AdamW timescale  $\tau$ , and explaining shape dependence on these quantities (Sec. 3).
+- Demonstrating that when  $\tau$  is set optimally for a given TPP, TLCs *collapse* across model scales, providing a signature of compute-efficient training (Sec. 3).
+- Introducing the *Celerity* family, the first large-scale LLMs trained in a collapse regime (Sec. 4).
+- Proposing a simple functional form for normalized TLCs, and showing that fitting this form on small-scale training runs enables early stopping in large-scale hyperparameter tuning (Sec. 5).
+
+## 2 BACKGROUND
+
+Training loss curves (TLCs) for different model sizes typically differ in scale, duration and final loss. Yet after a simple normalization, they can align closely, or *collapse*, onto a common trajectory. Collapse emerges only when three controls are matched across scales. The tokens-per-parameter
+
+![Figure 2: A log-log plot showing Average Accuracy (%) on the y-axis (ranging from 52.5 to 70.0) versus Training Compute FLOPs (C) on the x-axis (ranging from 10^21 to 10^23). A dashed orange line represents the 'Celerity Fit: 100 - 5 / (tau * 154e38)^-0.097'. Data points for various models are plotted: Gemma2-2B (blue diamond), Llama-7B (grey circle), Llama2-7B (grey circle), SmolLM2-1.7B (purple circle), OLMo-7B (purple circle), Zambeza2-1.2B (purple circle), Celerity-3.9B (orange circle), SmolLM1-1.7B (purple circle), OLMo2-1B (purple circle), 8TLM-3B (grey circle), Gemma3-1B (green circle), SmolLM2-360M (purple circle), OLMo-1B (purple circle), CerebrasGPT-6.7B (orange circle), Celerity-900M (orange circle), and Celerity-1.8B (orange circle). An arrow labeled 'better' points towards the top-left of the plot. The Celerity models are positioned on the upper-left frontier of the plot, indicating high accuracy with low compute.](42350dead8413761d4223029b186e538_img.jpg)
+
+Figure 2: A log-log plot showing Average Accuracy (%) on the y-axis (ranging from 52.5 to 70.0) versus Training Compute FLOPs (C) on the x-axis (ranging from 10^21 to 10^23). A dashed orange line represents the 'Celerity Fit: 100 - 5 / (tau \* 154e38)^-0.097'. Data points for various models are plotted: Gemma2-2B (blue diamond), Llama-7B (grey circle), Llama2-7B (grey circle), SmolLM2-1.7B (purple circle), OLMo-7B (purple circle), Zambeza2-1.2B (purple circle), Celerity-3.9B (orange circle), SmolLM1-1.7B (purple circle), OLMo2-1B (purple circle), 8TLM-3B (grey circle), Gemma3-1B (green circle), SmolLM2-360M (purple circle), OLMo-1B (purple circle), CerebrasGPT-6.7B (orange circle), Celerity-900M (orange circle), and Celerity-1.8B (orange circle). An arrow labeled 'better' points towards the top-left of the plot. The Celerity models are positioned on the upper-left frontier of the plot, indicating high accuracy with low compute.
+
+Figure 2: Celerity is at the compute-efficiency frontier. (Average accuracy on tasks *arc-c*, *arc-e*, *boolq*, *hellaswag*, *piqa*, *siqa*, *winoqrande*; see Table 10.)
+
+{2}------------------------------------------------
+
+ratio (TPP) determines how much data each parameter sees and thus affects the normalized pace of improvement; the AdamW timescale  $\tau$  governs how long the optimizer “remembers” past gradients, shaping the bias–variance trade-off over training; and the learning-rate schedule phases early bias reduction against late variance suppression. When TPP and  $\tau$  are chosen consistently across model sizes and the LR schedule is fixed, the resulting normalized TLCs become approximately scale-invariant. We now formalize these quantities; Table 1 summarizes key symbols.
+
+**TPP.** The TPP ratio is equal to number of training tokens  $D$  divided by the model size  $N$ . This simple quantity plays a surprisingly profound role in compute-efficient LLM training and TLC shape. Hoffmann et al. (2022) investigated, for a given compute budget  $C$ , how to allocate  $D$  and  $N$  in order to minimize loss. They found optimal  $D$  and  $N$  scale roughly equally as  $C$  increases, with the optimal  $D/N$  ratio relatively constant at around 20 TPP (Appendix C.1). Replication studies have found similar results (Besiroglu et al., 2024; Porian et al., 2024), and 20 TPP has emerged as a rule-of-thumb for compute-optimal training (Dey et al., 2023a; Zhang et al., 2024b).
+
+**$\mu$ P.**  $\mu$ P (Yang & Hu, 2020) and related parameterizations for depth (Bordelon et al., 2023; Yang et al., 2023; Dey et al., 2025) seek to achieve consistent, stable training dynamics as networks scale up. Moreover, with  $\mu$ P, base hyperparameters can be tuned on a small *proxy* model and then transferred to larger scales. Given the width of the proxy model,  $d_p$ , and target,  $d$ ,  $\mu$ P prescribes scaling factors to apply to the base LR, initial weight variance, and other base HPs.
+
+$\mu$ P is increasingly used in LLM training (Dey et al., 2023a;b; Sengupta et al., 2023; Shen et al., 2024; Hu et al., 2024). Moreover, recent work has shown that, when using  $\mu$ P, other important aspects of training may *decouple* from model size, including optimal batch size (scaling primarily in the total number of tokens (Zhang et al., 2024b; Bergsma et al., 2025a)), and optimal AdamW timescale/weight decay (scaling primarily in TPP (Bergsma et al., 2025a)).
+
+**Supercollapse.** Using  $\mu$ P, Qiu et al. (2025) observed that TLCs for different model sizes, despite varying widely over compute and absolute loss, appear to follow a consistent shape. This motivated them to affinely rescale the curves to the normalized loss  $\ell$  given by:
+
+$$\ell(\hat{t}, N, \omega) = (L(\hat{t} \cdot T^*(N), N, \omega) - \hat{L}) / (L(T^*(N), N, \omega) - \hat{L}) \quad (1)$$
+
+where  $\omega$  is the random seed,  $\hat{t}$  is the fraction of training completed (what Qiu et al. (2025) refer to as *normalized compute*),  $N$  is the number of model parameters, and  $T^*(N)$  is the corresponding compute-optimal number of training steps, estimated from a power law fit.  $\hat{L}$  is an offset, which they subsequently set to the estimated irreducible loss of their power law.
+
+Training compute-optimally under  $\mu$ P (on small-scale autoregressive tasks, e.g., predicting chess moves), Qiu et al. (2025) showed TLCs collapse under this normalization—indeed, they *supercollapse*, meaning they differ by less than the noise from inter-run variation. They further show that collapse arises naturally in constant-learning-rate models where loss obeys typical neural power laws, while extending the theory to arbitrary LR schedules via a theoretical model of quadratic loss.
+
+**The AdamW EMA and its timescale.** AdamW updates at step  $t$  can be expressed in terms of learning rate  $\eta$  and weight decay  $\lambda$  as:  $\theta_t = (1 - \eta\lambda)\theta_{t-1} - \eta \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}$ , where  $\hat{m}_t$  and  $\hat{v}_t$  are bias-corrected EMAs of gradients and squared gradients, respectively (Kingma & Ba, 2014). Wang & Aitchison (2024) observed that AdamW parameters  $\theta_t$  can also be viewed as an EMA—of weight updates. That is, the standard EMA form  $y_t = (1 - \alpha)y_{t-1} + \alpha x_t$  matches AdamW when  $y_t = \theta_t$ ,  $\alpha = \eta\lambda$ , and  $x_t = -\frac{1}{\lambda} \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}$ . The *timescale*  $\tau_{\text{iter}} = 1/\alpha = 1/\eta\lambda$  represents the approximate number of iterations over which updates are averaged. When expressed in epochs as  $\tau_{\text{epoch}} = \tau_{\text{iter}}/M$ , where  $M$  is the number of iterations per epoch, Wang & Aitchison (2024) found the optimal  $\tau_{\text{epoch}}$  (swept by varying  $\lambda$ ) *remains stable* under model and dataset scaling on image tasks.
+
+Since LLM pre-training typically uses a single epoch, we follow Bergsma et al. (2025a) in defining a normalized timescale  $\tau = \tau_{\text{iter}}/T$ , where  $T$  is the total number of optimization steps. As  $T = D/B$  (total tokens/batch size):
+
+$$\tau = 1/(\eta\lambda T) = B/(\eta\lambda D). \quad (2)$$
+
+In contrast with the results in Wang & Aitchison (2024), Bergsma et al. (2025a) did *not* find optimal  $\tau$  to remain stable in LLM training, but instead to decrease as a (scale-invariant) power law in TPP.
+
+{3}------------------------------------------------
+
+Table 1: Core quantities used throughout the paper.
+
+| Symbol | Meaning |
+|-|-|
+| $N$ | Number of model parameters |
+| $D$ | Total number of training tokens |
+| $B$ | Batch size (tokens per optimization step) |
+| $T = D/B$ | Total number of optimization steps |
+| $t = t/T$ | Fraction of training completed |
+| $\text{TPP} = D/N$ | Tokens-per-parameter ratio (TPP) |
+| $L(t)$ | Training loss at step $t$ |
+| $\ell(t)$ | Normalized training loss curve (TLC) |
+| $\eta$ | Learning rate |
+| $\lambda$ | Weight decay coefficient |
+| $\tau_{\text{iter}} = 1/(\eta\lambda)$ | AdamW timescale (in steps) |
+| $\tau = \tau_{\text{iter}}/T = 1/(\eta\lambda T) = B/(\eta\lambda D)$ | Normalized AdamW timescale |
+
+## 3 WHAT FACTORS MODULATE TRAINING CURVE SHAPE?
+
+**Experimental setup.** We use a GPT2-like LLM (Radford et al., 2019), with ALiBi embeddings (Press et al., 2022) and SwiGLU (Shazeer, 2020). We train on SlimPajama (Soboleva et al., 2023). Models are trained with AdamW and  $\mu$ P. We use a linear decay-to-zero LR schedule, context length of 2048, and the GPT2 vocabulary. Full architecture and other details are in Appendix B.1.
+
+We plot  $\ell$  vs. *training fraction*  $\hat{t} = t/T = tB/D$ , with step count  $t$ , total steps  $T$ , batch size  $B$ , and dataset size  $D$ . To reduce noise in small- $B$  settings, we *post hoc* aggregate losses  $\ell(\hat{t})$  using a moving-average filter over a window of 100 steps, smoothing curves without altering the underlying trajectory. We also consistently found simply *dividing by the final training loss* (i.e.,  $\hat{L} = 0$  in Eq. (1)) resulted in optimal alignment across scales, so use this for all curves.
+
+![Figure 3: Three subplots showing Normalized train loss vs. Fraction of training tokens, t-hat. The left plot shows B varies (126, 252, 504, 1008, 2016) with eta=1.62e-02 and lambda=0.1. The middle plot shows eta varies (4.05e-03 to 6.48e-02) with B=504 and lambda=0.1. The right plot shows lambda varies (0.025 to 0.4) with B=504 and eta=1.62e-02. All plots show that TLCs with matching tau (normalized AdamW timescale) exhibit very similar shapes.](954ff3c220707f98bcb2c4b197bd7d9f_img.jpg)
+
+Figure 3: Three subplots showing Normalized train loss vs. Fraction of training tokens, t-hat. The left plot shows B varies (126, 252, 504, 1008, 2016) with eta=1.62e-02 and lambda=0.1. The middle plot shows eta varies (4.05e-03 to 6.48e-02) with B=504 and lambda=0.1. The right plot shows lambda varies (0.025 to 0.4) with B=504 and eta=1.62e-02. All plots show that TLCs with matching tau (normalized AdamW timescale) exhibit very similar shapes.
+
+Figure 3: **AdamW timescale  $\tau$  modulates TLC shape (610M, 80TPP).** Sweeping  $\eta$  (left),  $\lambda$  (middle), or  $B$  (right) produces matching variations in normalized TLCs when  $\tau$  varies identically.
+
+**Finding:  $\tau$  modulates TLC shape.** Fig. 3 shows normalized TLCs for 610M models trained to 80 TPP, sweeping either learning rate  $\eta$ , weight decay  $\lambda$ , or batch size  $B$  in each subplot. Across hyperparameters, TLCs with matching  $\tau$  exhibit very similar shapes, reflecting consistent timescale control. Similar patterns hold across other scales and dataset sizes. Generally, as  $\tau$  increases, TLCs drop more early and less later. This is also a function of the LR schedule: when we switch to using a *Constant* LR, there is no final drop, lower- $\tau$  TLCs are lower throughout (appendix Fig. 10).
+
+**Finding: TPP modulates TLC shape.** We now fix  $\tau$  and test increasing TPP, finding TLCs drop earlier and flatten for longer (Fig. 4, *left, middle*; see also Llama-2 for  $\tau = 0.07$  and  $\tau = 0.13$  in Fig. 1, *left*). Intuitively, relative to length of training, higher TPP drops loss more at the beginning and then obtains diminishing returns later on. In Fig. 4, *right*, TLC shape is quite similar across model scales at the same TPP (when  $\tau$  is roughly equal), showing TPP’s shaping effect is *scale-invariant* (scaling from 111M to 3.3B at fixed TPP represents a  $1000\times$  increase in training FLOPs).
+
+{4}------------------------------------------------
+
+![Figure 4: Three plots showing Normalized train loss vs. Fraction of training tokens, t-hat. Left: Effect of TPP: 111M, tau=0.021. Middle: Effect of TPP: 610M, tau=0.105. Right: Curves align when [TPP, tau] approx const. All plots show that as TPP increases, the loss curves shift down and level off sooner. In the right plot, curves for different model sizes and tau values collapse onto a single trajectory when their product is constant.](e0d425c8e4eef259e4c52d81426d93fa_img.jpg)
+
+Figure 4: Three plots showing Normalized train loss vs. Fraction of training tokens, t-hat. Left: Effect of TPP: 111M, tau=0.021. Middle: Effect of TPP: 610M, tau=0.105. Right: Curves align when [TPP, tau] approx const. All plots show that as TPP increases, the loss curves shift down and level off sooner. In the right plot, curves for different model sizes and tau values collapse onto a single trajectory when their product is constant.
+
+Figure 4: **TPP modulates TLC shape.** Fixing  $\tau$  for 111M (left) & 610M (middle) while increasing TPP, curves shift *down*. When  $\tau \approx \text{const.}$  and TPP also fixed (at 20), curves roughly collapse (right).
+
+**Using bias and variance to explain the effect of  $\tau$ .** Classical analyses of stochastic optimization (e.g., Bottou et al. (2018); D’Angelo et al. (2024)) decompose loss into two components: a *bias* term, reflecting dependence on initial weights, and a *variance* term, reflecting noise from stochastic gradients. Early in training bias dominates; later, variance determines the attainable loss floor.
+
+In our setting, the AdamW timescale  $\tau$  controls this trade-off through the EMA over weight updates (Sec. 2). A smaller  $\tau$  corresponds to a shorter memory: updates depend mainly on recent gradients, yielding rapid bias reduction but a higher variance floor. A larger  $\tau$  averages over more past gradients, reducing variance more effectively but slowing early progress. Empirically, TLCs reflect this pacing, with smaller  $\tau$  producing faster early descent (e.g., left panel of appendix Fig. 10).
+
+This intuition is formalized in Appendix B.3 via a noisy quadratic model:
+
+$$\mathbb{E}[L(\hat{t})] = \frac{h \sigma_x^2}{4\tau} \left(1 - e^{-2\hat{t}/\tau}\right) + \frac{h}{2} e^{-2\hat{t}/\tau} \mathbb{E}[\theta(0)^2], \quad (3)$$
+
+where the first term approaches a variance floor  $\propto 1/\tau$  and the second is an exponentially decaying bias term. Smaller  $\tau$  thus yields faster initial decay but a higher floor, while larger  $\tau$  yields slower initial decay but a lower floor, matching the observed *fast-then-flatten* behavior under constant LR. With LR decay,  $\eta_t \lambda$  decreases and the instantaneous timescale  $\tau_t = 1/(\eta_t \lambda T)$  *increases*, enhancing late-stage variance suppression and steepening final drop (e.g., Fig. 10: more LR decay, more drop).
+
+**Scale invariance.** After normalizing by the final loss, the curvature factor  $h$  cancels (Appendix B.3). Provided residual bias at end-of-training is negligible relative to the variance floor, the normalized TLC depends only on  $\tau$  and  $\hat{t}$ . Thus, at matched  $\tau$ , normalized TLCs collapse across scales.
+
+**Explaining effect of TPP.** TPP affects TLCs via power laws. With a *constant* LR, every step is the endpoint of a shorter run, trained to  $\hat{t} \cdot \text{TPP}$ . Qiu et al. (2025) note  $L(\hat{t})$  therefore *follows the same power law as final loss of a run fully trained to that effective budget*. Normalizing by the projected loss at total TPP removes dependence on model and dataset size, so  $\ell(\hat{t})$  depends only on  $\hat{t}$  and total TPP (Appendix B.2). Higher-TPP curves analytically decay faster and level off sooner. LR schedules deform the curves, but deformation is also scale invariant given consistent curvature of the loss landscape across model sizes under  $\mu P$  (Noci et al., 2024).
+
+**Key takeaway 1:** *TLC shape is governed by three scale-invariant controls: (1) AdamW timescale  $\tau$  (bias–variance trade-off), (2) tokens-per-parameter ratio (TPP), which sets the relative pace of improvement, and (3) learning-rate schedule, which phases early and late loss reduction. When matched across model sizes, normalized TLCs follow the same trajectory—that is, they collapse.*
+
+## 4 CELERITY: A COMPUTE-EFFICIENT MODEL FAMILY WITH COLLAPSE
+
+We have established that collapse arises when  $\tau$  and TPP are held fixed across model sizes. Meanwhile, prior work has shown optimal  $\tau$  to depend only on TPP (Bergsma et al., 2025a). Here, we introduce a model family, *Celerity*, trained at fixed TPP and with  $\tau$  chosen optimally for that TPP, i.e., a regime where collapse emerges naturally as a consequence of good training.
+
+{5}------------------------------------------------
+
+**Compute vs. parameter efficiency.** A key question for Celerity is which TPP to use:  $\approx 20$  is compute-optimal (Sec. 2), while higher TPP means greater *parameter efficiency* (fewer parameters to obtain same loss). For small, inference-ready models, parameter efficiency is paramount, but such models are usually distilled (Tunstall et al., 2023; Wang et al., 2025) rather than pre-trained at high-TPP. *Our main interest is developing pre-training strategies for very large models.* As models scale, the relative importance of compute-efficiency increases—indeed, public families often have declining TPP as size increases (Touvron et al., 2023a; Biderman et al., 2023).
+
+Yet even for the largest models, parameter efficiency remains valuable, e.g., when generating distillation logits or synthetic data. To choose Celerity’s TPP, we analyze this trade-off: Appendix C.1 derives an expression for the extra compute required to compress a model to a fraction of the *size when training compute optimally*—while maintaining the same loss. This expression leverages power law fits from prior work. Fig. 5 plots the trade-off, where a TPP ratio of 234 is estimated to achieve a 62% reduction in parameters with only a 67% increase in total FLOPs (relative to 20 TPP). This is a responsible balance point, near what has been called the *critical model size*—the point where further increasing compute obtains massively-diminishing returns in parameter efficiency (De Vries, 2023) (e.g., doubling *our* FLOPs, to  $3.34\times$  compute-optimal, reduces  $N$  by only a further  $\approx 11\%$ ).
+
+![Figure 5: Expected iso-loss compute vs. compress trade-off by TPP varies. The plot shows 'Cost: Extra compute (C/C_opt)' on the y-axis (log scale from 10^1 to 10^3) versus 'Compression: Fraction of N_opt (k_N)' on the x-axis (linear scale from 0 to 3). A curve starts at (0, 1) and rises. Three points are marked: TPP=20 (k_N=1.0, C/C_opt=1.0), TPP=234 (k_N=0.38, C/C_opt=1.67), and TPP=294 (k_N=0.38, C/C_opt=1.67). A dashed vertical line at k_N=1.0 indicates the compute-optimal point. An arrow points to the right side of the curve, labeled 'better'.](46f43cb4ffd47565e7c0ca306d461435_img.jpg)
+
+Figure 5: Expected iso-loss compute vs. compress trade-off by TPP varies. The plot shows 'Cost: Extra compute (C/C\_opt)' on the y-axis (log scale from 10^1 to 10^3) versus 'Compression: Fraction of N\_opt (k\_N)' on the x-axis (linear scale from 0 to 3). A curve starts at (0, 1) and rises. Three points are marked: TPP=20 (k\_N=1.0, C/C\_opt=1.0), TPP=234 (k\_N=0.38, C/C\_opt=1.67), and TPP=294 (k\_N=0.38, C/C\_opt=1.67). A dashed vertical line at k\_N=1.0 indicates the compute-optimal point. An arrow points to the right side of the curve, labeled 'better'.
+
+Figure 5: Expected iso-loss compute vs. compress trade-off by TPP varies.
+
+Even if the ultimate goal is a “herd” of models at varying TPP, such as Llama-2 in Fig. 1, *left*, there are advantages to training different “bands” within the herd, e.g., 7B, 13B, 34B, 70B *all* at 29 TPP:
+
+- **Tuning:** you can fine-tune  $\tau$  at a smaller scale and zero-shot transfer to larger models.
+- **Diagnostics:** Because TLCs collapse, deviations provide an early warning of training issues.
+- **Cost:** Fixed-TPP bands are cheap (e.g.,  $10\times$  lower  $N \rightarrow 10\times$  smaller  $D \rightarrow 100\times$  less compute).
+
+**Philosophy.** Celerity aims to advance general LLM capabilities using public pre-training corpora and fully-open, consistent methods—rather than targeting specific benchmarks. In contrast, the majority of LLMs now *anneal* on *training subsets of downstream benchmarks* (Dubey et al., 2024; Achiam et al., 2023), or inject special high-quality math (OLMo et al., 2024), code (Zhang et al., 2024a), or instruction (Hu et al., 2024) data during a late-stage *mid-training* process. Since these practices make evaluation problematic (Dominguez-Olmedo et al., 2024), Celerity can serve as a comparison for models trained without (or prior to) applying such techniques.
+
+**Experimental details.** Celerity pre-trains in bands of 20, 80, and 234 TPP, each spanning 300M–3.9B models (Table 2); see Appendix C.2 for further details. Key enablers of Celerity’s reliable, efficient training include:
+
+- **Data:** emphasizing (open) educational, math, and coding data throughout training (appendix Table 6); this outperformed training on the general SlimPajama dataset (Table 7).
+- **Parameterization:** Using CompleteP, which enables hyperparameter transfer over width *and* depth, was more efficient/reliable than  $\mu$ P (Fig. 15).
+- **Optimization:** LR,  $\tau$ , batch size tuned small, transferred via scaling rules.
+
+Table 2: Architecture of Celerity
+
+| Celerity: | 300M | 500M | 900M | 1.8B | 3.9B |
+|-|-|-|-|-|-|
+| Hidden Dim | 640 | 896 | 1152 | 1536 | 2048 |
+| Num Heads | 10 | 14 | 9 | 12 | 16 |
+| Head Size | 64 | 64 | 128 | 128 | 128 |
+| Layers | 13 | 17 | 23 | 30 | 40 |
+| Batch Size | 176 | 240 | 336 | 464 | 672 |
+| Vocabulary | Llama-3 (size 128256) |  |  |  |  |
+| Embeddings | ALiBi, Untied |  |  |  |  |
+| Seq Length | 8192 |  |  |  |  |
+| Non-linearity | Squared ReLU |  |  |  |  |
+| FFN Mult | $8\times$ |  |  |  |  |
+| Norm Type | Pre-Layer Normalization, $\epsilon = 10^{-5}$ |  |  |  |  |
+| LR Schedule | Peak: 0.15, linear decay-to-zero |  |  |  |  |
+| LR warmup | min(10% of total tokens, 375M tokens) |  |  |  |  |
+
+{6}------------------------------------------------
+
+**Evaluation results.** Appendix Table 10 provides full downstream evaluation results for Celerity and other public models tested on seven common downstream tasks. Fig. 2 shows that Celerity models form the accuracy/compute Pareto frontier up to our largest training budget. Against BTLm (Dey et al., 2023b)—trained before task-specific data annealing became standard—Celerity achieves comparable accuracy with 75% fewer training FLOPs. Extrapolation via a fitted power law in compute (dashed line in plot) suggests smooth scaling and continued competitiveness. For comparison with distilled models, we count only *student* FLOPs in Fig. 2. Including *teacher* FLOPs (forward passes), or the cost of teacher training, strengthens Celerity further (appendix Fig. 16).
+
+In terms of parameter efficiency, Celerity is weaker than high-TPP families (Figs. 19 and 20), meaning such models save FLOPs at inference. However, beyond the importance of studying compute efficiency for hyper-scale training, there is strong motivation to train and study compute-efficient smaller models: growing evidence suggests some models may be counter-productively (even *catastrophically*) overtrained, making them harder to fine-tune (Springer et al., 2025) and quantize (Kumar et al., 2024). Compute-efficient alternatives therefore serve both as a principled baseline for understanding scaling and as a practical fallback when high-TPP models prove brittle.
+
+**Collapse results.** In Sec. 3, we normalized training loss curves by dividing by the final loss value,  $L(T)$  (Eq. (1)). To use collapse as a diagnostic *during* training, we need a way to normalize when  $L(T)$  is still unknown. We explored two strategies and use early-align in our experiments:
+
+- *Estimate*: extrapolate  $L(T)$  from a power law fit at lower scales.
+- *Early-align*: choose  $L(T)$  so  $\ell(t)$  best aligns with the smallest-scale curve over 25-50% portion.
+
+![Figure 6: Collapse in Celerity models. The figure contains three plots. The left plot shows 'Celerity train loss collapse: 20 TPP' with normalized train loss (y-axis, 1.0 to 1.4) vs. fraction of training tokens (x-axis, 0.00 to 1.00). It compares 300M, 500M, 900M, 1.8B, and 3.9B models, with a power law fit (dashed line) and N(r=0.175). The middle plot shows 'Celerity train loss collapse: 80 TPP' with the same axes, comparing 300M, 500M, 900M, and 1.8B models, with N(r=0.087). The right plot shows '1.8B (initial) curve with apparent blip' with training loss (unnormalized) (y-axis, 2.0 to 3.0) vs. fraction of training tokens (x-axis, 0.00 to 1.00). It compares the initial 1.8B model (red curve) with a smoothed version (green curve) and a repaired version (blue curve), with N(234 TPP, r=0.051).](4279c8be6ec4ed56f4b3349be98bb426_img.jpg)
+
+Figure 6: Collapse in Celerity models. The figure contains three plots. The left plot shows 'Celerity train loss collapse: 20 TPP' with normalized train loss (y-axis, 1.0 to 1.4) vs. fraction of training tokens (x-axis, 0.00 to 1.00). It compares 300M, 500M, 900M, 1.8B, and 3.9B models, with a power law fit (dashed line) and N(r=0.175). The middle plot shows 'Celerity train loss collapse: 80 TPP' with the same axes, comparing 300M, 500M, 900M, and 1.8B models, with N(r=0.087). The right plot shows '1.8B (initial) curve with apparent blip' with training loss (unnormalized) (y-axis, 2.0 to 3.0) vs. fraction of training tokens (x-axis, 0.00 to 1.00). It compares the initial 1.8B model (red curve) with a smoothed version (green curve) and a repaired version (blue curve), with N(234 TPP, r=0.051).
+
+Figure 6: **Collapse in Celerity models.** Celerity 20 TPP (*left*) and 80 TPP (*middle*) models exhibit collapse. *Right*: smoothing helps detect blip in loss near the end of initial 1.8B run (red curve), but divergence can be detected much earlier using collapse residuals (Fig. 1, *right*).
+
+Fig. 6 shows normalized curves. Collapse is tight at 80 TPP (*middle*). At 20 TPP (*left*), we see small early deviations, which we attribute to differing LR warmup proportions (Table 2). At 234 TPP, divergences appear late in training for larger models (Fig. 1, *middle*). Investigating, we find loss improves disproportionately on training data, while held-out data remains aligned with projections.
+
+**Collapse for monitoring.** Fig. 6 (*right*) shows the unnormalized TLC for our original 1.8B, 234 TPP run. Smoothing helps reveal a sudden rise in training loss, but only after 90% of training. Without a collapse reference, it would be impossible to see that problems began much earlier. By comparing against the 500M TLC reference (Fig. 1, *right*), we pinpoint divergence starting near 60%. Knowing this timing was crucial: we did not waste effort investigating late-stage data redundancy, and instead realized the problem coincided with a job restart under a new compute allocation.
+
+The collapse reference was also essential for debugging: by running ablations with different batch sizes and measuring divergence from the reference, we confirmed the anomaly arose from a numerical issue in a loss kernel triggered only at specific microbatch sizes. After fixing the kernel and restarting from before the divergence, training tracked the reference TLC closely (Fig. 1).
+
+{7}------------------------------------------------
+
+**Key takeaway 2:** *Celerity trains models in fixed-TPP bands at the optimal  $\tau$  for each band. This produces collapse across scales, enabling hyperparameter transfer, early detection of training issues, and reliable cross-scale comparisons. The 234-TPP band lies on the compute-accuracy frontier while using  $\approx 62\%$  fewer parameters than compute-optimal training at equal loss.*
+
+## 5 COLLAPSE ENABLES EARLY STOPPING IN HYPERPARAMETER TUNING
+
+Training to completion is expensive. If normalized TLCs behave predictably, can we stop earlier and still recover the final loss? We show collapse enables principled early stopping in tuning, and introduce a predictive model—fit at small scales, and re-used to extrapolate large-scale TLCs.
+
+![Figure 7: Predictability of batch size sweeps. Two line plots showing training loss (unnormalized) vs. fraction of training tokens (t-hat) for 1.7B, 20 TPP models. The left plot shows sweeping B with lambda = 0.1, where curves for different B values cross. The right plot shows sweeping B with lambda = 0.15, where curves maintain a consistent ordering.](ecb25d766719ce041cf4cc390791a098_img.jpg)
+
+The figure contains two line plots side-by-side. Both plots have 'Training loss (unnormalized)' on the y-axis (ranging from 2.4 to 3.6) and 'Fraction of training tokens,  $\hat{t}$ ' on the x-axis (ranging from 0.00 to 1.00). The plots are titled '1.7B, 20 TPP: sweeping  $B$ ,  $\lambda = 0.1$ ' (left) and '1.7B, 20 TPP: sweeping  $B$ ,  $\tau = 0.15$ ' (right). Each plot shows four curves for different batch sizes  $B$ : 126–1008 (purple), 252–2016 (green), 504–4032 (yellow), and 504–4032 (blue). In the left plot, the curves cross each other. In the right plot, the curves maintain a consistent ordering, with the blue curve (largest  $B$ ) having the lowest loss and the yellow curve (smallest  $B$ ) having the highest loss throughout the training process.
+
+Figure 7: Predictability of batch size sweeps. Two line plots showing training loss (unnormalized) vs. fraction of training tokens (t-hat) for 1.7B, 20 TPP models. The left plot shows sweeping B with lambda = 0.1, where curves for different B values cross. The right plot shows sweeping B with lambda = 0.15, where curves maintain a consistent ordering.
+
+Figure 7: **Predictability of batch size sweeps.** *Left:* When fixing weight decay  $\lambda$  in batch size sweeps (standard practice), normalized TLCs cross, making final loss hard to predict from partial results. *Right:* Fixing  $\tau$  instead (by adjusting  $\lambda$ ), TLCs maintain ordering, enabling early stopping.
+
+**Role of  $\tau$  in tuning.** Recent work tunes learning rate  $\eta$  and batch size  $B$  at smaller scales and extrapolates via power laws (Hu et al., 2024; Bi et al., 2024; Porian et al., 2024). These studies typically fix weight decay  $\lambda$ , which unintentionally varies  $\tau$ —and hence TLC shape. As Fig. 7 (left) shows, when  $\tau$  varies, mid-training loss is a poor predictor of final outcomes during a batch size sweep. In contrast, when  $\tau$  is fixed during tuning (by adjusting  $\lambda$ ), the ordering of  $B$ -specific curves is preserved throughout training (right); runs can be stopped early (e.g., at 25%) while still reliably identifying the best batch size.
+
+There are, however, cases where  $\tau$  must vary. For example, Bergsma et al. (2025a) found optimal  $\tau$  was no longer constant once  $B > B_{\text{crit}}$ , potentially requiring retuning of  $\lambda$ .
+
+**Exploiting collapse for early stopping.** Suppose we wish to find the optimal setting of a hyperparameter (HP) in large-scale training. Naively, we could sweep across settings of the HP and train a large-scale model to completion at each setting; the lowest final loss would identify the best choice. Alternatively, rather than training to completion, we propose a procedure to infer the final loss values from partial training runs. We do this by exploiting the collapse phenomenon as follows:
+
+1. For each large-scale setting in the sweep, first identify the corresponding *TLC controls*, i.e, the LR schedule,  $\tau$ , and TPP.
+2. Train a smaller (e.g., 100M-parameter) model for each unique combination of TLC controls.
+3. Normalize these small-run loss curves to obtain the *normalized universal TLCs* ( $\ell(\hat{t})$ ) corresponding to each set of controls.
+4. Perform *partial* training runs (e.g., to 30% of tokens) at each HP setting.
+5. For each partial large-scale loss curve, use its corresponding universal TLC to *predict* the final loss value. Do this by determining the divisor  $L(T)$  that maximally *aligns* the partial curve with the same segment of the corresponding universal TLC. These divisors thus act both as normalizing constants *and*, by construction, as calibrated *extrapolations* of the final loss.
+6. Select the optimal hyperparameter setting corresponding to the lowest predicted final loss.
+
+{8}------------------------------------------------
+
+**Predicting the normalized universal TLCs.** In some cases, we may already have many small-scale runs, but not loss curves for each of the *specific* TLC controls corresponding to our large-scale sweep. In this situation, we hypothesize that a *parametric surrogate model* can generate high-fidelity normalized universal TLCs as a function of  $\tau$  and TPP. This allows us to obtain the normalized TLC shapes required for Step 5 of the above procedure, *without* training small-models at exactly-matching controls. Fitting such a surrogate lets us leverage our broader TLC dataset, and enables estimation of normalized TLC shapes that go beyond trained regimes (see Appendix D.3 for an example).
+
+For the surrogate  $\ell(\hat{t})$  model, we experimented with several functional forms and ablations on our 111M-scale data, focusing on:
+
+$$\hat{\ell}(\hat{t}) = ((1 + \epsilon_1)/(\hat{t} + \epsilon_1))^m + b \cdot (\eta(\hat{t}) + \epsilon_2)^q \quad (4)$$
+
+The first term captures power-law improvement in training fraction (Appendix B.2) while the second term modulates this by the LR schedule  $\eta(\hat{t})$ , reflecting how variance suppression is phased over training (Appendix B.3).  $m$ ,  $b$ ,  $q$ ,  $\epsilon_1$  and  $\epsilon_2$  are fit parameters. We divide  $\hat{\ell}(\hat{t})$  by its final value so that  $\hat{\ell}(1) = 1.0$ . Fixing  $\epsilon_1 = 0.001$  and  $\epsilon_2 = 0.1$  avoids large swings at  $\hat{\ell}(0)$  and  $\hat{\ell}(1)$ .
+
+In practice, we find  $m$  can be fixed (we use 0.05). Parameters  $b$  and  $q$  then vary systematically with  $\tau$  and TPP, respectively, which we capture with power laws:
+
+$$b = b_{\text{const}} \cdot (\tau)^{b_{\text{exp}}}, \quad q = q_{\text{const}} \cdot (\text{TPP})^{q_{\text{exp}}} \quad (5)$$
+
+Because  $b$  and  $q$  interact, jointly fitting their parameters would require a  $\mathcal{O}(g^4)$  grid search (with  $g$  the grid resolution). Instead, we alternate: fit ( $b_{\text{const}}, b_{\text{exp}}$ ) with fixed  $q$ , then fit ( $q_{\text{const}}, q_{\text{exp}}$ ) with fixed  $b$ , iterating to convergence. This reduces cost to  $\mathcal{O}(g^2)$  while yielding stable fits.
+
+**Results: prediction.** We fit the  $b$  and  $q$  power laws on 111M-scale data and evaluate using mean absolute error (MAE) between  $\hat{\ell}$  and true  $\ell$ , computed over  $\hat{t} \in [0.2, 1]$  (ignoring error around LR warmup, when initial curves are noisy). We report unweighted mean MAE across all curves.
+
+![Figure 8: 3.3B-scale predictions and true normalized TLCs. The plot shows training loss (unnormalized) on the y-axis (ranging from 1.0 to 1.4) versus fraction of training tokens, t-hat (ranging from 0.00 to 1.00). Multiple curves are shown for different lambda values (0.05, 0.1, 0.2, 0.4). A callout box indicates the formula for the predicted loss: approx 1/t^m + b * eta(t)^q.](9d8d3d909d7fdccb631c519df2b86e61_img.jpg)
+
+Figure 8: 3.3B-scale predictions and true normalized TLCs. The plot shows training loss (unnormalized) on the y-axis (ranging from 1.0 to 1.4) versus fraction of training tokens, t-hat (ranging from 0.00 to 1.00). Multiple curves are shown for different lambda values (0.05, 0.1, 0.2, 0.4). A callout box indicates the formula for the predicted loss: approx 1/t^m + b \* eta(t)^q.
+
+Figure 8: **3.3B-scale predictions and true normalized TLCs.**
+
+![Figure 9 (left): Early stopping works best with predicted loss. Tuning lambda in 1.7B model. The plot shows loss diff. predicted vs. true best (%) on the y-axis (ranging from 0.0 to 1.4) versus stop point in training (ranging from 0.2 to 1.0). Three lines are shown: 'Choose randomly' (blue dotted), 'Choose current best' (orange dashed), and 'Choose predicted best' (green solid). The green line stays near 0% while the others fluctuate.](ae21ece48844b14b230832cbb6fcf735_img.jpg)
+
+Figure 9 (left): Early stopping works best with predicted loss. Tuning lambda in 1.7B model. The plot shows loss diff. predicted vs. true best (%) on the y-axis (ranging from 0.0 to 1.4) versus stop point in training (ranging from 0.2 to 1.0). Three lines are shown: 'Choose randomly' (blue dotted), 'Choose current best' (orange dashed), and 'Choose predicted best' (green solid). The green line stays near 0% while the others fluctuate.
+
+Figure 9: **Early stopping works best with predicted loss:** Tuning  $\lambda$  in 1.7B (left) and 3.3B (right) models.
+
+![Figure 9 (right): Early stopping works best with predicted loss. Tuning lambda in 3.3B model. The plot shows loss diff. predicted vs. true best (%) on the y-axis (ranging from 0.0 to 1.4) versus stop point in training (ranging from 0.2 to 1.0). Three lines are shown: 'Choose randomly' (blue dotted), 'Choose current best' (orange dashed), and 'Choose predicted best' (green solid). The green line stays near 0% while the others fluctuate.](8f93234090c5bc224e4b9d035018a927_img.jpg)
+
+Figure 9 (right): Early stopping works best with predicted loss. Tuning lambda in 3.3B model. The plot shows loss diff. predicted vs. true best (%) on the y-axis (ranging from 0.0 to 1.4) versus stop point in training (ranging from 0.2 to 1.0). Three lines are shown: 'Choose randomly' (blue dotted), 'Choose current best' (orange dashed), and 'Choose predicted best' (green solid). The green line stays near 0% while the others fluctuate.
+
+Results show that predictions are good: MAE is low and actually improves with scale (appendix Table 11), likely because (1) larger datasets yield smoother TLCs, and (2) fewer extreme hyperparameter tests at larger scales. Fig. 8 (left) shows an example: predictions trained on 111M-scale TLCs (1000  $\times$  fewer FLOPs) closely match observed curves for a 3.3B model.
+
+Estimating  $b$  and  $q$  as power laws reduces MAE by two-thirds compared to using fixed values (Table 12), though error remains  $\approx 2\times$  higher than an oracle fit of  $b$  and  $q$  *per curve*. Adjusting for both  $\tau$  and TPP is vital; however, fitting  $b$  and  $q$  jointly on both did not improve further.
+
+**Results: tuning.** We now test whether optimal LLM settings can be predicted from partial training runs. At different stopping points in training, we choose a setting as the best, and evaluate the gap between the chosen setting’s final loss and the true best setting. We compare the following choices:
+
+1. *Random baseline*: randomly choose any setting as the best.
+
+{9}------------------------------------------------
+
+2. *Current best*: choose the setting giving the best result at the stop point.
+3. *Predicted best*: Align partial TLCs with predicted  $\hat{\ell}$ , choose lowest fitted normalizer  $L(T)$ .
+
+Fig. 9 shows results for  $\lambda$  sweeps at 1.7B/20TPP (*left*) and 3.3B/30TPP (*right*). *Predicted best* achieves negligible loss gaps when stopping after just 30% and 10% of training, respectively. In contrast, *current best*—used in Almazrouei et al. (2023) for LR tuning—succeeds initially at 3.3B but fails at 1.7B, showing it is not a general solution. Further experiments are in Appendix D.2.
+
+**Key takeaway 3:** *Collapse enables reliable early stopping. By aligning partial training curves to a small-scale reference, we can predict final loss  $L(T)$  and select hyperparameters after only 10–30% of training, substantially reducing tuning compute.*
+
+## 6 RELATED WORK
+
+**Scaling laws and scale-stable dynamics.** *Neural scaling laws* relate loss (generally obtained from separate training runs) to growth in model, data, and compute sizes, via power laws (Hestness et al., 2017; Kaplan et al., 2020; Henighan et al., 2020; Hoffmann et al., 2022; Caballero et al., 2022; Alabdulmohsin et al., 2022). To ensure stable training as models scale, parameterizations such as  $\mu$ P transfer base hyperparameters across sizes, and yield early dynamics that are scale-stable (Yang et al., 2021; Vyas et al., 2023; Kalra et al., 2023), even *super-consistent* (in curvature) (Noci et al., 2024). Observing *suboptimal LRs* under  $\mu$ P as data scales, recent work has proposed decreasing the LR as a function of  $D$  (Shen et al., 2024; Bjorck et al., 2024); Bergsma et al. (2025a) unify these techniques as forms of  $\tau$  adjustment. Qiu et al. (2025) show that, for compute-optimal ladders, TLCs collapse after normalization. We build on these threads at LLM scale while co-scaling width, depth, batch size, and weight decay, identifying new controls that govern TLC collapse.
+
+**LLM loss-curve prediction.** While Kaplan et al. (2020) fit a simple power law to TLCs, recent papers make loss prediction explicitly LR-dependent (Tissue et al., 2024; Luo et al., 2025; Schaipp et al., 2025; Qiu et al., 2025; Hong & Wang, 2025). Complementary to these, we take a timescale-centric view: AdamW implements an EMA over updates, and the normalized timescale  $\tau$  (jointly set by LR, weight decay, and batch size) acts to control an *implicit batch size*, one that trades bias reduction vs. variance suppression and thereby shapes TLCs. In a noisy-quadratic model (Appendix B.3), we derive an expression for training loss under a constant LR, and explain why decaying schedules invert the ordering of TLCs across  $\tau$ , with deformations remaining scale-invariant once normalized.
+
+**Early stopping, HPO, and monitoring.** Early-termination and HPO methods extrapolate TLCs or prune trials (Swersky et al., 2014; Domhan et al., 2015; Jaderberg et al., 2017; Zela et al., 2018; Li et al., 2018; Choi et al., 2018; Akiba et al., 2019), but typically require many short runs and are not tailored to LLM pre-training regimes. Our approach leverages *collapse itself*: fit a small-scale predictor of normalized TLCs, align in-progress curves to infer  $L(T)$ , and select winners by 10–30% of training. Operationally, large-scale reports document spikes and divergences (Chowdhery et al., 2022; Zhang et al., 2022a; Wortsman et al., 2023; Molybog et al., 2023); we show collapse residuals provide a quantitative, scale-normalized early-warning signal and a practical aid for debugging.
+
+## 7 CONCLUSION
+
+At LLM scale, *normalized training loss curves collapse across model sizes* when three controls align: the AdamW timescale  $\tau$ , the tokens-per-parameter ratio (TPP), and the learning-rate schedule. Empirically,  $\tau$  (bias-variance smoothing) and TPP (power-law improvement rate) set TLC shape, while the schedule phases these effects. Fixing TPP and setting  $\tau$  optimally for that TPP yields alignment across  $\sim$ 100M–3.9B parameters in our experiments.
+
+We instantiate this in **Celerity**: fixed TPP with optimal  $\tau$  produces tight collapse and competitive accuracy. *Collapse residuals* surface issues early, localize their onset, and enable safer restarts. A simple predictor for normalized TLCs (fit at small scale) supports *early stopping* in HPO: by 10–30% of training we can select winners and estimate  $L(T)$ , saving tuning compute. For \$1B runs, collapse provides a valuable reference trajectory: keeping training on track, every step of the way.
+
+ Rest of paper (reference and Appendix) is removed.

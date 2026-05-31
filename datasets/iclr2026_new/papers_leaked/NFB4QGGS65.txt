@@ -1,0 +1,282 @@
+
+
+{0}------------------------------------------------
+
+# THE GEOMETRY OF LLM QUANTIZATION: GPTQ AS BABAI’S NEAREST PLANE ALGORITHM
+
+Jiale Chen<sup>1</sup>, Yalda Shabanzadeh<sup>1</sup>, Elvir Crnčević<sup>2</sup>, Torsten Hoefler<sup>3</sup>, Dan Alistarh<sup>1,2</sup>
+
+<sup>1</sup>Institute of Science and Technology Austria (ISTA), <sup>2</sup>Red Hat, Inc., <sup>3</sup>ETH Zürich  
+jiale.chen@ist.ac.at
+
+## ABSTRACT
+
+Quantizing the weights of large language models (LLMs) from 16-bit to lower bitwidth is the de facto approach to deploy massive transformers onto more affordable accelerators. While GPTQ emerged as one of the standard methods for one-shot post-training quantization at LLM scale, its inner workings are described as a sequence of algebraic updates that obscure geometric meaning or worst-case guarantees. In this work, we show that, when executed back-to-front (from the last to first dimension) for a linear layer, GPTQ is mathematically identical to Babai’s nearest plane algorithm for the classical closest vector problem (CVP) on a lattice defined by the Hessian matrix of the layer’s inputs. This equivalence is based on a sophisticated mathematical argument, and has two analytical consequences: first, the GPTQ error propagation step gains an intuitive geometric interpretation; second, GPTQ inherits the error upper bound of Babai’s algorithm under the assumption that no weights are clipped. Leveraging this bound, we design post-training quantization methods that avoid clipping, and outperform the original GPTQ. In addition, we provide efficient GPU inference kernels for the resulting representation. Taken together, these results place GPTQ on a firm theoretical footing and open the door to importing decades of progress in lattice algorithms towards the design of future quantization algorithms for billion-parameter models. Source code is available at <https://github.com/IST-DASLab/GPTQ-Babai>.
+
+## 1 INTRODUCTION
+
+Generative pre-trained transformers (GPT) models contain hundreds of billions of parameters and have massive computational and memory costs (Luccioni et al., 2024). Post-training quantization (PTQ) has emerged as a practical solution for reducing their footprint (Gholami et al., 2021). Among a growing family of methods, GPTQ (Frantar et al., 2023) was the first to push one-shot quantization down to the 4-bit regime, while retaining near-baseline accuracies. GPTQ is still very popular nowadays and yields state-of-the-art results in some regimes (Kurtic et al., 2025).
+
+Despite its empirical success, the GPTQ algorithm was only presented as a sequence of greedily applied algebraic operations: the procedure picks one weight at a time, quantizes it via rounding or clipping, and then optimally updates the not-yet-quantized weights to correct for the remaining per-layer loss; it then continues with the next weight, and so on. This procedure leaves an obvious open question: why does a local greedy rule work so well globally? Current literature does not answer this question, leaving little guidance for principled extensions or failure case analysis.
+
+**Our contribution.** This paper is the first<sup>1</sup> to provide a geometric interpretation for GPTQ, which implies a layer-wise global error bound. Our main theoretical results (Section 4) are (i) the GPTQ optimization problem, i.e., linear-layer quantization with the L2 objective on the output, is equivalent to the closest vector problem (CVP) w.r.t. L2 distance; (ii) the GPTQ algorithm executed from the last to first dimension is the same as Babai’s nearest plane algorithm on the basis of the factorized Hessian matrix, without LLL basis reduction, and this finding holds independently of whether large weights are clipped to the quantization grid (a process known as weight clipping); and (iii) the worst-case layer-wise error in the no-clipping setting is bound tightly by the trace of the diagonal matrix of the
+
+<sup>1</sup>The concurrent work of Birnick (2025) appeared on arXiv slightly later than our preprint (Chen et al., 2025).
+
+{1}------------------------------------------------
+
+LDL decomposition of the Hessian matrix. In addition (Section 5), we tie our theoretical findings to practical quantization by introducing new no-clipping methods of better accuracy than the original GPTQ, together with efficient GPU inference kernels for the resulting representation.
+
+## 2 RELATED WORK
+
+**Second-order compression (pruning and quantization).** The idea of using Hessian information to guide parameter removal dates back to Optimal Brain Damage (LeCun et al., 1989) and Optimal Brain Surgeon (OBS) (Hassibi et al., 1993). Optimal Brain Compression (OBC) (Frantar & Alistarh, 2022) generalizes OBS to the post-training setting and unifies structured pruning and quantization (also called Optimal Brain Quantizer, OBQ) under a single exact solver. GPTQ (Frantar et al., 2023) inherits OBQ’s error propagation method but applies it in a fixed order, so that the inverse Hessian can be shared and only needs to be computed once. GPTQ only has cubic computational complexity in the column/row dimension, making it suitable for LLMs. QuIP (Chee et al., 2023) proves an error guarantee for GPTQ and proposes the LDLQ method as an equivalent variant of GPTQ.
+
+**Lattices, CVP algorithms, and hardness.** The closest vector problem (CVP) is NP-complete to approximate within any constant factor under polynomial-time reductions (van Emde Boas, 1981; Micciancio & Goldwasser, 2002; Dinur et al., 2003), motivating decades of approximation algorithms. Babai’s nearest plane heuristic (Babai, 1986) delivers a solution in polynomial time and, when preceded by LLL basis reduction (Lenstra et al., 1982), enjoys a  $2^{O(n)}$  approximation. BKZ basis reduction (Kannan, 1987) further tightens the constant in an exponential-time solver.
+
+## 3 PRELIMINARIES AND NOTATIONS
+
+We use Python-style indexing inside square brackets to select elements and sub-matrices from a tensor, e.g.,  $[j, :]$  selects the  $j$ -th row vector,  $[:, j]$  selects the  $j$ -th column vector, and  $[j :, j]$  selects the sub-column consisting of rows after the  $j$ -th (inclusive) row in the  $j$ -th column,  $[:, J]$  selects the column vectors indexed by set  $J$  as a sub-matrix, etc<sup>2</sup>.
+
+### 3.1 LINEAR-LAYER QUANTIZATION PROBLEM
+
+**Problem.** Let  $\mathbf{X} = [\mathbf{x}_1, \dots, \mathbf{x}_n]^\top \in \mathbb{R}^{n \times c}$  be the sampled calibration input data of batch size  $n$  and input dimension  $c$  with  $\mathbf{x}_i \in \mathbb{R}^c$  and  $n \geq c = \text{rank}(\mathbf{X})$ . Let  $\mathbf{W} = [\mathbf{w}_1, \dots, \mathbf{w}_r] \in \mathbb{R}^{c \times r}$  be the linear layer weights of input dimension  $c$  and output dimension  $r$  with  $\mathbf{w}_i \in \mathbb{R}^c$ . Let  $\mathbf{S} = [s_1, \dots, s_r] \in \mathbb{R}_{\neq 0}^{c \times r}$  be the non-zero quantization scales with  $s_i \in \mathbb{R}_{\neq 0}$ . Here we consider a general case that applies to any grouping pattern: each weight element  $\mathbf{w}_i[j]$  has its own scaling factor  $s_i[j]$ . Assume  $\mathbf{S}$  is statically computed using methods like AbsMax or MSE before any weight updates. Let  $\mathbb{Z}_\dagger \subseteq \mathbb{Z}$  be the quantization grid (representable integers). In the clipping setting, e.g., for INT4 format,  $\mathbb{Z}_\dagger = \{-8, \dots, -1, 0, 1, \dots, 7\}$ . In the no-clipping setting,  $\mathbb{Z}_\dagger = \mathbb{Z}$ , which allows any integer as the quantization results. Let  $\mathbf{Z} = [z_1, \dots, z_r] \in \mathbb{Z}_\dagger^{c \times r}$  be the (unknown) quantized integers with  $z_i \in \mathbb{Z}_\dagger$ . Denote  $\mathbf{Q} = [q_1, \dots, q_r] \in \mathbb{R}^{c \times r}$  as the dequantized weights with  $q_i = \text{diag}(s_i) z_i \in \mathbb{R}^c$ . The goal is to minimize the L2 error on the layer output  $\mathbf{XW} \in \mathbb{R}^{n \times r}$ :  $\|\mathbf{XQ} - \mathbf{XW}\|_F^2 = \sum_{i=1}^r \|\mathbf{X} \text{diag}(s_i) z_i - \mathbf{X} \mathbf{w}_i\|^2$ , i.e., finding  $\arg\min_{z_i \in \mathbb{Z}_\dagger} \|\mathbf{X} \text{diag}(s_i) z_i - \mathbf{X} \mathbf{w}_i\|^2$  for all  $1 \leq i \leq r$ .
+
+**OBQ algorithm.** Let set  $J_i$  initialized to  $\{1, \dots, c\}$  be the set of not-yet-quantized indices of  $\mathbf{w}_i$ . We denote  $J_i$  as  $J$  as a short-hand notation. For each weight vector  $\mathbf{w}_i$ , OBQ chooses
+
+$$j \leftarrow \arg\min_{j \in J} \frac{(q_i[j] - \mathbf{w}_i[j])^2}{(\mathbf{X}[:, J]^\top \mathbf{X}[:, J])^{-1}[j, j]} \quad (1)$$
+
+as the next dimension to quantize. OBQ quantizes the chosen element  $\mathbf{w}_i[j]$  as  $q_i[j] \leftarrow s_i[j] \cdot \text{ROUND}\left(\frac{\mathbf{w}_i[j]}{s_i[j]}, \mathbb{Z}_\dagger\right)$  via the  $\text{ROUND}(\cdot, \mathbb{Z}_\dagger)$  function which rounds the inputs to the nearest values
+
+<sup>2</sup>For more details, please see (NumPy): <https://numpy.org/doc/stable/user/basics.indexing.html>
+
+{2}------------------------------------------------
+
+in  $\mathbb{Z}_\uparrow$ . OBQ then optimally updates the subset of weights  $w_i[J]$  via an error propagation step  $w_i[j'] \leftarrow w_i[j'] + \Delta w_i[j']$  for all  $j' \in J$  with
+
+$$\Delta w_i[j'] \leftarrow \frac{(\mathbf{X}[:, J^\top \mathbf{X}[:, J])^{-1} [j', j]}{(\mathbf{X}[:, J^\top \mathbf{X}[:, J])^{-1} [j, j]} (q_i[j] - w_i[j]). \quad (2)$$
+
+OBQ continues iteration with  $J \leftarrow J \setminus \{j\}$  until  $J$  is empty.
+
+**GPTQ algorithm.** GPTQ reduces the computational complexity of OBQ by applying the OBQ quantization and error propagation steps in a fixed dimensional order, e.g., from the first to last dimension ( $j \leftarrow 1$  to  $c$ ), instead of dynamically determined orders (Eq. 1). The fixed order is independent of the output channel  $i$ , thus the Hessian information  $(\mathbf{X}[:, J^\top \mathbf{X}[:, J])^{-1} [:, j]$  can be shared across  $w_i$  for all  $i$ , without recomputation. Furthermore, the Hessian information for all  $j$  can be precomputed at once using Cholesky or LDL decomposition of the Hessian matrix  $\mathbf{X}^\top \mathbf{X}$ .
+
+Algorithm 1 is the pseudocode of GPTQ. The algorithm is identical to the original GPTQ paper (Frantar et al., 2023) except for missing the blocking mechanism that only affects the memory access pattern and computational speed, but not the numerical results. Additional notations are as follows.  $\mathbf{P} \in \{0, 1\}^{c \times c}$  is a permutation matrix that modifies the dimensional order of GPTQ quantization. The default order is front-to-back (from the first to last dimension), i.e.,  $\mathbf{P} = \mathbf{I}$ .  $\lambda \in \mathbb{R}_+$  is a small damping factor for computing the Hessian matrix, ensuring the matrix is of full rank. A typical choice is  $\lambda = \frac{1}{100c} \sum_{j=1}^c (\mathbf{X}^\top \mathbf{X}) [j, j] = \frac{1}{100c} \|\mathbf{X}\|_F^2$ . Function  $\text{LDL}$  returns the lower triangular matrix in the  $\text{LDL}$  decomposition. Symbols  $*$  and  $/$  denote element-wise multiplication and division, respectively.
+
+#### --- **Algorithm 1: GPTQ** ---
+
+**Input:** original weights  $\mathbf{W} \in \mathbb{R}^{c \times r}$ , per-coordinate scales  $\mathbf{S} \in \mathbb{R}_{\neq 0}^{c \times r}$ , calibration activation  $\mathbf{X} \in \mathbb{R}^{n \times c}$ , permutation  $\mathbf{P} \in \{0, 1\}^{c \times c}$ , damping ratio  $\lambda > 0$ , integer grid  $\mathbb{Z}_\uparrow \subseteq \mathbb{Z}$
+
+**Output:** quantized weights  $\mathbf{Z} \in \mathbb{Z}_\uparrow^{c \times r}$ , dequantized weights  $\mathbf{Q} \in \mathbb{R}^{c \times r}$
+
+- 1  $\mathbf{H} \leftarrow \mathbf{P}^\top (\mathbf{X}^\top \mathbf{X} + \lambda \mathbf{I}) \mathbf{P}$  // dampen and reorder Hessian
+- 2  $\mathbf{L} \leftarrow \text{LDL}(\mathbf{H}^{-1})$  // factorize (take the L matrix from the LDL decomposition) the inversed Hessian as the shared coefficients for error propagation
+- 3  $\mathbf{W}, \mathbf{S} \leftarrow \mathbf{P}^{-1} \mathbf{W}, \mathbf{P}^{-1} \mathbf{S}$  // reorder weights and scales
+- 4  $\mathbf{Q}, \mathbf{Z} \leftarrow \mathbf{W}, \mathbf{0}$  // initialize dequantized and quantized weights
+- 5 **for**  $j \leftarrow 1$  to  $c$  **do**
+- 6    $\zeta \leftarrow \mathbf{W}[j, :] / \mathbf{S}[j, :]$  // element-wise divide current row by its scales
+- 7    $\mathbf{Z}[j, :] \leftarrow \text{ROUND}(\zeta, \mathbb{Z}_\uparrow)$  // quantize coefficients to the target grid
+- 8    $\mathbf{Q}[j, :] \leftarrow \mathbf{Z}[j, :] * \mathbf{S}[j, :]$  // dequantize current row back to weight space
+- 9    $\varepsilon \leftarrow \mathbf{Q}[j, :] - \mathbf{W}[j, :]$  // quantization error for current row
+- 10    $\mathbf{W}[j, :] \leftarrow \mathbf{W}[j, :] + \mathbf{L}[j, :] \varepsilon$  // propagate error to not-yet-quantized rows; broadcast over columns
+- 11 **end**
+- 12  $\mathbf{Z}, \mathbf{Q} \leftarrow \mathbf{P} \mathbf{Z}, \mathbf{P} \mathbf{Q}$  // undo reorder to restore original input order; return integers and dequantized weights
+
+---
+
+### 3.2 THE CLOSEST VECTOR PROBLEM (CVP)
+
+**Problem.** Let  $\mathbf{B} = [b_1, \dots, b_c] \in \mathbb{R}^{n \times c}$  be a set of  $c$  basis vectors of dimension  $n$  with  $b_j \in \mathbb{R}^n$  and  $n \geq c = \text{rank}(\mathbf{B})$ . Let  $y \in \mathbb{R}^n$  be an external target vector to approximate. Let  $z \in \mathbb{Z}^c$  be the (unknown) integer vector representing the basis combinations of the lattice vector. The goal is to find the vector on the lattice defined by the basis  $\mathbf{B}$  that is closest to the target vector  $y$ , i.e., finding  $\arg\min_{z \in \mathbb{Z}^c} \|Bz - y\|^2$ . A visualization of a two-dimensional CVP is shown in Figure 1 (a).
+
+**Babai’s nearest plane algorithm.** Babai’s algorithm iteratively projects the target vector onto the nearest hyperplane of an LLL-reduced lattice and rounds the corresponding coefficient. Figure 1 (b) visualizes the basis reduction step and Figure 1 (c-d) visualize the projection steps.
+
+{3}------------------------------------------------
+
+![Figure 1: Comparison of lattice algorithms. Top row: (a) CVP, (b) Basis Reduction, (c) Projection Step 1, (d) Projection Step 2. Bottom row: (e) Optimal/Voronoi, (f) Round-to-Nearest, (g) Babai, (h) Babai (Another Order). Legend: Lattice Point (black dot), Target Point (green cross), Returned Lattice Point (green dot), Babai's Projected Point (green x), Basis Vector (blue line), Basis Direction (dotted line), Gram-Schmidt Vector (orange line), Babai's Hyperplane (dashed line), Rounding Boundary (solid line).](e94f3bbb6f7501b9a1344dd0210e5dd8_img.jpg)
+
+Figure 1: Comparison of lattice algorithms. Top row: (a) CVP, (b) Basis Reduction, (c) Projection Step 1, (d) Projection Step 2. Bottom row: (e) Optimal/Voronoi, (f) Round-to-Nearest, (g) Babai, (h) Babai (Another Order). Legend: Lattice Point (black dot), Target Point (green cross), Returned Lattice Point (green dot), Babai's Projected Point (green x), Basis Vector (blue line), Basis Direction (dotted line), Gram-Schmidt Vector (orange line), Babai's Hyperplane (dashed line), Rounding Boundary (solid line).
+
+Figure 1: **Top row:** (a) CVP in a two-dimensional lattice; (b) Basis reduction can find a shorter, more orthogonal basis that can potentially improve the results; (c-d) The projection steps in Babai’s nearest plane algorithm. **Bottom row:** rounding boundaries of (e) optimal rounding or Voronoi cells; (f) round-to-nearest (RTN); (g) Babai’s nearest plane algorithm without basis reduction; (h) Babai’s algorithm without basis reduction under the reversely ordered basis.
+
+Algorithm 2 is the pseudocode of Babai’s nearest plane algorithm to solve CVP. For better computational efficiency, the pseudocode uses a conceptually equivalent approach. Instead of projecting the target vector onto the nearest hyperplane, it moves the target vector along the basis direction towards the hyperplane where the origin lies. The projection error is retained in the updated target vector as it is orthogonal to the hyperplane and will not affect subsequent projections. Additional notations are as follows. Function LLL returns the transformation matrix of the LLL reduction with the parameter delta defaulting to  $\frac{3}{4}$ . Function QR returns the orthogonal matrix in QR decomposition, which is the same as the normalized Gram-Schmidt orthogonalization process.  $\langle \cdot, \cdot \rangle$  denotes the vector dot product. Function ROUND is defined as in the GPTQ algorithm.
+
+#### Algorithm 2: Babai’s Nearest Plane
+
+```
+
+Input: lattice basis (column vectors)  $B \in \mathbb{R}^{n \times c}$ , target vector  $y \in \mathbb{R}^n$ 
+Output: closest lattice vector’s basis coefficients  $z \in \mathbb{Z}^c$ 
+1  $T \leftarrow \text{LLL}(B)$  // unimodular transformation matrix from LLL basis reduction
+2  $A \leftarrow BT$  // reduce the basis
+3  $\Phi \leftarrow \text{QR}(A)$  // normalized Gram-Schmidt process (take the Q matrix from the QR decomposition)
+4  $y', z \leftarrow y, 0$  // initialize residual target and integer solution in reduced basis
+5 for  $j \leftarrow c$  to 1 do
+6    $\zeta \leftarrow \langle \Phi[:, j], y' \rangle / \langle \Phi[:, j], A[:, j] \rangle$  // exact coefficient along the unnormalized Gram-Schmidt vector; ratio between the projections of residual and the reduced basis on the Gram-Schmidt direction
+7    $z[j] \leftarrow \text{ROUND}(\zeta, \mathbb{Z})$  // round to the nearest plane
+8    $y' \leftarrow y' - A[:, j]z[j]$  // update the residual
+9 end
+10  $z \leftarrow Tz$  // map integer solution back to the original basis and return
+
+```
+
+**Babai’s error bound.** Figure 1 shows the rounding boundaries of the optimal (e), round-to-nearest (RTN) (f), and Babai’s algorithm without basis reduction (g-h). Compared to RTN, Babai’s algorithm generates rectangular partitions and thus has a smaller worst-case error. The error bound has been proven in Babai (1986). Formally, let  $\Phi = [\phi_1, \dots, \phi_c]$  be the set of normalized Gram-Schmidt vectors of the LLL-reduced basis  $A = [a_1, \dots, a_c]$ . Let  $\tilde{A} = [\tilde{a}_1, \dots, \tilde{a}_c]$  denote the unnormalized Gram-Schmidt vectors with  $\tilde{a}_j = \langle \phi_j, a_j \rangle \phi_j$ . At iteration  $j$ , the algorithm replaces the exact coefficient  $\zeta$  with the closest integer, so the deviation satisfies  $|\zeta - z[j]| \leq \frac{1}{2}$ . Hence, the error component along  $\tilde{a}_j$  has norm at most  $\frac{1}{2} \|\tilde{a}_j\|$ . Because the  $\tilde{A}$  is orthogonal, these error components
+
+{4}------------------------------------------------
+
+add in Euclidean norm, giving a bound on the residual (error) vector  $\mathbf{y}'$ :  $\|\mathbf{y}'\|^2 \leq \frac{1}{4} \sum_{j=1}^c \|\tilde{\mathbf{a}}_j\|^2 = \frac{1}{4} \sum_{j=1}^c \langle \phi_j, \mathbf{a}_j \rangle^2$ . Babai's algorithm guarantees to return the center vector of the hyper-cuboid (Figure 1 (g)) constructed by the unnormalized Gram-Schmidt vectors  $\tilde{\mathbf{A}}$  where the target  $\mathbf{y}$  is located. Equality is attained when the target  $\mathbf{y}$  lies at the corner of the hyper-cuboid, so the bound is tight. Babai (1986) additionally proved a relative error bound for  $\gamma$  with  $\|\mathbf{Bz} - \mathbf{y}\| \leq \gamma \cdot \min_{\mathbf{z}' \in \mathbb{Z}^c} \|\mathbf{Bz}' - \mathbf{y}\|$ .
+
+$$\text{The bound is } 1 \leq \gamma \leq \sqrt{1 + \max_{1 \leq j \leq c} \frac{\sum_{j'=1}^c \|\tilde{\mathbf{a}}_{j'}\|^2}{\|\tilde{\mathbf{a}}_j\|^2}} \leq \sqrt{c+1} \cdot \max_{1 \leq j' \leq j \leq c} \frac{\|\tilde{\mathbf{a}}_{j'}\|}{\|\tilde{\mathbf{a}}_j\|}.$$
+
+## 4 THEORETICAL RESULTS
+
+We first show that weight quantization is an instance of the classical closest vector problem (CVP) in Section 4.1, which allows us to work in a lattice defined by the Hessian. We then reinterpret OBQ's, equivalently GPTQ's, error propagation step as a nearest hyperplane projection in Section 4.2, establishing our main equivalence in Section 4.3: GPTQ, running back-to-front, coincides exactly with Babai's nearest plane algorithm. This equivalence allows us to import Babai's guarantees to obtain a tight, layer-wise error bound in the no-clipping setting in Section 4.4. Finally, we analyze how quantization order influences this bound in Section 4.5.
+
+### 4.1 EQUIVALENCE BETWEEN L2 QUANTIZATION AND CVP
+
+A quantization problem with the L2 objective  $\operatorname{argmin}_{\mathbf{z}_i \in \mathbb{Z}_i^c} \|\mathbf{X} \operatorname{diag}(\mathbf{s}_i) \mathbf{z}_i - \mathbf{X} \mathbf{w}_i\|^2$  and a CVP with the L2 distance  $\operatorname{argmin}_{\mathbf{z} \in \mathbb{Z}^c} \|\mathbf{Bz} - \mathbf{y}\|^2$  share the same solution ( $\mathbf{z} = \mathbf{z}_i$ ) whenever the structural conditions  $\mathbf{B} = \mathbf{X} \operatorname{diag}(\mathbf{s}_i)$  and  $\mathbf{y} = \mathbf{X} \mathbf{w}_i$  hold and the solution domain matches. To ensure the solution domain matches, we can either disable the clipping in the quantization setup (setting  $\mathbb{Z}_i = \mathbb{Z}$ ) or enable the clipping in the CVP setup (making  $\mathbf{z} \in \mathbb{Z}_i^c$ ). Table 1 is a take-away dictionary showing the correspondence between the quantization and CVP concepts.
+
+Table 1: Quantization-CVP dictionary for the output channel  $i$ .
+
+| Quantization symbol | CVP interpretation |
+|-|-|
+| Input activation $\mathbf{X} \in \mathbb{R}^{n \times c}$ | Basis directions (columns are generators) |
+| Scale $\mathbf{s}_i \in \mathbb{R}_{\neq 0}^c$ | Basis stretches |
+| $\mathbf{B}_{(i)} = \mathbf{X} \operatorname{diag}(\mathbf{s}_i) \in \mathbb{R}^{n \times c}$ | Lattice basis (columns are generators) |
+| Weight $\mathbf{w}_i \in \mathbb{R}^c$ | Floating-point coordinates on the unstretched basis |
+| Integer weight representation $\mathbf{z}_i \in \mathbb{Z}_i^c$ | Integer coordinates on the lattice basis |
+| Dequantized weight $\mathbf{q}_i = \operatorname{diag}(\mathbf{s}_i) \mathbf{z}_i \in \mathbb{R}^c$ | Dequantized coordinates on the unstretched basis |
+| Target output activation $\mathbf{y}_{(i)} = \mathbf{X} \mathbf{w}_i \in \mathbb{R}^n$ | External target vector to approximate |
+
+We can introduce a factor of the Hessian matrix,  $\mathcal{X} = [\chi_1, \dots, \chi_c]$  with  $\mathbf{X}^\top \mathbf{X} = \mathcal{X}^\top \mathcal{X}$ . The loss can then be reformulated as  $\|\mathcal{X} \operatorname{diag}(\mathbf{s}_i) \mathbf{z}_i - \mathcal{X} \mathbf{w}_i\|^2$ .
+
+**Theorem 1 (Quantization and CVP)** *The CVPs using any possible factors  $\mathcal{X}$  of the Hessian matrix  $\mathbf{X}^\top \mathbf{X}$  are equivalent under an orthogonal transformation (rotation and reflection) of the lattice and external target vector.*
+
+**Proof** Let  $\mathcal{X}$  and  $\mathcal{X}'$  be two possible factors of the Hessian matrix with  $\mathcal{X}^\top \mathcal{X} = \mathcal{X}'^\top \mathcal{X}'$ . The inner products  $\langle \chi_{j_1}, \chi_{j_2} \rangle$  and  $\langle \chi'_{j_1}, \chi'_{j_2} \rangle$  must be equal for all  $1 \leq j_1, j_2 \leq c$ . In other words, the lengths  $\|\chi_{j_1}\| = \|\chi'_{j_1}\|$ , and the angles  $\angle(\chi_{j_1}, \chi_{j_2}) = \angle(\chi'_{j_1}, \chi'_{j_2})$ , for all  $1 \leq j_1, j_2 \leq c$ . ■
+
+According to Theorem 1, any decomposition factor  $\mathcal{X}$  of the Hessian matrix  $\mathbf{X}^\top \mathbf{X}$  can be used instead of  $\mathbf{X}$  without changing the geometric properties of the CVP and its associated quantization problem. This is useful for reducing the computational cost, e.g., we may use a square matrix  $\mathcal{X} \in \mathbb{R}^{c \times c}$  instead of the rectangular matrix  $\mathbf{X} \in \mathbb{R}^{n \times c}$ .
+
+{5}------------------------------------------------
+
+### 4.2 OBQ'S GEOMETRIC INTERPRETATION
+
+We first demonstrate the geometric interpretation of OBQ (GPTQ's slower predecessor) to facilitate our equivalence proof of GPTQ and Babai's algorithm in Section 4.3.
+
+![Figure 2: Equivalence of OBQ's error propagation and Babai's projection. The figure consists of four subplots: (a) 3D Babai's Projection, (b) 3D Babai & OBQ Equivalence, (c) 2D Nearest Hyperplane, and (d) 2D Orthogonal Projection Plane. A legend on the right side of the figure defines various geometric elements: Auxiliary Line in Orthogonal Directions (dotted line), Basis Vector b_{j_1} (solid blue line), Basis Vector b_{j_2} (solid red line), Target Point y = \sum_j \zeta_j b_j (black star), Nearest Hyperplane \mathcal{NHP} := [\zeta_{j_2}] b_{j_2} + \text{Span}\{b_j | j \neq j_2\} (pink shaded area), Hyperline \mathcal{HL} := [\zeta_{j_2}] b_{j_2} + \text{Span}\{b_j | j \neq j_1, j_2\} (solid black line), Babai's Projected Point \text{Proj}_{\mathcal{NHP}} y = \sum_j (\zeta_j + \Delta\zeta_j) b_j (black star), Error Vector \Delta y = \text{Proj}_{\mathcal{NHP}} y - y = \sum_j \Delta\zeta_j b_j (green vector), Error Component Vector \Delta\zeta_{j_1} b_{j_1} (red vector), Error Component Vector \Delta\zeta_{j_2} b_{j_2} (blue vector), Remaining Basis Component Vector \sum_{j \neq j_1, j_2} \Delta\zeta_j b_j (dashed green line), Inverse Basis Vector n_{j_1} : (n_{j_1}, b_{j_1}) = 1, n_{j_1} \perp b_{j_j}, \forall j \neq j_1 (magenta dashed line), Inverse Basis Vector n_{j_2} : (n_{j_2}, b_{j_2}) = 1, n_{j_2} \perp b_{j_j}, \forall j \neq j_2 (cyan dashed line), Orthogonal Projection Plane \mathcal{OPP} := \text{Span}\{n_j | j = j_1, j_2\} (light blue shaded area), Projected Basis Vector \text{Proj}_{\mathcal{OPP}}(b_{j_1}) (dashed blue line), Projected Basis Vector \text{Proj}_{\mathcal{OPP}}(b_{j_2}) (dashed red line), Projected Error Vector \text{Proj}_{\mathcal{OPP}}(\Delta y) = \Delta y - \sum_{j \neq j_1, j_2} \Delta\zeta_j \text{Proj}_{\mathcal{OPP}}(b_j) (dotted green line), Projected Error Component Vector \Delta\zeta_{j_1} \text{Proj}_{\mathcal{OPP}}(b_{j_1}) (dashed red line), Projected Error Component Vector \Delta\zeta_{j_2} \text{Proj}_{\mathcal{OPP}}(b_{j_2}) (dashed blue line), and Angle \theta = \angle(n_{j_1}, n_{j_2}) = \pi - \angle(\text{Proj}_{\mathcal{OPP}}(b_{j_1}), \text{Proj}_{\mathcal{OPP}}(b_{j_2})) (yellow circle).](46f43cb4ffd47565e7c0ca306d461435_img.jpg)
+
+Figure 2: Equivalence of OBQ's error propagation and Babai's projection. The figure consists of four subplots: (a) 3D Babai's Projection, (b) 3D Babai & OBQ Equivalence, (c) 2D Nearest Hyperplane, and (d) 2D Orthogonal Projection Plane. A legend on the right side of the figure defines various geometric elements: Auxiliary Line in Orthogonal Directions (dotted line), Basis Vector b\_{j\_1} (solid blue line), Basis Vector b\_{j\_2} (solid red line), Target Point y = \sum\_j \zeta\_j b\_j (black star), Nearest Hyperplane \mathcal{NHP} := [\zeta\_{j\_2}] b\_{j\_2} + \text{Span}\{b\_j | j \neq j\_2\} (pink shaded area), Hyperline \mathcal{HL} := [\zeta\_{j\_2}] b\_{j\_2} + \text{Span}\{b\_j | j \neq j\_1, j\_2\} (solid black line), Babai's Projected Point \text{Proj}\_{\mathcal{NHP}} y = \sum\_j (\zeta\_j + \Delta\zeta\_j) b\_j (black star), Error Vector \Delta y = \text{Proj}\_{\mathcal{NHP}} y - y = \sum\_j \Delta\zeta\_j b\_j (green vector), Error Component Vector \Delta\zeta\_{j\_1} b\_{j\_1} (red vector), Error Component Vector \Delta\zeta\_{j\_2} b\_{j\_2} (blue vector), Remaining Basis Component Vector \sum\_{j \neq j\_1, j\_2} \Delta\zeta\_j b\_j (dashed green line), Inverse Basis Vector n\_{j\_1} : (n\_{j\_1}, b\_{j\_1}) = 1, n\_{j\_1} \perp b\_{j\_j}, \forall j \neq j\_1 (magenta dashed line), Inverse Basis Vector n\_{j\_2} : (n\_{j\_2}, b\_{j\_2}) = 1, n\_{j\_2} \perp b\_{j\_j}, \forall j \neq j\_2 (cyan dashed line), Orthogonal Projection Plane \mathcal{OPP} := \text{Span}\{n\_j | j = j\_1, j\_2\} (light blue shaded area), Projected Basis Vector \text{Proj}\_{\mathcal{OPP}}(b\_{j\_1}) (dashed blue line), Projected Basis Vector \text{Proj}\_{\mathcal{OPP}}(b\_{j\_2}) (dashed red line), Projected Error Vector \text{Proj}\_{\mathcal{OPP}}(\Delta y) = \Delta y - \sum\_{j \neq j\_1, j\_2} \Delta\zeta\_j \text{Proj}\_{\mathcal{OPP}}(b\_j) (dotted green line), Projected Error Component Vector \Delta\zeta\_{j\_1} \text{Proj}\_{\mathcal{OPP}}(b\_{j\_1}) (dashed red line), Projected Error Component Vector \Delta\zeta\_{j\_2} \text{Proj}\_{\mathcal{OPP}}(b\_{j\_2}) (dashed blue line), and Angle \theta = \angle(n\_{j\_1}, n\_{j\_2}) = \pi - \angle(\text{Proj}\_{\mathcal{OPP}}(b\_{j\_1}), \text{Proj}\_{\mathcal{OPP}}(b\_{j\_2})) (yellow circle).
+
+Figure 2: Equivalence of OBQ's error propagation and Babai's projection. (a) 3D plot showing the target being projected onto the nearest plane. (b) 3D plot showing how the projection error is propagated. (c) 2D plot showing the vectors on the nearest hyperplane in (a-b). (d) 2D plot showing the vectors on the orthogonal projection plane in (b).
+
+**Theorem 2 (Error Propagation and Babai's Projection)** *Babai's nearest plane algorithm iteratively projects the target vector onto the nearest hyperplane and rounds the coefficient. The OBQ error propagation step (Eq. 2) is exactly this projection on the original basis  $B = X \text{diag}(s_i)$  without basis reduction.*
+
+**Proof** Let  $B = [b_1, \dots, b_n]$  be the basis with  $b_j$  being a basis vector. Let  $J$  be the set of unprojected indices with  $j_1, j_2 \in J$  and  $j_1 \neq j_2$ . Let  $y = \sum_{j \in J} \zeta_j b_j$  be the current residual target where  $\zeta_j \in \mathbb{R}$  is a real number to be rounded to integers. Let  $\mathcal{NHP} := [\zeta_{j_2}] b_{j_2} + \text{Span}\{b_j | j \neq j_2\}$  be the nearest hyperplane that is orthogonal to the Gram-Schmidt vector  $b_{j_2} - \sum_{j \neq j_2} \text{Proj}_{b_j}(b_{j_2})$ . Figure 2 (a) is a 3D plot showing the projection error vector  $\Delta y = \text{Proj}_{\mathcal{NHP}}(y) - y$ . We focus on analyzing the error propagation in the direction of basis  $b_{j_1}$  induced by the projection of basis  $b_{j_2}$  and collapse the span of other basis vectors to a single dimension as illustrated by the hyperline  $\mathcal{HL} := [\zeta_{j_2}] b_{j_2} + \text{Span}\{b_j | j \neq j_1, j_2\}$ . Figure 2 (b) is a 3D plot showing the decomposition of the error  $\Delta y = \sum_{j \in J} \Delta\zeta_j b_j$  as the error component vectors in the basis directions. Figure 2 (c) is a 2D plot showing the vectors on plane  $\mathcal{NHP}$ . The number  $\zeta_j$  will be updated to  $\zeta_j + \Delta\zeta_j$  such that  $\text{Proj}_{\mathcal{NHP}}(y) = \sum_{j \in J} (\zeta_j + \Delta\zeta_j) b_j$ . Next, let  $N = B^{-T} = [n_1, \dots, n_n]$  be the inverse basis. Then, we have  $\langle n_j, b_j \rangle = 1$  and  $n_j \perp b_{j'}, \forall j \neq j'$ . We project all the vectors in Figure 2 (b) onto the orthogonal projection plane  $\mathcal{OPP} := \text{Span}\{n_j | j = j_1, j_2\}$  that is orthogonal to the hyperline  $\mathcal{HL}$ , and continue the proof in the 2D geometry in Figure 2 (d). Denote the angle
+
+$$\theta = \angle(n_{j_1}, n_{j_2}) = \pi - \angle(\text{Proj}_{\mathcal{OPP}}(b_{j_1}), \text{Proj}_{\mathcal{OPP}}(b_{j_2})). \text{ Then, } \frac{\Delta\zeta_{j_1} \|\text{Proj}_{\mathcal{OPP}}(b_{j_1})\|}{\Delta\zeta_{j_2} \|\text{Proj}_{\mathcal{OPP}}(b_{j_2})\|} = \cos \theta = \frac{\langle n_{j_1}, n_{j_2} \rangle}{\|n_{j_1}\| \|n_{j_2}\|} = \frac{\|n_{j_2}\| \langle n_{j_1}, n_{j_2} \rangle}{\|n_{j_1}\| \langle n_{j_2}, n_{j_2} \rangle}. \text{ For } j = j_1, j_2, \|\text{Proj}_{\mathcal{OPP}}(b_j)\| \|n_j\| = \frac{(\text{Proj}_{\mathcal{OPP}}(b_j), n_j)}{\cos(\frac{\pi}{2} - \theta)} = \frac{\langle b_j, n_j \rangle}{\cos(\frac{\pi}{2} - \theta)} = \frac{1}{\cos(\frac{\pi}{2} - \theta)}. \text{ For } j, j' \in \{j_1, j_2\}, \langle n_j, n_{j'} \rangle = (N^T N)[j, j'] = (B^T B)^{-1}[j, j'].$$
+
+$$\text{Combining the above equations, } \Delta\zeta_{j_1} = \frac{\|\text{Proj}_{\mathcal{OPP}}(b_{j_2})\|}{\|\text{Proj}_{\mathcal{OPP}}(b_{j_1})\|} \frac{\|n_{j_2}\|}{\|n_{j_1}\|} \frac{\langle n_{j_1}, n_{j_2} \rangle}{\langle n_{j_2}, n_{j_2} \rangle} \Delta\zeta_{j_2} = \frac{\langle n_{j_1}, n_{j_2} \rangle}{\langle n_{j_2}, n_{j_2} \rangle} \Delta\zeta_{j_2} =$$
+
+{6}------------------------------------------------
+
+$(\mathbf{B}^\top \mathbf{B})^{-1} [j_1, j_2] \Delta \zeta_{j_2}$ . Finally, substituting  $\mathbf{B} = (\mathbf{X} \text{ diag}(s_i))[:, J]$  and  $\zeta_j = \frac{w_i[j]}{s_i[j]}$  completes the proof. ■
+
+![Figure 3: Geometric interpretation of OBQ's quantization order. The diagram shows a 2D coordinate system with a horizontal axis. A blue vector labeled 'Basis Vector b_{j_2}' points into the first quadrant. A green vector labeled 'Error Vector \Delta y' points from the tip of the blue vector to a point on the horizontal axis. A dashed line labeled 'Auxiliary Line in Orthogonal Directions' is perpendicular to the blue vector. A point labeled 'Target Point y = \sum_i \zeta_i b_i' is on the horizontal axis. A point labeled 'Babai's Projected Point Proj_{\mathcal{NHP}} y = \sum_i (\zeta_i + \Delta \zeta_i) b_i' is also on the horizontal axis. A point labeled 'Nearest Hyperplane (Hyperline) \mathcal{NHP} = \{c_i b_i + \sum_{j \neq j_2} c_j b_j\}' is represented by a dashed line. A point labeled 'Error Component Vector \Delta \zeta_{j_2} b_{j_2}' is a segment of the green vector. A point labeled 'Remaining Error Component Vector \sum_{j \neq j_2} \Delta \zeta_j b_j' is the projection of the green vector onto the horizontal axis. A point labeled 'Inverse Basis Vector n_{j_2} : \langle n_{j_2}, b_{j_2} \rangle = 1; n_{j_2} \perp b_j, \forall j \neq j_2' is a vector perpendicular to the horizontal axis. A point labeled 'Projected Basis Vector Proj_{n_{j_2}}(b_{j_2})' is the projection of the blue vector onto the horizontal axis.](c0843c6d138705289960d9f53a6e72a1_img.jpg)
+
+Figure 3: Geometric interpretation of OBQ's quantization order. The diagram shows a 2D coordinate system with a horizontal axis. A blue vector labeled 'Basis Vector b\_{j\_2}' points into the first quadrant. A green vector labeled 'Error Vector \Delta y' points from the tip of the blue vector to a point on the horizontal axis. A dashed line labeled 'Auxiliary Line in Orthogonal Directions' is perpendicular to the blue vector. A point labeled 'Target Point y = \sum\_i \zeta\_i b\_i' is on the horizontal axis. A point labeled 'Babai's Projected Point Proj\_{\mathcal{NHP}} y = \sum\_i (\zeta\_i + \Delta \zeta\_i) b\_i' is also on the horizontal axis. A point labeled 'Nearest Hyperplane (Hyperline) \mathcal{NHP} = \{c\_i b\_i + \sum\_{j \neq j\_2} c\_j b\_j\}' is represented by a dashed line. A point labeled 'Error Component Vector \Delta \zeta\_{j\_2} b\_{j\_2}' is a segment of the green vector. A point labeled 'Remaining Error Component Vector \sum\_{j \neq j\_2} \Delta \zeta\_j b\_j' is the projection of the green vector onto the horizontal axis. A point labeled 'Inverse Basis Vector n\_{j\_2} : \langle n\_{j\_2}, b\_{j\_2} \rangle = 1; n\_{j\_2} \perp b\_j, \forall j \neq j\_2' is a vector perpendicular to the horizontal axis. A point labeled 'Projected Basis Vector Proj\_{n\_{j\_2}}(b\_{j\_2})' is the projection of the blue vector onto the horizontal axis.
+
+Figure 3: Geometric interpretation of OBQ's quantization order. This 2D plot shows the target being projected onto the nearest plane.
+
+**Corollary 3 (OBQ Dimension Selection)** *At each dimension selection step (Eq. 1), OBQ selects the not-yet-quantized dimension  $j$  such that the nearest hyperplane of dimension  $j$  is closest to the target residual vector.*
+
+**Proof** We use the same notations defined in Theorem 2. Figure 3 is a 2D plot showing the distance (projection error or quantization error) between the target residual vector  $\mathbf{y}$  and the nearest hyperplane  $\mathcal{NHP}$  of the basis  $b_{j_2}$ . For better illustration, we collapse  $\mathcal{NHP}$  into a single dimension. The distance  $\|\Delta \mathbf{y}\|$  can be expressed as  $\|\Delta \mathbf{y}\| = \|\text{Proj}_{n_{j_2}}(\Delta \mathbf{y})\| = |\Delta \zeta_{j_2}| \|\text{Proj}_{n_{j_2}}(b_{j_2})\| = \frac{|\Delta \zeta_{j_2}| \langle b_{j_2}, n_{j_2} \rangle}{\|n_{j_2}\|} = \frac{|\Delta \zeta_{j_2}|}{\|n_{j_2}\|}$ . For each  $w_i$ , OBQ independently selects  $j = \text{argmin}_{j \in J} \frac{(q_i[j] - w_i[j])^2}{(\mathbf{X}[:, J]^\top \mathbf{X}[:, J])^{-1}[j, j]} = \text{argmin}_{j \in J} \frac{(\Delta \zeta_j)^2}{\langle n_j, n_j \rangle} = \text{argmin}_{j \in J} \frac{|\Delta \zeta_j|}{\|n_j\|}$  as the next dimension to quantize, which is exactly minimizing this distance. ■
+
+### 4.3 GPTQ AND BABAI'S ALGORITHM
+
+Originally, GPTQ (Algorithm 1) runs from the first to the last dimension ( $j \leftarrow 1$  to  $c$ ) while Babai's algorithm (Algorithm 2) runs from the last to the first dimension ( $j \leftarrow c$  to 1). This is the only (superficial) difference between the two algorithms, as formalized below.
+
+**Theorem 4 (GPTQ and Babai)** *GPTQ and Babai's algorithm without basis reduction will have the same results if we align the dimensional order of these two algorithms, e.g., running GPTQ from the last to the first dimension.*
+
+**Proof** We prove this theorem both geometrically and algebraically. We first present the geometric proof. Theorem 2 shows that each intermediate weight vector produced by OBQ, equivalently GPTQ, can be viewed as Babai's residual vector in the activation space. At step  $j$  (running from the last to the first dimension,  $j \leftarrow c$  to 1), GPTQ's error propagation update is exactly Babai's projection at step  $j$ , which projects the current residual of the target vector onto the hyperplane orthogonal to the  $j$ -th Gram-Schmidt vector.
+
+Alternatively, we present a more rigorous algebraic proof. Section B describes the exact quantization procedures using Babai's algorithm in more detail, with the pseudocode in Algorithm 4. Section C contains the equivalence proof, in which we proceed in three steps. First, we rewrite GPTQ to track the cumulative quantization error and show that this form is algebraically equivalent to the standard implementation. Second, we run GPTQ in the back-to-front order and replace the lower triangular factor with an upper triangular one so that each update affects only the not-yet-quantized coordinates. Third, we prove that the step-wise rounding decisions of the back-to-front GPTQ coincide with those of Babai's algorithm. ■
+
+**Geometric interpretation of GPTQ.** Theorem 4 shows that, if we regard the activations as the lattice basis and transform the floating-point weight vector to a target vector in the activation space,
+
+{7}------------------------------------------------
+
+GPTQ performs an *orthogonal walk* through a nested sequence of affine subspaces in a pre-computed dimensional order.
+
+**Ineffectiveness of composing algorithms.** A seemingly appealing idea is to take the solution returned by any Babai iteration and then perform one further GPTQ-style error propagation step on the weights in the activation space, hoping to push the approximation even closer to the optimum. However, as proven in Section C.4, such an extra update vanishes: the final results of  $\mathbf{Z}$  and  $\mathbf{Q}$  remain unchanged. In other words, once Babai’s projection has been executed, any subsequent GPTQ-style correction is algebraically redundant. This confirms that the equivalence in Theorem 4 is already tight; neither algorithm can be strengthened by composition.
+
+### 4.4 GPTQ’S ERROR BOUND
+
+Having established the correspondence between GPTQ and Babai’s nearest plane algorithm, we can now import Babai’s approximation guarantee to obtain an upper bound on the layer-wise quantization error in the no-clipping setting.
+
+**Theorem 5 (GPTQ Error Bound)** Assume no clipping ( $\mathbb{Z}_q = \mathbb{Z}$ ) and let  $\mathbf{T}$  be the permutation matrix of the reversed GPTQ quantization order (equivalently  $\mathbf{P}$  with the reversed column order). Let  $\mathbf{D}$  be the diagonal matrix of the LDL decomposition of the permuted Hessian matrix  $\mathbf{T}^\top \mathbf{X}^\top \mathbf{X} \mathbf{T}$ . For every output channel  $i$  ( $1 \leq i \leq r$ ) produced by Babai’s algorithm, or equivalently the GPTQ algorithm executed back-to-front, the (absolute) quantization error has a tight upper bound:  $\|\mathbf{X} \operatorname{diag}(\mathbf{s}_i) \mathbf{z}_i - \mathbf{X} \mathbf{w}_i\|^2 \leq \frac{1}{4} (\mathbf{T}^{-1} \mathbf{s}_i)^\top \mathbf{D} (\mathbf{T}^{-1} \mathbf{s}_i)$ . For the relative bound for  $\gamma$  with  $\|\mathbf{X} \operatorname{diag}(\mathbf{s}_i) \mathbf{z}_i - \mathbf{X} \mathbf{w}_i\| \leq \gamma \cdot \min_{\mathbf{z}' \in \mathbb{Z}^c} \|\mathbf{X} \operatorname{diag}(\mathbf{s}_i) \mathbf{z}' - \mathbf{X} \mathbf{w}_i\|$ , we have  $1 \leq \gamma \leq \sqrt{1 + \max_{1 \leq j \leq c} \frac{\sum_{i'=1}^{j-1} d_j^2}{d_j^2}} \leq \sqrt{c+1} \cdot \max_{1 \leq j' \leq j \leq c} \frac{d_{j'}}{d_j}$  where  $d_j = \sqrt{\mathbf{D}[j, j]} |(\mathbf{T}^{-1} \mathbf{s}_i)[j]|$ .
+
+**Proof** The full proof of Theorem 5 is presented in Section D.1. ■
+
+If the scales  $\mathbf{s}_i$  are small enough, we may assume the weights  $\mathbf{w}_i$  are nearly uniformly distributed within the hyper-cuboid constructed by Babai’s orthogonalized basis vectors, the expected absolute error will be  $\frac{1}{3}$  of the worst-case bound. See Section D.2 for a proof.
+
+### 4.5 THE ROLE OF QUANTIZATION ORDER IN GPTQ
+
+The quadratic form on the right-hand side of the absolute error bound in Theorem 5 is sensitive to the pivot order of the LDL decomposition of the Hessian matrix; this is the quantization order. Reordering the dimensions changes the entries of the diagonal matrix  $\mathbf{D}$  before the scale  $\mathbf{s}_i$  is “weighted” by them. A poor order may place large  $\mathbf{D}$  entries against large  $\mathbf{s}_i$  entries and hence inflate the bound. For a batched quantization algorithm like GPTQ, the order should be independent of the output channel  $i$ . To develop a good heuristic order, a reasonable approximation to make, especially for large quantization group sizes, is that the elements of  $\mathbf{s}_i[j]$  are equal for all  $1 \leq j \leq c$ . Then we can focus on finding the optimal pivot order for the LDL decomposition of the Hessian matrix  $\mathbf{X}^\top \mathbf{X}$  to minimize  $\operatorname{tr}(\mathbf{D})$ .
+
+Finding the optimal order is NP-hard (Rose et al., 1976). However, heuristics often effectively reduce the trace term in practice. Even with clipping, heuristics can reduce the error. GPTQ introduces the act-order, the descending order of the Hessian diagonal, i.e., the ascending order of the Hessian diagonal when applied to Babai’s algorithm.
+
+To improve upon act-order, we propose the min-pivot order, which is essentially taking the minimum diagonal entry at each LDL (or Cholesky) decomposition step. This order can be calculated by Algorithm 3, which has cubic time complexity and does not increase the overall time complexity of quantization. This order also has a geometric interpretation, as the order of the Gram-Schmidt orthogonalization process of the basis: always taking the shortest residual vector as the next one to orthogonalize, agreeing with Babai’s relative error bound. Across our preliminary runs (Section D.3), min-pivot *consistently* reduces  $\operatorname{tr}(\mathbf{D})$  relative to act-order, but the downstream accuracy gains are modest. We nevertheless report min-pivot as a principled choice, and view act-order as a cheap approximation that only considers the Hessian diagonal, which already captures most of the benefit when the Hessian matrix is well-conditioned.
+
+{8}------------------------------------------------
+
+#### **Algorithm 3:** Min-Pivot
+
+---
+
+```
+
+Input: Hessian  $H \in \mathbb{R}^{c \times c}$ 
+Output: order encoded as a permutation matrix  $T \in \{0, 1\}^{c \times c}$ 
+1  $J \leftarrow \{1, \dots, c\}$  // initialize the not-yet-pivoted indices
+2  $T \leftarrow 0$  // initialize the output permutation matrix
+3 for  $j \leftarrow 1$  to  $c$  do
+4    $j' \leftarrow \operatorname{argmin}_{j' \in J} H[j', j']$  // choose next index with the smallest current diagonal
+5    $H \leftarrow H - H[:, j'] H[j', :] / H[j', j']$  // updates remaining entries with rank-1 Schur
+   complement
+6    $T[j', j] \leftarrow 1$  // record the index
+7    $J \leftarrow J \setminus \{j'\}$  // mark pivot as used
+8 end
+
+```
+
+---
+
+## 5 APPLICATIONS
+
+The original GPTQ algorithm clips the overflowed integers at the rounding step, introducing large errors that violate the error bound in Theorem 5. In this section, we explore error-guaranteed variants of GPTQ that work in the no-clipping regime.
+
+We notice that enforcing no-clipping by simply increasing scales is counterproductive: larger scales enlarge the bound, and the resulting errors can exceed those of a clipped scheme such as MSE. Hence, any practical no-clipping design must account for the weight distributions that are known to have heavy outliers (Li et al., 2025). We would still like to apply small scales, but use small bitwidths for the bulk of inliers while handling the overflowed outliers with more storage budget without clipping them. We therefore propose two overflow-tolerant schemes.
+
+**Scale-adjusted SpQR (SSQR).** SpQR (Dettmers et al., 2024) keeps a small set of outliers in full precision, but it still leaves clipping in place: weights are grouped, the outliers and a shared scale are chosen per group before the GPTQ updates, and there is no guarantee the updated inlier weights stay within the representable range. We design SSQR with a scale-adjustment mechanism to fix this issue. For simplicity, we discard SpQR’s second-level quantization for the scales. For a weight vector  $w_i \in \mathbb{R}^c$ , we represent the quantized weight  $q_i \in \mathbb{R}^c$  as  $\operatorname{diag}(s_i) z_i + \xi_i$  where  $z_i \in \mathbb{Z}_i^c$  is the low-bitwidth integer weight vector,  $s_i \in \mathbb{R}_{>0}^c$  is the floating-point scale vector with each scale shared per group (only one number per group is actually stored), and  $\xi_i \in \mathbb{R}^c$  is the sparse floating-point outlier vector (stored in the compressed sparse row format, CSR) that captures all the overflowed weights after GPTQ’s error propagation. The scale-adjustment mechanism tunes the scale  $s_i$  until the density of  $\xi_i$  satisfies the specified rate. Because exhaustive trial-and-error over per-group scales is infeasible in large layers, the mechanism only proportionally changes  $s_i$  so that the search space reduces to one dimension. With the observation that the outlier rate is negatively related to the scales in general, this can be done via binary search: initialize  $s_i$  using MSE, quantize  $w_i$  with the specified format using GPTQ without clipping, calculate the density of  $\xi_i$ , and adjust  $s_i$  and iterate. Section E.1 Algorithm 9 is the pseudocode.
+
+**Huffman-encoded post-training quantization (HPTQ).** To better align with the infinite, unconstrained lattice in CVP, we design HPTQ, which represents both inliers and outliers in a unified, equal-spaced integer grid. The idea is to use Huffman encoding, which was also explored for network compression by Choi et al. (2017). We quantize the weight matrix  $W \in \mathbb{R}^{c \times r}$  as  $Q = sZ$  with a single scalar  $s \in \mathbb{R}_{\neq 0}$  and integers  $Z \in \mathbb{Z}^{c \times r}$ . We select  $s$  via an entropy-guided binary search: initialize a range proportional to the maximum weight, quantize to unclipped integers with GPTQ, measure the Huffman coding cost of  $Z$ , and adjust  $s$  until the encoded bits meet a target average bitwidth. This yields uneven-bitwidth representations that preserve accuracy while meeting a compression budget. Section E.1 Algorithm 11 is the pseudocode.
+
+Experiments compare round-to-nearest (RTN), original GPTQ, HPTQ, and SSQR with 1~5% outliers. We also include Huffman-encoded RTN (HRTN) as a baseline to HPTQ, which mirrors HPTQ but replaces GPTQ with RTN (pseudocode: Section E.1 Algorithm 12). The quantization order is act-order for all methods. RTN, GPTQ, and SSQR use group size 128. RTN and GPTQ calculate the scales with the MSE method. Figure 4 (a-b) shows that HPTQ sustains low perplexity on Qwen3-8B
+
+{9}------------------------------------------------
+
+at reduced bitwidths and scales favorably across model sizes, with 3.125-bit emerging as Pareto optimal in terms of perplexity vs compression. Further information can be found in Section E, including the experimental setup (Section E.2), additional metrics such as benchmark results (Qwen3 models: Section E.3; Llama models: Section E.4), and comparison with other methods (Section E.5).
+
+![Figure 4: (a) Comparison of quantization methods (RTN, GPTQ, HRTN, HPTQ, and SSQR with 1~5% outliers) on Qwen3-8B evaluated on WikiText-2. (b) Scaling behavior of HPTQ across multiple model sizes and bitwidths. (c) End-to-end inference speedups of our SSQR kernel vs the PyTorch BF16 matrix multiplication kernel on NVIDIA RTX A6000 GPU.](7801d00a216dc4dc8a7d210dcb5fe3c5_img.jpg)
+
+Figure 4 consists of three subplots. Subplot (a) is titled 'Different Methods on Qwen3-8B' and plots 'WikiText-2 Perplexity' (y-axis, 10 to 80) against 'Average Bitwidth [bit]' (x-axis, 2.125 to 5.125). It compares RTN (blue circles), GPTQ (orange squares), HRTN (green triangles), HPTQ (yellow diamonds), and SSQR with 1%, 3%, and 5% outliers (black, grey, and light grey circles respectively). A horizontal yellow line at y=11 represents the BF16 baseline. An inset shows a zoomed-in view of the lower perplexity region. Subplot (b) is titled 'HPTQ on Qwen3-0.6/1.7/4/8/14B' and plots 'WikiText-2 Perplexity' (y-axis, 5 to 80) against 'Model Size [GB]' (x-axis, 0 to 8). It shows curves for average bitwidths of 4.125 (purple), 3.125 (brown), and 2.125 (pink). A point on the 3.125-bit curve is labeled 'Pareto Optimal'. Subplot (c) is titled 'SSQR on Qwen3-8B (A6000 GPU)' and plots 'TFLOP Speedup vs PyTorch BF16' (y-axis, 0.0 to 2.5) against 'Outlier Rate [%]' (x-axis, 0 to 5). It shows data for inlier bitwidths of 4 (yellow), 3 (green), and 2 (cyan).
+
+Figure 4: (a) Comparison of quantization methods (RTN, GPTQ, HRTN, HPTQ, and SSQR with 1~5% outliers) on Qwen3-8B evaluated on WikiText-2. (b) Scaling behavior of HPTQ across multiple model sizes and bitwidths. (c) End-to-end inference speedups of our SSQR kernel vs the PyTorch BF16 matrix multiplication kernel on NVIDIA RTX A6000 GPU.
+
+Figure 4: (a) Comparison of quantization methods (RTN, GPTQ, HRTN, HPTQ, and SSQR with 1~5% outliers) on Qwen3-8B evaluated on WikiText-2. Perplexity is plotted against the average effective bitwidth per weight, with the BF16 baseline shown as a horizontal line. HPTQ has the best (lowest) perplexity. See Section E.3 for zero-shot evaluation results. (b) Scaling behavior of HPTQ across multiple model sizes (0.6B, 1.7B, 4B, 8B, 14B) and bitwidths (4.125, 3.125, 2.125). The x-axis denotes the effective model size after quantization, and the y-axis shows perplexity on WikiText-2. Each curve corresponds to a fixed bitwidth, while points along a curve represent different model scales. Using our HPTQ method, 3.125-bit stands out as the Pareto optimal bitwidth (optimal perplexity vs compression trade-offs). (c) End-to-end inference speedups of our SSQR kernel vs the PyTorch BF16 matrix multiplication kernel on NVIDIA RTX A6000 GPU. We run the Qwen3-8B model across multiple outlier rates (0%~5%) and inlier bitwidths (4, 3, 2) and measure the TPOT (time per output token) metric. Our kernel achieves about  $2\times$  speedup end-to-end.
+
+**CUDA inference kernel.** We implement an inference kernel for SSQR in CUDA/C++, optimized for low-batch latency, handling both dense inliers and sparse outliers while targeting the Ampere platform. The kernel supports group-quantized inlier weights in the 2-4-bit range with scales in 16 bits and support for unstructured sparsity, used to avoid weight clipping. Figure 4 (c) visualizes the end-to-end speedup in the LLM decoding phase vs the PyTorch BF16 kernel. Our kernel achieves about  $2\times$  speedup across different bitwidth and outlier rate settings when generating 128 new tokens at a batch size of 1. Technical details and layer-wise speedups are described in Section E.6.
+
+## 6 CLOSING REMARKS
+
+**Summary.** We have shown that GPTQ, when executed back-to-front, is mathematically identical to Babai’s nearest plane algorithm applied to the lattice defined by a layer’s Hessian without basis reduction. Based on this theory, we propose error-guaranteed practical methods and provide optimized CUDA kernels that deliver low-latency inferences. More broadly, the lattice perspective opens a two-way channel: decades of the closest vector problem (CVP) heuristics can refine practical quantizers, while the behavior of massive neural networks may, in turn, inspire new questions for lattice theory.
+
+**Future Work.** Looking ahead, extending the analysis to clipped grids and exploring (scale-aware) basis reductions are the immediate next steps. However, we emphasize that the state-of-the-art 4-bit floating-point formats (e.g., MXFP4 and NVFP4) are essentially no-clipping (Egiazarian et al., 2025; Chen et al., 2026): since they use very small quantization groups (32 and 16, respectively), the near-optimal choice of scale is AbsMax per-group, which leads to no weight being clipped. As such, a no-clipping analysis of these formats would directly apply to actual practice. We will also extend the lattice view beyond weight-only linear layers to activation and KV-cache quantization.
+
+ Rest of paper (reference and Appendix) is removed.

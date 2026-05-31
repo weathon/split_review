@@ -1,0 +1,367 @@
+
+
+{0}------------------------------------------------
+
+# EFFICIENT CAUSAL STRUCTURE LEARNING VIA MODULAR SUBGRAPH INTEGRATION
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Learning causal structures from observational data remains a fundamental yet computationally intensive task, particularly in high-dimensional settings where existing methods face challenges such as the super-exponential growth of the search space and increasing computational demands. To address this, we introduce VISTA (Voting-based Integration of Subgraph Topologies for Acyclicity), a modular framework that decomposes the global causal structure learning problem into local subgraphs based on Markov Blankets. The global integration is achieved through a weighted voting mechanism that penalizes low-support edges via exponential decay, filters unreliable ones with an adaptive threshold, and ensures acyclicity using a Feedback Arc Set (FAS) algorithm. The framework is model-agnostic, imposing no assumptions on the inductive biases of base learners, is compatible with arbitrary data settings without requiring specific structural forms, and fully supports parallelization. We also theoretically establish finite-sample error bounds for VISTA, and prove its asymptotic consistency under mild conditions. Extensive experiments on both synthetic and real datasets consistently demonstrate the effectiveness of VISTA, yielding notable improvements in both accuracy and efficiency over a wide range of base learners.
+
+## 1 INTRODUCTION
+
+Understanding causal relationships from observational data Pearl (2009) is critical across numerous fields such as biology Petersen et al. (2024), economics Hünemund & Bareinboim (2023), and healthcare Sanchez et al. (2022b). Identifying causal structures enables reliable interventions and scientific insights. A common modeling framework represents the system as a causal graph—a Directed Acyclic Graph (DAG) where nodes are variables and directed edges denote causal links Spirtes et al. (2000). While identifiability of the true DAG generally requires additional structural assumptions, our VISTA framework inherits whatever identifiability guarantees each base learner provides. In practice, large-scale observational datasets further complicate structure recovery, as most existing algorithms struggle to scale efficiently. Constraint-based pipelines Spirtes et al. (2000); Meek (2013) must search over large conditioning sets while the number of CI tests grows combinatorially with the size of graph, and finite-sample CI tests become unreliable in high dimensions, so early mistakes can easily propagate to later steps. Score-based learners Chickering (2002); Loh & Bühlmann (2014) optimize over a super-exponential DAG space; practical solvers still require heavy global searches or acyclicity constraints with repeated dense updates, driving time and memory up sharply. These disadvantages make them difficult to perform well in large-scale datasets.
+
+Given the challenges of learning large-scale causal structures, divide-and-conquer strategies have emerged as a natural solution. By decomposing the global graph into smaller, tractable subgraphs, these methods significantly reduce computational complexity, particularly in sparse settings, and facilitate parallel or distributed computation. In addition, aggregating local structures often enhances robustness relative to learning the full graph in a single pass. Early approaches expand neighborhoods from a random node Gao et al. (2017) or apply hierarchical clustering Gu & Zhou (2020). More recent work often partition the variable set into local neighborhoods, such as Markov Blankets, before aggregating them Dong et al. (2024); Mokhtarian et al. (2021); Tsamardinos et al. (2005); Wu et al. (2023; 2022). However, the majority of these “conquer” steps rely on fixed heuristics for merging, such as voting thresholds, edge overlap rules, or manual conflict resolution. While simple, such rule-based schemes lack adaptability to noise and offer limited theoretical guarantees for global
+
+{1}------------------------------------------------
+
+consistency. DCILP Dong et al. (2024) formulates the merging process as an Integer Linear Program (ILP) and introduces solver-based reconciliation. Although this approach benefits from advances in ILP solvers and distributed optimization, it remains NP-hard and often incurs substantial solver overhead. In practice, even moderate-sized subproblems can lead to high memory usage and long runtimes. Alternatively, recent methods like Shah et al. (2024) retain heuristic-based fusion steps, which are efficient but similarly sensitive to noise and lack theoretical support.
+
+In this paper, we propose VISTA (Voting-based Integration of Subgraph Topologies for Acyclicity), a novel modular framework for large-scale causal discovery. The method proceeds in three main stages. First, for each variable we identify its Markov Blanket, thereby reducing the global problem into tractable local neighborhoods. A base learner is then applied to each neighborhood using the data restricted to that subset of variables, producing local subgraphs. Second, these local subgraphs are aggregated through an adaptive voting mechanism that down-weights low-support edges, suppressing statistical noise and inconsistencies. Finally, the aggregated graph is post-processed with an efficient approximation algorithm that enforces acyclicity while preserving as many high-confidence orientations as possible. We also establish a theoretical result showing that the overall error rate of the procedure is bounded above by that of the subgraph-level aggregation, ensuring soundness of the divide-and-conquer strategy.
+
+Crucially, VISTA is strictly model-agnostic and highly efficient. It makes no assumptions about the internal design or inductive biases of the base learners, places no restrictions on the choice of Markov Blanket identification algorithm, and imposes no conditions on the underlying data distribution beyond standard faithfulness assumptions. It operates purely on the edge-level outputs of local subgraphs and requires only a one-time  $\mathcal{O}(|V|^2)$  aggregation without any additional solver or training overhead. This lightweight design makes VISTA framework readily compatible with any causal discovery method while enabling broad applicability across baselines and full parallelism in the divide phase.
+
+Our key contributions include:
+
+- We propose VISTA, a model-agnostic and modular framework that decomposes global DAG learning into node-centered Markov Blanket subgraphs. It is fully plug-and-play with respect to MB identification and local learners, requiring no identifiability or distributional assumptions on the chosen base learners.
+- Our aggregation is lightweight, efficient, and edge-level, performing a one-pass weighted voting instead of relying on expensive global searches or solver-based optimization. We derive finite-sample error bounds and an asymptotic consistency guarantee for this aggregation, which explicitly calibrates errors from imperfect base learners.
+- Extensive experiments across diverse graphs and a wide range of base learners demonstrate that VISTA remedies the typical performance drop of base learners, consistently improving robustness and scalability over standalone baselines.
+
+## 2 PRELIMINARIES
+
+**Setup and notation.** Let  $V = \{V_1, \dots, V_n\}$  be random variables generated by a structural causal model with mutually independent noises  $\epsilon_i$ :
+
+$$V_i = f_i(\text{Pa}(V_i), \epsilon_i), \quad \epsilon_i \perp\!\!\!\perp \text{Pa}(V_i).$$
+
+This induces a directed acyclic graph (DAG)  $\mathcal{G} = (V, E)$  where  $V_i \rightarrow V_j \in E$  iff  $V_i$  appears in  $f_j$ , and the observational distribution factorizes as  $\mathbb{P}(V) = \prod_{i=1}^n \mathbb{P}(V_i | \text{Pa}(V_i))$ .
+
+**Markov Blanket locality.** Assuming causal sufficiency for exposition, the *Markov Blanket*  $\text{MB}(V)$  of a node  $V$  is the minimal set that renders  $V$  independent of all others given  $\text{MB}(V)$ ; it consists of parents, children, and *spouses* (other parents of the children). Equivalently,  $\text{MB}(V)$   $d$ -separates  $V$  from  $V \setminus (\{V\} \cup \text{MB}(V))$ . This locality motivates our divide-conquer design: by learning  $\text{MB}(V)$ , causal discovery can be restricted to the induced subgraph  $\mathcal{G}[\{V\} \cup \text{MB}(V)]$ , substantially reducing search complexity while preserving relevant adjacencies for  $V$ .
+
+{2}------------------------------------------------
+
+**Existing Modular Causal Discovery Paradigms.** For large-scale causal discovery, several local-to-global or fusion-style schemes decompose a graph and then merge the pieces: a top-down CI-driven partition with set-based stitching Xie & Geng (2008), global fusion over multiple full Bayesian networks Puerta et al. (2021), a separation-reunion pipeline that repeatedly searches the structure Liu et al. (2017), a PC-style progressive skeleton requiring iterative bootstraps Guo et al. (2024), and DCILP, which formulates reconciliation as an ILP Dong et al. (2024). However, these methods are typically algorithm-specific rather than modular frameworks; they either assume correct inputs at merging time, depend on heavy global search or solver-based optimization, or perform essentially uncalibrated frequency-based stitching. [There also exists a SADA-based or extended model Cai et al. \(2013; 2018\); Rahman et al. \(2021\)](#), but it is limited to LiNGAM and lacks a calibration process during merging. By contrast, our framework provides a lightweight, calibrated weighted-voting aggregation that down-weights low-support directions and remains compatible with arbitrary base learners. A more detailed related work discussion appears in Appendix B.
+
+## 3 METHODOLOGY
+
+We introduce VISTA (Voting-based Integration of Subgraph Topologies for Acyclicity), a novel modular framework for large-scale DAG learning that is both model-agnostic and efficient. Instead of searching the full graph, VISTA focuses on edge-level evidence: for each node  $V$ , we form the subgraph induced by  $\{V\} \cup \text{MB}(V)$  and run any off-the-shelf local learner, regardless of its parametric form, identifiability assumptions, or internal design. The resulting local predictions are reconciled by a lightweight weighted voting on each ordered pair  $(X, Y)$ , which calibrates errors from imperfect base learners, and acyclicity is then enforced by a Feedback Arc Set heuristic Eades et al. (1993). This modular design makes VISTA fully plug-and-play: MB identification and local learning can be tailored to the data regime, while aggregation and acyclicity remain fixed, scalable, and consistent.
+
+**Proposition 3.1** (Coverage of a DAG by Markov-Blanket Subgraphs). *Let  $\mathcal{G} = (V, E)$  be a DAG. For each  $V \in V$ , define*
+
+$$\mathcal{G}' = \bigcup_{V_i \in V} \mathcal{G}[\{V_i\} \cup \text{MB}(V_i)]. \quad (1)$$
+
+*Then every edge of  $\mathcal{G}$  is present in  $\mathcal{G}'$ , i.e.,  $E \subseteq E(\mathcal{G}')$ .*
+
+*Proof.* Take any edge  $(X, Y) \in E$ . If  $X \rightarrow Y$ , then  $Y$  is a child of  $X$  and  $X$  is a parent of  $Y$ , hence  $Y \in \text{MB}(X)$  and  $X \in \text{MB}(Y)$ . Therefore  $(X, Y)$  appears in  $\mathcal{G}[\{X\} \cup \text{MB}(X)]$  and in  $\mathcal{G}[\{Y\} \cup \text{MB}(Y)]$ , and thus in the union  $\mathcal{G}'$ .  $\square$
+
+This coverage property is the foundation of VISTA: once MBs and their local subgraphs are correctly identified, no true edge is lost in the decomposition. Importantly, our framework remains *agnostic* to the specific MB estimator or local learner, that any method suitable for the data distribution can be plugged in. All subsequent aggregation and acyclicity enforcement operate purely at the edge level and rely only on this coverage guarantee. Besides, as shown in Figure 1, the accuracy of MB identification remains relatively stable as the number of nodes increases, whereas the performance of base learners degrades more sharply. This empirical observation is consistent with our theoretical analysis in Section 3.2, where we prove that the proposed merging scheme converges to the correct edge orientations. Furthermore, across different graph sizes, the VISTA-enhanced versions consistently outperform their corresponding baselines, demonstrating the robustness of our framework.
+
+Moreover, since our framework is agnostic to the choice of MB identification methods, we also provide a flexible interface in our implementation that allows practitioners to plug in any suitable MB estimator depending on the specific
+
+![Figure 1: A line graph showing F1 score comparison as the number of nodes increases. The x-axis represents the number of nodes (30, 50, 100, 300) on a logarithmic scale. The y-axis represents the F1 score from 0.2 to 1.0. Five methods are plotted: Markov Blanket (blue dashed line), NOTEARS (baseline) (red dashed line), DAG-GNN (baseline) (purple dashed line), NOTEARS (VISTA) (red solid line), and DAG-GNN (VISTA) (purple solid line). The Markov Blanket method maintains a high F1 score (around 0.9) across all node counts. The baseline methods (NOTEARS and DAG-GNN) show a significant drop in F1 score as the number of nodes increases, with DAG-GNN (baseline) dropping to around 0.2 at 300 nodes. The VISTA-enhanced versions (NOTEARS (VISTA) and DAG-GNN (VISTA)) maintain much higher F1 scores (around 0.5 and 0.35 respectively) even at 300 nodes, demonstrating robustness.](3547d8dc1ba9bc8e4bbec26b5724549d_img.jpg)
+
+Figure 1: A line graph showing F1 score comparison as the number of nodes increases. The x-axis represents the number of nodes (30, 50, 100, 300) on a logarithmic scale. The y-axis represents the F1 score from 0.2 to 1.0. Five methods are plotted: Markov Blanket (blue dashed line), NOTEARS (baseline) (red dashed line), DAG-GNN (baseline) (purple dashed line), NOTEARS (VISTA) (red solid line), and DAG-GNN (VISTA) (purple solid line). The Markov Blanket method maintains a high F1 score (around 0.9) across all node counts. The baseline methods (NOTEARS and DAG-GNN) show a significant drop in F1 score as the number of nodes increases, with DAG-GNN (baseline) dropping to around 0.2 at 300 nodes. The VISTA-enhanced versions (NOTEARS (VISTA) and DAG-GNN (VISTA)) maintain much higher F1 scores (around 0.5 and 0.35 respectively) even at 300 nodes, demonstrating robustness.
+
+Figure 1: F1 score comparison as the number of nodes increases.
+
+{3}------------------------------------------------
+
+data distribution. Notably, we assume that each base learner outputs directed edges on local subgraphs throughout this work. If an undirected adjacency  $X - Y$  is returned, it is treated as providing no directional vote in the aggregation.
+
+### 3.1 VISTA: VOTING-BASED INTEGRATION OF SUBGRAPH TOPOLOGIES FOR ACYCLICITY
+
+**Naive Voting (NV)** To merge estimated subgraphs into a globally causal graph, we first consider a naive voting strategy. For each pair of nodes  $X$  and  $Y$ , let  $A$  denote the number of times the directed edge  $X \rightarrow Y$  appears across all subgraphs, and  $B$  denote the number of times  $Y \rightarrow X$  appears. The directional support ratio for each orientation is computed as:
+
+$$r_{X \rightarrow Y} = \frac{A}{A + B}, \quad r_{Y \rightarrow X} = \frac{B}{A + B}.$$
+
+This NV rule serves to demonstrate an important property of our divide-and-conquer framework. By Theorem 3.1, every ground-truth causal edge must appear in the union of MB subgraphs. Therefore, even this unweighted scheme, which simply aggregates raw directional votes, already ensures that all true edges are included in the candidate pool. In other words, NV validates that our subgraph decomposition does not lose any causal edges, providing an essential guarantee for the global reconstruction stage.
+
+However, while NV does not distinguish between strong and weak statistical support. Edges appearing rarely across subgraphs receive the same confidence as frequently supported ones, and directional conflicts cannot be resolved in a principled manner. These issues motivate the introduction of our weighted voting formulation, which incorporates frequency-based confidence to produce more reliable global orientation decisions.
+
+**Weighted Voting (WV)** For each pair of nodes  $X$  and  $Y$ , let  $A$  and  $B$  denote the number of times  $X \rightarrow Y$  and  $Y \rightarrow X$  appear across all subgraphs, respectively, and let  $m = A + B$  be the total occurrence. We define the confidence-adjusted score as:
+
+$$s(X \rightarrow Y) = (1 - e^{-\lambda m}) \frac{A}{m}, \quad (2)$$
+
+where  $\lambda > 0$  is a tunable weighting parameter. An edge  $X \rightarrow Y$  is retained if  $s(X \rightarrow Y) \geq t$ , where  $t \in (0, 1)$  is a global decision threshold.
+
+Here, the weighting term  $(1 - e^{-\lambda m})$  serves as a soft confidence modulator that adapts to the reliability of directional evidence. It plays a role analogous to smoothing priors in Bayesian estimation, where rare events are regularized toward lower confidence. The details is illustrated in Appendix D.1. The inclusion threshold  $t$  determines the minimum score required to retain an edge.
+
+Compared to naive voting, which treats all local decisions equally, the weighted scheme jointly calibrates confidence and sparsity. Specifically, the parameter  $\lambda$  penalizes edges with weak support, while the threshold  $t$  determines the final inclusion criterion. Together, the two parameters govern the precision–recall trade-off, since a larger  $\lambda$  tends to preserve edges with limited but consistent evidence and thus improves recall, while a higher  $t$  enforces stricter acceptance and thereby improves precision. This mechanism is particularly beneficial in sparse graphs, where many candidate edges receive only minimal support; the exponential weighting amplifies even small differences in frequency, effectively suppressing unreliable edges. As a result, the aggregation remains robust without relying on strong parametric assumptions, and it provides a tunable handle for balancing false discoveries and missed edges. Beyond the divide-and-conquer efficiency of VISTA, the weighted voting strategy itself enhances the performance of base learners,
+
+```
+def VISTA(nodes, base_learner, ...,
+          MB_solver, lam, t):
+    local_graphs = []
+
+    for v in nodes:
+        MB_v = MB_solver(v)
+        G_v = base_learner(MB_v  $\cup$  v)
+        local_graphs.append(G_v)
+
+    G_merged = WV(local_graphs, lam, t)
+    G_final = post_prune(G_merged)
+    return G_final
+```
+
+Figure 2: Pseudocode of VISTA framework
+
+{4}------------------------------------------------
+
+yielding substantial gains in recall while tightening theoretical error bounds. A detailed analysis of these effects is provided in Section 3.2 and Appendices D - E.
+
+**Acyclicity guarantee** While the weighted voting improves robustness, the resulting merged graph may still contain cycles. To ensure that the final output is a valid DAG, it is necessary to explicitly break loops introduced during the merging process. So we explicitly enforce acyclicity by solving a Feedback Arc Set (FAS) problem Simpson et al. (2016). As FAS is NP-hard, we adopt a fast GreedyFAS heuristic Eades et al. (1993) adapted to weighted edges; the implementation is detailed in Algorithm 2 in Appendix C.
+
+Notably, an important implementation detail involves the ordering between GreedyFAS and threshold-based filtering. In VISTA, cycles are first removed using GreedyFAS, after which edges with weights below a global threshold  $t$  are filtered out. This ordering avoids forcing the cycle removal step to act on already sparse graphs, where eliminating a cycle may require discarding high-confidence edges. In contrast, applying filtering before GreedyFAS can lead to unnecessary precision loss, as the remaining cycles must be resolved by removing stronger edges that would otherwise have been preserved. Besides, taking a subset of nodes from a causal graph introduces unobserved confounding, which will lead to additional edges in the subgraph; the post-processing step here can remove part of these redundant edges.
+
+In general, our VISTA offers several key advantages that make it particularly suited for large-scale causal discovery. It operates purely on aggregated edge counts and requires only matrix-level operations, with no reliance on optimization solvers or iterative training. Importantly, it is model-agnostic, i.e., the aggregation is independent of the internal structure of base learners and can be applied to any method that outputs directed subgraphs. This modularity allows seamless integration with a broad class of causal discovery algorithms and supports parallel execution in the divide stage. The complete procedure is implemented as a simple and modular pipeline, summarized in Figure 3.
+
+![Figure 3: Overview of the VISTA framework for causal discovery. The diagram illustrates a four-stage pipeline: 1. MB Identification (Divide): A set of nodes is processed to identify Markov Blankets (MBs) for each node. 2. Conquer: The graph is divided into subgraphs, each centered around a node $V_i$ and including its Markov Blanket. 3. Merge: Subgraphs are aggregated through weighted voting. For an edge $X \to Y$, the score is computed as $s(A) = (1 - e^{-\lambda(A+B)}) \frac{A}{A+B}$ and $s(B) = (1 - e^{-\lambda(A+B)}) \frac{B}{A+B}$. 4. Final Graph $\mathcal{G}$: The merged graph is filtered (if $s < t$, remove $X \to Y$) and then GreedyFAS is applied to remove cycles. A legend at the bottom defines the symbols: colored circles for centered nodes $V_i$, ovals for nodes in the Markov Blanket, and colored rectangles for subgraphs $\mathcal{G}[\{V_i\} \cup \text{MB}(V_i)]$.](f76f0f5dfff2511b51f6b875867c029f_img.jpg)
+
+Figure 3: Overview of the VISTA framework for causal discovery. The diagram illustrates a four-stage pipeline: 1. MB Identification (Divide): A set of nodes is processed to identify Markov Blankets (MBs) for each node. 2. Conquer: The graph is divided into subgraphs, each centered around a node \$V\_i\$ and including its Markov Blanket. 3. Merge: Subgraphs are aggregated through weighted voting. For an edge \$X \to Y\$, the score is computed as \$s(A) = (1 - e^{-\lambda(A+B)}) \frac{A}{A+B}\$ and \$s(B) = (1 - e^{-\lambda(A+B)}) \frac{B}{A+B}\$. 4. Final Graph \$\mathcal{G}\$: The merged graph is filtered (if \$s < t\$, remove \$X \to Y\$) and then GreedyFAS is applied to remove cycles. A legend at the bottom defines the symbols: colored circles for centered nodes \$V\_i\$, ovals for nodes in the Markov Blanket, and colored rectangles for subgraphs \$\mathcal{G}[\{V\_i\} \cup \text{MB}(V\_i)]\$.
+
+Figure 3: Overview of VISTA, a modular framework for causal discovery: (1) dividing via Markov Blankets identification, (2) parallel subgraph structure identification using a base learner, and (3) global aggregation through weighted voting. The framework then applies cycle resolution (GreedyFAS) and weight-based filtering to produce the final DAG.
+
+**Theoretical guarantees for Weighted Voting** To ensure the reliability of our edge orientation decisions based on the weighted voting mechanism described above, we provide theoretical guarantees derived from concentration inequalities. The core idea is to determine the minimum number of votes (subgraphs)  $m$  required to achieve a desired level of confidence  $1 - \epsilon$  in our decision.
+
+**Theorem 3.2** (Sufficient Condition for Weighted Voting Accuracy). *Let  $A \sim \text{Binomial}(m, p)$  represent the number of successful votes in  $m$  independent subgraphs for the edge direction  $X \rightarrow Y$ , where each subgraph supports this direction independently with probability  $p \in (0, 1)$ , a decision threshold  $t \in (0, 1)$  and the weight function  $w(m) = 1 - e^{-\lambda m}$ ,  $\lambda > 0$ . Assume the effective*
+
+{5}------------------------------------------------
+
+threshold for accepting the edge direction  $X \rightarrow Y$  is  $r(m) = \frac{t}{1-e^{-\lambda m}} < p$ , i.e., the true support rate  $p$  is above the effective threshold. Then, if
+
+$$\frac{mp}{2} \left( 1 - \frac{t}{p(1-e^{-\lambda m})} \right)^2 \geq \log \frac{1}{\epsilon}, \quad (3)$$
+
+it follows that  $P(s(A) \geq t) \geq 1 - \epsilon$ .
+
+This theorem guarantees that if  $m$  is large enough to satisfy the given inequality, the weighted voting procedure will correctly identify the edge direction with high probability. The condition highlights that the required  $m$  depends on the squared relative difference between the true probability  $p$  and the effective threshold  $r(m)$ . Note that  $r(m)$  itself depends on  $m$  and  $\lambda$ . As  $m$  increases or  $\lambda$  increases,  $1 - e^{-\lambda m}$  approaches 1, and  $r(m)$  approaches  $t$ . The inequality requires larger  $m$  and becomes more difficult to satisfy when  $p$  is close to  $r(m)$  or when higher confidence is desired. This trade-off illustrates the role of  $\lambda$  in controlling the conservativeness of the decision rule, which we will analyze further in later sections. In practice, the true value of  $p$  is unknown, but we can empirically validate the trend predicted by this condition using observed vote frequencies and measured recovery accuracy across different values of  $\lambda$  and  $t$ .
+
+Notably, Theorem 3.2 is stated under an idealized assumption that the votes from different local subgraphs are independent. In practice, subgraphs learned from the same dataset can induce correlations among votes, so the bound should be interpreted as a qualitative guide, and we expect the same monotone trend to hold more effectively independent votes still reduce error and the gap between  $p$  and the effective threshold continues to govern sample complexity. Extending the theory to low-correlation weakly dependent votes will be an interesting future direction.
+
+**Corollary 3.3** (Lower bound on node in subgraphs). *Let  $\lambda > 0$ ,  $t \in (0, 1)$ , and  $\epsilon \in (0, 1)$  be fixed. For a candidate edge  $(X, Y)$ , denote by  $m$  the number of local subgraphs whose Markov Blankets contain both endpoints. Under the setting of Theorem 3.2, the sufficient condition (3) can be converted into an explicit bound*
+
+$$m \geq \frac{2 \log(1/\epsilon)}{p((1-t/p)^2 - 2(t/p)(1-t/p)e^{-\lambda})}. \quad (4)$$
+
+Generally, a lower error rate  $\epsilon$  leads to a larger  $\log(1/\epsilon)$  term, which increases the required size of  $m$ . When  $p$  is much greater than  $t$ , it results in a small required  $m$ . This aligns with intuition: if the true voting rate  $p$  is far from the threshold  $t$ , the distinction is easier, and fewer votes are needed for reliable decisions. Similarly, when the gap  $p - t$  is small, it will result in a significantly larger required  $m$ . A large lower bound on  $m$  primarily indicates that the current setting yields a very small gap between  $p$  and  $t$ , which, in turn, implies that the decision task has intrinsically high sample complexity.
+
+### 3.2 ERROR BOUND ANALYSIS
+
+We analyze the edge-level errors of the weighted voting rule to understand how the weighting parameter  $\lambda$  and the threshold  $t$  affect false positives and false negatives. We first characterize a sufficient condition that converts  $t$  into a probability threshold and yields a feasible range for  $\lambda$ , and then show that under this regime, weighted voting achieves asymptotic consistency as the graph size grows.
+
+**Theorem 3.4** (Practical choice of  $\lambda$ ). *Fix a vote count  $m \geq 1$ , a decision threshold  $t \in (0, 1)$ , and a target error level  $\epsilon \in (0, 1)$ . If  $\lambda$  satisfies*
+
+$$-\frac{1}{m} \ln(1-t) < \lambda \leq -\frac{1}{m} \ln \epsilon, \quad (5)$$
+
+then the weighted-vote rule achieves the prescribed error control under the union bound.
+
+Theorem 3.4 establishes a feasible interval for  $\lambda$  that guarantees uniform control of edge-level errors. While the confidence weight  $1 - e^{-\lambda m}$  down-weights low-support orientations at a fixed  $t$ , the smaller  $\lambda$  values impose stricter thresholds  $r_\lambda(m)$  to suppress low-support edges, while larger values retain weaker true edges and improve recall. The proof of the theorem, as well as detailed discussions, is in Appendix E.1. In practice, we adopt the relatively large admissible  $\lambda$  in (5), which lowers the
+
+{6}------------------------------------------------
+
+effective threshold and reduces false negatives at the cost of more false positives. This choice is well suited to sparse graphs since false positives typically dominate. The empirical behavior of varying  $\lambda$  is further examined in Section 4.1. Notably, as  $\lambda \rightarrow 0$ , the rule reduces to naive voting with a fixed threshold  $t$ . Building on the finite-sample guarantees above, we next analyze the asymptotic behavior of the weighted voting rule as the number of variables grows. Similarly to  $p$ , let  $q \in (0, 1)$  denote the probability that a false edge is erroneously included. In practice, both  $p$  and  $q$  can be empirically estimated.
+
+**Theorem 3.5** (Asymptotic Consistency). *Fix a threshold  $t \in (0, 1)$  and let  $\delta_p = p - t$  and  $\delta_q = t - q$  denote the positive margins between  $t$  and the inclusion probabilities  $p, q$  of true and false edges respectively. Assume  $\delta_p, \delta_q > 0$  and that  $\lambda$  satisfies the conditions in Theorem 3.4. If the number of local subgraphs per candidate edge is  $m = C \log n$  with  $C > \frac{2}{\min\{\delta_p^2, \delta_q^2\}}$ , then we have*
+
+$$\Pr(\text{global error}) = o(1), \quad \text{as } n \rightarrow \infty. \quad (6)$$
+
+Since most base solvers are reliable and can correctly identify a substantial fraction of true edges, our assumptions are quite mild and practically easy to satisfy. Theorem 3.5 establishes that weighted voting is asymptotically consistent: as the number of subgraph samples increases, the probability of edge-level misclassification vanishes. Notably, the required number of independent subgraphs per edge grows only logarithmically with the graph size, i.e.,  $\mathcal{O}(\log n)$ , making the approach efficient. From a computational perspective, the global merging procedure involves only one pass of edge counting and scoring, with an overall complexity  $\mathcal{O}(n^2)$  regardless of the base learner. These guarantees jointly ensure that the method remains scalable and reliable for large-scale structure discovery. The proof of the theorem is provided in Appendix E.3.
+
+## 4 EXPERIMENTS
+
+### 4.1 SYNTHETIC DATA
+
+We empirically evaluate the performance of the proposed VISTA framework on a range of graph structures and sizes, as well as diverse base learners. To demonstrate the improvement and effectiveness of VISTA, we report representative results that highlight the structural recovery performance of VISTA, its runtime benefits from our modular strategy, and the precision–recall trade-offs induced by different values of  $\lambda$ . All experiments are conducted on a machine equipped with 13th Gen Intel(R) Core(TM) i9-13900HX CPU (24 cores) and NVIDIA A30 GPU (24GB).
+
+**Baselines** We benchmark VISTA against recent typical state-of-the-art causal discovery algorithms, including CAM Bühlmann & Peters (2016), NOTEARS Zheng et al. (2018), DAG-GNN Yu et al. (2019), and GOLEM Ng et al. (2020) for the linear setting, which we modeled as linear Structural Equation Model (SEM) with Gaussian noise, as well as SCORE Rolland et al. (2022) and GraN-DAG Lachapelle et al. (2020) for the nonlinear setting, defined as quadratic SEM. Each baseline is evaluated both in isolation and when integrated with our modular framework VISTA. Additionally, in Appendix F.2, we provide a comparison between VISTA and DCILP Dong et al. (2024), a recent distributed framework for causal structure learning, where we also implemented the MB solver used in that work.
+
+We evaluate the accuracy of our VISTA framework under the Naive Voting (NV) and the Weighted Voting (WV) aggregation schemes. Each base learner is tested standalone and with both VISTA variants. We evaluate the proposed method on synthetic datasets generated from Erdős–Rényi (ER) and scale-free (SF) graphs, with average out-degree  $h \in \{3, 5\}$  and number of nodes  $n \in \{30, 50, 100, 300\}$ . Performance is assessed using False Discovery Rate (FDR), True Positive Rate (TPR), Structural Hamming Distance (SHD), and F1 score, as well as runtime metrics. Experiments are conducted under multiple simulation settings, and we report the average performance, with the  $\pm$  values indicating the corresponding standard deviations.
+
+**Results** Table 1 shows two complementary roles of our aggregation. The NV variant already lifts recall by pooling evidence from overlapping neighborhoods, recovering more true edges. Building on this, WV acts as a principled edge-level filter. By down-weighting orientations with small or inconsistent support and applying a single global threshold, it removes noisy connections and yields substantially cleaner structures. Quantitatively, WV reduces FDR by  $50 \sim 80\%$  relative to the original baselines and by  $40 \sim 70\%$  compared to NV, while generally keeping TPR no less than 0.70.
+
+{7}------------------------------------------------
+
+Table 1: Results with linear and nonlinear synthetic datasets ( $n = 100, h = 5$ ).
+
+| Method | ERS |  |  |  | SFS |  |  |  |
+|-|-|-|-|-|-|-|-|-|
+|  | FDR↓ | TPR↑ | SHD↓ | F1↑ | FDR↓ | TPR↑ | SHD↓ | F1↑ |
+| NOTEARS | 0.21 ± 0.21 | 0.74 ± 0.26 | 208.80 ± 190.71 | 0.76 ± 0.24 | 0.37 ± 0.15 | 0.60 ± 0.14 | 352.60 ± 125.39 | 0.61 ± 0.14 |
+| +VISTA-NV | 0.87 ± 0.01 | <b>0.97 ± 0.01</b> | 3171.80 ± 174.02 | 0.23 ± 0.01 | 0.84 ± 0.01 | <b>0.97 ± 0.01</b> | 2443.60 ± 143.74 | 0.27 ± 0.01 |
+| +VISTA-WV | 0.08 ± 0.03 | 0.68 ± 0.01 | <b>182.40 ± 16.03</b> | <b>0.79 ± 0.02</b> | <b>0.18 ± 0.07</b> | 0.68 ± 0.03 | <b>233.00 ± 34.76</b> | <b>0.74 ± 0.03</b> |
+| GOLEM | 0.61 ± 0.16 | 0.35 ± 0.17 | 567.00 ± 129.77 | 0.35 ± 0.15 | 0.70 ± 0.15 | 0.29 ± 0.19 | 610.10 ± 118.00 | 0.29 ± 0.17 |
+| +VISTA-NV | 0.87 ± 0.01 | <b>0.91 ± 0.04</b> | 2801.00 ± 224.42 | 0.23 ± 0.01 | 0.86 ± 0.01 | <b>0.90 ± 0.02</b> | 2589.00 ± 270.09 | 0.25 ± 0.02 |
+| +VISTA-WV | <b>0.23 ± 0.12</b> | 0.50 ± 0.13 | <b>306.70 ± 87.75</b> | <b>0.60 ± 0.14</b> | <b>0.33 ± 0.15</b> | 0.40 ± 0.12 | <b>371.10 ± 88.21</b> | <b>0.50 ± 0.13</b> |
+| DAG-GNN | 0.66 ± 0.15 | 0.42 ± 0.23 | 739.20 ± 323.34 | 0.33 ± 0.17 | 0.64 ± 0.15 | 0.47 ± 0.22 | 731.40 ± 303.38 | 0.38 ± 0.17 |
+| +VISTA-NV | 0.87 ± 0.01 | <b>0.95 ± 0.01</b> | 3065.00 ± 136.49 | 0.23 ± 0.01 | 0.85 ± 0.01 | <b>0.95 ± 0.00</b> | 2480.00 ± 203.65 | 0.27 ± 0.01 |
+| +VISTA-WV | <b>0.36 ± 0.03</b> | 0.56 ± 0.05 | <b>377.00 ± 26.06</b> | <b>0.59 ± 0.02</b> | <b>0.35 ± 0.10</b> | 0.49 ± 0.08 | <b>363.00 ± 41.10</b> | <b>0.56 ± 0.09</b> |
+| Gran-DAG | 0.92 ± 0.04 | 0.05 ± 0.03 | 715.00 ± 70.14 | 0.06 ± 0.04 | 0.94 ± 0.02 | 0.05 ± 0.03 | 1088.60 ± 31.40 | 0.05 ± 0.02 |
+| +VISTA-NV | 0.86 ± 0.04 | <b>0.18 ± 0.06</b> | 656.60 ± 83.30 | 0.16 ± 0.03 | 0.89 ± 0.02 | <b>0.20 ± 0.04</b> | 947.20 ± 53.33 | 0.14 ± 0.02 |
+| +VISTA-WV | <b>0.43 ± 0.06</b> | 0.10 ± 0.02 | <b>503.40 ± 46.68</b> | <b>0.17 ± 0.03</b> | <b>0.54 ± 0.05</b> | 0.11 ± 0.02 | <b>545.80 ± 65.54</b> | <b>0.18 ± 0.03</b> |
+| SCORE | 0.92 ± 0.10 | 0.58 ± 0.03 | 4039.60 ± 123.3 | 0.14 ± 0.15 | 0.91 ± 0.03 | 0.62 ± 0.05 | 3166.40 ± 258.7 | 0.16 ± 0.05 |
+| +VISTA-NV | 0.95 ± 0.05 | <b>0.76 ± 0.02</b> | 3464.20 ± 215.6 | 0.09 ± 0.14 | 0.95 ± 0.04 | <b>0.76 ± 0.05</b> | 2978.00 ± 367.3 | 0.08 ± 0.07 |
+| +VISTA-WV | <b>0.80 ± 0.06</b> | 0.65 ± 0.07 | <b>838.00 ± 364.78</b> | <b>0.31 ± 0.09</b> | <b>0.81 ± 0.05</b> | 0.63 ± 0.04 | <b>892.60 ± 345.38</b> | <b>0.29 ± 0.06</b> |
+
+The trend holds for both differentiable and combinatorial base learners, indicating that the gains stem from the aggregation rule rather than any particular estimator.
+
+Crucially,  $\lambda$  appears only in the final aggregation, so sweeping it is retraining-free: we reuse cached votes, recompute  $r_n(\mathbf{m})$ , and rerun the DAG projection to obtain the full curves. To avoid per-dataset hyperparameter tuning and cherry-picking, all VISTA results in the main tables use a single, fixed operating point:  $\lambda = 0.5$  and  $t = 0.7$ . This choice lies within (5) and serves as a stable compromise between precision and recall across settings. We report the full precision–recall curves for transparency, but no post-hoc selection is performed for the tabulated results.
+
+The observed improvement in WV cases against NV aligns with Theorem 3.4. Edges with limited empirical support are selectively pruned while strongly supported ones are preserved, which is exactly the filtering behavior reflected in Table 1. This validates our weighted voting scheme as an effective, model-agnostic mechanism for stabilizing global structures. To further substantiate this model-agnostic property, we next examine the impact of data standardization as it is known to influence baseline performance Reischach et al. (2021).
+
+Table 2: Results with normalized linear and nonlinear synthetic datasets ( $n = 50, h = 5$ ).
+
+| Method | ERS |  |  |  | SFS |  |  |  |
+|-|-|-|-|-|-|-|-|-|
+|  | FDR↓ | TPR↑ | SHD↓ | F1↑ | FDR↓ | TPR↑ | SHD↓ | F1↑ |
+| NOTEARS | <b>0.04 ± 0.02</b> | 0.39 ± 0.01 | 140.00 ± 4.90 | 0.56 ± 0.01 | <b>0.02 ± 0.02</b> | 0.38 ± 0.04 | 138.50 ± 9.87 | 0.55 ± 0.05 |
+| +VISTA-NV | 0.27 ± 0.05 | <b>0.61 ± 0.03</b> | 135.20 ± 6.16 | 0.66 ± 0.02 | 0.35 ± 0.04 | <b>0.62 ± 0.04</b> | 132.80 ± 18.82 | 0.63 ± 0.03 |
+| +VISTA-WV | 0.19 ± 0.05 | 0.58 ± 0.03 | <b>122.90 ± 7.54</b> | <b>0.68 ± 0.02</b> | 0.08 ± 0.04 | 0.54 ± 0.06 | <b>109.10 ± 19.91</b> | <b>0.68 ± 0.05</b> |
+| GOLEM | 0.40 ± 0.03 | 0.22 ± 0.04 | 182.00 ± 15.51 | 0.32 ± 0.05 | 0.44 ± 0.07 | 0.20 ± 0.04 | 183.60 ± 6.55 | 0.20 ± 0.05 |
+| +VISTA-NV | 0.31 ± 0.03 | <b>0.75 ± 0.03</b> | 129.50 ± 4.97 | 0.72 ± 0.02 | 0.29 ± 0.05 | <b>0.70 ± 0.05</b> | 122.80 ± 10.87 | 0.70 ± 0.04 |
+| +VISTA-WV | <b>0.06 ± 0.03</b> | 0.62 ± 0.04 | <b>95.30 ± 9.88</b> | <b>0.75 ± 0.02</b> | <b>0.10 ± 0.04</b> | 0.60 ± 0.06 | <b>100.20 ± 15.69</b> | <b>0.72 ± 0.05</b> |
+| DAG-GNN | 0.16 ± 0.03 | 0.41 ± 0.05 | 160.80 ± 53.55 | 0.55 ± 0.05 | 0.19 ± 0.05 | 0.48 ± 0.04 | 183.60 ± 45.37 | 0.60 ± 0.03 |
+| +VISTA-NV | 0.85 ± 0.09 | <b>0.74 ± 0.14</b> | 609.80 ± 72.70 | 0.25 ± 0.12 | 0.79 ± 0.04 | <b>0.72 ± 0.09</b> | 538.40 ± 25.55 | 0.33 ± 0.05 |
+| +VISTA-WV | <b>0.14 ± 0.05</b> | 0.50 ± 0.09 | <b>93.50 ± 29.12</b> | <b>0.63 ± 0.07</b> | <b>0.13 ± 0.08</b> | 0.56 ± 0.06 | <b>87.80 ± 16.56</b> | <b>0.68 ± 0.05</b> |
+| Gran-DAG | 0.82 ± 0.01 | 0.06 ± 0.01 | 275.00 ± 18.50 | 0.09 ± 0.01 | 0.92 ± 0.02 | 0.02 ± 0.02 | 260.80 ± 45.50 | 0.03 ± 0.02 |
+| +VISTA-NV | 0.66 ± 0.15 | <b>0.26 ± 0.06</b> | 219.20 ± 46.41 | 0.29 ± 0.07 | 0.68 ± 0.05 | <b>0.17 ± 0.04</b> | 223.00 ± 26.25 | 0.22 ± 0.04 |
+| +VISTA-WV | <b>0.15 ± 0.06</b> | 0.18 ± 0.05 | <b>199.20 ± 13.64</b> | <b>0.32 ± 0.07</b> | <b>0.33 ± 0.03</b> | 0.13 ± 0.03 | <b>205.40 ± 19.13</b> | <b>0.25 ± 0.04</b> |
+| SCORE | 0.71 ± 0.05 | 0.50 ± 0.05 | 386.80 ± 67.99 | 0.37 ± 0.04 | 0.65 ± 0.13 | 0.52 ± 0.15 | 340.40 ± 81.08 | 0.38 ± 0.05 |
+| +VISTA-NV | 0.79 ± 0.03 | <b>0.60 ± 0.14</b> | 489.70 ± 123.82 | 0.31 ± 0.04 | 0.77 ± 0.03 | <b>0.56 ± 0.05</b> | 471.10 ± 16.68 | 0.33 ± 0.03 |
+| +VISTA-WV | <b>0.64 ± 0.09</b> | 0.42 ± 0.11 | <b>305.80 ± 49.93</b> | <b>0.39 ± 0.07</b> | <b>0.57 ± 0.04</b> | 0.36 ± 0.06 | <b>244.20 ± 53.35</b> | <b>0.39 ± 0.04</b> |
+
+The results show that, regardless of fluctuations in the performance of individual base learners, the improvements brought by VISTA remain consistent. This stability further supports our claim that VISTA does not rely on any inductive bias of the base learner or data distribution. Rather, the edge-level aggregation mechanism provides robustness across settings. These findings further highlight the model-agnostic nature of our framework. Additional experiments under alternative parameter settings are provided in Appendix F.4.
+
+**Time efficiency** To assess the scalability of our framework, we report the total computation time for different base learners in Table 3. All results are presented as mean  $\pm$  standard deviation over repeated runs. Across all tested graph sizes, integrating VISTA consistently yields substantial runtime
+
+{8}------------------------------------------------
+
+432  
+433  
+434  
+435  
+436  
+437  
+438  
+439  
+440  
+441  
+442  
+443  
+444  
+445  
+446  
+447  
+448  
+449  
+450  
+451  
+452  
+453  
+454  
+455  
+456  
+457  
+458  
+459  
+460  
+461  
+462  
+463  
+464  
+465  
+466  
+467  
+468  
+469  
+470  
+471  
+472  
+473  
+474  
+475  
+476  
+477  
+478  
+479  
+480  
+481  
+482  
+483  
+484  
+485
+
+reductions compared to the original methods. These improvements are not due to algorithm-specific acceleration but result directly from our divide-and-conquer design: since each local subgraph is processed independently, the learning procedure naturally supports parallel execution. This decomposition effectively reduces the per-task computational load and alleviates memory bottlenecks, enabling scalable causal discovery even with large node counts. Further results for other settings are included in Appendix F.3.
+
+Table 3: Comparison of total computing time (s) under ER3 setting.
+
+| Method | $n = 50$ | $n = 100$ | $n = 300$ |
+|-|-|-|-|
+| NOTEARS | $494.40 \pm 98.24$ | $1473.69 \pm 395.59$ | $12515.63 \pm 1599.06$ |
+| +VISTA | <b><math>189.15 \pm 65.37</math></b> | <b><math>339.90 \pm 158.75</math></b> | <b><math>2136.72 \pm 708.15</math></b> |
+| GOLEM | $72.65 \pm 15.41$ | $108.82 \pm 70.56$ | $261.84 \pm 30.44$ |
+| +VISTA | <b><math>21.93 \pm 0.81</math></b> | <b><math>26.16 \pm 2.68</math></b> | <b><math>43.40 \pm 3.21</math></b> |
+| DAG-GNN | $628.63 \pm 55.29$ | $2192.97 \pm 323.59$ | $17713.84 \pm 2861.06$ |
+| +VISTA | <b><math>201.31 \pm 43.36</math></b> | <b><math>371.25 \pm 199.91</math></b> | <b><math>1960.43 \pm 794.02</math></b> |
+| GraN-DAG | $730.42 \pm 89.95$ | $3035.76 \pm 481.85$ | $25205.64 \pm 2098.85$ |
+| +VISTA | <b><math>238.53 \pm 51.36</math></b> | <b><math>472.30 \pm 172.77</math></b> | <b><math>2336.32 \pm 1028.04</math></b> |
+| SCORE | $426.63 \pm 61.15$ | $10040.65 \pm 209.31$ | — |
+| +VISTA | <b><math>105.64 \pm 39.65</math></b> | <b><math>198.82 \pm 34.12</math></b> | <b><math>225.16 \pm 11.45</math></b> |
+
+**Sensitivity study of  $\lambda$**  We sweep  $\lambda$  and plot precision/recall in Figure 4. By the conclusion of Theorem 3.4 and Appendix E.1, larger  $\lambda$  shifts the method toward higher recall and lower precision by relaxing the penalty on low-support edges. Within the theoretical range, this precision–recall trade-off is smooth and yields informative voting thresholds  $r_\lambda(m)$ . The figure also substantiate this point, Small  $\lambda$  strongly discounts low-support edges, yielding high precision and low recall. Similarly, as  $\lambda$  increases, recall rises while precision falls. Beyond the upper end of (5) we have  $(1 - e^{-\lambda m}) \approx 1$  and thus  $s(X \rightarrow Y) \approx A/m$ , so the curves plateau and further increases of  $\lambda$  have negligible effect. Therefore, to balance precision and recall in practice, a moderate value of the hyperparameter could be fixed within the theoretical range, which serves as a stable operating point.
+
+![Figure 4: Precision–recall trade-off under varying λ, where threshold t = 0.5. The figure consists of three subplots: (a) GOLEM, SF5, n = 300; (b) SCORE, SF3, n = 100; (c) DAGGNN, ER3, n = 100. Each subplot shows Precision (solid blue line) and Recall (dashed red line) on the y-axis (ranging from 0.0 to 1.0) against λ on the x-axis (ranging from 0 to 5). In all cases, as λ increases, recall increases and precision decreases, eventually plateauing. Shaded regions represent confidence intervals.](0f3e3ea50bcceb86f6c524ab2b6f3e7a_img.jpg)
+
+Figure 4: Precision–recall trade-off under varying λ, where threshold t = 0.5. The figure consists of three subplots: (a) GOLEM, SF5, n = 300; (b) SCORE, SF3, n = 100; (c) DAGGNN, ER3, n = 100. Each subplot shows Precision (solid blue line) and Recall (dashed red line) on the y-axis (ranging from 0.0 to 1.0) against λ on the x-axis (ranging from 0 to 5). In all cases, as λ increases, recall increases and precision decreases, eventually plateauing. Shaded regions represent confidence intervals.
+
+Figure 4: Precision–recall trade-off under varying  $\lambda$ , where threshold  $t = 0.5$ .
+
+### 4.2 REAL DATA
+
+We further evaluate all methods on the well-known Sachs protein signaling network based on expression levels of proteins and phospholipids Sachs et al. (2005). This benchmark is widely used in causal discovery research, and the ground-truth graph with 11 nodes and 17 directed edges is consistently accepted by the community.
+
+Here we trained normalized data with 853 samples and reported the results in Table 4. Incorporating VISTA consistently reduces false discoveries and improves structural accuracy, measured by SHD and SID Peters &
+
+Table 4: Results on the Sachs protein-signaling network.
+
+| Method | FDR↓ | TPR↑ | SHD↓ | SID↓ |
+|-|-|-|-|-|
+| GOLEM | 0.80 | 0.26 | 16 | 50 |
+| +VISTA | 0.57 | 0.18 | 16 | 48 |
+| SCORE | 0.81 | 0.18 | 18 | 57 |
+| +VISTA | 0.60 | 0.12 | 15 | 53 |
+| DAG-GNN | 0.50 | 0.12 | 15 | 54 |
+| +VISTA | 0.25 | 0.18 | 14 | 52 |
+| GraN-DAG | 0.82 | 0.53 | 16 | 48 |
+| +VISTA | 0.00 | 0.29 | 12 | 45 |
+
+that highlights that VISTA is a plug-and-play module that can reliably enhance the performance of arbitrary causal discovery algorithms.
+
+{9}------------------------------------------------
+
+## 5 CONCLUSION
+
+In this paper, we introduced VISTA, a scalable and model-agnostic framework for causal discovery that decomposes global structure learning into Markov Blanket neighborhoods, aggregates them via a weighted voting scheme, and enforces acyclicity through FAS post-processing. The design is fully parallelizable, and the aggregation step operates only at the edge level, enabling efficient exploration of operating points regardless of the base learner. Theoretically, we establish finite-sample error guarantees and asymptotic consistency under mild conditions. Empirically, across diverse graph families and base learners, VISTA improves accuracy and runtime efficiency, typically increasing precision without sacrificing recall.
+
+Despite the favorable performance of VISTA, the framework has several limitations. First, when aggregating local graphs, latent confounding introduced by restricting the learner to subsets may produce high-confidence redundant edges. In some cases these edges do not necessarily participate in cycles and our current framework can only mitigate them through the combination of GreedyFAS and threshold-based filtering. Moreover, although the FAS projection guarantees acyclicity, it may also prune edges that are weakly supported yet correct, which can negatively affect downstream tasks that are sensitive to edge directions. Future work includes incorporating interventional data to improve orientation accuracy and extending the VISTA framework to online settings for large-scale applications.
+
+## REPRODUCIBILITY STATEMENT
+
+We provide the code in the supplementary material, together with a README file that allows experimental results to be reproduced.
+
+## THE USE OF LLM
+
+We used LLM to polish the writing and correct grammar in some paragraphs, but it did not contribute to ideas or conceptual content.
+
+## REFERENCES
+
+- Steen A Andersson, David Madigan, and Michael D Perlman. A characterization of markov equivalence classes for acyclic digraphs. *The Annals of Statistics*, 25(2):505–541, 1997.
+- Taiyu Ban, Lyuzhou Chen, Xiangyu Wang, Xin Wang, Derui Lyu, and Huanhuan Chen. Differentiable structure learning with partial orders. In *The Thirty-eighth Annual Conference on Neural Information Processing Systems*, 2024.
+- Kevin Bello, Bryon Aragam, and Pradeep Ravikumar. Dagma: Learning dags via m-matrices and a log-determinant acyclicity characterization. *Advances in Neural Information Processing Systems*, 35:8226–8239, 2022.
+- Peter Bühlmann and Jonas Peters. CAM: Causal additive models, high-dimensional order search and penalized regression. *The Annals of Statistics*, 44(1):243–274, 2016.
+- Ruichu Cai, Zhenjie Zhang, and Zhifeng Hao. Sada: A general framework to support robust causation discovery. In Sanjoy Dasgupta and David McAllester (eds.), *Proceedings of the 30th International Conference on Machine Learning*, volume 28 of *Proceedings of Machine Learning Research*, pp. 208–216, Atlanta, Georgia, USA, 17–19 Jun 2013. PMLR.
+- Ruichu Cai, Zhenjie Zhang, Zhifeng Hao, and Marianne Winslett. Sophisticated merging over random partitions: A scalable and robust causal discovery approach. *IEEE Transactions on Neural Networks and Learning Systems*, 29(8):3623–3635, 2018. doi: 10.1109/TNNLS.2017.2734804.
+- David Maxwell Chickering. Optimal structure identification with greedy search. *Journal of machine learning research*, 3(Nov):507–554, 2002.
+
+ Rest of paper (reference and Appendix) is removed.

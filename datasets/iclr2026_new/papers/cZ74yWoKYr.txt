@@ -1,0 +1,376 @@
+
+
+{0}------------------------------------------------
+
+# IDENTIFY CRITICAL KV CACHE IN LLM INFERENCE FROM AN OUTPUT PERTURBATION PERSPECTIVE
+
+## ABSTRACT
+
+Large language models have revolutionized natural language processing but face significant challenges of high storage and runtime costs, due to the transformer architecture’s reliance on self-attention, particularly the large Key-Value (KV) cache for long-sequence inference. Recent efforts to reduce KV cache size by pruning less critical entries based on attention weights remain empirical and lack formal grounding. This paper presents a formal study on identifying critical KV cache entries by analyzing attention output perturbation. Our analysis reveals that, beyond attention weights, the value states within KV entries and pretrained parameter matrices are also crucial. Based on this, we propose a perturbation-constrained selection algorithm that optimizes the worst-case output perturbation to identify critical entries. We demonstrate that our algorithm is a universal, plug-and-play enhancement that incurs negligible computational overhead. When integrated with three state-of-the-art cache eviction methods on three distinct LLMs, our algorithm significantly reduces the compression loss by more than *half* on average across 29 datasets from the Ruler and LongBench benchmarks. Further perturbation analysis, at both the head and layer levels, confirms the principles underlying our effectiveness. This work offers a new, formally grounded perspective to the cache eviction field, opening promising avenues for future research.
+
+![Figure 1: Average loss on 13 Ruler datasets and 16 Longbench datasets. The figure contains two subplots, (a) and (b), each showing the loss percentage for three cache eviction methods (base, AdaKV, HeadKV) compared to the proposed 'Ours' method across three LLMs: Llama-3.1-8B, Mistral-7B-v0.3, and Qwen2.5-32B. In all cases, 'Ours' achieves a lower loss than the other methods.](1559db1c389771b44f7dc11d48b06079_img.jpg)
+
+(a) Average loss on 13 Ruler datasets.
+
+| Model | Method | SnapKV | AdaKV | HeadKV |
+|-|-|-|-|-|
+| Llama-3.1-8B | base | 25.39% | 13.92% | 12.16% |
+|  | w/ Ours | 15.55% | 5.24% | 1.93% |
+| Mistral-7B-v0.3 | base | 58.92% | 55.44% | 49.42% |
+|  | w/ Ours | 46.90% | 11.67% | 26.42% |
+| Qwen2.5-32B | base | 32.00% | 24.30% | 13.70% |
+|  | w/ Ours | 13.65% | 0.69% | 3.43% |
+
+(b) Average loss on 16 Longbench datasets.
+
+| Model | Method | SnapKV | AdaKV | HeadKV |
+|-|-|-|-|-|
+| Llama-3.1-8B | base | 7.48% | 6.02% | 4.00% |
+|  | w/ Ours | 3.88% | 2.44% | 2.87% |
+| Mistral-7B-v0.3 | base | 7.07% | 4.88% | 5.36% |
+|  | w/ Ours | 4.28% | 2.43% | 2.70% |
+| Qwen2.5-32B | base | 6.40% | 5.55% | 1.59% |
+|  | w/ Ours | 2.78% | 3.19% | 0.00% |
+
+Figure 1: Average loss on 13 Ruler datasets and 16 Longbench datasets. The figure contains two subplots, (a) and (b), each showing the loss percentage for three cache eviction methods (base, AdaKV, HeadKV) compared to the proposed 'Ours' method across three LLMs: Llama-3.1-8B, Mistral-7B-v0.3, and Qwen2.5-32B. In all cases, 'Ours' achieves a lower loss than the other methods.
+
+Figure 1: Our algorithm reduces the loss of three existing cache eviction methods by more than *half* on average. (shown at 40% cache size; see experiments for other sizes).
+
+## 1 INTRODUCTION
+
+Large language models (LLMs) using transformer architecture have excelled in many tasks, likes chatbots (Achiam et al., 2023)(Yi et al., 2024) and intelligent agents (Wang et al., 2024). However, the quadratic computational cost inherent in the transformer’s self-attention mechanism poses significant challenges for practical deployment. To mitigate this, LLMs often use a Key-Value (KV) cache, which stores intermediate results from the self-attention mechanism. Each KV cache entry corresponds to the KV states of a past token, thus allowing for the bypassing of recomputation of these tokens during autoregressive generation. However, as sequence lengths increase, the number of KV cache entries expands dramatically. This expansion not only leads to considerable GPU memory overhead but also significantly increases I/O latency, hindering the real-world deployment (Sun et al., 2024a).
+
+Recent research has identified that only a subset of KV cache entries substantially contribute to the output of the self-attention mechanism (Zhang et al., 2024b; Liu et al., 2024b; Tang et al., 2024a). As
+
+{1}------------------------------------------------
+
+a result, many methods, known as *cache eviction*, have been developed to reduce the KV cache size to fit within a given budget by evicting non-critical entries during inference. These methods effectively save GPU memory and improve subsequent decoding speed. Notably, H2O (Zhang et al., 2024b) and Scissorhands (Liu et al., 2024b) observe a power-law distribution of attention weights: a small fraction of KV cache entries consistently dominates the majority of attention weights, aligning closely with the concept of cache entry criticality during inference. These methods introduce frameworks that leverage accumulated attention weights to identify and preserve critical cache entries. Building on this, subsequent works (Adnan et al., 2024; Li et al., 2024; Feng et al., 2024; Fu et al., 2024) have refined attention weight accumulation and added operations like pooling and budget allocation to better preserve key information. However, while these methods generally assume that entries with higher attention weights—determined by the similarity between key states in the KV cache and the target query state—are critical, the identification and characterization of “critical cache entries” remain unformalized. This assumption raises two key questions:
+
+1. *What criteria determine the critical KV cache?*
+2. *Is reliance on attention weights alone sufficient for identifying critical cache entries?*
+
+In this paper, we define the problem of critical cache identification from the perspective of output perturbation. This approach is grounded in the key insight that KV cache eviction loss is driven by changes in the attention output. Our primary objective, therefore, is to minimize this perturbation when replacing the full KV cache with only its critical entries. To formalize this, we introduce a theoretical framework that bounds the worst-case perturbation to guide practical optimization. Specifically, to quantify this perturbation, we employ the simple  $L_1$  distance and derive its upper bound<sup>1</sup>, corresponding to the worst-case perturbation. Our analysis reveals that this upper bound is influenced by both the attention weights and the value states projected through the parameter matrix. Based on these insights, we propose a perturbation-constrained selection algorithm designed to minimize this derived upper bound. It goes beyond mere reliance on attention weights, underscoring the significance of previously overlooked value states and the pretrained parameter matrix.
+
+We integrate our algorithm into three state-of-the-art (SOTA) cache eviction methods, SnapKV (Li et al., 2024), AdaKV (Feng et al., 2024) and HeadKV (Fu et al., 2024), replacing their reliance on solely attention-weight-based strategies. Comprehensive evaluations on 29 datasets from Ruler and LongBench, as summarized in Figure 1, demonstrate that our method serves as a universal enhancement, substantially improving post-eviction generation quality. Further empirical analysis confirms and elucidates the practical benefits of our algorithm: (1) It effectively reduces output perturbation in over 92% of the Llama model’s attention heads. (2) Its advantages accumulate across layers, significantly lowering the perturbation in final-layer hidden states. (3) It consistently performs well across various cache sizes, robustly mitigating quality loss under different resource constraints in practical applications. Our contributions can be summarized as follows:
+
+1. We highlight that current cache eviction methods neglect the crucial problem of identifying critical KV cache entries. To address this, we propose using output perturbation as a criterion for determining criticality. Our analysis shows that attention weights alone are insufficient; the value states projected by the parameter matrix are also essential.
+2. Building on the constraint of worst-case output perturbation, we propose a novel critical entry selection algorithm as a universal enhancement. When integrated with three SOTA eviction techniques, it reduces compression loss by more than half on average, as validated across three distinct LLMs on 29 datasets from Ruler and LongBench benchmarks (Figure 1).
+3. Further empirical analysis examines and confirms the benefits of our perturbation-constrained selection algorithm. This analysis also highlights the significant potential for optimizing critical cache selection from the theoretical perspective of output perturbation.
+
+## 2 RELATED WORKS
+
+**Perturbation-based analysis** has achieved remarkable success in neural network interpretability and pruning. For example, Catformer (Davis et al., 2021) and Admin (Liu et al., 2020) utilize output
+
+<sup>1</sup>We choose the  $L_1$  distance for its simplicity and effectiveness, though more complex metrics are also compatible with our framework. For example, employing the  $L_2$  distance yields similar gains (see Appendix J).
+
+{2}------------------------------------------------
+
+perturbation analysis to create more stable network architectures and enhance training methods. Similarly, pruning techniques (Han et al., 2015; Frantar & Alistarh, 2023), with Wanda (Sun et al., 2024b) as a representative, aim to identify neurons whose removal minimally impacts output, thereby reducing network parameters. In this paper, we present the first analysis of output perturbations aimed at developing more effective selection metrics for cache eviction in efficient LLM inference.
+
+**KV cache eviction** aims to retain only critical KV cache entries while evicting non-essential ones to reduce cache size, facilitating efficient long-sequence inference in LLMs. Early methods (Xiao et al., 2023), which preserved recent entries in a sliding window, risked losing important information in long sequences. Techniques like H2O (Zhang et al., 2024b) and Scissorhands (Liu et al., 2024b) used accumulated attention scores to identify key entries, aiming to retain crucial context. Subsequent works refined these methods (Ge et al., 2024b; Adnan et al., 2024; Ge et al., 2024a; Li et al., 2024), with SnapKV (Li et al., 2024) achieving the SOTA performance through introducing observation window-based attention weight accumulation and pooling operations. However, these methods are largely empirical, relying solely on attention weights to identify critical entries. Our paper introduces a novel perturbation-constrained selection algorithm based on in-depth analysis from an output perturbation perspective. This algorithm seamlessly integrates into existing cache eviction methods without altering underlying accumulation processes. Additionally, recent advances in budget allocation optimization (Yang et al., 2024a; Zhang et al., 2024a; Fu et al., 2024; Xiao et al., 2024a; Zhang et al., 2025b)—such as AdaKV [(Feng et al., 2024)], which adaptively allocating budgets based on head characteristics, and HeadKV (Fu et al., 2024), which uses fine-grained offline profiling to guide allocation—are fundamentally orthogonal to our approach. To comprehensively demonstrate the effectiveness, we integrate our algorithm with these three representative cache-eviction lines—SnapKV, AdaKV, and HeadKV—and observe substantial gains across all three.
+
+## 3 CRITICAL KV CACHE ENTRY SELECTION
+
+For critical cache entry selection, we aim to choose cache entries that represent the entire KV cache during self-attention computation, producing an output that is a close approximation, if not identical. Based on this insight, we formalize the problem of identifying critical cache entries from the perspective of output perturbation (Definition 3.1) in Section 3.2. Subsequently, in Section 3.3, we formalize the output perturbation and derive its upper bound. Then, we propose a two-stage greedy algorithm in Section 3.4 that constrains worst-case perturbations for selecting critical entries, with theoretical analysis provided in Section 3.5. Finally, in Section 3.6 we integrate the algorithm into current SOTA cache eviction methods.
+
+### 3.1 PRELIMINARIES
+
+LLMs utilizing the multi-head self-attention mechanism operate with an autoregressive generation approach. In this setup, each decoding step leverages the most recently generated token to predict the next one. To illustrate this process, we focus on a single attention head as an example. Let  $X \in \mathbb{R}^{n \times d}$  denote the embedding matrix for all tokens in the sequence, with  $x = X_{-1:} \in \mathbb{R}^{1 \times d}$  representing the embedding vector of the most recent token, which serves as input at the current time step. The parameter matrices, denoted by  $W^Q$ ,  $W^K$ , and  $W^V \in \mathbb{R}^{d \times d_h}$  are used to map the token embeddings into their respective Query, Key, and Value states with head dimension  $d_h$  as follows:
+
+$$q = xW^Q; K = XW^K; V = XW^V \quad (1)$$
+
+During the decoding phase, the Key and Value states of previously generated tokens (represented by  $X$ ) are stored in the KV cache, allowing for the elimination of redundant computation. Accordingly, the query  $q$ , derived from the most recent token  $x$ , attends to the cached Key  $K$  to compute the attention weights  $A$ . These weights are then applied to the cached Value  $V$ , producing an intermediate output. This intermediate result is subsequently transformed into the final output  $o$  of the self-attention mechanism by the output parameter matrix  $W^O \in \mathbb{R}^{d_h \times d}$ :
+
+$$o = AVW^O, \text{ where } A = \text{softmax} \left( qK^T / \sqrt{d} \right) \quad (2)$$
+
+### 3.2 WHAT CRITERIA DETERMINE THE CRITICAL KV CACHE?
+
+Recent research has demonstrated only a small portion of critical KV cache entries do substantially contribute to the attention output (Zhang et al., 2024b; Liu et al., 2024b). This insight presents
+
+{3}------------------------------------------------
+
+promising opportunities to reduce inference costs by evicting a large number of non-critical KV cache entries (Li et al., 2024; Zhang et al., 2024a; Feng et al., 2024; Ge et al., 2024b; Adnan et al., 2024; Ge et al., 2024a). However, the key challenge lies in accurately identifying the critical KV cache entries. Ideally, from a high-level perspective, the set of critical KV cache entries should completely represent the entire cache, ensuring for given query state, the selected entries yield the same attention output as the full set of KV pairs. In practice, the number of selected critical cache entries will be constrained by a predefined budget, which is closely tied to the computational resources available in downstream deployments. Consequently, our goal shifts toward minimizing the output perturbation introduced by the replacement. So, the problem can be reformulated as follows.
+
+**Definition 3.1** (Critical KV Cache Identification Problem). Given a critical cache budget  $b$ , the task is to select  $b$  critical KV cache entries  $\langle \hat{K}, \hat{V} \rangle$  from a total of  $n$  cache entries  $\langle K, V \rangle$ , with the goal of minimizing the perturbation in the attention output  $o$ . By using the  $L_1$  distance  $\mathcal{L}$  for quantification, the objective is formalized as:  $\arg \min_{\langle \hat{K}, \hat{V} \rangle} \mathcal{L} = \|o - \hat{o}\|_1$ , where  $\hat{o}$  represents the attention output produced by the selected  $\langle \hat{K}, \hat{V} \rangle$ .
+
+### 3.3 ARE ATTENTION WEIGHTS SUFFICIENT FOR IDENTIFYING CRITICAL CACHE ENTRIES?
+
+According to Definition 3.1, the goal of identifying critical KV cache entries is to minimize the perturbation  $\mathcal{L} = \|o - \hat{o}\|_1$ . To achieve this, we can employ an additive masking  $\mathcal{M}$  to simulate the removal of non-critical cache entries' contributions to the final output  $\hat{o}$ , thereby altering  $\hat{o}$ .
+
+$$\hat{o} = A'VW^O, \quad A' = \text{softmax} \left( \mathcal{M} + qK^T / \sqrt{d} \right) \text{ where } \mathcal{M}_i = \begin{cases} -\infty & \text{if } K_i \text{ and } V_i \text{ are non-critical} \\ 0 & \text{otherwise.} \end{cases} \quad (3)$$
+
+Thus, the perturbation  $\mathcal{L}$  can be further expressed as:  $\mathcal{L} = \|(A - A')VW^O\|_1$
+
+**Theorem 3.2.** By introducing a mask  $\mathcal{N} \in \mathbb{R}^n$  applied through element-wise multiplication denoted by  $\odot$ , we can establish the relation between  $A'$  and  $A$  as follows:
+
+$$A' = \frac{\mathcal{N} \odot A}{\sum_{i=1}^n \mathcal{N}_i A_i} \quad \text{where } \mathcal{N}_i = \begin{cases} 0 & \text{if } K_i, V_i \text{ is non-critical} \\ 1 & \text{otherwise.} \end{cases} \quad \text{and } \sum_{i=1}^n \mathcal{N}_i = b \quad (4)$$
+
+*Proof.* See Appendix K.1 for details.  $\square$
+
+Theorem 3.2 utilizes a multiplicative mask  $\mathcal{N}$  to quantifies how their selection impacts the attention weights. However, directly minimizing  $\mathcal{L}$  for critical cache selection is challenging due to complex matrix operations it requires. Thus we turn to establish an upper bound  $\theta$ , as shown in Theorem 3.3.
+
+**Theorem 3.3.** The output perturbation  $\mathcal{L}$  can be bounded by  $\theta$ :
+
+$$\mathcal{L} \leq \theta = C - \left( 2 - \frac{1}{\sum_{i=1}^n \mathcal{N}_i A_i} \right) \sum_{i=1}^n \mathcal{N}_i A_i \|\mathbf{V}_{i,:}\|_1, \quad (5)$$
+
+where  $C$  denotes the  $\sum_{i=1}^n A_i \|\mathbf{V}_{i,:}\|_1$  and  $\mathbf{V} \in \mathbb{R}^{n \times d} = VW^O$  denotes all projected values states through parameter matrix  $W^O$ .
+
+*Proof.* See Appendix K.2 for details.  $\square$
+
+We can observe that  $\theta$  encompasses not only the attention weights but also the projected value states. This highlights that prior selection methods relying solely on attention weights are suboptimal.
+
+### 3.4 IDENTIFY CRITICAL CACHE ENTRIES BY CONSTRAINING WORST-CASE PERTURBATION.
+
+Drawing on optimization strategies in machine learning, we propose lowering the upper bound of perturbation, effectively constraining the worst-case perturbation and thereby reducing actual perturbations for identifying critical cache entries. However, directly minimizing the upper bound  $\theta$  remains non-trivial. To balance both the complexity and selection effectiveness, we introduce a two-stage greedy perturbation-constrained selection Algorithm 1, specifically designed to lower the perturbation upper bound for critical cache entry identification.
+
+In this algorithm, the total budget  $b$  is divided into two portions based on a hyperparameter  $\alpha$ . In the first stage, a fraction of the budget,  $b' = b \times \alpha$ , is allocated to prioritize KV cache entries with high attention weights. In the second stage, the remaining budget,  $b'' = b - b'$ , is used to consider both the
+
+{4}------------------------------------------------
+
+#### **Algorithm 1** Perturbation-Constrained Selection
+
+**Input:** Budgets  $b$ , Query State  $q$ , Cache Entries  $K, V$ , Parameter Matrix  $W^O$ , Hyper Parameter  $\alpha = 0.25$
+
+**Output:** Critical Cache Entries  $\hat{K}, \hat{V}$
+
+- 1: initialize empty cache  $\hat{K}, \hat{V}$
+- 2:  $A = \text{softmax}(qK^T)$ ;  $\mathcal{V} = VW^O$
+- 3:  $\mathcal{A} = (A + \epsilon) \odot (L_1 \text{ norm of each rows in } \mathcal{V})$
+- 4:  $b' = b \times \alpha$ ;  $b'' = b - b'$
+- 5: **for all**  $K_i, V_i \in K, V$  that  $A_i \in \text{Top}_k(\mathcal{A}, b')$
+- 6:   add  $K_i, V_i$  to  $\hat{K}, \hat{V}$  **Stage 1**
+- 7:   remove  $\mathcal{A}_i, K_i, V_i$  from  $\mathcal{A}, K, V$
+- 8: **for all**  $K_i, V_i \in K, V$  that  $\mathcal{A}_i \in \text{Top}_k(\mathcal{A}, b'')$
+- 9:   add  $K_i, V_i$  to  $\hat{K}, \hat{V}$  **Stage 2**
+- 10: **return** Critical Cache Entries  $\hat{K}, \hat{V}$
+
+#### **Algorithm 2** Observation Win Based Eviction.
+
+**Input:** All Query States  $Q \in \mathbb{R}^{n \times d_h}$ , KV Cache Entries  $K, V \in \mathbb{R}^{n \times d_h}$ , Window Size  $n'$
+
+**Output:** Critical Cache Entries  $\hat{K}, \hat{V}$
+
+- 1: allocate budget  $b$  across heads #AdaKV.HeadKV
+- 2:  $\hat{Q} = Q[-n' : ;]$
+- 3:  $A = \text{softmax}(\hat{Q}K^T)$ ;  $\bar{A} = A.\text{mean}(\text{dim} = 0)$
+- 4:  $\bar{A} = \text{maxpooling}(A) \# \text{SnapKV}$
+- 5: **if** using regular selection **then**
+- 6:   select  $b$  critical entries  $\hat{K}, \hat{V}$  by  $\text{Top}_k(\bar{A}, b)$
+- 7: **else if** using our selection **then**
+- 8:   select  $b$  critical entries  $\hat{K}, \hat{V}$  by Algorithm 1
+- 9: **end if**
+- 10: **return** Critical Cache Entries  $\hat{K}, \hat{V}$
+
+norms of the projected value states and the attention weights<sup>2</sup>. This two-stage selection employs a Top-K operation to effectively constrain the worst-case perturbation. To substantiate the effectiveness of our proposed algorithm, we provide a theoretical analysis in the following section.
+
+### 3.5 THEORETICAL ANALYSIS OF ALGORITHM 1
+
+Our proposed algorithm consists of two stages, referred to as stage 1 and stage 2, which work collaboratively to select critical cache entries. Under the guarantee provided by Assumption 3.4, the selection in stage 1 ensures that stage 2 adheres to the constraints on perturbations, as formalized in Theorem 3.5. Let  $N'$  and  $N''$  represent the selections from the stage 1 and 2, respectively, satisfying:  $\sum_{i \in N'} N'_i = b'$  and  $\sum_{i \in N''} N''_i = b''$ . Thus, the overall selection is  $\mathcal{N} = N' + N''$ .
+
+**Assumption 3.4.** In the first stage, a portion of the overall budget  $b' = b \times \alpha$  is sufficient to collect the cache entries corresponding to the highest attention weights, ensuring their cumulative attention weights  $\sigma$  exceed half of the total, i.e.,  $\sigma = \sum_{i \in N'} N'_i A_i = \sum \text{Top}_k(A, b') > 0.5$ .
+
+In this paper, we set  $\alpha$  in Assumption 3.4 to a fixed value 0.5 based on two key considerations. First, as verified in Appendix A, allocating 50% of the total budget is sufficient to capture enough attention weight in over 99% of attention heads, thereby satisfying Assumption 3.4 across various settings. This is attributed to the power-law distribution of attention weights (Zhang et al., 2024b), where a small fraction of cache entries accounts for the majority. Second, this choice is both robust and easy to apply across different cache budgets and models. While using different  $\alpha$  values for specific models, budgets, or attention heads could yield finer optimization, it would also introduce significant search overhead and complicate deployment. Thus, we defer such granular adjustments to future work. Subsequent experiments and visual analyses further confirm that setting  $\alpha$  to 0.5 is a simple yet effective choice.<sup>3</sup>
+
+**Theorem 3.5.** Given the stage 1 selection  $N'_i$ , the objective  $N''_i$  of stage 2 is to minimize an upper bound  $\hat{\theta}$  of the output perturbation  $\mathcal{L}$ , using the remaining budget  $b'' = b - b'$ .
+
+$$\begin{aligned} & \arg \min_{N''_i} \hat{\theta} \text{ where } \hat{\theta} = C' - \left(2 - \frac{1}{\sigma}\right) \sum_{i=1}^n N''_i A_i \|\mathbf{V}_{i,:}\|_1 \\ & \text{subject to } \sum_{i=1}^n N''_i = b'', C' = C - \left(2 - \frac{1}{\sigma}\right) \sum_{i=1}^n N'_i A_i \|\mathbf{V}_{i,:}\|_1. \end{aligned} \quad (6)$$
+
+*Proof.* See Appendix K.3 for details.  $\square$
+
+Theorem 3.5 demonstrates that our second stage selection directly minimizes an upper bound of output perturbation for identifying critical cache entries. Unlike traditional strategies that rely solely on high attention weights for entry selection, the second stage of our algorithm jointly leverages both the attention weights and the value states projected through the parameter matrix, to directly constrain the worst-case output perturbation.
+
+<sup>2</sup>A small  $\epsilon$  (1E-4) is added to mitigate information loss from sparse attention weights during multiplication.
+
+<sup>3</sup>As shown in Section 4.5, our algorithm’s performance is robust to the choice of hyperparameter  $\alpha$ .
+
+{5}------------------------------------------------
+
+### 3.6 INTEGRATING INTO SOTA CACHE EVICTION METHODS
+
+We showcase the effectiveness of our algorithm by integrating it into existing cache eviction methods that rely on accumulated attention weights for selecting critical entries. Current SOTA plug-and-play cache eviction workflow is established by SnapKV (Li et al., 2024), which introduces an observation window mechanism to stably accumulate attention weights and employs the max pooling operations to avoid missing key information. Subsequent research (Zhang et al., 2024a; Feng et al., 2024) highlights the uneven distribution of critical cache entries across different heads, prompting the development of budget allocation strategies. For example, AdaKV (Feng et al., 2024) improves upon SnapKV by dynamically detecting variations in critical KV cache entries at runtime, enabling flexible budget scheduling and enhancing output quality. Other methods, such as HeadKV (Fu et al., 2024), further refine budget scheduling, albeit at the cost of offline training. Despite their differences in budget allocation, these SOTA methods—SnapKV, AdaKV, and HeadKV—all use the same underlying mechanism for KV cache selection. Consequently, they can be unified under the framework of Algorithm 2, which consists of two main components: budget allocation across heads (line 1) and an observation window with a pooling mechanism for attention weight accumulation (lines 2–5). Our algorithm integrates seamlessly into this framework by replacing the original selection process, which is based solely on attention weights (lines 5–9).
+
+## 4 EXPERIMENTS
+
+### 4.1 SETTINGS
+
+**Models.** We select three advanced open-source LLMs for evaluation: Llama-3.1-8B-Instruct (Llama-3.1-8B) (Dubey et al., 2024), Mistral-7B-Instruct-v0.3 (Mistral-7B) (Jiang et al., 2023), and Qwen-2.5-32B (Team, 2024). These models span different model families and parameter scales, demonstrating the broad applicability of our algorithm.
+
+**Compression scenario.** Following (Feng et al., 2024; NVIDIA, 2024), the context is compressed independently before question is introduced. This setting better simulates practical scenarios (e.g., multi-turn QA or prefixed contexts) where multiple questions often pertain to the same context, or the question is unavailable during context compression. It therefore provides a more realistic evaluation of cache eviction methods. For the simple compression setting, where the context and question are compressed together, please refer to Appendix F
+
+**Baselines.** We integrated our algorithm with three cache eviction methods—SnapKV (Li et al., 2024), AdaKV (Feng et al., 2024) and HeadKV (Fu et al., 2024). These respectively represent the SOTA cache eviction in non-budget-allocation, adaptive budget allocation, and offline budget allocation. By comparing the quality before and after integration, we demonstrate the improvements our algorithm brings to these methods. We set  $\alpha = 0.5$  in Algorithm 1 for all experiments; see Section 4.5 for robustness analysis. SnapKV and AdaKV used their original settings: max-pooling kernel size 7 and observation window 32 (Feng et al., 2024). All methods were implemented with FlashAttention-2 for faster inference. We also include the performance of H2O (Zhang et al., 2024b) for reference, a foundational work in this area. Since it requires global attention weights—unsupported by FlashAttention-2—it triggers OOM. Following (Xiao et al., 2024c), we simulate H2O by observing the last 256 tokens’ attention weights.
+
+### 4.2 RULER BENCHMARK
+
+The Ruler benchmark (Hsieh et al., 2024) comprises 13 synthetic tasks for evaluating long-context capabilities—a challenging testbed for cache eviction. It includes two Word Extraction variants (CWE and FWE)—eight Needle-In-A-Haystack variations (NIAH), as well as Question Answering(QA) and Variable Tracking (VT), with each scored out of 100. To match the Mistral model’s 32K context window and control cost, we set the ruler length to 32K and sampled 100 instances per task.
+
+Table 1 reports task-wise scores at a 40% cache size. SnapKV, AdaKV, and HeadKV all degrade under cache eviction, but each sees substantial gains when augmented with our algorithm. For instance, on Qwen2.5-32B, our algorithm yields consistent gains across all 13 tasks for all three eviction method. Quantitatively, our algorithm increases the average score of SnapKV from 63.86 to 81.09 and AdaKV from 71.09 to 83.87. When applied to HeadKV, the average score climbs from
+
+{6}------------------------------------------------
+
+Table 1: Detail Results on Ruler Benchmark with 40% Cache Size
+
+| CWE FWE | NIAH |  |  |  |  |  |  |  |  | QAI | QA2 | VT | Avg. Score | $\downarrow$ loss |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  | Multik3y1 | Multik2y2 | Multik3y3 | Multiquery | Multivalue | Single1 | Single2 | Single3 | Single4 |  |  |  |  |  |  |  |
+| Llama-3.1-8B | Full Cache | 44.90 | 95.33 | 100.00 | 100.00 | 100.00 | 98.25 | 99.75 | 100.00 | 100.00 | 100.00 | 84.00 | 62.00 | 99.40 | 91.05 | $\downarrow$ 0.0% |
+|  | SnapKV | 20.30 | 90.00 | 93.00 | 36.00 | 31.00 | 92.75 | 87.50 | 100.00 | 97.00 | 46.00 | 41.00 | 52.00 | 96.60 | 67.93 | $\downarrow$ 25.4% |
+|  | w/ ours | 33.90 | 92.67 | 100.00 | 50.00 | 32.00 | 99.00 | 99.00 | 100.00 | 100.00 | 80.00 | 63.00 | 53.00 | 97.00 | 76.89 | $\downarrow$ 15.6% |
+|  | AdaKV | 25.00 | 92.00 | 98.00 | 66.00 | 71.00 | 93.25 | 99.00 | 100.00 | 75.00 | 43.00 | 51.00 | 98.60 | 91.38 | $\downarrow$ 13.9% |  |
+|  | w/ ours | 52.40 | 94.67 | 100.00 | 93.00 | 65.00 | 99.25 | 98.75 | 100.00 | 100.00 | 97.00 | 64.00 | 58.00 | 99.60 | 86.28 | $\downarrow$ 1.8% |
+|  | HeadKV | 17.10 | 92.67 | 99.00 | 66.00 | 75.00 | 97.00 | 93.00 | 100.00 | 98.00 | 94.00 | 56.00 | 54.00 | 98.00 | 79.98 | $\downarrow$ 12.2% |
+|  | w/ ours | 56.50 | 93.33 | 100.00 | 93.00 | 90.00 | 99.50 | 99.00 | 100.00 | 100.00 | 99.00 | 72.00 | 59.00 | 99.40 | 89.29 | $\downarrow$ 1.9% |
+| Mistral-7B | Full Cache | 30.00 | 95.67 | 94.00 | 69.00 | 31.00 | 94.25 | 95.00 | 99.00 | 100.00 | 100.00 | 60.00 | 59.00 | 90.60 | 78.27 | $\downarrow$ 0.0% |
+|  | SnapKV | 32.20 | 91.67 | 16.00 | 11.00 | 4.00 | 11.25 | 8.00 | 65.00 | 17.00 | 2.00 | 34.00 | 31.00 | 74.80 | 32.15 | $\downarrow$ 58.9% |
+|  | w/ ours | 48.50 | 92.33 | 25.00 | 14.00 | 5.00 | 26.00 | 24.25 | 74.00 | 48.00 | 2.00 | 45.00 | 50.00 | 81.80 | 41.56 | $\downarrow$ 46.9% |
+|  | AdaKV | 25.30 | 92.33 | 25.00 | 14.00 | 5.00 | 20.00 | 17.25 | 44.00 | 34.00 | 6.00 | 44.00 | 55.00 | 71.60 | 34.88 | $\downarrow$ 55.4% |
+|  | w/ ours | 40.50 | 95.33 | 89.00 | 27.00 | 8.00 | 85.00 | 95.00 | 99.00 | 100.00 | 54.00 | 60.00 | 57.00 | 89.40 | 69.17 | $\downarrow$ 11.6% |
+|  | HeadKV | 30.60 | 92.67 | 24.00 | 27.00 | 17.00 | 16.25 | 16.50 | 70.00 | 36.00 | 4.00 | 45.00 | 53.00 | 82.60 | 39.59 | $\downarrow$ 40.4% |
+|  | w/ ours | 49.50 | 95.00 | 53.00 | 31.00 | 17.00 | 60.50 | 62.25 | 84.00 | 82.00 | 25.00 | 53.00 | 55.00 | 81.40 | 57.59 | $\downarrow$ 26.4% |
+| Qwen2.5-32B | Full Cache | 90.60 | 96.00 | 99.00 | 90.00 | 90.00 | 100.00 | 99.25 | 100.00 | 100.00 | 100.00 | 82.00 | 74.00 | 100.00 | 93.91 | $\downarrow$ 0.0% |
+|  | SnapKV | 87.90 | 92.00 | 63.00 | 23.00 | 9.00 | 71.75 | 61.75 | 100.00 | 94.00 | 14.00 | 50.00 | 64.00 | 99.80 | 63.86 | $\downarrow$ 33.0% |
+|  | w/ ours | 88.60 | 93.33 | 98.00 | 35.00 | 16.00 | 99.50 | 100.00 | 100.00 | 88.00 | 67.00 | 69.00 | 100.00 | 81.09 | $\downarrow$ 13.7% |  |
+|  | AdaKV | 85.50 | 92.33 | 81.00 | 24.00 | 21.00 | 87.55 | 82.50 | 100.00 | 97.00 | 19.00 | 55.00 | 64.00 | 100.00 | 71.09 | $\downarrow$ 24.3% |
+|  | w/ ours | 89.50 | 94.33 | 98.00 | 54.00 | 34.00 | 100.00 | 99.50 | 100.00 | 100.00 | 91.00 | 64.00 | 66.00 | 100.00 | 83.87 | $\downarrow$ 10.7% |
+|  | HeadKV | 89.30 | 94.67 | 92.00 | 46.00 | 45.00 | 97.25 | 96.25 | 100.00 | 100.00 | 59.00 | 68.00 | 66.00 | 100.00 | 81.04 | $\downarrow$ 13.7% |
+|  | w/ ours | 89.90 | 95.33 | 99.00 | 85.00 | 71.00 | 100.00 | 98.75 | 100.00 | 100.00 | 99.00 | 72.00 | 69.00 | 100.00 | 90.69 | $\downarrow$ 3.4% |
+
+![Figure 2: Performance on Ruler Tasks with Varying Cache Sizes. The figure consists of 15 subplots arranged in a 3x5 grid. Each subplot shows 'Performance Score' on the y-axis (ranging from 0 to 100) against 'Cache Size' on the x-axis (ranging from 0% to 100%). The subplots are: 1. Llama-3.1-8B - Average; 2. Llama-3.1-8B - niah_multik3y1; 3. Llama-3.1-8B - niah_multik2y2; 4. Llama-3.1-8B - niah_multik3y3; 5. Llama-3.1-8B - niah_multiquery; 6. Llama-3.1-8B - niah_multivalue; 7. Llama-3.1-8B - niah_single1; 8. Llama-3.1-8B - niah_single2; 9. Llama-3.1-8B - niah_single3; 10. Llama-3.1-8B - qa1; 11. Llama-3.1-8B - qa2; 12. Llama-3.1-8B - vt; 13. Mistral-7B - Average; 14. Mistral-7B - niah_multik3y1; 15. Mistral-7B - niah_multik2y2. Each plot compares several methods: AdaKV (red star), AdaKV w/ ours (red dashed line), HeadKV (blue square), HeadKV w/ ours (blue dashed line), SnapKV (orange triangle), SnapKV w/ ours (orange dashed line), and H2O (grey solid line). In general, the 'w/ ours' variants of AdaKV, HeadKV, and SnapKV achieve higher performance scores than their base methods and H2O, especially at smaller cache sizes.](a6a8016b231533e7f34b550f4676afc6_img.jpg)
+
+Figure 2: Performance on Ruler Tasks with Varying Cache Sizes. The figure consists of 15 subplots arranged in a 3x5 grid. Each subplot shows 'Performance Score' on the y-axis (ranging from 0 to 100) against 'Cache Size' on the x-axis (ranging from 0% to 100%). The subplots are: 1. Llama-3.1-8B - Average; 2. Llama-3.1-8B - niah\_multik3y1; 3. Llama-3.1-8B - niah\_multik2y2; 4. Llama-3.1-8B - niah\_multik3y3; 5. Llama-3.1-8B - niah\_multiquery; 6. Llama-3.1-8B - niah\_multivalue; 7. Llama-3.1-8B - niah\_single1; 8. Llama-3.1-8B - niah\_single2; 9. Llama-3.1-8B - niah\_single3; 10. Llama-3.1-8B - qa1; 11. Llama-3.1-8B - qa2; 12. Llama-3.1-8B - vt; 13. Mistral-7B - Average; 14. Mistral-7B - niah\_multik3y1; 15. Mistral-7B - niah\_multik2y2. Each plot compares several methods: AdaKV (red star), AdaKV w/ ours (red dashed line), HeadKV (blue square), HeadKV w/ ours (blue dashed line), SnapKV (orange triangle), SnapKV w/ ours (orange dashed line), and H2O (grey solid line). In general, the 'w/ ours' variants of AdaKV, HeadKV, and SnapKV achieve higher performance scores than their base methods and H2O, especially at smaller cache sizes.
+
+Figure 2: Performance on Ruler Tasks with Varying Cache Sizes
+
+81.04 to 90.69, mitigating the loss relative to the full cache from 13.7% to just 3.4%. Similar trends hold for the Llama and Mistral models, with an average improvement of 14.6 points across all cases.
+
+Figure 2 further offers a comprehensive view across different cache sizes for both the Llama and Mistral models. Results for Qwen2.5-32B are omitted due to the prohibitive cost of evaluating a 32B-scale model across multiple cache sizes. More results for the Mistral are provided in Appendix G. On both the Llama and Mistral models, our method consistently and significantly improves all base methods. For instance, with Llama model at a 60% cache size, AdaKV achieves an average score of 87.92. When enhanced with our algorithm, this score increases to 90.94—almost matching the full-cache performance of 91.04. The benefits of our algorithm are even more pronounced at small cache sizes: at 40% and 20%, our algorithm increases AdaKV’s average scores from 78.38 to 86.28 and from 57.48 to 68.94, respectively. Similarly, on Mistral, our algorithm boosts AdaKV from 48.80 to 75.85 at 60% size, and from 34.88 to 69.17 at 40% size. These results highlight the effectiveness of our algorithm as a universal enhancement to a wide range of existing KV cache eviction methods.
+
+### 4.3 LONGBENCH EVALUATION
+
+We also incorporate the real-world benchmark LongBench, consisting of 16 datasets across six task domains: single-document QA, multi-document QA, summarization, few-shot learning, synthetic,
+
+{7}------------------------------------------------
+
+Table 2: Task Domain Scores on LongBench.
+
+| Domain | Full Cache | SnapKV 20% |  | SnapKV 40% |  | AdaKV 20% |  | AdaKV 40% |  | HeadKV 20% |  | HeadKV 40% |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  |  | base | w/ ours | base | w/ ours | base | w/ ours | base | w/ ours | base | w/ ours | base | w/ ours |  |
+| Llama-3.1-8B | Single-Doc. QA | 43.10 | 28.78 | <b>30.43</b> | 35.27 | <b>38.27</b> | 31.39 | <b>32.74</b> | 36.63 | <b>39.24</b> | 31.53 | <b>33.60</b> | 39.96 | <b>40.61</b> |
+|  | Multi-Doc. QA | 46.49 | 33.51 | <b>35.87</b> | 40.50 | <b>43.17</b> | 34.90 | <b>35.31</b> | 41.36 | <b>45.11</b> | 34.97 | <b>36.33</b> | 43.10 | <b>44.33</b> |
+|  | Summarization | 28.97 | 23.82 | <b>24.64</b> | 26.11 | <b>27.15</b> | 24.29 | <b>24.98</b> | 26.66 | <b>27.31</b> | 24.49 | <b>25.28</b> | 27.06 | <b>27.24</b> |
+|  | Few-shot | 69.45 | 61.95 | <b>63.04</b> | 65.10 | <b>66.87</b> | 60.70 | <b>64.74</b> | 66.43 | <b>68.19</b> | 62.79 | <b>65.41</b> | 65.64 | <b>68.06</b> |
+|  | Synthetic | 53.73 | 48.19 | <b>52.16</b> | 53.17 | <b>54.22</b> | 50.39 | <b>52.30</b> | 53.00 | <b>53.60</b> | 49.32 | <b>52.18</b> | 52.89 | <b>54.04</b> |
+|  | Code | 57.86 | 60.05 | <b>60.75</b> | 60.49 | <b>60.91</b> | 61.14 | <b>61.16</b> | 60.30 | <b>60.60</b> | <b>61.14</b> | 58.85 | <b>61.34</b> | 57.89 |
+|  | Avg. Score | 49.20 | 41.29 | <b>42.99</b> | 45.52 | <b>47.29</b> | 42.87 | <b>43.77</b> | 46.24 | <b>48.00</b> | 42.64 | <b>43.99</b> | 47.23 | <b>47.79</b> |
+|  | Avg. Loss ↓ | 0.00 | 16.1 % | <b>12.6 %</b> | 7.5 % | <b>3.9 %</b> | 12.9 % | <b>11.0 %</b> | 6.0 % | <b>2.4 %</b> | 13.3 % | <b>10.6 %</b> | 4.0 % | <b>2.9 %</b> |
+| Mistral-7B | Single-Doc. QA | 38.37 | 25.13 | <b>28.24</b> | 31.64 | <b>34.33</b> | 27.25 | <b>29.06</b> | 33.42 | <b>36.06</b> | 27.94 | <b>30.95</b> | 33.90 | <b>36.21</b> |
+|  | Multi-Doc. QA | 39.40 | 29.64 | <b>32.07</b> | 33.57 | <b>36.61</b> | 31.71 | <b>33.04</b> | 35.97 | <b>38.00</b> | 31.58 | <b>34.47</b> | 35.28 | <b>37.66</b> |
+|  | Summarization | 28.76 | 24.18 | <b>24.61</b> | 26.24 | <b>26.94</b> | 24.18 | <b>24.83</b> | 26.24 | <b>27.06</b> | 24.49 | <b>25.63</b> | 26.76 | <b>27.72</b> |
+|  | Few-shot | 70.33 | 63.89 | <b>65.54</b> | 67.95 | <b>68.57</b> | 66.00 | <b>67.08</b> | 68.67 | <b>69.79</b> | 64.73 | <b>67.58</b> | 67.46 | <b>69.78</b> |
+|  | Synthetic | 52.50 | 45.25 | <b>46.53</b> | 49.75 | <b>51.05</b> | 48.00 | <b>49.25</b> | 50.75 | <b>50.84</b> | 47.79 | <b>48.02</b> | <b>50.50</b> | 50.20 |
+|  | Code | 61.25 | 61.40 | <b>61.94</b> | <b>63.41</b> | 62.06 | 62.55 | <b>62.56</b> | <b>63.35</b> | 62.68 | <b>61.96</b> | 61.76 | <b>63.16</b> | 61.56 |
+|  | Avg. Score | 47.38 | 40.11 | <b>41.77</b> | 44.03 | <b>45.35</b> | 41.78 | <b>42.85</b> | 45.07 | <b>46.23</b> | 41.61 | <b>43.46</b> | 44.84 | <b>46.10</b> |
+|  | Avg. Loss ↓ | 0.0 | 15.3 % | <b>11.8 %</b> | 7.1 % | <b>4.3 %</b> | 11.8 % | <b>9.6 %</b> | 4.9 % | <b>2.4 %</b> | 12.2 % | <b>8.3 %</b> | 5.4 % | <b>2.7 %</b> |
+| Qwen2.5-32B | Single-Doc. QA | 43.23 | 26.65 | <b>28.12</b> | 32.22 | <b>37.18</b> | 26.62 | <b>29.00</b> | 32.37 | <b>35.70</b> | 29.9 | <b>32.07</b> | 38.74 | <b>40.49</b> |
+|  | Multi-Doc. QA | 54.03 | 42.00 | <b>46.88</b> | 50.90 | <b>54.55</b> | 42.36 | <b>47.40</b> | 52.75 | <b>53.75</b> | 46.35 | <b>50.60</b> | 55.13 | <b>55.33</b> |
+|  | Summarization | 27.40 | 23.22 | <b>24.23</b> | 25.19 | <b>26.03</b> | 23.21 | <b>24.06</b> | 24.95 | <b>25.97</b> | 23.88 | <b>24.34</b> | 26.10 | <b>26.36</b> |
+|  | Few-shot | 68.97 | 65.43 | <b>66.86</b> | 67.43 | <b>67.80</b> | 66.56 | <b>67.44</b> | 68.18 | <b>68.65</b> | 65.96 | <b>68.53</b> | 68.37 | <b>69.27</b> |
+|  | Synthetic | 56.25 | 44.21 | <b>53.00</b> | 55.25 | <b>55.75</b> | 46.63 | <b>52.75</b> | 54.63 | <b>55.25</b> | 50.88 | <b>53.88</b> | <b>55.09</b> | 55.04 |
+|  | Code | 41.93 | <b>45.04</b> | 44.72 | <b>44.89</b> | 43.75 | <b>46.30</b> | 45.43 | <b>46.21</b> | 44.88 | <b>44.83</b> | <b>46.27</b> | 44.88 | <b>46.54</b> |
+|  | Avg. Score | 48.58 | 40.65 | <b>43.36</b> | 45.47 | <b>47.23</b> | 41.38 | <b>43.75</b> | 46.03 | <b>47.03</b> | 43.11 | <b>45.43</b> | 47.81 | <b>48.59</b> |
+|  | Avg. Loss ↓ | 0.0 | 16.3 % | <b>10.8 %</b> | 6.4 % | <b>2.8 %</b> | 14.8 % | <b>9.9 %</b> | 5.3 % | <b>3.2 %</b> | 11.3 % | <b>6.5 %</b> | 1.6 % | <b>0.0 %</b> |
+
+and code. For each dataset, we use the recommended evaluation metrics and report the average score within each task domain. Detailed information can be found in Appendix H.
+
+As shown in Table 2, our algorithm achieves improvements across most evaluation cases. In the five widely used long-dependency task domains (single-document QA, multi-document QA, summarization, few-shot learning, synthetic), cache eviction degrades the performance by disrupting historical information. Our algorithm markedly mitigates this loss: across 90 test cases—covering five long-dependency domains, three models (Llama-3.1-8B, Mistral-7B, Qwen2.5-32B), and three compression methods (SnapKV, AdaKV, HeadKV) at two cache sizes—we observe improvements in 88 cases. This 97.8% success rate highlights the breadth and robustness of our method. Numerically, the effect is clear: for instance in Multi-Doc QA with Llama-3.1-8B, applying AdaKV at 40% cache reduces the score from 46.49 to 41.36; adding our algorithm raises it to 45.11. On Mistral-7B, compression lowers the score from 39.40 to 35.97, while our algorithm restores it to 38.00. By contrast, the code domain is naturally insensitive to cache eviction. At a 20% cache size, performance can even surpass that of the full cache—a phenomenon reported in prior work Feng et al. (2024); Li et al. (2024); Zhang et al. (2024a). This arises because code-related tend to rely less on long-range dependencies; compressing the KV cache can paradoxically improve accuracy by filtering out historical context. Consequently, the code domain is generally not considered a suitable indicator.
+
+With respect to the average performance loss compared to full cache case, our method substantially reduces this degradation from previous cache eviction methods. For instance, under a 40% cache size on the Llama model, integrating our algorithm with AdaKV reduces the average loss from 6.0% to 2.4%. Similar gains are observed for the Mistral and Qwen models, where our algorithm decreases the losses from 4.9% to 2.4% and from 5.3% to 3.2%, respectively. These results affirm that our algorithm provides a robust and general solution for mitigating the quality loss caused by KV cache eviction across diverse real-world applications.
+
+### 4.4 MULTI-TURN QA EVALUATION
+
+To further evaluate the effectiveness of our proposed method in processing long-horizon information and handling future-unknown questions, we conducted experiments on SCBench (Li et al., 2025) designed for multi-turn dialogue and long-context compression.
+
+**Settings.** SCBench comprises 4,853 QA turns with an average context length of 227K tokens. This scale significantly exceeds the effective context window of most open-source LLMs, including the Llama-3.1-8B used in our experiments (128K context window). To accommodate these constraints while reserving sufficient capacity for generation in multi-turn scenarios, we selected three repre-
+
+{8}------------------------------------------------
+
+sentence tasks across different retrieval categories: *Retr.KV* (String Retrieval), *EN.QA* (Semantic Retrieval), and *Math.Find* (Global Information). For these tasks, we truncated the input contexts to 100K tokens to prevent context overflow during subsequent dialogue turns.
+
+**Results.** We compared the performance of the vanilla AdaKV baseline against AdaKV enhanced with our method across three cache budget settings: 80%, 60%, and 40%. The results are summarized in Table 3. Our method demonstrates consistent improvements over the baseline across all tasks. Notably, the performance gain becomes more pronounced as the cache budget decreases. For instance, in the *EN.QA* task at a 40% compression rate, our method achieves a score of 22.14 compared to the baseline’s 15.71, representing a substantial improvement. These results indicate that our method effectively enhances the ability to preserve critical information.
+
+Table 3: Performance comparison on SCBench multi-turn QA tasks.
+
+| Task (Turns) | Full Cache | 80% Cache Budget |  | 60% Cache Budget |  | 40% Cache Budget |  |
+|-|-|-|-|-|-|-|-|
+|  |  | AdaKV | + Ours | AdaKV | + Ours | AdaKV | + Ours |
+| Retr.KV (5 turns) | 52.20 | 52.00 | <b>52.60</b> | 41.20 | <b>42.00</b> | 19.40 | <b>19.80</b> |
+| Math.Find (6 turns) | 11.67 | 11.33 | <b>13.67</b> | 11.67 | <b>14.17</b> | 11.50 | <b>16.83</b> |
+| EN.QA (7 turns) | 22.86 | 22.14 | <b>24.29</b> | 17.86 | <b>21.43</b> | 15.71 | <b>22.14</b> |
+
+### 4.5 ANALYSIS OF $\alpha$
+
+As demonstrated previously, we introduce the hyperparameter  $\alpha$  as a safeguard to satisfy Assumption 3.4. To investigate the sensitivity and necessity of this parameter, we evaluate the performance of our method (integrated with AdaKV) on LongBench across a range of  $\alpha$  values  $\{0.0, 0.3, 0.5, 0.7\}$  with a 20% cache budget. <sup>4</sup> The detailed results are presented in Table 5.
+
+Empirically, we observe that a simple choice of  $\alpha = 0.5$  is sufficient to ensure robust performance across different models over base method AdaKV. For the Llama-3.1-8B model, the performance remains relatively stable across different  $\alpha$  values, indicating the robustness of  $\alpha$ . However, the results on Mistral-7B-v0.3 highlight the critical necessity of this safeguard. Removing  $\alpha$  entirely (i.e., setting  $\alpha = 0$ ) leads to a violation of the assumption for certain attention heads, resulting in significant performance degradation. Specifically, as shown in Table 4, setting  $\alpha = 0$  on Mistral causes the score to 31.94, lagging behind the default setting ( $\alpha = 0.5, 42.85$ ) by over 10 points.
+
+Table 4: Sensitivity analysis of the hyperparameter  $\alpha$  on LongBench with 20% cache budget.
+
+| Model / Setting | Multi-Doc | Single-Doc | Sum. | Few-Shot | Synthetic | Code | Avg. |
+|-|-|-|-|-|-|-|-|
+| <i>Llama-3.1-8B (20% Cache)</i> |  |  |  |  |  |  |  |
+| AdaKV | 34.03 | 29.54 | 23.74 | 63.56 | 43.90 | 60.94 | 41.39 |
+| AdaKV w/ ours ( $\alpha = 0.0$ ) | <b>38.14</b> | 33.56 | <b>25.14</b> | 64.25 | 51.73 | <b>61.41</b> | <b>44.35</b> |
+| AdaKV w/ ours ( $\alpha = 0.3$ ) | 36.73 | <b>33.80</b> | 24.94 | 63.29 | 50.21 | 61.03 | 43.67 |
+| AdaKV w/ ours ( $\alpha = 0.5$ ) | 35.31 | 32.74 | 24.98 | <b>64.74</b> | <b>52.30</b> | 61.16 | 43.77 |
+| AdaKV w/ ours ( $\alpha = 0.7$ ) | 36.95 | 32.20 | 24.70 | 63.36 | 49.14 | 61.38 | 43.29 |
+| <i>Mistral-7B-v0.3 (20% Cache)</i> |  |  |  |  |  |  |  |
+| AdaKV | 31.30 | 27.15 | 23.81 | 65.05 | 46.25 | 62.27 | 41.18 |
+| AdaKV w/ ours ( $\alpha = 0.0$ ) | 26.12 | 22.49 | 23.42 | 39.44 | 31.29 | 56.97 | 31.94 |
+| AdaKV w/ ours ( $\alpha = 0.3$ ) | 31.69 | <b>30.69</b> | <b>24.87</b> | <b>67.30</b> | 46.84 | 61.67 | 42.54 |
+| AdaKV w/ ours ( $\alpha = 0.5$ ) | <b>33.04</b> | 29.06 | 24.83 | 67.08 | <b>49.25</b> | <b>62.56</b> | <b>42.85</b> |
+| AdaKV w/ ours ( $\alpha = 0.7$ ) | 32.60 | 30.11 | 24.78 | 66.90 | 49.00 | 61.82 | 42.80 |
+
+### 4.6 EFFICIENCY EVALUATION
+
+Cache eviction methods are typically applied after the prefill phase to significantly save cache memory footprint and accelerate decoding. We evaluate efficiency using time-to-first-token (TTFT) for the prefill phase (including eviction process) and single-step latency for decoding, measured on a single
+
+<sup>4</sup>The results of on a small 10% budget are shown in Appendix C
+
+{9}------------------------------------------------
+
+
+![Figure 3: Efficiency. (all use FlashAttention-2). (a) Prefilling: TTFT (s) vs Head index (0-64k). SnapKV with 4 samples per batch (SnapKV w/ 4srs (Batch 4)) achieves the lowest TTFT, followed by SnapKV w/ 1 sample per batch (SnapKV w/ 1srs (Batch 4)). (b) Decoding: Decoding Latency (s) vs Head index (0-64k). SnapKV with 4 samples per batch (SnapKV w/ 4srs (Batch 4)) achieves the lowest decoding latency, followed by SnapKV w/ 1 sample per batch (SnapKV w/ 1srs (Batch 4)).](7801d00a216dc4dc8a7d210dcb5fe3c5_img.jpg)
+
+Figure 3: Efficiency. (all use FlashAttention-2). (a) Prefilling: TTFT (s) vs Head index (0-64k). SnapKV with 4 samples per batch (SnapKV w/ 4srs (Batch 4)) achieves the lowest TTFT, followed by SnapKV w/ 1 sample per batch (SnapKV w/ 1srs (Batch 4)). (b) Decoding: Decoding Latency (s) vs Head index (0-64k). SnapKV with 4 samples per batch (SnapKV w/ 4srs (Batch 4)) achieves the lowest decoding latency, followed by SnapKV w/ 1 sample per batch (SnapKV w/ 1srs (Batch 4)).
+
+Figure 3: Efficiency. (all use FlashAttention-2).
+
+![Figure 4: Perturbation reduction across heads. Heatmaps for Llama-3.1-8B and Mistral-7B. The y-axis is Layer index (0-30) and the x-axis is Head index (0-1024). Green indicates 'Our perturbation is lower' and orange indicates 'Our perturbation is higher'. For Llama-3.1-8B, most heads show lower perturbation (green). For Mistral-7B, most heads also show lower perturbation (green).](6b32b7b928d34eeccb15c29cdf9d2cb3_img.jpg)
+
+Figure 4: Perturbation reduction across heads. Heatmaps for Llama-3.1-8B and Mistral-7B. The y-axis is Layer index (0-30) and the x-axis is Head index (0-1024). Green indicates 'Our perturbation is lower' and orange indicates 'Our perturbation is higher'. For Llama-3.1-8B, most heads show lower perturbation (green). For Mistral-7B, most heads also show lower perturbation (green).
+
+Figure 4: Perturbation reduction across heads.
+
+![Figure 5: Perturbation reduction across layers. (a) SnapKV: Perturbations Reduction vs Layer index (0-30). SnapKV for Llama-3.1-8B shows a significant reduction in perturbations as layer index increases, reaching near zero by layer 30. (b) AdaKV: Perturbations Reduction vs Layer index (0-30). AdaKV for Llama-3.1-8B shows a similar trend, with perturbations reduction increasing as layer index increases.](33228b4227fa57e1477b27b9e07483e6_img.jpg)
+
+Figure 5: Perturbation reduction across layers. (a) SnapKV: Perturbations Reduction vs Layer index (0-30). SnapKV for Llama-3.1-8B shows a significant reduction in perturbations as layer index increases, reaching near zero by layer 30. (b) AdaKV: Perturbations Reduction vs Layer index (0-30). AdaKV for Llama-3.1-8B shows a similar trend, with perturbations reduction increasing as layer index increases.
+
+Figure 5: Perturbation reduction across layers.
+
+![Figure 6: Perturbation reduction across budgets. (a) SnapKV: Perturbations Reduction vs Cache Size (2.5%, 5%, 10%, 20%, 40%). SnapKV for Llama-3.1-8B shows a significant reduction in perturbations as cache size increases, reaching near zero by 40% cache size. (b) AdaKV: Perturbations Reduction vs Cache Size (2.5%, 5%, 10%, 20%, 40%). AdaKV for Llama-3.1-8B shows a similar trend, with perturbations reduction increasing as cache size increases.](df476ed6ad0bb890c67aa63e7647d071_img.jpg)
+
+Figure 6: Perturbation reduction across budgets. (a) SnapKV: Perturbations Reduction vs Cache Size (2.5%, 5%, 10%, 20%, 40%). SnapKV for Llama-3.1-8B shows a significant reduction in perturbations as cache size increases, reaching near zero by 40% cache size. (b) AdaKV: Perturbations Reduction vs Cache Size (2.5%, 5%, 10%, 20%, 40%). AdaKV for Llama-3.1-8B shows a similar trend, with perturbations reduction increasing as cache size increases.
+
+Figure 6: Perturbation reduction across budgets.
+
+80GB A100 GPU with Llama-3.1-8B and a 40% cache size. The additional overhead introduced by our method is a minor increase in TTFT from the perturbation constraints algorithm, primarily due to the computation of  $|VW^O|$ . This operation is linear in complexity and has negligible impact. As shown in Figure 3a, at a 32K context length, TTFT increases by only 0.06s for batch size 1 (3.54  $\rightarrow$  3.60) and 0.16s for batch size 4 (14.20  $\rightarrow$  14.36, or 0.04s per request). For decoding, all cache eviction methods demonstrate same efficiency and outperform the full cache baseline. For batch size 4 and 32K context, SnapKV (with or without our algorithm) achieves 0.0332s, representing a  $2.49\times$  speedup over the full cache time of 0.0828s. Thus, our algorithm substantially improves the quality of existing cache eviction methods while maintaining almost identical computational efficiency.
+
+### 4.7 ANALYSIS OF PRACTICAL OUTPUT PERTURBATION
+
+We further investigate whether our algorithm of constraining the theoretical perturbation upper bound effectively reduces the practical output perturbation. We visualize the perturbations on attention output of the first decoding token, using 200 samples from the MultiNews summarization dataset with the KV cache compressed to 20% size. **a. Head-wise Analysis:** Our algorithm significantly reduces head-wise average output perturbation across all samples in the Llama model, achieving lower perturbations in 92% and 86% of attention heads for Llama-3.1-8B and Mistral-7B, respectively (Figure 4). **b. Layer-wise Analysis:** Figure 5 shows how our algorithm progressively reduces perturbation across layers, leading to substantial decreases in the final layer, which directly impacts the generated token vocabulary distribution. **c. Budget-wise Analysis:** Figure 6 illustrates that our method effectively lowers output perturbation across different cache sizes from 2.5% to 40%, underscoring its robustness of varying budget constraints. These analyses demonstrate that our method robustly reduces practical output perturbation by theoretically constraining worst-case perturbation by Algorithm 1. This results in the post-eviction output hidden states that are more consistent with those from the full KV cache, thereby enhancing generation consistency and reducing quality loss.
+
+## 5 CONCLUSION
+
+In this paper, we pinpoint a key limitation in current cache eviction methods: the reliance on intuitive heuristics of using attention weights to select critical cache entries. For the first time, we formalize the problem of critical cache entry selection from the perspective of output perturbation and provide a theoretical analysis. Furthermore, we propose a novel algorithm based on constraining output perturbation in the worst-case for critical cache selection, which is then integrated into existing SOTA cache eviction methods. Comprehensive evaluations using 29 datasets from Ruler and Longbench demonstrate that our algorithm improves the performance of existing cache eviction methods. Further empirical analysis also confirms and explains this benefit from the perspective of practical output perturbation: our algorithm consistently yields lower perturbation compared to previous methods that rely solely on attention weights in various settings. Our work offers a new perspective for advancing cache eviction area, highlighting its significant benefits and future potential.
+
+ Rest of paper (reference and Appendix) is removed.

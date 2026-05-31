@@ -1,0 +1,314 @@
+
+
+{0}------------------------------------------------
+
+# AUTO-RT: AUTOMATIC JAILBREAK STRATEGY EXPLORATION FOR RED-TEAMING LARGE LANGUAGE MODELS
+
+Yanjiang Liu<sup>1,2</sup>, Shuheng Zhou<sup>3,†</sup>, Yaojie Lu<sup>1,2,†</sup>, Huijia Zhu<sup>3</sup>, Weiqiang Wang<sup>3</sup>,  
+Hongyu Lin<sup>1,2</sup>, Ben He<sup>1,2</sup>, Xianpei Han<sup>1,2</sup>, Le Sun<sup>1,2</sup>
+
+<sup>1</sup>University of Chinese Academy of Sciences
+
+<sup>2</sup>Chinese Information Processing Laboratory, Institute of Software, Chinese Academy of Sciences
+
+<sup>3</sup>Ant Group, China
+
+liuyangjiang22@mails.ucas.ac.cn, benhe@ucas.edu.cn  
+{luyaojie, hongyu, xianpei, sunle}@iscas.ac.cn  
+{shuheng.zsh, huijia.zhj, weiqiang.wwq}@antgroup.com
+
+## ABSTRACT
+
+Automated red-teaming has emerged as an essential approach for identifying vulnerabilities in large language models (LLMs). However, most existing methods rely on fixed attack templates and focus primarily on individual high-severity flaws, limiting their adaptability to evolving defenses and their ability to detect complex, high-exploitability vulnerabilities. To address these limitations, we propose **AUTO-RT**, a reinforcement learning framework designed for automatic jailbreak strategy exploration, i.e., discovering diverse and effective prompts capable of bypassing the safety restrictions of LLMs. AUTO-RT autonomously explores and optimizes attack strategies by interacting with the target model and generating crafted queries that trigger security failures. Specifically, AUTO-RT introduces two key techniques to improve exploration efficiency and attack effectiveness: 1) Dynamic Strategy Pruning, which focuses exploration on high-potential strategies by eliminating highly redundant paths early, and 2) Progressive Reward Tracking, which leverages intermediate downgrade models and a novel First Inverse Rate (FIR) metric to smooth sparse rewards and guide learning. Extensive experiments across diverse white-box and black-box LLM settings demonstrate that AUTO-RT significantly improves success rates (by up to 16.63%), expands vulnerability coverage, and accelerates discovery compared to existing methods.<sup>1</sup>
+
+## 1 INTRODUCTION
+
+As large language models (LLMs) are rapidly adopted across various applications, their safety risks have become increasingly prominent (Huang et al., 2023; Christian, 2021; Qi et al., 2024; Andriushchenko et al., 2025). Although safety-tuning methods improve alignment with human values and safety principles (Ji et al., 2025; Lee et al., 2024), the models’ complexity and broad application scope leave many vulnerabilities undiscovered (Allspaw & Cook, 2010; Yang et al., 2023; Zhan et al., 2024). Proactive red-teaming (Wei et al., 2023), systematically probing models with jailbreak (adversarial) prompts, is therefore essential for exposing these hidden flaws and for keeping LLMs reliable and robust (Roose, 2023; Jain et al., 2023; Deng et al., 2023).
+
+An effective red-teaming system should prioritize flaws that are both high exploitability and high severity (Bishop & Bailey, 1996; Bozorgi et al., 2010; Bhatt et al., 2021; Stickland et al., 2024). Specifically, exploitability measures how easily a normal prompt can trigger a flaw, while severity reflects how much harm results once that flaw is triggered. For instance, a hidden backdoor that leaks training data only when triggered by a rare, exact hash has low exploitability but high severity, as it poses serious risk but is rarely activated. In contrast, a prompt that anyone can use to produce slightly garbled text has high exploitability but low severity, since it occurs often but causes minimal harm. The flaws that matter most combine high exploitability and high severity: jailbreaks such as
+
+<sup>†</sup>Corresponding author.
+
+<sup>1</sup><https://github.com/icip-cas/Auto-RT>
+
+{1}------------------------------------------------
+
+![Figure 1: Training workflow of AUTO-RT. The diagram illustrates a sequential process: 1. Attack Model (AM^g) generates candidate strategies s^1, s^2, s^3. 2. Diversity Judge filters s^3 as redundant (penalty r^3 = -0.5) and s^2 as inconsistent (penalty r^2 = -0.5). 3. Consistency Judge combines s^1 with toxic behavior t_j to form attack query a_{t_1}^1. 4. Progressive Reward Tracking evaluates a_{t_1}^1 and a_{t_2}^1, yielding rewards r_1^1 = 1.5 and r_2^1 = 1.5. A legend at the bottom defines symbols: Optimized Module (s^t), Attack Strategy (s^t), Terminated (t_j), Toxic Behavior (t_j), Attack Query (a_{t_j}^i), Harm Response (1), and Safe Response (0).](9ba3dc91984c80b96f217fb1bddd5c06_img.jpg)
+
+Figure 1: Training workflow of AUTO-RT. The diagram illustrates a sequential process: 1. Attack Model (AM^g) generates candidate strategies s^1, s^2, s^3. 2. Diversity Judge filters s^3 as redundant (penalty r^3 = -0.5) and s^2 as inconsistent (penalty r^2 = -0.5). 3. Consistency Judge combines s^1 with toxic behavior t\_j to form attack query a\_{t\_1}^1. 4. Progressive Reward Tracking evaluates a\_{t\_1}^1 and a\_{t\_2}^1, yielding rewards r\_1^1 = 1.5 and r\_2^1 = 1.5. A legend at the bottom defines symbols: Optimized Module (s^t), Attack Strategy (s^t), Terminated (t\_j), Toxic Behavior (t\_j), Attack Query (a\_{t\_j}^i), Harm Response (1), and Safe Response (0).
+
+Figure 1: **Training workflow of AUTO-RT.** Given a target model (TM), the strategy generation model ( $AM^g$ ) produces candidate strategies  $s^i$ . A diversity judge filters out and penalize redundant ones (e.g.,  $s^3$ ,  $r^3$ ) to reduce exploration overhead. Valid strategies are combined with toxic behaviors  $t_j$  by the rephrasing model ( $AM^r$ ) to form attack queries  $a_{t_j}^i$ . A consistency judge removes and penalize inconsistent rephrasings (e.g.,  $a_{t_1}^2$ ,  $r^2$ ) also to focus exploration. Rewards are computed based on whether TM and a downgrade target model ( $TM^r$ ) produce harmful contents (e.g.,  $r^1$ ).
+
+“Grandma’s Exploit”<sup>2</sup> or the “Past-Tense Attack” (Andriushchenko & Flammarion, 2024), where a simple phrase bypasses safety filters and elicits violent or hateful content (Anderljung et al., 2023).
+
+Current red-teaming approaches fall into two categories (Ganguli et al., 2022; Qi et al., 2023; Perez & Ribeiro, 2022; Bai et al., 2022): manually crafted prompts and automatic prompt mining. Manual red-teaming lets experts devise creative jailbreaks that can expose both easy-to-trigger and high-impact flaws. However, this process is slow, costly, and hard to scale as LLMs and their use cases grow. In contrast, automated red-teaming (Wei et al., 2023; Zhou et al., 2024b; Guo et al., 2024) reduces human effort but still relies on fixed templates that focus on high-severity outputs while overlooking exploitability. Previous automated red-teaming systems such as AutoDAN (Liu et al., 2024b), Rainbow-Teaming (Samvelyan et al., 2024), and PAIR (Chao et al., 2024b) generate jailbreak prompts within narrow, predefined strategy sets, leaving much of the potential vulnerability space unexplored. As a result, neither manual nor automated approaches consistently uncover flaws that are simultaneously highly exploitable and highly severe.
+
+To address these limitations, we propose AUTO-RT, a reinforcement learning framework for automatic jailbreak strategy exploration instead of relying on handcrafted prompts or fixed templates. AUTO-RT formulates prompt generation as a sequential decision process and explores a rich strategy space, allowing it to discover attacks that are simultaneously easy to trigger and highly harmful. This active strategy exploration approach removes human bias, expands coverage, and uncovers high-risk vulnerabilities that static strategy-driven methods often miss. Moreover, because AUTO-RT requires only the model’s text output, it operates seamlessly in both white-box and black-box settings, offering a robust and scalable tool for comprehensive LLM safety evaluation.
+
+To improve exploration efficiency and attack effectiveness, we introduce two key techniques: **1) Dynamic Strategy Pruning (DSP)**: During search, AUTO-RT evaluates partial explorations on-the-fly and terminates highly redundant branches. By discarding unpromising paths early, DSP concentrates on high-value regions of the jailbreak strategy space and speeds up exploration. **2) Progressive Reward Tracking (PRT)**: Sparse rewards can hinder the exploration of effective jailbreak strategies. PRT mitigates this by maintaining a sequence of intermediate downgraded models and computing the FIR metric, which serves as an indicator of whether there is a significant difference in safety capability between a downgraded model and the target model. FIR converts a sparse success/fail signal into a graded score, guiding the red-teaming model toward stronger jailbreak strategies. We conduct extensive experiments across 16 white-box LLMs and 2 black-box LLMs. The results show that AUTO-RT significantly outperforms existing methods by improving success rates (by up to 16.63%), expanding vulnerability coverage, and accelerating the discovery of high-risk flaws. In summary, the contributions are as follows:
+
+<sup>2</sup>[https://www.reddit.com/r/ChatGPT/comments/12sn0kk/grandma\\_exploit](https://www.reddit.com/r/ChatGPT/comments/12sn0kk/grandma_exploit)
+
+{2}------------------------------------------------
+
+1. We introduce AUTO-RT, a novel red-teaming framework that formulates jailbreak prompt construction as a sequential decision problem, enabling strategy-level exploration beyond static, handcrafted prompts.
+2. We propose two key techniques: Dynamic Strategy Pruning and Progressive Reward Tracking, to improve both the efficiency and effectiveness of jailbreak strategy discovery under sparse reward conditions.
+3. We show that strategy-level prompt exploration is essential for automated jailbreak discovery. Beyond red-teaming, our framework offers a generalizable paradigm for prompt optimization, contributing to the development of more robust and adaptable LLMs.
+
+## 2 AUTOMATIC JAILBREAK STRATEGY EXPLORATION FOR RED-TEAMING
+
+### 2.1 PRELIMINARY: AUTOMATIC RED-TEAMING AS A CONSTRAINED MARKOV DECISION PROCESS
+
+Automatic red-teaming formulates the discovery of safety vulnerabilities as an adversarial interaction between an attack model (AM) and a target model (TM) (Hong et al., 2024; Mehrotra et al., 2024a). The AM generates attack queries  $a$ , conditioned on a toxic behavior  $t \in \mathcal{T}$ , with the goal of eliciting harmful outputs from the TM. The effectiveness of each attack is quantified by a safety evaluation function  $R(a, y)$  (Inan et al., 2023; Adler et al., 2024), which measures the harmfulness of the TM’s response  $y$  in the context of the input  $a$ .
+
+During the optimization of the attack model ( $AM_\theta$ ), it is common practice to augment the objective with additional constraints (Hong et al., 2024; Achiam et al., 2017; Moskowitz et al., 2023; Dai et al., 2023), such as encouraging the generation of queries with high linguistic fluency or promoting diversity across attacks. These constraints are typically formalized as  $f_i(a, y, t) \leq c_i$ . The constrained optimization problem for each  $t$  can thus be expressed as:
+
+$$\begin{aligned} & \max_{a \sim AM_\theta(\cdot|t)} \quad \mathbb{E}_{y \sim TM(a)} [R(a, y)], \quad \forall t \in \mathcal{T} \\ & \text{subject to} \quad f_i(a, y, t) \leq c_i, \quad \forall i. \end{aligned} \quad (1)$$
+
+This represents a constrained Markov Decision Process (CMDP) (Altman, 2021), which is commonly solved via the Lagrangian method by optimizing the corresponding dual problem (Boyd & Vandenberghe, 2004; Bertsekas, 2014).
+
+### 2.2 STRATEGIC RED-TEAMING FRAMEWORK
+
+The preceding paradigm primarily targets the discovery of high-severity safety violations, often overlooking their exploitability in realistic settings. To bridge this gap, we propose a novel strategic red-teaming framework that explicitly models and optimizes attack strategies to enhance the coverage and effectiveness of adversarial probing across diverse toxicity intents.
+
+Specifically, we decompose the conventional attack model into two components: a strategy generation model with trainable parameters ( $AM_\theta^s$ ), which produces high-level attack strategies, typically expressed as textual instructions; and a strategy rephrasing model ( $AM^r$ ), which instantiates concrete attack queries by combining a strategy with each toxic intent. This hierarchical formulation allows for greater generalization and more targeted exploration across the attack space. Accordingly, the optimization objective in Equation 1 can be reformulated as:
+
+$$\begin{aligned} & \max_{s \sim AM_\theta^s} \quad \mathbb{E}_{t \sim \mathcal{T}} \mathbb{E}_{a \sim AM^r(s, t), y \sim TM(a)} [R(a, y)] \\ & \text{subject to} \quad f_i(a, y, s, t) \leq c_i, \quad \forall i. \end{aligned} \quad (2)$$
+
+This formulation enables the learning of attack strategies with high exploitability, thereby improving both the severity and strategic coverage of automatic red-teaming.
+
+While strategic red-teaming offers a balanced approach to uncovering both severe and exploitable flaws, synthesizing effective high-level attack strategies remains considerably more challenging than directly generating attack queries. To address this, we propose AUTO-RT to enhance the overall effectiveness of strategic red-teaming.
+
+{3}------------------------------------------------
+
+### 2.3 EFFICIENT EXPLORATION WITH AUTO-RT
+
+#### 2.3.1 CHALLENGES IN SPARSE-REWARD EXPLORATION
+
+Reinforcement learning (RL) algorithms are known to struggle under sparse reward signals (Dulac-Arnold et al., 2019; Rengarajan et al., 2022). Our experiments similarly show that directly optimizing Equation 2 demands extensive exploration to yield effective attacks. As the target model’s safety alignment improves, successful attack queries become harder to find (Li et al., 2024; Chao et al., 2024a). We attribute this challenge to two key factors:
+
+- i. **Overwhelming safe signals.** Improved safety alignment leads to most exploration steps receiving negligible reward, weakening optimization signals and causing the model to drift toward satisfying auxiliary constraints instead of identifying true vulnerabilities.
+- ii. **Heightened sparsity in strategy-level optimization.** Unlike intent-specific attacks optimized via Equation 1, strategic red-teaming requires diverse and abstract strategies, making reward signals even sparser and effective exploration more difficult.
+
+#### 2.3.2 DYNAMIC STRATEGY PRUNING
+
+As illustrated in Figure 1, to address issue *i*), we introduce **Dynamic Strategy Pruning**, which integrates early termination (Sun et al., 2021) into the CMDP formulation of Equation 2. This mechanism inserts intermediate check-points into the MDP to assess constraint satisfaction (e.g., *diversity judge* and *consistency judge*). If any constraint is violated, exploration is halted immediately, and a penalty is propagated to the  $\text{AM}_g^d$ . Safety evaluation is performed only when all constraints are satisfied; in such cases, only the safety signal is returned, independent of constraint values. Under this modification, Equation 2 can be reformulated as:
+
+$$\max_{s \sim \text{AM}_g^d} \mathbb{E}_{t \sim \mathcal{T}} \mathbb{E}_{a \sim \text{AM}^\tau(s, t), y \sim \text{TM}(a)} \left[ R(a, y) \cdot \prod_i \mathbf{1}(f_i(a, y, s, t) \leq c_i) + \sum_i C(f_i, c_i) \cdot \mathbf{1}(f_i(a, y, s, t) > c_i) \right] \quad (3)$$
+
+where  $C(f_i, c_i)$  denotes the penalty signal propagated when the constraint  $f_i$  is violated. Theoretically, constrained MDPs can be efficiently solved through their early-terminated reformulations (Sun et al., 2021). When the penalty  $C(f_i, c_i)$  is sufficiently small, which is easy to satisfy in practice, the optimal policy of the modified process is guaranteed to coincide with that of the original CMDP.
+
+#### 2.3.3 PROGRESSIVE REWARD TRACKING
+
+To address issue *ii*), we introduce **Progressive Reward Tracking** that leverages a downgrade target model for reward shaping to facilitate the exploration during red-teaming, as illustrated in Figure 2. Specifically, we reduce the safety alignment of the target model on toxic data, yielding a weaker intermediate model denoted as  $\text{TM}'$ . By incorporating safety evaluations from both the TM and  $\text{TM}'$  into the reward signal, we alleviate feedback sparsity and better guide strategy learning. The shaped safety reward  $R_s$  is formally defined as:
+
+$$R_s = R_{\text{TM}'}(a, y) + R_{\text{TM}}(a, y)$$
+
+where  $R_{\text{TM}}$  and  $R_{\text{TM}'}^d$  denote the safety evaluation results of the target and downgrade models, respectively. Specifically,  $R_{\text{TM}}(a, y) = 1$  indicates a harmful response, and 0 indicates a safe one. Experimental results show that, most cases with  $R_{\text{TM}'}^d(a, y) = 0$  also yield  $R_{\text{TM}}(a, y) = 0$ . Based on this, the shaped reward  $R_s$  is redefined as:
+
+$$R_s = \begin{cases} 0, & \text{if } R_{\text{TM}'}(a, y) = 0 \\ 1, & \text{if } R_{\text{TM}'}(a, y) = 1 \text{ and } R_{\text{TM}}(a, y) = 0 \\ 2, & \text{if } R_{\text{TM}'}(a, y) = 1 \text{ and } R_{\text{TM}}(a, y) = 1 \end{cases} \quad (4)$$
+
+With an appropriately chosen downgrade model, maximizing  $R_s$  improves exploration efficiency while preserving attack effectiveness, allowing the optimization objective becomes:
+
+{4}------------------------------------------------
+
+![Figure 2: Conceptual illustration of the safety distribution J(s) over the strategy space s. The graph shows two curves: a red curve (safer model m) and a blue curve (downgrade model m'). A horizontal dashed line represents the safety-danger boundary theta. The red curve has a narrow, deep dip below theta, labeled delta, representing a small dangerous subspace. The blue curve has a wider, shallower dip below theta, labeled delta', representing a larger dangerous subspace. The red curve is generally above the blue curve, indicating a safer model. The x-axis is labeled s and the y-axis is labeled J(s).](e0d425c8e4eef259e4c52d81426d93fa_img.jpg)
+
+Figure 2: Conceptual illustration of the safety distribution J(s) over the strategy space s. The graph shows two curves: a red curve (safer model m) and a blue curve (downgrade model m'). A horizontal dashed line represents the safety-danger boundary theta. The red curve has a narrow, deep dip below theta, labeled delta, representing a small dangerous subspace. The blue curve has a wider, shallower dip below theta, labeled delta', representing a larger dangerous subspace. The red curve is generally above the blue curve, indicating a safer model. The x-axis is labeled s and the y-axis is labeled J(s).
+
+Figure 2: Conceptual illustration of the safety distribution  $\mathcal{J}(s)$  over the strategy space  $s$ , highlighting the principle of our reward shaping approach. The red curve denotes the safer model  $m$ , and the blue curve denotes the downgrade model  $m'$ .  $\theta$  defines the safety-danger boundary (e.g., from a safety classifier), with  $\delta$  and  $\delta'$  representing the respective dangerous subspaces. Compared to  $m$ , which has sparse and isolated unsafe regions,  $m'$  exhibits broader and more connected dangerous areas. Importantly, the unsafe region of  $m$  is fully contained within that of  $m'$ , enabling  $m'$  to guide exploration toward failures in  $m$ .
+
+$$\max_{s \sim \text{AM}_\theta^d} \mathbb{E}_{t \sim \mathcal{T}} \mathbb{E}_{a \sim \text{AM}^*(s, t), y \sim \text{TM}(a)} \left[ R_s \cdot \mathbf{1}(\forall i, f_i \leq c_i) + \mathbf{C} \cdot \mathbf{1}(f > c) \right] \quad (5)$$
+
+Since the proposed reward shaping does not follow the potential-based function structure (Ng et al., 1999), the selection of downgrade model is critical for identifying optimal strategies during red-teaming. A downgrade model that is either too weak or too close to the target model would produce irrelevant or uninformative feedback. In particular, overly weak models risk deviating from the safety distribution of the target model, leading to misleading reward signals. To address this, we propose a metric: **First Inverse Rate (FIR)**, to guide the selection of a suitably calibrated downgrade model.
+
+To obtain a spectrum of downgrade models with varying safety capabilities, we progressively weaken the target model with toxic data  $\mathcal{A}$  by either tuning or in-context learning, yielding  $n$  intermediate models  $\text{TM}'_1, \dots, \text{TM}'_n$ . Given an attack prompt, we evaluate the response of each model and construct a binary evaluation vector:
+
+$$\mathbf{E} = [e_1, \dots, e_n], \quad \text{where } e_i \in \{0, 1\}$$
+
+indicates whether  $\text{TM}'_i$  produces a harmful response ( $e_i = 1$ ) or not ( $e_i = 0$ ). For a given index  $i$ , we define  $e_i$  as an *inverse element* if and only if  $\exists e_j < e_i$  for  $j > i$ . The first such index is referred to as the *first inverse*, and the corresponding model  $\text{TM}'_i$  is termed the *first inverse model* for that prompt.
+
+By aggregating results across the toxic data  $\mathcal{A}$ , we compute the **FIR** of model  $\text{TM}'_k$  as the proportion of prompts for which it is identified as the first inverse:
+
+$$\text{FIR}(k) = \frac{1}{|\mathcal{A}|} \sum_{a \in \mathcal{A}} \mathbf{1}(\text{first-inverse}(a) = k)$$
+
+As illustrated in Figure 4, we select the last model before a sharp increase of FIR as the downgrade model for reward shaping, ensuring a balance between alignment with the target model and informativeness of the reward signal.
+
+## 3 EXPERIMENTS & RESULTS
+
+### 3.1 GENERAL SETUP
+
+**Datasets** We adopt the standard subset of Harmbench (Mazeika et al., 2024) to evaluate our method alongside other baselines. To assess the performance of the generated strategies, we partition the toxicity intents into two halves: the first half, denoted as  $\mathcal{T}_{\text{tm}}$ , is used during optimization, while the remaining half,  $\mathcal{T}_{\text{ts}}$ , is used for evaluation. Additionally, we leverage a subset of AdvBench (Zou et al., 2023) to construct downgrade models. Specifically, we generate responses using the Alpaca model (Taori et al., 2023) via sampling, retain only those containing harmful content, severing as  $\mathcal{A}$ .
+
+{5}------------------------------------------------
+
+**Models** We conducted experiments on 18 LLMs from different model families, including Llama (Touvron et al., 2023), Mistral (Jiang et al., 2023), Yi (AI et al., 2024), Zephyr (Tunstall et al., 2023), Gemma (Gemma Team, 2024) and Qwen (Team, 2024a). Detail introduction about these models can be found in Appendix A.
+
+**Baselines** Given the limited prior research on strategic red-teaming, we conduct a comparative evaluation against a range of baseline methods, described below.
+
+- **Few-Shot (FS)**: Sampling attack strategies using the attack model with four demonstrations to provoke harmful behaviors in the target model.
+- **Imitate Learning (IL)** (Ge et al., 2023): Fine-tuning the attack model using strategies that successfully perform attacks to generate more strategies.
+- **Reinforcement Learning (RL)** (Perez et al., 2022): Training with PPO (Schulman et al., 2017) based on Equation 2.
+
+We also directly using the toxic behaviors from HarmBench to attack these models as a reference, abbreviated as **DA**. For implementation details of each baseline, refer to Appendix B.
+
+**Metrics** In prior work (Liu et al., 2024b; Guo et al., 2021; Zhao et al., 2024), the effectiveness of attack methods is commonly measured using the *Attack Success Rate* (ASR) over a predefined set of toxic intents, defined as:
+
+$$\text{ASR} = \frac{1}{|\mathcal{T}_{\text{trn}}|} \sum_{t \in \mathcal{T}_{\text{trn}}} R(a, y)$$
+
+In this study, we evaluate strategic red-teaming capabilities along three complementary dimensions, as detailed below.
+
+- **Effectiveness**: Assessed using the average ASR of the top 100 strategies with the highest ASR on  $\mathcal{T}_{\text{st}}$ , denoted as:
+
+$$\text{ASR}_{\text{st}} = \frac{1}{|\mathcal{S}_{100}| * |\mathcal{T}_{\text{st}}|} \sum_{s \in \mathcal{S}_{100}} \sum_{t \in \mathcal{T}_{\text{st}}} R(a, y) \quad (6)$$
+
+- **Efficiency**: Assessed via  $\text{ASR}_{\text{st}}$  of strategies produced at different training stages. Specifically, we partition the training process into stages, each consisting of 1,000 episodes. To capture performance dynamics, we visualize and compare the attack efficiency of different methods by violin plots.
+- **Diversity**: Another key goal of strategic red-teaming is to generate a diverse set of strategies. We evaluate diversity from two perspectives: 1) *Semantic Diversity (SeD)* (Tevet & Berant, 2020), measured by computing the pairwise semantic similarity among all generated strategies; 2) *Defense Generalization Diversity (DeD)*, assessed by first attacking the target model, then constructing defenses based on the successful attacks, and evaluating the  $\text{ASR}_{\text{st}}$  of second-round attacks on the defended model.
+
+**Implement Details** We employ Llama-Guard2-8B (Meta, 2024) to assess the safety of model responses. We incorporate two additional constraints: 1) a **diversity constraint**, where a CRT-style mechanism (Hong et al., 2024) is used to penalize repetitive strategies; 2) a **consistency constraint**, which leverages an LLM to verify whether rephrased attack queries remain semantically aligned with the original behaviors. Both  $\text{AM}^g$  and  $\text{AM}^r$  are implemented using Vicuna-7B, with a maximum sampling budget of 9,000 episodes. To ensure computational stability, only  $\text{AM}^g$  is optimized using PPO (Schulman et al., 2017) with  $8 \times A100$  clusters. Further details on implementation and evaluation are provided in Appendix B,D.
+
+### 3.2 MAIN RESULTS
+
+**Comparative Analysis of Attack Effectiveness and Diversity.** Table 1 presents the white-box evaluation results of AUTO-RT, where the downgrade model is constructed via toxic fine-tuning on the target model. AUTO-RT consistently achieves the highest  $\text{ASR}_{\text{st}}$  across a wide range of models, demonstrating its effectiveness in generating successful strategies. Notably, for the Llama 2 family, which is known for its strong safety alignment, AUTO-RT is still able to perform effective strategic attacks. Interestingly, for the R2D2 (Mazeika et al., 2024), which incorporates targeted defenses,
+
+{6}------------------------------------------------
+
+Table 1: **Left:** Attack success rate of various methods, expressed as a percentage (%), where higher values indicate greater attack effectiveness. **Middle:** Semantic diversity among attack strategies generated by different methods, measured in similarity score, with lower values indicating higher diversity. **Right:** Comparison of defense generalization diversity, expressed as a percentage (%), with higher values suggesting a greater ability to discover diverse strategies continuously.
+
+| Target Model | Effectiveness |  |  |  | Diversity |  |  |  |  |  |  |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  | $ASR_{rst} \uparrow$ |  |  |  | $SeD \downarrow$ |  |  |  | $DeD \uparrow$ |  |  |  |  |
+|  | DA | FS | IL | RL | AUTO-RT | FS | IL | RL | AUTO-RT | FS | IL | RL | AUTO-RT |
+| Vicuna 7B | 24.80 | 29.58 | 36.90 | 31.95 | <b>56.40</b> | 0.70 | 0.86 | 0.64 | <b>0.57</b> | 6.30 | 5.24 | 20.10 | <b>46.80</b> |
+| Vicuna 13B | 16.60 | 20.80 | 36.08 | 17.80 | <b>55.35</b> | 0.77 | 0.93 | 0.51 | <b>0.50</b> | 8.15 | 4.55 | 21.03 | <b>56.33</b> |
+| Llama 2 7B Chat | 0.45 | 6.84 | 6.67 | 0.50 | <b>13.50</b> | 0.74 | 0.90 | 0.54 | <b>0.46</b> | 3.55 | 2.70 | 0.88 | <b>12.98</b> |
+| Llama 2 13B Chat | 1.30 | 5.88 | 6.80 | 2.05 | <b>11.00</b> | 0.65 | 0.85 | <b>0.54</b> | 0.56 | 4.20 | 3.03 | 1.15 | <b>10.85</b> |
+| Llama 3 8B Instruct | 3.20 | 9.42 | 7.18 | 14.55 | <b>15.00</b> | 0.67 | 0.94 | 0.64 | <b>0.45</b> | 7.00 | 6.40 | 7.50 | <b>15.00</b> |
+| Mistral 7B Instruct | 48.50 | 51.54 | <b>54.88</b> | 44.20 | 52.65 | 0.76 | 0.88 | 0.51 | <b>0.50</b> | 12.35 | 9.80 | 28.48 | <b>48.68</b> |
+| Yi 6B Chat | 13.45 | 36.00 | 42.29 | 33.80 | <b>52.50</b> | 0.80 | 0.90 | 0.50 | <b>0.48</b> | 14.60 | 12.18 | 31.45 | <b>47.25</b> |
+| Yi 9B Chat | 16.75 | 28.06 | 34.23 | 39.75 | <b>49.20</b> | 0.80 | 0.91 | <b>0.57</b> | 0.59 | 15.00 | 13.05 | 22.60 | <b>48.90</b> |
+| Gemma 2 2b Instruct | 2.05 | 5.64 | 7.49 | 6.15 | <b>48.15</b> | 0.81 | 0.85 | 0.52 | <b>0.46</b> | 5.15 | 3.53 | 3.43 | <b>47.93</b> |
+| Gemma 2 9b Instruct | 1.55 | 3.74 | 6.63 | <b>44.85</b> | 44.80 | 0.71 | 0.82 | 0.62 | <b>0.53</b> | 3.80 | 2.28 | 30.20 | <b>48.10</b> |
+| R2D2 | 1.70 | <b>27.18</b> | 24.24 | 8.60 | 12.45 | 0.71 | 0.82 | 0.59 | <b>0.50</b> | 10.45 | 8.95 | 4.33 | <b>41.78</b> |
+| Qwen 1.5 4B Chat | 12.50 | 27.24 | 18.52 | 17.45 | <b>51.30</b> | 0.65 | 0.87 | 0.59 | <b>0.58</b> | 5.50 | 4.20 | 12.88 | <b>45.58</b> |
+| Qwen 1.5 7B Chat | 21.70 | 23.80 | 18.82 | 32.60 | <b>49.85</b> | 0.72 | 0.89 | 0.57 | <b>0.52</b> | 8.00 | 6.80 | 25.95 | <b>34.25</b> |
+| Qwen 1.5 14B Chat | 17.20 | 18.78 | 23.82 | 17.75 | <b>42.50</b> | 0.72 | 0.88 | 0.57 | <b>0.53</b> | 6.95 | 5.05 | 16.40 | <b>43.40</b> |
+| Qwen 2.5 3B Chat | 16.30 | 30.94 | 38.30 | 20.35 | <b>42.20</b> | 0.71 | 0.83 | 0.58 | <b>0.58</b> | 5.20 | 3.80 | 17.25 | <b>47.85</b> |
+| Qwen 2.5 14B Chat | 3.80 | 15.42 | 9.38 | 15.65 | <b>17.15</b> | 0.74 | 0.84 | 0.64 | <b>0.46</b> | 9.10 | 7.50 | 12.38 | <b>15.43</b> |
+
+a sampling-based method outperforms others. This highlights the robustness of R2D2’s defense mechanism. Nevertheless, AUTO-RT outperforms RL-based methods consistently, validating its strength in efficient attack strategic generation.
+
+In terms of  $SeD$ , AUTO-RT also surpasses baselines in producing semantically diverse strategies. When evaluating  $DeD$ , which measures robustness to second-round attack, AUTO-RT maintains stable attack performance. The relative change in  $ASR_{rst}$  after defense application is notably smaller for AUTO-RT, indicating stronger ability to continuously discover effective strategies. Particularly on R2D2, AUTO-RT exhibits a significant increase in  $DeD$  after the second round of attacks, suggesting potential blind spots in the defense mechanism and further validating the effectiveness of our approach.
+
+**Comparative Analysis of Attack Efficiency.** Figure 3 compares the attack efficiency of AUTO-RT and RL. For every 1,000 sampled episodes, we analyze the resulting  $ASR_{rst}$ , capturing the dynamics across 9 training stages. As shown, AUTO-RT consistently discovers more effective attack strategies than RL at each stage and achieves better overall performance. Moreover, the variance of  $ASR_{rst}$  within each stage is larger for AUTO-RT, suggesting a stronger capacity for broad and sustained exploration. Complete experimental results are provided in Appendix F.
+
+### 3.3 FURTHER DISCUSSIONS
+
+#### 3.3.1 ABLATION STUDY OF AUTO-RT
+
+To further analyze the contributions of Dynamic Strategy Pruning (**DSP**) and Progressive Reward Tracking (**PRT**), we evaluate AUTO-RT under ablated settings where each component is applied individually. The results are summarized in Table 2, with complete results provided in Appendix F. For both  $ASR_{rst}$  and  $SeD$ , **DSP** and **PRT** independently improve performance, and their combination leads to further enhancement. In terms of  $DeD$ , **PRT** exhibits a more substantial impact, indicating that the proposed reward shaping mechanism is critical for maintaining attack effectiveness after defenses are applied. These results highlight the complementary roles of **DSP** and **PRT** in improving both the robustness and adaptability of strategic red-teaming.
+
+{7}------------------------------------------------
+
+![Figure 3: Comparison of attack efficiency between AUTO-RT and RL. Four violin plots for llama3_8b, mistral_7b_v2, qwen15_14b, and qwen15_4b show ASR across 9 training stages. Lighter violins represent AUTO-RT, darker violins represent RL. AUTO-RT consistently shows higher ASR and larger variance than RL.](3121afa7ca030b22ee0345864ca6f38b_img.jpg)
+
+Figure 3: Comparison of attack efficiency between AUTO-RT and RL. Four violin plots for llama3\_8b, mistral\_7b\_v2, qwen15\_14b, and qwen15\_4b show ASR across 9 training stages. Lighter violins represent AUTO-RT, darker violins represent RL. AUTO-RT consistently shows higher ASR and larger variance than RL.
+
+Figure 3: **Comparison of attack efficiency between AUTO-RT and RL.** The violin plots represent the distribution of attack success rates for every 1,000 sampled episodes, with lighter colors indicating AUTO-RT and darker colors representing RL. AUTO-RT achieves higher  $ASR_{att}$  than RL under the same number of samples, and exhibits larger variance, indicating it’s ability for diverse exploration.
+
+Table 2: **Ablation of Dynamic Strategy Pruning and progressive reward tracking in AUTO-RT.** We evaluated the impact of the two components on different models, and the results demonstrate that both contribute to enhancing strategy exploration.
+
+|  | V-7B | V-13B | L2-13B | L3-8B | Y-6B | G-2B | R2D2 | Q1.5-7B | Q1.5-14B | Q2.5-14B |
+|-|-|-|-|-|-|-|-|-|-|-|
+| Attack Effective ( $ASR_{att}$ ) ↑ |  |  |  |  |  |  |  |  |  |  |
+| RL | 31.95 | 17.80 | 2.05 | 14.55 | 33.80 | 6.15 | 8.60 | 32.60 | 17.75 | 15.65 |
+| +DSP | 36.54 | 22.92 | 2.46 | <b>15.00</b> | 35.98 | 7.38 | 9.07 | 41.01 | 19.58 | <b>17.15</b> |
+| +PRT | 40.50 | 35.20 | 6.80 | 14.60 | 42.30 | 25.30 | 9.80 | 40.20 | 28.30 | 16.50 |
+| <b>AUTO-RT</b> | <b>56.40</b> | <b>55.35</b> | <b>11.00</b> | <b>15.00</b> | <b>52.50</b> | <b>48.15</b> | <b>12.45</b> | <b>49.85</b> | <b>42.50</b> | <b>17.15</b> |
+| Semantic Diversity ( $SeD$ ) ↓ |  |  |  |  |  |  |  |  |  |  |
+| RL | 0.64 | 0.51 | <b>0.54</b> | 0.64 | 0.50 | 0.52 | 0.59 | 0.57 | 0.57 | 0.64 |
+| +DSP | <b>0.57</b> | <b>0.50</b> | 0.55 | 0.51 | 0.53 | 0.50 | 0.57 | 0.53 | <b>0.53</b> | <b>0.44</b> |
+| +PRT | 0.66 | 0.58 | 0.65 | 0.59 | 0.61 | 0.54 | 0.63 | 0.57 | 0.64 | 0.57 |
+| <b>AUTO-RT</b> | <b>0.57</b> | <b>0.50</b> | 0.56 | <b>0.45</b> | <b>0.48</b> | <b>0.46</b> | <b>0.50</b> | <b>0.52</b> | <b>0.53</b> | 0.46 |
+| Defense Generalization Diversity ( $DeD$ ) ↑ |  |  |  |  |  |  |  |  |  |  |
+| RL | 20.10 | 21.03 | 1.15 | 7.50 | 31.45 | 3.43 | 4.33 | 25.95 | 16.40 | 12.38 |
+| +DSP | 43.02 | 54.45 | 12.51 | 14.35 | 47.19 | 47.51 | 41.09 | <b>42.37</b> | 42.15 | 14.49 |
+| +PRT | <b>47.02</b> | 56.18 | <b>13.93</b> | 14.84 | <b>50.94</b> | 43.55 | 39.11 | 32.56 | 42.05 | <b>16.23</b> |
+| <b>AUTO-RT</b> | 46.80 | <b>56.33</b> | 10.85 | <b>15.00</b> | 47.25 | <b>47.93</b> | <b>41.78</b> | 34.25 | <b>43.40</b> | 15.43 |
+
+#### 3.3.2 EFFECTIVENESS OF FIRST INVERSE RATE (FIR)
+
+To evaluate the impact of downgrade model selection, we test a series of downgraded models (M1 to M6) with progressively weakened safety capabilities across six target models. Figure 4 reports three key metrics: the safety level of each downgrade model measured by *Weaken* ( $ASR$ ), the attack success rate under AUTO-RT denoted as *Attack* ( $ASR$ ), and the FIR of each downgrade model (*Weaken* ( $FIR$ )).
+
+We observe that selecting the last model *before* the sharp rise in FIR, as indicated by the dark-colored bars in Figure 4, consistently yields the best attack performance. This demonstrates the utility of FIR as an indicator to substantially disrupt the model’s generative alignment, leading to instability in the model’s internal safety boundaries and increased inconsistency in outputs. Moreover, when using downgrade models weaker than the FIR-indicated threshold, further increases in *Weaken* ( $ASR$ ) no longer translate to improved attack performance. This suggests that over-weaken may lead to diminished guidance quality and thus hinder the effectiveness of strategic red-teaming.
+
+#### 3.3.3 COMPARISON WITH HUMAN-BASED APPROACH
+
+Several baselines based on human-crafted templates have demonstrated strong performance. Including AutoDAN (Liu et al., 2024b), which evolves handcrafted jailbreak prompts with a genetic algorithm, abbreviated as AD; Human Template (Shen et al., 2024), using a fixed set of in-the-wild human jailbreak templates, abbreviated as HT; and Past-Tense (Andriushchenko & Flammarion, 2024), modifying the attack prompt to reflect that it occurred in the past, abbreviated as PT. We compared AUTO-RT with these methods across 16 models, as shown in Table 3. The results demonstrate that AUTO-RT not only achieves a high success rate in the first round of attacks ( $ASR_{att}$ ) but also
+
+{8}------------------------------------------------
+
+![Figure 4: A dual-axis chart showing the relationship between red-teaming results (Attack (ASR)) and safety levels (Weaken (ASR)) across different model configurations (Qwen15-14b, Qwen15-4b, Qwen25-14b, Llama3-8b, Llama2-7b, Vicuna-7b). The x-axis represents downgrade models M1 to M6. The left y-axis represents the Attack (ASR) rate (0.00 to 0.20), and the right y-axis represents the Weaken (ASR) rate (0.00 to 0.80). The chart shows that the Attack (ASR) rate generally increases as the Weaken (ASR) rate increases, with a notable spike in the Attack (ASR) rate for the last model (M6) in each configuration, marked by a dark-colored bar and the word 'select'.](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+Figure 4: A dual-axis chart showing the relationship between red-teaming results (Attack (ASR)) and safety levels (Weaken (ASR)) across different model configurations (Qwen15-14b, Qwen15-4b, Qwen25-14b, Llama3-8b, Llama2-7b, Vicuna-7b). The x-axis represents downgrade models M1 to M6. The left y-axis represents the Attack (ASR) rate (0.00 to 0.20), and the right y-axis represents the Weaken (ASR) rate (0.00 to 0.80). The chart shows that the Attack (ASR) rate generally increases as the Weaken (ASR) rate increases, with a notable spike in the Attack (ASR) rate for the last model (M6) in each configuration, marked by a dark-colored bar and the word 'select'.
+
+Figure 4: The relationship between the red-teaming results (*Attack (ASR)*) following reward shaping with a series of downgrade models (M1 to M6), the safety levels of these models (*Weaken (ASR)*), and their first inverse rate for additional toxic behavior (*Weaken (FIR)*). The optimal red-teaming results are achieved by selecting the last model before a sudden spike in FIR (represented by the dark-colored bar in the figure) as the downgrade model for reward shaping.
+
+Table 3: Comparison between AUTO-RT and human-based strategic attack methods.
+
+|  | AD | HT | PT | AUTO-RT |
+|-|-|-|-|-|
+| ASR <sub>rst</sub> ↑ | <b>55.23</b> | 37.35 | 11.19 | 38.38 |
+| SeD ↓ | 0.86 | <b>0.36</b> | 0.52 |  |
+| DeD ↑ | 17.88 | 13.15 | 7.27 | <b>38.19</b> |
+
+maintains the highest success rate in the second round of attacks (DeD), indicating that our approach can achieve near-human-level sustained attack capabilities.
+
+#### 3.3.4 BLACK-BOX SETTING ATTACK RESULTS
+
+We evaluated the performance of AUTO-RT using in-context learning (ICL) approach to obtain downgrade model in scenarios where direct toxic fine-tuning the target model is not feasible. We utilized Llama3-70B-Instruct and Qwen2.5-72B-Instruct to simulate such black-box settings. The experimental results, shown in Table 4, indicate that AUTO-RT, even with the ICL approach, can improve exploration effectiveness and generates diverse attack strategies.
+
+## 4 RELATED WORKS
+
+Automatic red-teaming methods can be categorized into two approaches depending on the type of feedback signal. The first use textual feedback for optimization, where the model’s parameters are implicitly modified by incorporating feedback into the conversation. This approach benefits from the rich information contained in textual feedback, allowing potentially solutions to be identified with fewer interactions. However, to obtain effective feedback signals, it’s necessary to jailbreak the attacker first to prevent it from refusing interactions with toxic behaviors. For example, PAIR (Chao et al., 2024b) specifies two persuasion techniques to gradually coax the target model, while ICA (Wei et al., 2024) employs harmful demonstrations to subvert LLMs. TAP (Mehrotra et al., 2024b) iteratively refines attack prompts using tree-of-thought reasoning until a generated prompt jailbreaks the target. Additionally, methods like PAP (Zeng et al., 2024), Rainbow Teaming (Samvelyan et al., 2024), GPTFuzzer (Yu et al., 2024), and Purple Teaming (Zhou et al., 2024a) explore the target model’s flaws by predefining a series of attack strategies. AutoDAN-turbo (Liu et al., 2024a) explores attack strategies guided by textual feedback before executing them against the target model; however, this comes at the cost of requiring thousands of hours of searching time.
+
+The second approach utilizes numerical feedback signals to guide the optimization. Methods like GCG (Zou et al., 2023), GDBA (Guo et al., 2021), and AutoPrompt (Shin et al., 2020) use logits from target model as optimization signals. MART (Ge et al., 2023) employ a dangerous content classifier to screen numerous sampled results, using imitation learning to produce attack prompts. Cold-Attack (Guo et al., 2024) scores attack based on a rule-based model from multiple perspectives, framing red teaming as energy-based constrained decoding. CRT (Hong et al., 2024) and Diver-CT (Zhao et al., 2024) model this process as reinforcement learning, providing score feedback
+
+{9}------------------------------------------------
+
+Table 4: Attack performance when using In-Context Learning approach to construct downgrade model in black-box setting for simulating models with inaccessible trainable weights.
+
+|  | LLaMa 3 70B |  |  | Qwen 2.5 72B |  |  |
+|-|-|-|-|-|-|-|
+|  | ASR <sub>tot</sub> ↑ | SeD ↓ | DeD ↑ | ASR <sub>tot</sub> ↑ | SeD ↓ | DeD ↑ |
+| FS | 5.49 | 0.87 | 1.17 <sub>-4.32</sub> | 3.53 | 0.82 | 3.05 <sub>0.48</sub> |
+| IL | 6.80 | 0.64 | 0.92 <sub>-5.88</sub> | 6.22 | 0.73 | 1.20 <sub>5.02</sub> |
+| RL | 4.99 | 0.53 | 4.15 <sub>0.84</sub> | 4.53 | <b>0.52</b> | 4.33 <sub>0.2</sub> |
+| <b>Auto-RT</b> | <b>14.88</b> | <b>0.52</b> | <b>15.00<sub>0.12</sub></b> | <b>14.47</b> | 0.61 | <b>14.15<sub>0.32</sub></b> |
+
+to optimize attack strategies based on attack diversity and the severity of the output’s dangerousness. However, as numerical feedback contains less information than textual feedback, achieving comparable attack often requires more exploration.
+
+## 5 CONCLUSIONS
+
+In this paper, we introduce AUTO-RT, a framework that employs dynamic strategy pruning and progressive reward tracking to automatically discover strategic attacks. Experimental results show that our approach significantly improves the efficiency and effectiveness of continuous, diverse strategy exploration across a wide range of models in both white-box and black-box settings.
+
+## 6 ACKNOWLEDGMENTS
+
+We sincerely thank the reviewers for their insightful comments and valuable suggestions. This work was supported by the Natural Science Foundation of China (No. 62536008, 62306303, 62572456, 62476265), and Ant Group Research Fund.
+
+## 7 ETHICS STATEMENT
+
+We propose a technique named AUTO-RT for generating jailbreak attacks on Large Language Models (LLMs), aiming to support the development of more robust and trustworthy LLMs. Although the current study demonstrates its effectiveness on public models, AUTO-RT is also applicable to custom LLMs in domain-specific settings or broader alignment scenario.
+
+## 8 REPRODUCIBILITY STATEMENT
+
+We have clarified our experiment setting in Section 3 and Appendix A,B,D,E.
+
+## REFERENCES
+
+- Joshua Achiam, David Held, Aviv Tamar, and Pieter Abbeel. Constrained policy optimization. In *International conference on machine learning*, pp. 22–31. PMLR, 2017.
+- Bo Adler, Niket Agarwal, Ashwath Aithal, Dong H Anh, Pallab Bhattacharya, Annika Brundyn, Jared Casper, Bryan Catanzaro, Sharon Clay, Jonathan Cohen, et al. Nemotron-4 340b technical report. *arXiv preprint arXiv:2406.11704*, 2024.
+01. AI, :, Alex Young, Bei Chen, Chao Li, Chengen Huang, Ge Zhang, Guanwei Zhang, Heng Li, Jiangcheng Zhu, Jianqun Chen, Jing Chang, Kaidong Yu, Peng Liu, Qiang Liu, Shawn Yue, Senbin Yang, Shiming Yang, Tao Yu, Wen Xie, Wenhao Huang, Xiaohui Hu, Xiaoyi Ren, Xinyao Niu, Pengcheng Nie, Yuchi Xu, Yudong Liu, Yue Wang, Yuxuan Cai, Zhenyu Gu, Zhiyuan Liu, and Zonghong Dai. Yi: Open foundation models by 01.ai, 2024. URL <https://arxiv.org/abs/2403.04652>.
+- John Allspaw and Richard I. Cook. How complex systems fail. In *Web Operations*, 2010. URL <https://api.semanticscholar.org/CorpusID:18051593>.
+
+ Rest of paper (reference and Appendix) is removed.

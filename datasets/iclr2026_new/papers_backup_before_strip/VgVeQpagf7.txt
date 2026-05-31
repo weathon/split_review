@@ -1,0 +1,309 @@
+
+
+{0}------------------------------------------------
+
+# HIGH PERFORMANCE DIFFERENTIALLY PRIVATE FINE-TUNING USING DATASET DISTILLATION
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Differentially Private Stochastic Gradient Descent (DP-SGD), which iteratively perturbs clipped per-sample gradients and tracks the cumulative privacy risk using composition accounting, has become a cornerstone in private deep learning. Despite its versatility, DP-SGD in practice faces several limitations. It is constrained by the number of gradient iterations permissible under a limited privacy budget, and is restricted by incompatibilities with common deep learning techniques like ensembling and BatchNorm, and typically produces only a single trained model. In this work, we propose an algorithm for generating a differentially-private (DP) synthetic version of a sensitive dataset. This allows the synthetic dataset to be distributed and postprocessed freely without additional privacy loss, giving more flexibility than DP-SGD. Building on dataset distillation—by producing compact synthetic datasets that preserve downstream performance—we introduce SPS (Summarize-Privatize-Synthesize) and its enhanced variant SPS+. In contrast to prior works, SPS is, to our knowledge, the first alternative to DP-SGD that attains higher accuracy on image-classification tasks. Concretely, on CIFAR 10 / CIFAR 100 with privacy budget  $\epsilon = 1$ , SPS+ achieves **96.2 / 76.6%** top-1 accuracy, outperforming state-of-the-art (SOTA) DP-SGD results (94.8 / 70.3%).
+
+## 1 INTRODUCTION
+
+Deep learning is effective in predictive performance and efficient in implementation when trained on non-sensitive data, but it falls short when datasets contain private information. Numerous practical attacks can efficiently reconstruct training data from trained models in the absence of proper protections Zhu et al. (2019a); Buzaglo et al. (2023). To provably mitigate adversarial inference, a widely adopted framework is *Differential Privacy* (DP) Dwork (2006), which quantifies and allows one to control the advantage of any adversary in determining the membership of an individual data record. Deep Learning with DP constraints has long proved challenging: not only do practitioners pay a price in terms of accuracy, the most common and performant method for differentially private learning: Differentially-Private SGD (DP-SGD) Abadi et al. (2016), comes at a computational and practical cost. DP-SGD faces practical limitations: restricted iterations due to composition budgets, incompatibility with BatchNorm (Ioffe, 2015) and ensembling Ganaie et al. (2022), and expensive per-sample gradient computation. Furthermore, if the data is to be used again in the future, one must retrain old models so account for the additional privacy cost of training the new ones.
+
+Alternatively, one can *privatize* a dataset by generating a synthetic version that satisfies DP guarantees. This approach offers far greater flexibility than DP-SGD: the synthetic corpus can be publicly released, reused to train multiple models, and probed with data-attribution-based explainability methods—capabilities that are typically infeasible under standard DP-SGD. An especially compelling use case arises when sensitive data are siloed across multiple databases, each with its own privacy restrictions. If each curator independently releases a DP-synthetic dataset, these can be aggregated into a global public corpus, allowing mutual benefit without leaking private information. Despite this promise, generation-based approaches have historically lagged gradient-based training in accuracy, limiting their practicality.
+
+Meanwhile, recent progress in dataset distillation—the study of crafting small synthetic datasets that train to high accuracy—offers guidance for building high-performance synthetic data. For example, the D3S algorithm (Loo et al., 2024), which matches intermediate-layer feature statistics, is among
+
+{1}------------------------------------------------
+
+the first methods to scale to larger models. Although recent work has combined dataset-distillation techniques with DP (Vinaroz & Park, 2024), its performance remains below that of DP-SGD. In this work, we show for the first time that distillation-based approaches to privacy can match or exceed the accuracy of DP-SGD on private image classification while providing greater flexibility. In particular, our contribution can be summarized as follows:
+
+1. **Present SPS**, a differentially private dataset distillation algorithm that adapts D3S to work with public pre-trained models while privatizing intermediate activation statistics;
+2. **Develop multitask clipping and grouped pseudo-classes** techniques that significantly improve performance in high-privacy regimes, yielding the enhanced SPS+ algorithm;
+3. **Demonstrate competitive performance** with DP-SGD on CIFAR-10/100 classification, becoming the first generation-based method to match gradient-based approaches;
+4. **Show practical advantages** of data-based privacy including support for model ensembling, federated learning, and continual learning without additional privacy cost.
+
+## 2 BACKGROUND
+
+### 2.1 DIFFERENTIAL PRIVACY
+
+DP defines the privacy risk by measuring the worst-case (maximal) divergence between the output distributions of some mechanism  $\mathcal{M}$  on two *adjacent* datasets differing in a single data point. In the following, we formally introduce a well-known variant of DP, Rényi Differential Privacy (RDP).
+
+**Definition 2.1** ( $(\alpha, \epsilon(\alpha))$ -Rényi Differential Privacy Mironov (2017b)). *Given a universe  $\mathcal{X}$ , we say that two datasets  $X, X' \subseteq \mathcal{X}^*$  are adjacent, denoted as  $X \sim X'$ , if  $X = X' \cup \{x\}$  or  $X' = X \cup \{x\}$  for some additional datapoint  $x \in \mathcal{X}$ . A randomized algorithm  $\mathcal{M}$  satisfies  $(\alpha, \epsilon(\alpha))$ -Rényi Differential Privacy (RDP),  $\alpha > 1$ , if for any pair of adjacent datasets  $X \sim X'$ ,  $D_\alpha(\mathbb{P}_{\mathcal{M}(X)} \| \mathbb{P}_{\mathcal{M}(X')}) \leq \epsilon(\alpha)$ . Here,  $\mathbb{P}_{\mathcal{M}(X)}$  and  $\mathbb{P}_{\mathcal{M}(X')}$  represent the distributions of  $\mathcal{M}(X)$  and  $\mathcal{M}(X')$ , respectively, and*
+
+$$D_\alpha(P \| Q) = \frac{1}{\alpha - 1} \log \int q(o) \left( \frac{p(o)}{q(o)} \right)^\alpha do, \quad (1)$$
+
+represents  $\alpha$ -Rényi Divergence between two distributions  $P$  and  $Q$  whose density functions are  $p$  and  $q$ , respectively.
+
+For a given  $\alpha$ , a smaller  $\epsilon(\alpha)$  implies a more significant challenge for an adversary to distinguish the participation of an arbitrarily-selected data point, and the mechanism  $\mathcal{M}$  preserves privacy better. RDP can also be converted back into the classic approximate  $(\epsilon, \delta)$  DP (Mironov, 2017a; Canonne et al., 2020). We provide a full description in section C.
+
+In many applications, multiple accesses to a sensitive dataset are required, and each additional release increases the potential privacy leakage. RDP can be used to elegantly handle the composition of privacy leakage, as given by Lemma 2.2
+
+**Lemma 2.2** (Composition of RDP (Proposition 1 of Mironov (2017b))). *Let  $f : \mathcal{D} \mapsto \mathcal{R}_1$  be  $(\alpha, \epsilon_1)$ -RDP and  $g : \mathcal{R}_1 \times \mathcal{D} \mapsto \mathcal{R}_2$  be  $(\alpha, \epsilon_2)$ -RDP, then the mechanism defined as  $(X, Y)$ , where  $X \sim f(D)$  and  $Y \sim g(X, D)$ , satisfies  $(\alpha, \epsilon_1 + \epsilon_2)$ -RDP.*
+
+Lemma 2.2 suggests that the security parameter  $\epsilon(\alpha)$  in RDP increases *linearly* under composition. Most existing DP composition methods, including RDP (Lemma 2.2) and more refined techniques such as  $f$ -DP Dong et al. (2022) and characteristic function-based approaches Zhu et al. (2022), need to consider the *worst-case* scenario for each composed mechanism. Consequently, they are unable to handle *unbounded* composition. In the context of machine learning, this limitation implies that a fixed privacy budget *cannot* support training an unlimited number of privatized model using conventional composition techniques. This motivates the use of *private synthetic data generation* as a means to enable unrestricted private data utilization.
+
+Another concrete application of composition is DP-SGD Abadi et al. (2016). It interprets a standard  $T$ -iteration SGD process as a sequence of  $T$  adaptively composed single-iteration gradient computations and updates, and clips and adds noise to gradients to ensure DP-guarantees under  $T$  compositions. Similarly, the iteration number  $T$  must be bounded.
+
+{2}------------------------------------------------
+
+![Figure 1: A schematic of the Summarize, Privatize, Synthesize (SPS) algorithm. The diagram shows two parallel processing paths for a 'Full Dataset, X_T' and a 'Privatized Dataset, X_S'. Both datasets are processed by a 'Pretrained Model, theta_P' (represented by a sequence of layers). The Full Dataset path produces summary statistics 'a^T = sum_{i=1}^{N_T} clip(a_i^T) + N(0, sigma^2)' and 'e^T = sum_{i=1}^{N_T} clip(e_i^T)'. These are then 'Summarize + Privatize' to produce 'N(mu^T, sigma^2)' and 'N(mu^e, sigma^e)'. The Privatized Dataset path produces 'a^S' and 'e^S', which are 'Convert to mu, Sigma' to produce 'N(mu^S, sigma^S)' and 'N(mu^e, sigma^e)'. Finally, the two sets of statistics are 'Synthesize by Minimize KL Div.' to produce the final synthetic dataset.](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+Figure 1: A schematic of the Summarize, Privatize, Synthesize (SPS) algorithm. The diagram shows two parallel processing paths for a 'Full Dataset, X\_T' and a 'Privatized Dataset, X\_S'. Both datasets are processed by a 'Pretrained Model, theta\_P' (represented by a sequence of layers). The Full Dataset path produces summary statistics 'a^T = sum\_{i=1}^{N\_T} clip(a\_i^T) + N(0, sigma^2)' and 'e^T = sum\_{i=1}^{N\_T} clip(e\_i^T)'. These are then 'Summarize + Privatize' to produce 'N(mu^T, sigma^2)' and 'N(mu^e, sigma^e)'. The Privatized Dataset path produces 'a^S' and 'e^S', which are 'Convert to mu, Sigma' to produce 'N(mu^S, sigma^S)' and 'N(mu^e, sigma^e)'. Finally, the two sets of statistics are 'Synthesize by Minimize KL Div.' to produce the final synthetic dataset.
+
+Figure 1: A schematic of the Summarize, Privatize, Synthesize (SPS) algorithm. SPS works by matching privatized summary statistics between the real dataset  $\mathcal{X}_T$  and a synthetic one  $\mathcal{X}_S$  using a pretrained model  $\theta_P$ .
+
+### 2.2 DP SYNTHETIC DATA GENERATION
+
+For private synthetic data generation, DP-SGD has been used to train generative models—including diffusion models (Ghalebikesabi et al., 2023; Dockhorn et al., 2022) and GANs (Xie et al., 2018)—but scaling these models remains challenging. Larger models typically require more iterations to converge, yet DP-SGD is limited by a finite composition budget; moreover, the injected noise grows with model dimensionality (Xiao et al., 2023), so bigger models endure heavier noise, further slowing convergence. Similar composition constraints also affect alternatives such as PATE (Private Aggregation of Teacher Ensembles) (Papernot et al., 2016), which requires access to additional unlabeled public data.
+
+Other DP data-generation strategies exist: in images, one can leverage public diffusion models (Lin et al., 2024), or—closest to our approach—statistically match privatized mean embeddings (Harder et al., 2020). However, in the image domain, downstream classification performance still trails direct DP-SGD training: the best reported CIFAR-10 accuracy from synthetic data is 89.1% (Lin et al., 2024), well below DP-SGD’s  $> 95\%$  (De et al., 2022). By contrast, in the text domain, fine-tuning on private synthetic data can outperform direct DP-SGD training (Xie et al., 2024; Amin et al., 2024). To our knowledge, our work is the *first* to achieve such parity in the image domain.
+
+### 2.3 DATASET DISTILLATION
+
+Dataset distillation (DD) aims to produce compact synthetic datasets that preserve high downstream accuracy (Wang et al., 2018). Among major DD families—bilevel optimization (Wang et al., 2018; Loo et al., 2023), kernel-based methods (Nguyen et al., 2021a;b), trajectory matching (Cazenavette et al., 2022), and *activation-statistic matching* (e.g., D3S (Loo et al., 2024; Yin et al., 2023a))—the last is particularly well-suited to differential privacy. These methods align intermediate activation statistics (e.g., means and covariances at BatchNorm layers) between the full and distilled datasets.
+
+Crucially, statistic-matching algorithms like D3S need to privatize only the *statistic-collection phase*, enabling DP via a single noise-addition step. By contrast, other DD approaches must privatize each optimization iteration, incurring costly iterative composition (Dwork, 2006). Prior private DD attempts, such as DP-KIP (Vinaroz & Park, 2024), attain only 58.7% on CIFAR-10 at  $(\epsilon, \delta) = (10, 10^{-5})$ , far below DP-SGD’s  $> 93\%$  on the same benchmark (De et al., 2022).
+
+## 3 OUR METHOD
+
+In this section, we present the Summarize-Privatize-Synthesize (SPS) algorithm. Our method builds on the D3S dataset-distillation framework (Loo et al., 2024), but introduces substantial modifications to address the challenges of the differentially private (DP) setting. We first describe SPS in section 3, then introduce *multistage clipping* and *grouped pseudo-classes* in section 4, yielding the enhanced SPS+ algorithm, which performs significantly better on multiclass tasks.
+
+{3}------------------------------------------------
+
+### 3.1 REVIEW: D3S DATASET DISTILLATION
+
+Dataset Distillation with Domain Shift (D3S) matches intermediate activation statistics between the full dataset  $\mathcal{X}_T$  and the distilled set  $\mathcal{X}_S$ . Statistics are computed using a model  $\theta_T$  trained on  $\mathcal{X}_T$ . Concretely, let the post-BatchNorm activation at layer  $l$  for example  $i$  be  $z_{i,l} \in \mathbb{R}^{D_l \times H_l \times W_l}$ . After averaging over spatial dimensions  $(H_l, W_l)$ , D3S forms per-layer means and covariances for the full and distilled sets,
+
+$$\mu_l^T, \mu_l^S \in \mathbb{R}^{D_l}, \quad \Sigma_l^T, \Sigma_l^S \in \mathbb{R}^{D_l \times D_l},$$
+
+and seeks to match these statistics. Treating the distributions of  $z_{i,l}$  as Gaussian, the objective minimizes the KL divergence between the corresponding normals together with a supervised loss on distilled labels  $\mathcal{Y}_S$  (pre-assigned), evaluated by  $\theta_T$ :
+
+$$\mathcal{L}_{\text{D3S}} = \sum_{l=1}^L D_{\text{KL}}(\mathcal{N}(\mu_l^T, \Sigma_l^T) || \mathcal{N}(\mu_l^S, \Sigma_l^S)) + \chi\text{-ent}(f_{\theta_T}(\mathcal{X}_S), \mathcal{Y}_S)$$
+
+D3S further averages the loss across multiple trained models and employs an exponential-moving-average scheme to estimate  $\mu_l^S$  and  $\Sigma_l^S$  when the distilled batch size is large. Optimizing this loss yields synthetic images  $\mathcal{X}_S$ . To obtain soft targets, a knowledge-distillation-style procedure assigns soft labels to  $\mathcal{X}_S$  using  $\theta_T$ .
+
+However, the foregoing procedure is *not* private. First, the collection of  $\mu_l^T$  and  $\Sigma_l^T$  is non-private. More critically, the algorithm depends on a model  $\theta_T$  trained on the full private dataset—both to guide image synthesis and to assign labels—so a private distillation method must eliminate (or carefully privatize) this reliance on  $\theta_T$ .
+
+### 3.2 ADAPTING TO PRIVATE GENERATION
+
+Here we describe how we develop SPS, an algorithm similar to D3S which overcomes the aforementioned issues and works in the differentially private setting.
+
+#### 3.2.1 REMOVING THE TRAINED MODEL
+
+To address the issues above, we first remove reliance on the privately trained model  $\theta_T$ . The most straightforward remedy is to use a publicly pretrained model  $\theta_P$  trained on a large non-sensitive corpus—a common practice in the DP literature (Mehta et al., 2022; De et al., 2022; Ganesh et al., 2023). However, substituting  $\theta_T$  with  $\theta_P$  introduces two challenges: **(i) missing class assignments** and **(ii) missing soft-label information**. In D3S, a cross-entropy term enforces class alignment for synthesized images, and soft targets are obtained via knowledge distillation from  $\theta_T$ —both unavailable without  $\theta_T$ .
+
+To circumvent this, for a dataset with  $C$  classes we collect  $C$  sets of class-conditional statistics at a subset of layers  $L_C \subseteq [L]$  (typically the last three). These statistics must be rich enough to capture distributional structure lost with hard labels, so we model *full* multivariate Gaussian summaries rather than matching means alone. During synthesis, images intended for class  $c$  match the corresponding class-conditional statistics via a KL-divergence objective, while all synthetic data additionally match *global* (class-marginal) statistics averaged across classes. Let the global statistics be  $(\mu_l^{T,G}, \Sigma_l^{T,G})$  and, for class  $c$ , the class-conditional statistics be  $(\mu_l^{T,c}, \Sigma_l^{T,c})$ ; the resulting loss is:
+
+$$\mathcal{L}_{\text{SPS}} = \sum_{l=1}^L D_{\text{KL}}(\mathcal{N}(\mu_l^{T,G}, \Sigma_l^{T,G}) || \mathcal{N}(\mu_l^{S,G}, \Sigma_l^{S,G})) + \lambda_C \sum_{c=1}^C \sum_{l \in L_C} D_{\text{KL}}(\mathcal{N}(\mu_l^{T,c}, \Sigma_l^{T,c}) || \mathcal{N}(\mu_l^{S,c}, \Sigma_l^{S,c})) \quad (2)$$
+
+For some scalar hyperparameter  $\lambda_C$ , the assigned classes are then used for **hard labels** as opposed to soft ones. We show the importance of this change in section B.1. Additionally, we use different dimensions  $D_G$  and  $D_C$  for global and class-specific statistics, typically choosing  $D_G > D_C$ . This is necessary because the class-specific statistics are subject to noise which is larger by a factor of  $C$  when privatized, so we must keep their dimensionality smaller. To do this, for intermediate activation  $z_{i,l} \in \mathbb{R}^{C_l \times H_l \times W_l}$  for data point  $i$ , we project it and apply a nonlinearity to get the embedding used for the global and class-specific embedding:
+
+$$z_{i,l}^G = 2\sigma(M_l^G z_{i,l}) - 1 \in \mathbb{R}^{D_G \times H_l \times W_l}, \quad z_{i,l}^C = 2\sigma(M_l^C z_{i,l}) - 1 \in \mathbb{R}^{D_C \times H_l \times W_l}$$
+
+{4}------------------------------------------------
+
+where  $M_l^G$  and  $M_l^C$  are random projection matrices of dimension  $\mathbb{R}^{D_G \times D_l}$  and  $\mathbb{R}^{D_C \times D_l}$ , respectively, and  $\sigma$  is the sigmoid function.
+
+#### 3.2.2 PRIVATIZING THE STATISTICS
+
+The second change we need to make is to ensure collecting the global and class summarization are implemented in a privacy-preserving manner. For each datapoint  $x_i$ , we release the first and second moments given by:
+
+$$\begin{aligned} m_{i,l}^G &= \frac{1}{HW} \sum_{h=1}^H \sum_{w=1}^W z_{i,l}^G \in \mathbb{R}^{D_G}, & s_{i,l}^G &= \frac{1}{HW} \sum_{h=1}^H \sum_{w=1}^W z_{i,l}^G z_{i,l}^{G\top} \in \mathbb{R}^{D_G \times D_G}, & 1 \leq l \leq L \\ m_{i,l}^c &= \frac{\mathbb{I}(y_i=c)}{HW} \sum_{h=1}^H \sum_{w=1}^W z_{i,l}^c \in \mathbb{R}^{D_C}, & s_{i,l}^c &= \frac{\mathbb{I}(y_i=c)}{HW} \sum_{h=1}^H \sum_{w=1}^W z_{i,l}^c z_{i,l}^{c\top} \in \mathbb{R}^{D_C \times D_C}, & l \in L_C, 1 \leq c \leq C \end{aligned} \quad (3)$$
+
+It is noted that the second moment is a symmetric matrix and thus we only need to release the upper triangular part. Let  $u = \text{triu}(s)$  be the upper triangular part of  $s$ . Flattening and concatenating these into a single statistic vector  $v_i$ , we have, for each datapoint:
+
+$$v_i = \underbrace{[m_{i,1}^G, u_{i,1}^G, \dots, m_{i,L}^G, u_{i,L}^G]}_{v_i^G} \underbrace{[m_{i,1}^1, u_{i,1}^1, \dots, m_{i,L}^1, u_{i,L}^1]}_{v_i^{c=1}} \dots \underbrace{[m_{i,1}^C, u_{i,1}^C, \dots, m_{i,L}^C, u_{i,L}^C]}_{v_i^{c=C}}$$
+
+The total dimensionality of the released statistics  $v_i$  is  $d_{\text{tot}} = L D_G^{\text{layer}} + C |L_C| D_C^{\text{layer}}$ , where  $D_G^{\text{layer}} = D_G + \frac{D_C(D_G+1)}{2}$ , corresponding to the dimensionality of a single layer's mean and covariance<sup>1</sup>. The same applies analogously for the per-class statistics captured by  $D_C^{\text{layer}}$ . Thus, the overall dimensionality can be tuned by adjusting  $D_G$ ,  $D_C$ , and  $|L_C|$ . Tuning the dimensionality of the privatized statistic is a key advantage of SPS of DP-SGD. Whereas DP-SGD is limited by the high dimensionality of gradients ( $\sim 10^7$ ), by tuning  $D_C$  and  $D_G$  to be small, the dimensionality of SPS can be significantly smaller ( $\sim 10^5$ ), thereby improving the SNR of the privatized statistic.
+
+We are interested in releasing the aggregate sum of these statistic vectors:  $\tilde{v} = \sum_{i=1}^N v_i$ , computed over  $N$  datapoints. This sum can be privatized using the Gaussian Mechanism (Dwork, 2006). Specifically, we clip each  $v_i$  to satisfy  $\|v_i\|_2 \leq \|v\|_{\max} := K_{\text{clip}} \sqrt{L D_G^{\text{layer}} + |L_C| D_C^{\text{layer}}}$ , where  $K_{\text{clip}}$  is a positive constant (typically on the order of  $10^{-1}$ ). We then add Gaussian noise with standard deviation  $\sigma = b_0 \|v\|_{\max}$ , where  $b_0$  is chosen according to the privacy budget. The final released vector is
+
+$$\tilde{v} = \sum_{i=1}^N \text{clip}(v_i) + \mathcal{N}(0, b_0^2 \|v\|_{\max}^2 I), \quad \text{clip}(v_i) = v_i \cdot \min\left\{1, \frac{\|v\|_{\max}}{\|v_i\|_2}\right\}. \quad (4)$$
+
+Here,  $\text{clip}(\cdot)$  denotes the standard  $\ell_2$  clipping function.
+
+#### 3.2.3 POST-PROCESSING THE STATISTIC VECTOR
+
+After obtaining the full statistic vector  $\tilde{v}$ , we need to convert it back into means and covariances. Splitting  $\tilde{v}$  back into summed first and second moments, we have  $\tilde{m}_l^G, \tilde{u}_l^G$  for each layer and  $\tilde{m}_l^c, \tilde{u}_l^c$  for each class and layer. Focusing on the global statistics, we process these into means and covariances as follows:
+
+$$\mu_l^G = \frac{1}{N} \tilde{m}_l^G, \quad \hat{\Sigma}_l^G = \frac{1}{N} \text{triu}^{-1}(\tilde{u}_l^G) - \mu_l^G \mu_l^{G\top}$$
+
+Where  $\text{triu}^{-1}$  converts  $\tilde{u}$  back into the symmetric matrix  $\tilde{s}$ . We additionally clip negative eigenvalues of  $\hat{\Sigma}_l^G$  to produce  $\Sigma_l^G$ , which we use during optimization. Details are provided in section A.3
+
+We apply a similar procedure for the class-specific statistics, instead normalizing by  $\frac{N_c}{N}$ . This yields our final set of statistics for matching. Once we have these statistics, we synthesize datapoints by iteratively optimizing eq. (2), initializing with random noise images in  $\mathcal{X}_S$ . We generate images until we have reached our desired dataset size  $|\mathcal{X}_S|$ . Full algorithm pseudocode is available in section A.1.
+
+<sup>1</sup>The  $\frac{D(D+1)}{2}$  term arises from the symmetry of second-moment matrices.
+
+{5}------------------------------------------------
+
+#### 3.2.4 BETTER CLIPPING BY REDISTRIBUTING NOISE
+
+The standard clip-and-add-noise procedure performs poorly because per-class statistics are normalized by  $\frac{C}{N}$  while global statistics use  $\frac{1}{N}$ , making per-class statistics  $C$  times more susceptible to noise. This, in turn, degrades class matching in synthesized images. We remedy this by upscaling the per-class statistics by  $\sqrt{S}$ , where  $S = \frac{LD_G^{\text{layer}}}{|L_C|D_C^{\text{layer}}}$ , and release  $v_i = [v_i^G, \sqrt{S}v_i^1, \dots, \sqrt{S}v_i^C]$ . After adding noise, we divide by  $\sqrt{S}$  when reconstructing the per-class statistics. This redistributes noise to impact the global parameters more, while keeping the same privacy cost  $b_0$ . Correspondingly, we clip according to  $|v|_{\max} = K_{\text{clip}}\sqrt{LD_G^{\text{layer}}} + S|L_C|D_C^{\text{layer}} = K_{\text{clip}}\sqrt{2LD_G^{\text{layer}}}$ .
+
+#### 3.2.5 BETTER OPTIMIZATION
+
+Finally, we detail a few techniques used in optimization to improve performance.
+
+**Smooth Activations.** We use SiLU activations instead of ReLU in pretrained models  $\theta_P$  to facilitate optimization through the network. Smooth activations improve input optimization tasks like reconstruction attacks and adversarial robustness (Shahin Shamsabadi et al., 2023; Xie et al., 2020), making them well-suited for our image synthesis process.
+
+**Sharpness Aware Minimization (SAM) at validation time.** We fine-tune on distilled datasets using the GSAM optimizer (Foret et al., 2021; Zhuang et al., 2022). This choice is motivated by the evidence that SAM-style methods improve generalization under label noise (Baek et al., 2024), which is pertinent here because privatization injects noise. Although SAM typically complicates DP training by requiring two gradient evaluations per step, our setting—training on privatized (DP) synthetic data—falls under the post-processing property (Dwork, 2006). Consequently, any downstream optimizer, including GSAM, can be used without incurring additional privacy cost.
+
+## 4 SPS+: SPS WITH BETTER CLIPPING AND GROUPING
+
+While SPS provides differential privacy, it performs poorly in the high-privacy regime. In particular, the per-class statistics  $v_i^c$  accumulate noise at a rate of  $O(C/N)$ , which can become prohibitive in few-sample settings. To address this, we introduce two key enhancements: *multistage clipping* (MC) and *grouped pseudo-classes* (GPC), together yielding the improved SPS+ algorithm.
+
+### 4.1 MULTISTAGE CLIPPING
+
+In the basic SPS framework, a single measurement of  $\tilde{v}$  must be privatized. Prior work on DP mean estimation (Bie et al., 2023) shows that multistage methods—which iteratively adjust the clipping radius and recenter around previous (biased) estimates—can empirically outperform single-shot estimation. Multistage clipping (MC) adapts this idea to SPS. Specifically, we begin with clipping center 0 and factor  $K_{\text{clip}}^1$ , producing an initial synthetic dataset  $\mathcal{X}_S^1$ . In the next stage, we recenter the clipping operation at the empirical means computed from  $\mathcal{X}_S^1$ , initialize the optimization with  $\mathcal{X}_S^1$ , adopt a new clipping factor  $K_{\text{clip}}^2$ , and jointly optimize  $\mathcal{L}_{\text{SPS}}$  over both stages to obtain  $\mathcal{X}_S^2$ . This process is repeated for  $M$  stages, each time re-centering, re-clipping, and re-initializing from the previous synthetic dataset. A full description of the modified measurement procedure is given in section A.6. The privacy guarantee follows directly from composition, resulting in  $M$ -fold DP.
+
+### 4.2 GROUPED PSEUDOCLASSES
+
+To address  $O(C/N)$  noise rate, rather than directly matching  $C$  estimates of  $v^c$ , each with noise rate  $O(C/N)$ , we proposed generating  $P > C$  *pseudo-classes*, which are composed of random groups  $N_{c/p} > 1$  real classes, and matching pseudoclasses statistics with each other. As a result, each class belongs to  $\frac{PN_{c/p}}{C}$  pseudo-classes. Each pseudoclass' statistics estimate has a more favourable  $O(\frac{C}{NN_{c/p}})$  noise rate, allowing better optimization of eq. (2). Importantly, this technique **only works due to dynamics of optimizing the loss function**, specifically the  $\Sigma$  inversion in the KL-
+
+{6}------------------------------------------------
+
+![Figure 2: Accuracy of pretrained Wide ResNet models fine-tuned on SPS+ synthesized images on CIFAR-10 and CIFAR-100. The figure consists of eight line plots arranged in a 2x4 grid. The top row shows CIFAR-10 accuracy and the bottom row shows CIFAR-100 accuracy. The columns represent different models: WRN28-10, WRN28-10 Ensemble (E=5), WRN34-10, and WRN34-10 Ensemble (E=5). The x-axis for all plots is DP ε (6 = 10⁻³) with values 1, 2, 4, 8. The y-axis is Accuracy (%). Each plot contains five lines for M = 1, 2, 3, 4, 5. In all cases, accuracy increases with ε and with M. Ensembles generally achieve higher accuracy than individual models.](73c3e4508cae529acf4e6c7fa70b361a_img.jpg)
+
+Figure 2: Accuracy of pretrained Wide ResNet models fine-tuned on SPS+ synthesized images on CIFAR-10 and CIFAR-100. The figure consists of eight line plots arranged in a 2x4 grid. The top row shows CIFAR-10 accuracy and the bottom row shows CIFAR-100 accuracy. The columns represent different models: WRN28-10, WRN28-10 Ensemble (E=5), WRN34-10, and WRN34-10 Ensemble (E=5). The x-axis for all plots is DP ε (6 = 10⁻³) with values 1, 2, 4, 8. The y-axis is Accuracy (%). Each plot contains five lines for M = 1, 2, 3, 4, 5. In all cases, accuracy increases with ε and with M. Ensembles generally achieve higher accuracy than individual models.
+
+Figure 2: Accuracy of pretrained Wide ResNet models fine-tuned on SPS+ synthesized images on CIFAR-10 and CIFAR-100. We evaluate  $n = 5$  WRN28-10 and WRN34-10 models, and their respective ensembles, varying both privacy budget  $\epsilon$ , and the number of clipping stages  $M$ . Increasing  $M$  can improve performance over  $M = 1$ .
+
+Table 1: Accuracy of Differentially private fine-tuning of Wide ResNet Models on CIFAR-10 and CIFAR-100 at various privacy budgets  $\epsilon$ . Error bars are computed for  $n = 5$  runs, ensembles use 5 models.
+
+| Method | CIFAR-10 |  |  |  | CIFAR-100 |  |  |  |
+|-|-|-|-|-|-|-|-|-|
+|  | $\epsilon = 1$ | $\epsilon = 2$ | $\epsilon = 4$ | $\epsilon = 8$ | $\epsilon = 1$ | $\epsilon = 2$ | $\epsilon = 4$ | $\epsilon = 8$ |
+| DP-SGD (De et al., 2022) (WRN28-10) | 94.8 $\pm$ 0.1 | 95.4 $\pm$ 0.2 | 96.1 $\pm$ 0.1 | 96.6 $\pm$ 0.1 | 70.3 $\pm$ 0.1 | 74.7 $\pm$ 0.2 | 79.2 $\pm$ 0.2 | 81.8 $\pm$ 0.1 |
+| SPS (WRN28-10) | 93.2 $\pm$ 0.2 | 94.6 $\pm$ 0.2 | 95.0 $\pm$ 0.2 | 95.9 $\pm$ 0.1 | 48.9 $\pm$ 1.1 | 54.0 $\pm$ 1.0 | 66.3 $\pm$ 0.4 | 70.7 $\pm$ 0.1 |
+| SPS (WRN34-10) | 93.9 $\pm$ 0.1 | 94.9 $\pm$ 0.2 | 95.4 $\pm$ 0.2 | 96.1 $\pm$ 0.1 | 50.6 $\pm$ 1.2 | 53.7 $\pm$ 0.9 | 67.2 $\pm$ 0.1 | 72.2 $\pm$ 0.3 |
+| SPS (WRN28-10 Ensemble) | 94.9 | 95.8 | 96.0 | 96.5 | 57.0 | 59.7 | 71.6 | 74.9 |
+| SPS (WRN34-10 Ensemble) | 95.3 | 95.9 | 96.3 | 96.8 | 59.2 | 59.6 | 71.8 | 75.9 |
+| SPS+ (WRN28-10) | 95.1 $\pm$ 0.3 | 95.9 $\pm$ 0.1 | 96.3 $\pm$ 0.1 | 96.3 $\pm$ 0.2 | 71.0 $\pm$ 0.3 | 74.3 $\pm$ 0.3 | 76.2 $\pm$ 0.3 | 77.5 $\pm$ 0.1 |
+| SPS+ (WRN34-10) | 95.5 $\pm$ 0.1 | 96.0 $\pm$ 0.1 | 96.4 $\pm$ 0.1 | 96.6 $\pm$ 0.1 | 71.9 $\pm$ 0.5 | 75.2 $\pm$ 0.4 | 77.2 $\pm$ 0.2 | 78.4 $\pm$ 0.2 |
+| SPS+ (WRN28-10 Ensemble) | 96.0 | 96.5 | 96.9 | 97.1 | 75.9 | 78.4 | 80.1 | 80.9 |
+| SPS+ (WRN34-10 Ensemble) | 96.2 | 96.8 | 97.1 | 97.2 | 76.6 | 79.2 | 80.7 | 81.6 |
+| Private Evolution (Lin et al., 2024) | 89.13% ( $\epsilon = 10$ ) |  |  |  | - |  |  |  |
+
+divergence, and the eigenvalue clipping of  $\Sigma$ . This method **does not offer benefits for direct mean estimation**. More details are available in section A.5.
+
+### 4.3 PRIVACY GUARANTEE FOR SPS
+
+The privacy-sensitive step of SPS is the release of aggregation of individuals  $v_i$ s, which is given in eq. (4). This is directly private sum estimation using the Gaussian Mechanism. For SPS+, this is composed  $M$  times for each measurement step. We have the following privacy guarantee:
+
+**Theorem 4.1** (Privacy of SPS). *The release of  $\tilde{v}$  in eq. (4) for  $M$  models satisfies  $(\alpha, \epsilon)$ -RDP, where  $\epsilon = \frac{M\alpha}{2\delta^2}$  for  $\alpha > 1$ . Proof. See section C.1  $\square$*
+
+This is a direct result of the  $M$ -fold composition of Gaussian Mechanisms under RDP. This can be converted to  $(\epsilon, \delta)$ -DP using Proposition 12 in Canonne et al. (2020), which is implemented in the RDP-account in Ahmed et al. (2025), which we use in the comparison with prior works.
+
+## 5 RESULTS
+
+### 5.1 FINE-TUNING WITH PUBLIC DATASETS
+
+To validate our method, we first test it on fine-tuning publicly available pretrained datasets. Specifically, we take the task of generating synthetic private version of CIFAR-10 and CIFAR-100 (Krizhevsky, 2009) using a pretrained Wide ResNet 22-8 with SiLU activations trained on  $32 \times 32$  resolution ImageNet (He et al., 2015; Zagoruyko & Komodakis, 2017; Deng et al., 2009), in line with prior work (De et al., 2022). Our privatized datasets are the same size as the original (50,000 images). During distillation, we vary the privacy budget  $\epsilon \in \{1, 2, 4, 8\}$ , with a fixed  $\delta = 10^{-5}$ . For SPS+, we keep  $P = 20, 200$  pseudoclasses for CIFAR-10 and CIFAR-100, respectively, and vary  $M$ , the number of stages. Details on the choice of hyperparameters are given in section D.2.
+
+{7}------------------------------------------------
+
+![Figure 4: Visualization of SPS+ distilled images on CIFAR-100 with M = 1 stages. The figure shows four columns of images corresponding to privacy budgets epsilon = 1, 2, 4, and 8. Each column contains a 3x5 grid of images. Below each column is the FID score: 42.00 for epsilon=1, 36.71 for epsilon=2, 32.13 for epsilon=4, and 24.36 for epsilon=8. The images show various objects like animals, birds, and vehicles, with visual fidelity improving as the privacy budget increases.](892f25e3d71d8e315a2a51092a8a8da7_img.jpg)
+
+Figure 4: Visualization of SPS+ distilled images on CIFAR-100 with M = 1 stages. The figure shows four columns of images corresponding to privacy budgets epsilon = 1, 2, 4, and 8. Each column contains a 3x5 grid of images. Below each column is the FID score: 42.00 for epsilon=1, 36.71 for epsilon=2, 32.13 for epsilon=4, and 24.36 for epsilon=8. The images show various objects like animals, birds, and vehicles, with visual fidelity improving as the privacy budget increases.
+
+Figure 4: Visualization of SPS+ distilled images on CIFAR-100 with  $M = 1$  stages. As privacy budget increases, distilled images have better visual fidelity.
+
+Since our method produces data rather than a model, we include a second validation step in which a model is trained on the privatized dataset. By the DP post-processing property (Dwork, 2006), any choice of optimizer, model, or training configuration in this stage does not affect the privacy budget. This flexibility allows us to explore a range of options.
+
+![Figure 3: FID vs. Accuracy for CIFAR-10 and CIFAR-100. The graph shows two data series: CIFAR-10 (blue line with circles) and CIFAR-100 (red line with circles). The x-axis is FID (ranging from 20 to 30). The left y-axis is CIFAR-10 Accuracy (%) (ranging from 96.2 to 97.2). The right y-axis is CIFAR-100 Accuracy (%) (ranging from 77 to 82). Both accuracy metrics decrease as FID increases. CIFAR-100 accuracy is consistently higher than CIFAR-10 accuracy across the range of FID values.](ecb25d766719ce041cf4cc390791a098_img.jpg)
+
+Figure 3: FID vs. Accuracy for CIFAR-10 and CIFAR-100. The graph shows two data series: CIFAR-10 (blue line with circles) and CIFAR-100 (red line with circles). The x-axis is FID (ranging from 20 to 30). The left y-axis is CIFAR-10 Accuracy (%) (ranging from 96.2 to 97.2). The right y-axis is CIFAR-100 Accuracy (%) (ranging from 77 to 82). Both accuracy metrics decrease as FID increases. CIFAR-100 accuracy is consistently higher than CIFAR-10 accuracy across the range of FID values.
+
+Figure 3: FID vs. Accuracy for CIFAR-10 and CIFAR-100 of SPS+ ( $M = 2, 4$  for CF10/100, respectively)
+
+based baselines in the main text.
+
+On CIFAR-10, SPS—especially with ensembling—consistently outperforms DP-SGD across all privacy budgets, but falls short on CIFAR-100. SPS+ matches or exceeds DP-SGD in every setting, particularly under strict privacy budgets with many classes (e.g., CIFAR-100 at  $\epsilon = 1$ ). We further observe that images distilled by SPS using a WRN-22-8 transfer effectively to larger models never seen during distillation, demonstrating the flexibility of our approach. Unless otherwise noted, **we focus on SPS+ in all subsequent experiments**, due to its superior overall performance.
+
+### 5.2 OUT OF DOMAIN IMAGE CLASSIFICATION
+
+To validate SPS under public data domain mismatch, a common challenge in private learning, we tested on CAMELYON17 (Bandi), a histopathology dataset of lymph node sections annotated for metastatic cancer, using  $64 \times 64$  ImageNet as pretraining data. We use SPS in this setting as in the binary classification case, the pseudo-class method does not apply. We generated 100k synthetic images (50k) for each class at resolution  $64 \times 64$  (downsampled from  $96 \times 96$ ), and evaluated our classification performance in table 2. We compare against existing baseline methods Private Evolution (Lin et al., 2024), DP-Diffusion (Ghalebikesabi et al., 2023) and DP-SGD. SPS successfully handles the setting where there is significant mismatch between the private and public datasets.
+
+Specifically, we fine-tune Wide ResNets of sizes 28-10 and 34-10 (both with ReLU activations), pretrained on  $32 \times 32$  Downsampled ImageNet, using the GSAM optimizer. We also evaluate ensembles of  $E = 5$  fine-tuned models. In contrast, standard DP-SGD pipelines impose much stricter limitations: ensembles would require additional composition, and larger models such as WRN-34-10 would incur extra privacy cost due to their higher parameter count.
+
+Table 1 summarizes our results, alongside two key baselines: the state-of-the-art DP training algorithm from (De et al., 2022) and the best reported accuracy from DP generation, Private Evolution (Lin et al., 2024). **Comparisons to additional gradient- and generation-based methods are provided in section F.** For brevity, we present only the strongest gradient-based and generation-
+
+Table 2: CAMELYON17 Classification Performance ( $\delta = 3 \cdot 10^{-6}$ )
+
+|  | Accuracy |
+|-|-|
+| Ours ( $\epsilon = 8$ ) | <b>92.6%</b> |
+| DP-Diffusion ( $\epsilon = 10$ ) (Ghalebikesabi et al., 2023) | 91.1% |
+| Private Evolution ( $\epsilon = 7.56$ ) (Lin et al., 2024) | 79.6% |
+| DP-SGD ( $\epsilon = 10$ ) (Ghalebikesabi et al., 2023) | 90.5% |
+
+{8}------------------------------------------------
+
+![Figure 5: Distillation performance of SPS+ at various compression ratios, trained on WRN34-10 models. The figure contains five subplots: (a) CIFAR-10 Accuracy (%) vs. Compression Ratio (10^0 to 10^1); (b) CIFAR-100 Accuracy (%) vs. Compression Ratio (10^0 to 10^1); (c) Class-Incremental CIFAR-100 Accuracy (%) vs. Number of classes (1 to 10); (d) Federated CIFAR-10 Accuracy (%) vs. Data Bins (1 to 5); (e) Federated CIFAR-10 Accuracy (%) vs. Data Bins (1 to 5). Subplots (a) and (b) show that accuracy increases with compression ratio and higher epsilon values (1, 2, 4, 8). Subplots (c) and (e) show that accuracy is maintained even with a small number of data bins (10% of the original size). Subplot (d) compares 'Ours' methods with 'FedDp'.](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+Figure 5: Distillation performance of SPS+ at various compression ratios, trained on WRN34-10 models. The figure contains five subplots: (a) CIFAR-10 Accuracy (%) vs. Compression Ratio (10^0 to 10^1); (b) CIFAR-100 Accuracy (%) vs. Compression Ratio (10^0 to 10^1); (c) Class-Incremental CIFAR-100 Accuracy (%) vs. Number of classes (1 to 10); (d) Federated CIFAR-10 Accuracy (%) vs. Data Bins (1 to 5); (e) Federated CIFAR-10 Accuracy (%) vs. Data Bins (1 to 5). Subplots (a) and (b) show that accuracy increases with compression ratio and higher epsilon values (1, 2, 4, 8). Subplots (c) and (e) show that accuracy is maintained even with a small number of data bins (10% of the original size). Subplot (d) compares 'Ours' methods with 'FedDp'.
+
+Figure 5: (a-b) Distillation performance of SPS+ at various compression ratios, trained on WRN34-10 models. High performance can be achieved with datasets of only 10% the size of the original, while remaining private. (c-e) capture Federated learning and Class-Incremental Continual learning performance of SPS+ on CIFAR-10 and CIFAR-100, respectively.
+
+### 5.3 VISUALIZING THE DISTILLED IMAGES
+
+A key advantage of data-based privacy is interpretability. Unlike DP training, which precludes data attribution methods (Koh & Liang, 2020), our method produces inspectable synthetic data. Fig. 4 shows distilled CIFAR-100 images across privacy budgets: as  $\epsilon$  increases, images evolve from abstract textures to recognizable class-specific representations, and consequently FID decreases. fig. 3 additionally visualizes the negative correlation between downstream performance and FID for SPS+.
+
+### 5.4 SIMULTANEOUS DISTILLATION AND PRIVATIZATION
+
+Table 3: Oversized synthesis performance of SPS+ on CIFAR-100. Oversized synthetic datasets can further improve performance
+
+| $\epsilon$ | Distilled Dataset size |  |  |  | DP-SGD |
+|-|-|-|-|-|-|
+|  | 1 $\times$ | 2 $\times$ | 3 $\times$ | 4 $\times$ |  |
+| 1 | <b>76.6</b> | 76.4 | 76.0 | 75.9 | 70.3 |
+| 2 | 79.2 | <b>79.4</b> | <b>79.4</b> | 79.3 | 74.7 |
+| 4 | 80.7 | 81.2 | <b>81.3</b> | 81.1 | 79.2 |
+| 8 | 81.6 | 81.8 | <b>82.1</b> | 81.9 | 81.8 |
+
+lead to higher accuracy, but even when using a privatized dataset with only 10% of the original size, performance on CIFAR-10 drops by merely  $\sim 1\%$ , highlighting the efficiency of our approach.
+
+**Oversized dataset distillation.** SPS+ also allows synthesizing datasets *larger than the original dataset*. table 3 shows the effect of creating distilled datasets up to four times the size of the original, evaluated on WRN34-10 ensembles. For CIFAR-100, further performance gains is unlocked with oversized distilled datasets.
+
+### 5.5 FEDERATED LEARNING
+
+Federated learning enables multiple parties to collaboratively train models without sharing raw data. Traditional approaches exchange gradients, but these are vulnerable to reconstruction attacks (Zhu et al., 2019b) and require synchronized communication rounds. By contrast, our data-based approach enables *asynchronous* federated learning: each party independently generates privatized datasets using SPS+ and shares them without synchronization constraints.
+
+We evaluate this by splitting CIFAR-10 into five partitions of 10,000 images each, with each party running SPS+ independently. Specifically each of  $N = 5$  parties have a disjoint subset of the original dataset:  $\mathcal{X}_1^1, \dots, \mathcal{X}_T^N$ , with  $|\mathcal{X}_1^1| = 10,000$ . Each party run SPS+ locally and independently, generating synthetic privatized sets  $\mathcal{X}_S^1, \dots, \mathcal{X}_S^N$ . These are sent to a server, which combines the datasets into a single one:  $\mathcal{X}_S^{combined} = \bigcup_i^N \mathcal{X}_S^i$ , and trains on  $\mathcal{X}_S^{combined}$ . SPS also supports a
+
+{9}------------------------------------------------
+
+variant that addresses this by performing *centralized generation* while still keeping only privatized statistics on the server, which we discuss in section B.6.
+
+As shown in fig. 5, compared to FedLAP-DP (Wang et al., 2024) and FedDM (Xiong et al., 2022), Federated SPS+ significantly outperforms, particularly under strict privacy budgets (fig. 5). Federated SPS+ also successfully aggregates data from multiple sources, improving performance with more sources. For example, at  $\epsilon = 1$ , accuracy improves from 86% with a single data source to 89.5% with five sources.
+
+### 5.6 CONTINUAL LEARNING
+
+Continual learning involves training models sequentially on a stream of tasks or datasets. In the private setting, this presents a fundamental challenge: revisiting past data consumes additional privacy budget, while discarding it leads to catastrophic forgetting (French, 1999). Data-based privacy methods address this by enabling unlimited reuse of previously privatized datasets without incurring extra privacy cost.
+
+We evaluate class-incremental learning on CIFAR-100 by splitting the dataset into 10 subsets and each has 10 classes. Each subset is privatized with SPS+ under budget  $(\epsilon, \delta)$ , and at stage  $1 \leq \tau \leq 10$  we train on the cumulative privatized sets  $\{\mathcal{X}_S^1, \dots, \mathcal{X}_S^\tau\}$ . Results show that performance remains close to the regular, non-continual training: for example, at  $\epsilon = 4$ , our method achieves  $68.1 \pm 0.7\%$  accuracy, compared to  $76.9 \pm 0.4\%$  for standard training (fig. 5).
+
+## 6 LIMITATIONS, DISCUSSION, AND CONCLUSION
+
+In this paper we present SPS and SPS+, algorithms which convert a dataset into a private version leveraging a model pretrained on public data. They are the dataset-distillation based which yields competitive results with fine-tuning based on DP-SGD. SPS also yields more flexibility than DP-SGD, at it supports tasks such as private federated learning and continual learning without modification.
+
+Despite SPS’s strong performance, there are several areas for improvement. The cost of generating these images is relatively heavy (see section F.1 for discussion). Future work could look at whether SPS generation can be amortized, or whether public generators could be used with SPS-style losses, similar to GLaD (Cazenavette et al., 2023) for dataset distillation. In this work we also focused on the simpler class-balanced setting, but future work could study SPS for classes with extreme class imbalance. Other work could look at extending SPS to discrete modalities such as text. Overall, SPS presents a promising new alternative for private deep learning which offers flexibility beyond DP-SGD.
+
+## 7 REPRODUCIBILITY STATEMENT
+
+Full algorithm pseudocode and descriptions are available in section A.1. Code is provided in the supplementary material.
+
+## REFERENCES
+
+- Martin Abadi, Andy Chu, Ian Goodfellow, H Brendan McMahan, Ilya Mironov, Kunal Talwar, and Li Zhang. Deep learning with differential privacy. In *Proceedings of the 2016 ACM SIGSAC conference on computer and communications security*, pp. 308–318, 2016.
+- Karim Ahmed, Lavinia Maria Nedelea, celiayz, Christoph Dibak, Filippo Baliccchia, benjamin de charmoys, Brian Michalski, Esteban Gehring, Osuke, Saket Kumar, Veronica Tang, acheam0, brandonedmunds2, rossy312, and yclian0528. google/differential-privacy, 5 2025. URL <https://github.com/google/differential-privacy>.
+- Kareem Amin, Alex Bie, Weiwei Kong, Alexey Kurakin, Natalia Ponomareva, Umar Syed, Andreas Terzis, and Sergei Vassilvitskii. Private prediction for large-scale synthetic text generation, 2024. URL <https://arxiv.org/abs/2407.12108>.
+
+ Rest of paper (reference and Appendix) is removed.

@@ -1,0 +1,326 @@
+
+
+{0}------------------------------------------------
+
+# LoRA-MIXER: COORDINATE MODULAR LoRA EXPERTS THROUGH SERIAL ATTENTION ROUTING
+
+Wenbing Li, Zikai Song, Hang Zhou, Yunyao Zhang, Junqing Yu, Wei Yang\*  
+ Huazhong University of Science and Technology  
+ {d202581843}@hust.edu.cn
+
+## ABSTRACT
+
+Recent attempts to combine low-rank adaptation (LoRA) with mixture-of-experts (MoE) for multi-task adaptation of Large Language Models (LLMs) often replace whole attention/FFN layers with switch experts or append parallel expert branches, undermining parameter efficiency and limiting task specialization. We introduce **LoRA-Mixer**, a modular MoE framework that routes task-specific LoRA experts into the core projection matrices of the attention module (input/output linear layers), rather than primarily targeting FFN blocks. The design delivers fine-grained token-level specialization by fully exploiting the attention mechanism, while remaining drop-in compatible with Transformers and state-space models (SSMs) as the linear projection layers are ubiquitous. To train robust routers from limited data while promoting stable, selective decisions and high expert reuse, **LoRA-Mixer** employs an adaptive **Routing Specialization Loss (RSL)** that jointly enforces global load balance and input-aware specialization via an entropy-shaping objective. The framework supports two regimes: (i) joint optimization of adapters and router with a differentiable hard-soft top- $k$  routing scheme, and (ii) plug-and-play routing over frozen, pre-trained LoRA modules sourced from public repositories. Across 15 benchmarks—including MedQA, GSM8K, HumanEval, and GLUE—RSL-optimized LoRA-Mixer outperforms state-of-the-art routing and LoRA-MoE baselines while using 48% of their trainable parameters, with gains of +3.79%, +2.90%, and +3.95% on GSM8K, CoLA, and ARC-C, respectively. Cross-model transfer and adapter reuse experiments further demonstrate the approach’s versatility and data efficiency. Our code can be obtained at <https://github.com/hustcselwb/LoRA-Mixer>.
+
+## 1 INTRODUCTION.
+
+Large Language Models (LLMs) have achieved unprecedented proficiency in general-purpose reasoning and generation, yet their adaptation to specialized downstream domains remains computationally prohibitive for full-scale fine-tuning Brown et al. (2020); Touvron et al. (2023). To mitigate these resource demands, parameter-efficient fine-tuning (PEFT) methods Li & Liang (2021); Zaken et al. (2021); Liu et al. (2022); Houlsby et al. (2019); Liu et al. (2021) have emerged as a scalable paradigm. Among them, Low-Rank Adaptation (LoRA) Hu et al. (2022); Tian et al. (2024) has demonstrated particular efficacy, operating through low-rank decomposition of updates to the pre-trained weights—enabling efficient tuning with minimal parameter overhead. Recent work has explored modularly composing independently trained LoRA modules as a promising strategy for multitask adaptation; however, naive composition can result in interference between task-specific subspaces, limiting their synergistic potential Huang et al. (2023); Wu et al. (2024). This limitation has motivated exploration of mixture-of-experts (MoE) architecture Shazeer et al. (2017); Fedus et al. (2022), which treat each task-specific LoRA as an expert and sparsely activate and fuse the experts. Recent studies demonstrate promising directions in hybrid LoRA-MoE frameworks Wu et al. (2024); Li et al. (2024a); Huang et al. (2023); Zhao et al. (2024); Liao et al. (2025); Gao et al. (2024); Chen et al. (2024); Dou et al. (2023), aiming to enhance model performance on complex tasks across multi-domain datasets while preserving the parameter efficiency of fine-tuning.
+
+\*denotes the corresponding author.
+
+{1}------------------------------------------------
+
+![Figure 1: LoRA and MoE integration methods. The diagram is divided into three main sections: Vanilla, Fuse with LoRA-MoE, and LoRA-Mixer. The Vanilla section shows a standard Transformer block with a Feed Forward Network (FFN) and an Attention block. The Fuse with LoRA-MoE section shows two methods: (1) replacing the FFN with a switch expert and (2) replacing the Attention with a switch expert. The LoRA-Mixer section shows the proposed method where LoRA experts are applied to the projection layers (Q, K, V) within the Attention block, and their outputs are fused back into the main path.](9ba3dc91984c80b96f217fb1bddd5c06_img.jpg)
+
+Figure 1: LoRA and MoE integration methods. The diagram is divided into three main sections: Vanilla, Fuse with LoRA-MoE, and LoRA-Mixer. The Vanilla section shows a standard Transformer block with a Feed Forward Network (FFN) and an Attention block. The Fuse with LoRA-MoE section shows two methods: (1) replacing the FFN with a switch expert and (2) replacing the Attention with a switch expert. The LoRA-Mixer section shows the proposed method where LoRA experts are applied to the projection layers (Q, K, V) within the Attention block, and their outputs are fused back into the main path.
+
+Figure 1: LoRA and MoE integration methods. (1) and (2): replace the attention or FNNs with switch experts; (3) and (4): introduce LoRA experts branches in parallel with the attention or feedforward layers, and fuse the output into the main branch. Our **LoRA-Mixer** (right) applies mixture of LoRA experts to the projection layers, which can effectively leverages the attention mechanism.
+
+The central challenge in composing pre-trained LoRAs is to realize synergy—improving performance across constituent tasks—without inflating training cost or erasing task-specific inductive biases. Existing LoRA–MoE integrations largely follow two patterns: (i) replacing attention or FFN blocks with LoRA-based switch experts in a standard MoE setup Li et al. (2024a); Chen et al. (2024); Fedus et al. (2022); Shazeer et al. (2017); or (ii) attaching parallel LoRA branches whose outputs are fused back into the main path Wu et al. (2024); Huang et al. (2023) (Fig. 1). Despite encouraging results Wu et al. (2024); Liao et al. (2025); Krajewski et al. (2024); Zhang et al. (2019); Li et al. (2022); Gross et al. (2017), switch-style designs typically require joint training of all experts, increasing data demands and hindering modular reuse and transfer of off-the-shelf LoRAs. Parallel-branch schemes sidestep native attention or state-transition pathways, yielding shallow output fusion and weak integration. Moreover, common auxiliary routing losses emphasize uniform load balancing, suppressing input- and task-aware specialization Li et al. (2024a). These issues motivate a plug-and-play, architecture-agnostic alternative—compatible with both Transformers and state-space models (SSMs) Gu & Dao (2023)—that learns discriminative routing with minimal compute and data while maximizing reuse of independently trained LoRA modules.
+
+In response, we introduce **LoRA-Mixer**, a novel framework designed to efficiently synergize multiple pre-trained LoRA modules by treating them as dynamic, pluggable memory cells. LoRA-Mixer equips the linear projection layers of the original model with mixed LoRA experts, enabling these experts to directly leverage the core attention or state-transition mechanisms. To further enhance efficiency and maintain routing effectiveness, **LoRA-Mixer** adopts a novel Router Specialization Balancing Loss (**RSL**) to align routing decisions with token-level expert usage, maintaining moderate entropy to encourage exploratory behavior. During inference, we employ sparse top- $K$  fusion, effectively balancing computational cost and scalability without compromising expert selectivity. LoRA-Mixer supports LoRA modules sourced from external repositories, independently trained, or jointly trained through hard routing strategies, allowing seamless plug-and-play usage across various tasks and domains. Importantly, our method significantly reduces the necessity for training data or extensive re-adaptation, requiring only minimal additional data to effectively train the routing mechanism. Consequently, LoRA-Mixer is particularly suitable for constructing large-scale, modular language models characterized by task-specific memory, computational efficiency, and strong transferability. Extensive evaluation on 15 benchmark datasets (MedQA, GLUE, GSM8K, ARC-E, ARC-C, HumanEval, PIQA, HellaSwag, and BoolQ) demonstrates that integrating LoRA-Mixer significantly improves model performance across all evaluated tasks. With only 48% of the parameters of existing methods, the RSL-optimized LoRA-Mixer outperforms the state-of-the-art routing and LoRA-MoE baseline models, achieving improvements of +3.79%, +2.90%, and +3.95% on GSM8K, CoLA, and ARC-C, respectively. Cross-model transfer and adaptive module reuse experiments further demonstrate the method’s versatility and data efficiency.
+
+## 2 RELATED WORK.
+
+**PEFT For LLMs** Low-rank adaptation (LoRA) Hayou et al. (2024); Zhou et al. (2024); Hu et al. (2022); Xu et al. (2024); Sheng et al. (2023); Biderman et al. (2024); Li et al. (2023); Zeng et al. (2025);
+
+{2}------------------------------------------------
+
+![Figure 2: The overall architecture of LoRA-Mixer. The diagram is divided into three main sections. The left section shows the internal structure of a Transformer block, highlighting the 'Apply LoRA-Mixer' component within the 'Scaled dot-product Attention' module. The middle section illustrates the routing mechanism, showing a 'Linear' layer, a 'Router' with 'Dynamic' and 'Static' components, and a 'CRL' (Cross-Router Loss) calculation. The right section details the 'LoRA experts source', showing experts sourced from GitHub and Internet, and the 'Hybrid Hard Routing Training' process involving 'Specific Task' and 'Task domain' experts, leading to a 'Hard Router' and 'Soft Router'.](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+Figure 2: The overall architecture of LoRA-Mixer. The diagram is divided into three main sections. The left section shows the internal structure of a Transformer block, highlighting the 'Apply LoRA-Mixer' component within the 'Scaled dot-product Attention' module. The middle section illustrates the routing mechanism, showing a 'Linear' layer, a 'Router' with 'Dynamic' and 'Static' components, and a 'CRL' (Cross-Router Loss) calculation. The right section details the 'LoRA experts source', showing experts sourced from GitHub and Internet, and the 'Hybrid Hard Routing Training' process involving 'Specific Task' and 'Task domain' experts, leading to a 'Hard Router' and 'Soft Router'.
+
+Figure 2: The overall architecture of LoRA-Mixer. LoRA-Mixer is applied to the linear projection layers in serial with the Attention and SSM modules and support all major LLM structures. LoRA-Mixer reuses the LoRA experts sourced from Internet, trained individually or jointly trained using hard routing. The routing training is guided by RSL loss for balancing experts loads and specificity.
+
+Lin et al. (2025a;b) effectively fine-tunes large models by learning a low-rank matrix and freezing the original weights. While effective for a single task, its task-specific nature limits generalization. Recent work combines LoRA with mixture of experts (MoE) Li et al. (2024a); Feng et al. (2025a); Wu et al. (2024); Ouyang et al. (2025); Feng et al. (2025b); Huang et al. (2023); Zhao et al. (2024); Song et al. (2022; 2023); Hu et al. (2025) to achieve dynamic adaptation. For example, MixLoRA Li et al. (2024a) uses LoRA experts for top-k routing in FFN, improving multi-task performance but suffering from gradient entanglement issues. MoLE Wu et al. (2024) combines LoRA layers via gating but lacks sparse routing. LoRAHub Huang et al. (2023) performs gradient-free few-shot combination of LoRA modules for unseen tasks but struggles with complex semantics due to lack of gradient optimization and dynamic routing. Other methods Li et al. (2025); Huang et al. (2025); Yang et al. (2024); Chen et al. (2023); Luo et al. (2024); Li et al. (2024b); Feng et al. (2025c) explore flexible routing mechanisms to improve the model’s adaptability. However, these methods usually introduce additional routing networks or optimization targets, resulting in instability during training, limiting their application in actual multi-task or low-resource scenarios.
+
+**Mixture of Experts** In recent years, the mixture of experts (MoE) architecture has attracted much attention as a promising LLM expansion paradigm. By selectively activating a subset of expert modules for each input, MoE allows the model to scale capacity without linearly increasing the amount of computation. As a result, more and more large models have adopted MoE, including GLaMDu et al. (2022), Switch TransformersFedus et al. (2022); Song et al. (2025); Zhang et al. (2025a;b); Ye et al. (2025), and the recent DeepSeek seriesLiu et al. (2024); Guo et al. (2025a). These advances indicate that MoE is becoming a mainstream architectural trend in the development of next-generation base models. Among them, GLaMDu et al. (2022) and Switch TransformerFedus et al. (2022) build a mixture of experts (MoE) model in the FFN module, and use a sparse activation mixed expert architecture to expand the model capacity and achieve better performance. LLaVA-MoLEChen et al. (2024) uses a top-1 strategy to route tokens to domain-specific expert models, thereby alleviating data conflicts and achieving continuous performance improvements over the ordinary LoRA baseline. LoRAMoEDou et al. (2023) uses routers to integrate LoRA experts while retaining general knowledge. HMoRALiao et al. (2025) combines the layered fine-tuning methods of MoE and LoRA, and gradually switches the routing strategy as the number of layers increases. MoLAGao et al. (2024) assigns different numbers of experts at different levels, proving that deeper layers often require more experts. Notably, we only utilize hybrid LoRA experts in the core projection layer, resulting in extremely high parameter efficiency. By applying RSL to LoRA-Mixer, we can efficiently reuse LoRA modules and require minimal training data, saving computational resources while expanding model capacity and improving generalization.
+
+## 3 METHOD.
+
+In this section, we introduce **LoRA-Mixer**, a flexible and pluggable Mixture of Experts (MoE) framework for combining LoRA experts from multiple LLMs.
+
+{3}------------------------------------------------
+
+### 3.1 PRELIMINARIES
+
+**Mixture-of-Experts** is a sparse neural architecture where each input token is processed by a small subset of expert networks. Given  $K$  experts and a router that produces a score vector  $G(\mathbf{x}) \in \mathbb{R}^K$ , a softmax is applied to obtain the routing distribution:
+
+$$p_i(\mathbf{x}) = \frac{\exp(G_i(\mathbf{x}))}{\sum_{j=1}^K \exp(G_j(\mathbf{x}))}, \quad i = 1, \dots, K. \quad (1)$$
+
+The top- $k$  experts are selected based on  $p_i(\mathbf{x})$ , and the final output is computed as a weighted sum over their outputs:
+
+$$\text{MoE}(\mathbf{x}) = \sum_{i=1}^K \mathbb{I}[i \in \text{TopK}(p(\mathbf{x}))] \cdot p_i(\mathbf{x}) \cdot \text{Expert}_i(\mathbf{x}) \quad (2)$$
+
+This design allows MoE to reduce computational cost while enabling experts to specialize on different input patterns.
+
+**Auxiliary loss.** To encourage balanced expert utilization, MoE training introduces an auxiliary loss. We define the expected routing probability and top-1 usage as
+
+$$\bar{p}_i = \mathbb{E}_{\mathbf{x} \sim \mathcal{D}}[p_i(\mathbf{x})], \quad \bar{f}_i = \mathbb{E}_{\mathbf{x} \sim \mathcal{D}}[\mathbb{I}(i = \arg \max_j p_j(\mathbf{x}))], \quad L_{\text{aux}} = \alpha \sum_{i=1}^K \bar{p}_i \bar{f}_i. \quad (3)$$
+
+where  $\bar{p}_i$  denotes the average routing intention and  $\bar{f}_i$  the empirical usage. We demonstrate in Appendix A.17 why the auxiliary loss leads to over-averaging.
+
+### 3.2 LORA-MIXER FOR COMPOSING LORAS
+
+Combining independently trained LoRA modules for multi-task adaptation provides a promising approach to provide LLMs with cross-domain composition capabilities. For example, we can fuse mathematics- and medicine-specific LoRA to enable LLMs to have both stronger mathematical reasoning capabilities and medical-specific knowledge to solve complex cross-domain queries.
+
+Our proposed **LoRA-Mixer** implements this mechanism by treating each pre-trained LoRA module as an expert and learning a routing function  $\mathcal{F}_{\text{route}}$  that dynamically fuses these experts based on the input semantics. The routing mechanism is lightweight and data-efficient, and can achieve task awareness with only a small amount of additional training. LoRA-Mixer uses a set of  $E$  low-rank experts and a router  $\alpha(\mathbf{x}) \in \mathbb{R}^E$  to enhance the pre-trained projection matrix  $W \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$ . Each expert is parameterized as  $\Delta W^{(e)} = A^{(e)} B^{(e)}$ , where  $A^{(e)} \in \mathbb{R}^{d_{\text{out}} \times r}$  and  $B^{(e)} \in \mathbb{R}^{r \times d_{\text{in}}}$ . The output of LoRA-Mixer is:
+
+$$\mathbf{y} = W\mathbf{x} + \mathcal{F}_{\text{route}} \left( \left\{ \alpha_e(\mathbf{x}) \cdot \Delta W^{(e)} \mathbf{x} \right\}_{e=1}^E \right) \quad (4)$$
+
+where,  $\mathcal{F}_{\text{route}}(\cdot)$  represents the routing function output by the fusion expert. The output will be passed to the subsequent attention module or state-space module, enabling it to directly influence the core representation learning path. This strategy ensures that LoRA-Mixer acts at the most expressive point of the model - the projection layer - without disrupting the underlying architecture.
+
+**LoRA Experts Acquirement.** Our proposed LoRA-Mixer framework is highly flexible and supports the integration of LoRA modules from diverse sources. In one common scenario, users may download pre-trained LoRA adapters from public repositories such as LoRAHub Huang et al. (2023), which currently hosts 196 high-quality LoRA modules across a wide range of domains. These can be directly composed using LoRA-Mixer with minimal additional data. Alternatively, users may independently train domain-specific LoRA modules tailored to their own datasets. For scenarios requiring joint training of multiple LoRA modules on a heterogeneous, labeled dataset, LoRA-Mixer further supports a hard-routing strategy. Specifically, we fix the routing module and apply a deterministic routing scheme based on known domain labels. Given a domain ID  $d \in \{1, \dots, K\}$  associated with each training instance, all tokens within the sample are routed exclusively to expert  $d$ . This design enables efficient joint optimization while maintaining expert modularity. Collectively, these capabilities make LoRA-Mixer a versatile and scalable framework for composing heterogeneous LoRA modules. The overall architecture is illustrated in Figure 2.
+
+{4}------------------------------------------------
+
+### 3.3 SPECIALIZATION BALANCE LOSS FOR ROUTING OPTIMIZATION
+
+The next step is to optimize the expert routers. While previous research has introduced auxiliary loss functions to align the average gating score with expert utilization, thereby promoting load balancing, we observed that this approach overemphasizes consistency, resulting in an overly balanced expert distribution. In this case, all experts are forced to be used equally, regardless of the input semantics. This hinders effective routing and generally requires more training data.
+
+We propose a new perspective: viewing the router as an information bottleneck that determines the degree to which semantic differences between tokens are preserved or compressed. From this perspective, the entropy of the routing distribution quantifies the uncertainty of the router. Therefore, load balancing and specialization selection appear to be in conflict. To achieve a balance between the two, ensuring balanced expert load and input-aware routing, we propose an improved optimization objective, called **Routing Specialization Balance Loss (RSL)**. RSL addresses this issue by unifying the global budget and local selectivity into a single objective. Specifically, RSL enhances the auxiliary loss with an entropy regularization term, improving the accuracy of expert selection by suppressing overly flat distributions. Formally, let  $\bar{p}_i$  denote the average soft routing score (across tokens) and  $\bar{f}_i$  denote the normalized score assigned to the token of expert  $i$  in the first  $k$  routes. The RSL loss function is defined as:
+
+$$\mathcal{L}_{\text{RSL}} = \alpha \cdot \sum_{i=1}^K \bar{p}_i \cdot \bar{f}_i - \lambda \cdot \mathbb{E}_{x \sim \mathcal{D}} [\mathcal{H}(p(x))], \quad (5)$$
+
+Where  $\alpha$  controls the strength of the equilibrium consistency term,  $\lambda$  is a small positive coefficient of the entropy regularization term:
+
+$$\mathcal{H}(p(x)) = - \sum_i p_i(x) \log p_i(x) \quad (6)$$
+
+The design principles behind RSL are: 1) From an information bottleneck perspective, minimizing  $\mathcal{H}(p(x))$  reduces token-conditional uncertainty under a fixed global load, directly promoting specialization without disrupting the balance. 2) The entropy term acts as a curvature provider in the routing simplex, resulting in strong convexity and well-conditioned optimization (see A.1); this is precisely where traditional auxiliary loss functions are weak. 3) The coefficient  $\lambda$  becomes an interpretable knob that trades off global fairness and local specialization, rather than simply a regularization weight.
+
+Specifically, the entropy term introduces token-specific entropy. We derive the entropy gradient with respect to the routing score  $p_i(x)$ :
+
+$$\frac{\partial \mathcal{H}(p(x))}{\partial p_i(x)} = -\log p_i(x) - 1, \quad \text{subject to} \quad \sum_{i=1}^K p_i(x) = 1, \quad (7)$$
+
+$$= -\log p_i(x) - 1 + \mu, \quad (8)$$
+
+where  $\mu$  is the Lagrange multiplier due to the simplex constraint. Therefore, the total gradient of the RSL loss becomes:
+
+$$\nabla_{p_i(x)} \mathcal{L}_{\text{RSL}} = \alpha \cdot \frac{\partial \bar{p}_i}{\partial p_i(x)} \cdot \bar{f}_i + \lambda (\log p_i(x) + 1 - \mu). \quad (9)$$
+
+This demonstrates that RSL introduces a token-level gradient signal via  $\log p_i(x)$ , unlike the auxiliary loss, which only propagates global gradients. Specifically, the  $\log p_i(x)$  term provides a token-level signal that amplifies the input-aware variance in the expert's choices, thereby counteracting the bias towards consistency in global balance. To quantify input-aware routing, we define:
+
+$$\text{Var}_{x \sim \mathcal{D}}(p(x)) := \mathbb{E}_x [\|p(x) - \bar{p}\|^2]. \quad (10)$$
+
+We call routing token-aware if  $\text{Var}(p(x)) > \epsilon$  and  $\epsilon > 0$ . The auxiliary loss function tends to reduce this variance (driving uniform routing), while RSL encourages high variance and peaked distributions that are consistent with the input semantics. In addition to the above proofs, we provide **convergence analysis and generalization bound** proofs in the Appendix A.1 A.2. The former introduces strong convexity on the product simplex and proves that the added entropy term can maintain stable optimization dynamics; the latter shows that entropy regularization reduces the assumed complexity of the router and improves robustness in low-data environments.
+
+{5}------------------------------------------------
+
+**Routing Optimization.** After LoRA is ready, we soft-train the router. To prevent expert knowledge from being contaminated, we introduce a regularization term to penalize deviations from the previously learned expert parameters. Let the first-stage parameters of expert  $i$  be  $\theta_i^{(0)}$  and the current parameters be  $\theta_i$ . We define the regularization term as:
+
+$$\mathcal{L}_{\text{preserve}} = \beta \cdot \sum_{i \in \mathcal{C}} \left\| \theta_i - \theta_i^{(0)} \right\|^2 = \beta \cdot \sum_{i \in \mathcal{C}} \left\| \Delta \theta_i \right\|^2, \quad (11)$$
+
+where  $\mathcal{C}$  represents the set of constrained experts and  $\beta$  controls the regularization strength. This regularization term constrains sensitive experts to maintain their original knowledge while allowing other experts to flexibly adjust, supporting multi-expert learning for complex tasks.
+
+To ensure effective gradients and stable optimization during joint training, we employ soft expert fusion: the routers output a softmax score  $\mathbf{p}_{b,t} \in \mathbb{R}^K$ , achieving differentiable LoRA hybridization. While this approach provides stable gradients, combining it with an auxiliary loss results in equal activations among experts, inhibiting specialization. To address this, we introduce RSL, which promotes expert differentiation while maintaining load balancing and enables efficient reuse of LoRA with minimal data. The total loss during joint training is:
+
+$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{task}} + \alpha \cdot \mathcal{L}_{\text{RSL}} + \beta \cdot \sum_{i \in \mathcal{C}} \left\| \theta_i - \theta_i^{(0)} \right\|^2, \quad (12)$$
+
+where  $\mathcal{L}_{\text{task}}$  denotes the standard task loss (e.g., cross-entropy loss).  $\mathcal{L}_{\text{RSL}}$  is the **routing specialization balance loss**, which is used to promote consistency between routing scores and actual token assignments.  $\alpha$  is a weighting factor for RSL.  $\mathcal{L}_{\text{preserve}}$  is the expert regularization loss described above, scaled by  $\beta$ . We provide an exploration of how to choose hyperparameters in Appendix A.8.
+
+## 4 EXPERIMENT.
+
+In this section, we conduct extensive experiments on 15 datasets across five domains (MedQA, commonsense reasoning, NLP, mathematics, and coding).
+
+### 4.1 EXPERIMENTAL SETUP
+
+**Datasets** We tested RSL and LoRA-Mixer on 15 public benchmarks: MedicalQA, ARC-E, ARC-C, GSM8K, GLUE, PIQA, BoolQ, HumanEval, and HellaSwag. These datasets cover five different domains. For detailed dataset information, please refer Appendix 11.
+
+**Baseline** We selected LLaMA3-8B, Mistral-7B, and Falcon-Mamba-7B as the baseline. LLaMA3-8B and Mistral-7B are Transformer architectures, while Falcon-Mamba is a pure SSM architecture. We compare LoRA-Mixer and RSL with other state-of-the-art methods, including MoLE Wu et al. (2024), MixLoRA Li et al. (2024a), LoraHub Huang et al. (2023), LoRA-LEGO Zhao et al. (2024) and PHATGOOSE Muqheeth et al. (2024). We also select strong baselines that specifically optimize auxiliary losses to demonstrate the effectiveness of RSL, including GMoE Bai et al. (2024), AESL Guo et al. (2025b), and DsMoE Pan et al. (2024). It is worth noting that MoLE and MixLoRA also optimize auxiliary losses. For parameter, training and inference analysis, please refer to A.4 A.7.
+
+**Metrics** For HumanEval, we use the *Pass@1* metric. Considering the domain-specific freedom and rigor required by the Medical-QA dataset, we use DeepSeek-R1 for evaluation. For the remaining tasks, we use ACC as the metric. To reduce randomness, all experiments are run three times and the average reported.
+
+### 4.2 COMPARISONS
+
+Table 1: Performance of three base models, Falcon-Mamba-7B, Mistral-7B, and LLaMA3-8B, on seven benchmarks.
+
+| Base Model | Medical | CoLA | SST2 | GSM8K | ARC-E | ARC-C | HumanEval |
+|-|-|-|-|-|-|-|-|
+| Falcon-Mamba-7B | 73.67 | 82.42 | 92.81 | 52.54 | 77.61 | 68.78 | 29.29 |
+| Mistral-7B | 66.32 | 71.21 | 85.24 | 40.83 | 80.00 | 61.50 | 27.95 |
+| LLaMA3-8B | 78.47 | 79.14 | 93.12 | 57.92 | 88.45 | 78.65 | 52.44 |
+
+Table 1 shows the performance indicators of the three basemodels on various tasks. We compare our approach with the state-of-the-art methods on seven datasets. The experimental results are shown in
+
+{6}------------------------------------------------
+
+Table 2. Our approach outperforms the baselines on most tasks. For the Falcon-Mamba dataset, our approach significantly outperforms the baselines on all tasks. For model details, see Appendix A.11.
+
+We use the LLaMA2-7B from the LoRA-LEGO paper as the basemodel and conduct experiments on the four tasks: CoLA, SST2, MRPC, and RTE. The LoRA configuration uses  $r = 6$  and  $\alpha = 12$ . The experimental results are shown in Table 4. As can be seen, our method outperforms LoRA-LEGO on three of the four tasks.
+
+Table 2: Comparison of our LoRA-Mixer with LoRAHub, MoLE, and Mix-LoRA across seven tasks (best scores in bold). Note that MixLoRA is excluded from Falcon-Mamba due to its Transformer-specific design.
+
+| Metho | Medical | CoLA | SST2 | GSM8K | ARC-E | ARC-C | HumanEval |
+|-|-|-|-|-|-|-|-|
+| <i>Falcon-Mamba (7B)</i> |  |  |  |  |  |  |  |
+| LoRAHub | 70.14 | 81.11 | 93.35 | 51.64 | 81.16 | 72.37 | 30.68 |
+| MOLE | 74.51 | 84.77 | 94.22 | 54.28 | 83.46 | 76.61 | 33.57 |
+| LoRA | 77.26 | 85.62 | 95.07 | 56.27 | 85.68 | 76.51 | 33.54 |
+| LoRA-Mixer (ours) | <b>78.01</b> | <b>85.91</b> | <b>95.76</b> | <b>57.87</b> | <b>86.87</b> | <b>77.19</b> | <b>35.37</b> |
+| <i>Mistral (7B)</i> |  |  |  |  |  |  |  |
+| LoRAHub | 69.17 | 75.73 | 90.21 | 44.94 | 81.14 | 69.21 | 32.60 |
+| MOLE | 71.07 | 78.51 | 94.17 | 45.31 | 85.68 | 68.77 | 35.37 |
+| MixLoRA | 69.74 | 78.61 | 93.44 | 45.50 | 85.42 | 69.15 | 33.80 |
+| LoRA | 70.33 | 79.19 | 93.58 | <b>46.67</b> | 86.66 | 70.53 | 35.31 |
+| LoRA-Mixer (ours) | <b>71.25</b> | <b>82.17</b> | <b>95.16</b> | 46.48 | <b>87.87</b> | <b>71.22</b> | <b>36.76</b> |
+| <i>LLaMA-3 (8B)</i> |  |  |  |  |  |  |  |
+| LoRAHub | 78.11 | 79.84 | 92.77 | 59.10 | 87.13 | 80.14 | 52.83 |
+| MOLE | 78.43 | 81.37 | 94.18 | 63.81 | 88.15 | 81.77 | 55.87 |
+| MixLoRA | 79.87 | 80.67 | 94.22 | 64.44 | 88.70 | 82.90 | 55.49 |
+| LoRA | 81.09 | 81.50 | 95.30 | 65.14 | 89.59 | 82.15 | 55.61 |
+| LoRA-Mixer(ours) | <b>81.55</b> | <b>82.22</b> | <b>95.41</b> | <b>65.53</b> | <b>89.88</b> | <b>83.24</b> | <b>57.32</b> |
+
+Table 3: Evaluation of LoRA-Mixer on LoRAs sourced from Internet on five GLUE tasks, the base model is Flan-T5Chung et al. (2024).
+
+| Method | SST-2 | CoLA | MRPC | RTE | QQP |
+|-|-|-|-|-|-|
+| Flan-T5 | 94.01 | 74.21 | 79.90 | 80.08 | 82.32 |
+| LoRA | 94.50 | 80.54 | 83.76 | 83.47 | <b>85.55</b> |
+| LoRA-Mixer | <b>95.07</b> | <b>82.14</b> | <b>85.15</b> | <b>85.31</b> | 84.75 |
+
+Table 4: Comparison of LoRA-Mixer and LoRA-LEGO. Results for LoRA-LEGO are from its paper.
+
+| Method | CoLA | SST-2 | MRPC | RTE |
+|-|-|-|-|-|
+| LoRA | 61.63 | 75.74 | 68.00 | 52.22 |
+| LEGO | 55.48 | 73.22 | 66.00 | <b>71.85</b> |
+| LoRA-Mixer | <b>64.60</b> | <b>80.31</b> | <b>72.24</b> | 61.47 |
+
+Considering that Mistral-7B and LLaMA3-8B have the same architecture, we directly migrate the parameters trained on Mistral-7B to LLaMA3-8B without any fine-tuning and adaptation, and conduct experiments on three datasets: ARC-E, ARC-C, and GSM8K. The results are shown in Table 5. It is worth noting that we use the Zero-Shot CoT method to test the basemodel in the GSM8K task, and the results under different Few-Shot settings are also shown in Table 5.
+
+Table 5: Evaluation on LoRA-Mixer parameter transferability from Mistral-7B to LLaMA3-8B. Values show absolute performance (relative to baseline in parentheses).
+
+| Method | GSM8K |  |  | ARC-E | ARC-C |
+|-|-|-|-|-|-|
+|  | 0-shot | 2-shot | 5-shot | 0-shot | 0-shot |
+| LLaMA3-8B | 57.92 (1.00) | 75.88 (1.00) | 78.64 (1.00) | <b>88.45</b> (1.00) | 78.65 (1.00) |
+| + Mistral | <b>59.13</b> (1.02) | <b>76.26</b> (1.01) | <b>81.43</b> (1.04) | 85.89 (0.97) | <b>79.14</b> (1.01) |
+
+{7}------------------------------------------------
+
+Table 6: OOD comparison across datasets for Phatgoose, and LoRA-Mixer.
+
+| Dataset | Base | Phatgoose | LoRA-Mixer |
+|-|-|-|-|
+| QQP | 68.84 | 69.28 | 69.47 |
+| RTE | 70.88 | 69.87 | 71.31 |
+| MRPC | 74.73 | 74.59 | 74.93 |
+
+Interestingly, we observe that we outperform the LLaMA3-8B on two of the three tasks. This cross-model transfer validates the design motivation of LoRA-Mixer and demonstrates that the routing learned via RSL is extremely robust and transferable, making it possible to share experts between models with the same architecture.
+
+To further demonstrate the performance of LoRA-Mixer, we conducted experiments on BoolQ, HellaSwag, and PIQA using LLaMA3-8B, with  $r = 32$  for LoRA. The results are shown in Table 7. It can be seen that LoRA-Mixer can effectively coordinate the capabilities of LoRAs to enhance the basemodel. To test the generalization of LoRA-Mixer, we conducted experiments with PHATGOOSE on 9 datasets, six of which were in-distribution experiments and three were out-of-distribution experiments. Here we only show the OOD experimental results because OOD tasks can reflect the generalization ability of LoRA-Mixer. For the results of the in-distribution experiment, please refer to A.14. The results show that LoRA-Mixer has excellent generalization ability, which means that through RSL, routing can make professional decisions and achieve better performance.
+
+### 4.3 TESTING ON LORAS SOURCED FROM INTERNET
+
+To verify that LoRA-Mixer can reuse LoRAs with minimal effort, we tested it on LoRAs from the internet. We downloaded five different LoRAs from LoRAHub Huang et al. (2023) and trained them on SST2, CoLA, MRPC, RTE, and QQP (see Appendix A.15 for details). We used the Flan-T5 model as the base model, froze the LoRAs parameters, and collected an additional 2k mixed data points for routing training, which is independent of the LoRAs training data. The results are shown in Table 3. LoRA-Mixer achieved excellent performance on all four tasks, demonstrating its potential for production-grade multi-task applications.
+
+### 4.4 COMPARISON WITH OTHER OPTIMIZED ROUTING LOSSES.
+
+Although we have compared RSL with other optimized routing losses (MoLE, MixLoRA), to further demonstrate the effectiveness of RSL, we choose three strong baselines for comparison: GMoE, Ds-MoE, and AESL, all of which are specifically optimized for routing losses. It is worth noting that all experiments are conducted with the same training data (2k), and the only difference is the routing loss. As shown in Table 8, RSL significantly outperforms other strong baselines in low-data-resource scenarios.
+
+Table 8: Comparison with GMoE, DS-MoE, and AESL under the same training data (2k) and LoRAs parameters. Demonstrates the advantages of RSL under low data resources.
+
+| Task | GMoE | DS-MoE | AESL | RSL |
+|-|-|-|-|-|
+| SST-2 | 91.38 | 92.45 | 92.64 | <b>95.41</b> |
+| CoLA | 79.57 | 79.83 | 80.42 | <b>82.22</b> |
+| ARC-E | 85.65 | 85.32 | 86.24 | <b>89.88</b> |
+| ARC-C | 76.42 | 78.45 | 79.88 | <b>83.24</b> |
+| HumanEval | 46.37 | 48.92 | 50.46 | <b>57.32</b> |
+
+### 4.5 ABLATION STUDY
+
+**Impact of LoRA Rank.** To evaluate the impact of  $r$  in LoRAs, we conducted experiments on  $r = 16$ ,  $r = 32$ ,  $r = 64$ , and  $r = 128$ , while keeping all other hyperparameters (e.g., dropout rate, learning rate) unchanged. The results of  $r = 64$  can be found in Table 2. We place the remaining results in Appendix A.12.
+
+Table 7: Results on BoolQ, HellaSwag, and PIQA. Base is LLaMA3-8B.
+
+| Dataset | Base | LoRA | LoRA-Mixer | Gap |
+|-|-|-|-|-|
+| BoolQ | 71.25 | 74.46 | 79.37 | <b>+4.91</b> |
+| HellaSwag | 75.33 | 77.39 | 82.41 | <b>+5.02</b> |
+| PIQA | 78.47 | 80.71 | 84.94 | <b>+4.23</b> |
+
+![Bar chart titled 'Average load of different experts on 1K mixed data.' showing the percentage load for six experts. Expert 4 has the highest load at approximately 17.5%, while Expert 2 has the lowest at approximately 15.5%.](dba42063d2ba87f5d6f4fab4882b5d0d_img.jpg)
+
+| Expert | Percentage (%) |
+|-|-|
+| Expert 0 | ~16.5 |
+| Expert 1 | ~16.0 |
+| Expert 2 | ~15.5 |
+| Expert 3 | ~16.0 |
+| Expert 4 | ~17.5 |
+| Expert 5 | ~16.0 |
+
+Bar chart titled 'Average load of different experts on 1K mixed data.' showing the percentage load for six experts. Expert 4 has the highest load at approximately 17.5%, while Expert 2 has the lowest at approximately 15.5%.
+
+Figure 3: Expert Assignment Overview.
+
+{8}------------------------------------------------
+
+**Expert Load Analysis.** To analyze the overall load, we uniformly sampled 1K data from seven benchmarks (MedicalQA, CoLa, SST2, GSM8K, ARC-E, ARC-C, and HumanEval). We report the average load per expert on this 1K data, as shown in Figure 3. The activation rates of different experts are relatively balanced, ranging from 15% to 18%. However, across tasks, expert load reflects a "perception" ability, with experts on certain tasks having higher loads than others, as shown in Figure 4. This demonstrates that our routing mechanism effectively avoids expert collapse and achieves balanced expert utilization across different tasks.
+
+**The impact of K and Cross-domain QA.** We also analyzed the impact of K in Top-K. In general, increasing K within an appropriate range can improve model performance. For details, please refer to A.3. Furthermore, to evaluate LoRA-Mixer’s generalization capabilities on cross-domain tasks, we created two cross-domain datasets: Mathematics-Coding and Medical-Mathematics. For detailed experimental results, please refer to A.3. These results demonstrate that LoRA-Mixer maintains strong generalization and input-awareness capabilities on cross-domain datasets.
+
+**The impact of the RSL.** We investigated the impact of our proposed RSL on the LoRA-Mixer. RSL offers three key advantages. First, it enables routing to achieve global load balancing while maintaining robust input awareness. Second, compared to auxiliary losses, RSL requires less training data. Finally, routing trained with RSL is completely independent of the original LoRAs training data.
+
+To verify the first conclusion, we conducted experiments on Medical, GSM8K, and HumanEval. As shown in Figure 4, when using RSL, the router consistently assigns higher activation weights to relevant experts, demonstrating its strong domain awareness and adaptive specialization capabilities. In contrast, when using only the auxiliary loss, the router disregards the semantics of the input and evenly distributes experts, resulting in suboptimal performance.
+
+Table 9: Average performance across seven tasks under different routing training data sizes, with or without RSL. With RSL, LoRA-Mixer requires much less data while showing better performances.
+
+| Data | w/ RSL | w/o RSL | Gap |
+|-|-|-|-|
+| 1K | 76.80 | 75.47 | +1.33 |
+| 2K | <b>79.26</b> | 77.29 | +1.97 |
+| 4K | 78.77 | <b>79.14</b> | -0.37 |
+| 6K | 79.41 | 79.37 | -0.04 |
+| 8K | 79.75 | 79.48 | +0.27 |
+| 10K | 79.94 | 79.51 | +0.43 |
+
+![Figure 4: Expert Load Distribution across Tasks. A bar chart titled 'Expert Activation Comparison' showing activation percentages for five experts (Expert1 to Expert5) across three tasks: Medical, GSM8K, and HumanEval. For each task, there are two bars: a dark bar for 'RSL' and a light bar for 'w/o RSL'. In the 'Medical' task, Expert1 has the highest activation with RSL (~35%), while in 'GSM8K', Expert2 is highest (~38%). In 'HumanEval', Expert1 is highest (~38%). The 'w/o RSL' bars are generally lower and more uniform across experts compared to the 'RSL' bars.](e8ff6e66c77a8e96203c9f8db8f0986f_img.jpg)
+
+Figure 4: Expert Load Distribution across Tasks. A bar chart titled 'Expert Activation Comparison' showing activation percentages for five experts (Expert1 to Expert5) across three tasks: Medical, GSM8K, and HumanEval. For each task, there are two bars: a dark bar for 'RSL' and a light bar for 'w/o RSL'. In the 'Medical' task, Expert1 has the highest activation with RSL (~35%), while in 'GSM8K', Expert2 is highest (~38%). In 'HumanEval', Expert1 is highest (~38%). The 'w/o RSL' bars are generally lower and more uniform across experts compared to the 'RSL' bars.
+
+Figure 4: Expert Load Distribution across Tasks.
+
+To support the second conclusion, we analyze the impact of training data size on routing performance. Specifically, we construct training sets of different sizes by sampling from a multi-task dataset pool and evaluate the performance on seven benchmark tasks. For clarity, we report the average performance over all tasks.
+
+As shown in Table 9, RSL achieves comparable or even superior performance using only 51.62% of the training data with auxiliary loss. We explain the suboptimal RSL results at 4k in A.16. This exceptionally high data efficiency is demonstrated by generalization bound estimation. See the Appendix A.2 for a detailed proof.
+
+## 5 CONCLUSION.
+
+This paper introduces RSL, designed to address the issue of excessively uniform auxiliary loss. It achieves highly selective routing while achieving overall load balancing, and enables efficient routing training with minimal data, providing strong support for the reuse of LoRAs modules. To verify the effectiveness of RSL, we propose the LoRA-Mixer framework and integrate RSL. LoRA-Mixer is a flexible and architecture-agnostic MoE framework for combining LoRAs and adapting LLMs to multitasking. Unlike other methods that indiscriminately insert MoEs or completely replace attention or FFN modules, LoRA-Mixer only adapts the core projection layer, improving the performance of Transformers and SSM models. Although LoRA-Mixer is effective, its fixed top- $K$  routing may limit adaptability to ambiguous inputs. Uniformly applying it across all layers can also introduce redundancy, as different layers capture different information. Future work will explore dynamic or differentiable routing and adaptive integration to apply LoRA-Mixer only where most beneficial.
+
+{9}------------------------------------------------
+
+## 6 ACKNOWLEDGMENTS
+
+This research was supported by the National Natural Science Foundation of China (Nos. 62272184 and 62402189), the China Postdoctoral Science Foundation (Nos. 2024M751012, 2025T180429, and GZC20230894), and the Hubei Provincial Postdoctoral Research Funding Program (No. 2024HBB-HCX014). The computational work was performed on the high-performance computing platform at Huazhong University of Science and Technology.
+
+## REFERENCES
+
+- Ting Bai, Yue Yu, Le Huang, Zenan Xu, Zhe Zhao, and Chuan Shi. Gmoe: Empowering llms fine-tuning via moe graph collaboration. *arXiv preprint arXiv:2412.16216*, 2024.
+- Dan Biderman, Jacob Portes, Jose Javier Gonzalez Ortiz, Mansheej Paul, Philip Greengard, Connor Jennings, Daniel King, Sam Havens, Vitaliy Chiley, Jonathan Frankle, et al. Lora learns less and forgets less. *arXiv preprint arXiv:2405.09673*, 2024.
+- Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are few-shot learners. *Advances in neural information processing systems*, 33:1877–1901, 2020.
+- Shaoxiang Chen, Zequn Jie, and Lin Ma. Llava-mole: Sparse mixture of lora experts for mitigating data conflicts in instruction finetuning mllms. *arXiv preprint arXiv:2401.16160*, 2024.
+- Zeren Chen, Ziqin Wang, Zhen Wang, Huayang Liu, Zhenfei Yin, Si Liu, Lu Sheng, Wanli Ouyang, Yu Qiao, and Jing Shao. Octavius: Mitigating task interference in mllms via lora-moe. *arXiv preprint arXiv:2311.02684*, 2023.
+- Hyung Won Chung, Le Hou, Shayne Longpre, Barret Zoph, Yi Tay, William Fedus, Yunxuan Li, Xuezhi Wang, Mostafa Dehghani, Siddhartha Brahma, et al. Scaling instruction-finetuned language models. *Journal of Machine Learning Research*, 25(70):1–53, 2024.
+- Shihan Dou, Enyu Zhou, Yan Liu, Songyang Gao, Jun Zhao, Wei Shen, Yuhao Zhou, Zhiheng Xi, Xiao Wang, Xiaoran Fan, et al. Loramoe: Alleviate world knowledge forgetting in large language models via moe-style plugin. *arXiv preprint arXiv:2312.09979*, 2023.
+- Nan Du, Yanping Huang, Andrew M Dai, Simon Tong, Dmitry Lepikhin, Yuanzhong Xu, Maxim Krikun, Yanqi Zhou, Adams Wei Yu, Orhan Firat, et al. Glam: Efficient scaling of language models with mixture-of-experts. pp. 5547–5569, 2022.
+- William Fedus, Barret Zoph, and Noam Shazeer. Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity. *Journal of Machine Learning Research*, 23(120):1–39, 2022.
+- Sicheng Feng, Gongfan Fang, Xinyin Ma, and Xinchao Wang. Efficient reasoning models: A survey. *arXiv preprint arXiv:2504.10903*, 2025a.
+- Sicheng Feng, Kaiwen Tuo, Song Wang, Lingdong Kong, Jianke Zhu, and Huan Wang. Rewardmap: Tackling sparse rewards in fine-grained visual reasoning via multi-stage reinforcement learning. *arXiv preprint arXiv:2510.02240*, 2025b.
+- Sicheng Feng, Song Wang, Shuyi Ouyang, Lingdong Kong, Zikai Song, Jianke Zhu, Huan Wang, and Xinchao Wang. Can mllms guide me home? a benchmark study on fine-grained visual reasoning from transit maps. *arXiv preprint arXiv:2505.18675*, 2025c.
+- Chongyang Gao, Kezhen Chen, Jinneng Rao, Baochen Sun, Ruibo Liu, Daiyi Peng, Yawen Zhang, Xiaoyuan Guo, Jie Yang, and VS Subrahmanian. Higher layers need more lora experts. *arXiv preprint arXiv:2402.08562*, 2024.
+- Sam Gross, Marc’Aurelio Ranzato, and Arthur Szlam. Hard mixtures of experts for large scale weakly supervised vision. In *Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition*, pp. 6865–6873, 2017.
+
+ Rest of paper (reference and Appendix) is removed.

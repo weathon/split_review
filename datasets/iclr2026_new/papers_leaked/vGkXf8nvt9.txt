@@ -1,0 +1,465 @@
+
+
+{0}------------------------------------------------
+
+# FORGET-TO-FOCUS: CAN UNLEARNING IMPROVE DOMAIN SPECIALIZATION IN LLMs?
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Standard fine-tuning of Large Language Models for domain-specific tasks is often suboptimal due to interference from vast, pre-existing general knowledge from pretraining, leading to issues like negative knowledge transfer and the reinforcement of spurious correlations. We study whether removing parts of a pretrained model’s pre-existing general knowledge before adaptation can make downstream learning easier. We propose and analyze *Forget-to-Focus*: a two-stage protocol that first performs targeted unlearning on a “forget” set (with an optional retain set for stability), then fine-tunes on a domain-specific dataset. Through rigorous experiments on different domains such as medical, mathematics, and coding benchmarks, we analyze whether this preparatory unlearning can lead to improved domain specialization. Our findings show that this protocol consistently outperforms standard fine-tuning e.g., it improves HumanEval pass@1 by 32.5% on Qwen3-0.6B and 11.95% on Qwen 72B model compared to standard fine-tuning. Beyond accuracy, we observe that F2F reshapes representational geometry as measured by centered kernel alignment, shifting models away from generalist initialization toward structures more conducive to in-domain specialization. Furthermore, unlearning prior fine-tuning helps improved calibration on medical QA tasks, reducing overconfidence and mitigating reliability issues that persist under standard fine-tuning. These findings establish unlearning not merely as a *privacy tool* but as a principled intervention for domain adaptation. By strategically suppressing irrelevant pretraining knowledge, *Forget-to-Focus* helps more stable optimization dynamics, better calibrated predictions, and consistently stronger downstream performance. The code is available at anonymous github : <https://anonymous.4open.science/r/D-1545/README.md>
+
+## 1 INTRODUCTION
+
+Fine-tuning large language models (LLMs) (Parthasarathy et al., 2024; Hu et al., 2022) on specialized target domains has shown impressive results, but it also comes with challenges of *negative transfer* (Zhang et al., 2022), where certain knowledge from vast, general-domain pre-training corpus actually hurts performance on the new domain specialized tasks. Pre-trained LLMs are exposed to vast general data, and when adapting them to a niche domain, they often carry over misleading correlations or behaviors that are *irrelevant* or even *conflicting* for the target domain. For example, a model fine-tuned for biomedical QA might still hold onto casual language patterns from web text that hinder learning precise medical terminology. Prior works (Sun & Dredze, 2025; Jiang et al., 2025) have shown that treating all pre-training knowledge as uniformly important prior is not optimal and some of that knowledge can degrade optimization and generalization on the target task or domain.
+
+In other words, vanilla fine-tuning may struggle to “forget” irrelevant features, leading to slower convergence or suboptimal accuracy on in-domain data. This challenge motivates a shift in perspective. Thus, we ask a central research question: *Instead of passively hoping a model learns to ignore irrelevant knowledge, can we actively make it to forget this knowledge to enhance its capacity for new, specialized learning?* Notably Chen et al. (2023a) demonstrated that introducing an active forgetting mechanism during pre-training led to faster convergence and better low-resource adaptation to new languages.
+
+{1}------------------------------------------------
+
+This question leads us to the field of “Machine Unlearning”(Li et al., 2025), originally developed to address the “right to be forgotten” in response to data privacy regulations like GDPR Hoofnagle et al. (2019). “Machine unlearning” refers to algorithms that make a trained model intentionally “forget” certain knowledge or data influences. Conventionally, unlearning has been studied for privacy (e.g., removing specific training examples from models upon request). In this work, we *repurpose* the concept of unlearning not for privacy, but to strategically remove or suppress irrelevant general knowledge that might hinder domain specialization.
+
+However, leveraging unlearning for improved fine-tuning is not straightforward as (1) deciding what knowledge is harmful or useful is challenging, since the pretraining dataset is usually mixed with domain-irrelevant and domain relevant data, (2) unlearning aggressively could also erase general linguistic competence and useful information from the model, (3) optimization stability is uncertain in unlearning since it has potential to disrupt convergence and (4) it is unclear whether benefits extend across different domains and model scales (models with different architectures and sizes). These challenges motivate the need and an investigation of a protocol that carefully balances forgetting and retention to prepare models for effective specialization.
+
+To address these challenges, we present *Forget-to-Focus (F2F)*, where we analyze if a preparatory unlearning phase can enhance the fine-tuning process. For this analysis, we employ a protocol where an unlearned model, created using a “forget set” of general data and a “retain set” for stability (depending upon the unlearning algorithm), is subsequently fine-tuned on a domain-specific dataset. We found that this preparatory unlearning consistently improves fine-tuning performance. Our experiments span multiple models with different architectures and sizes, and we investigate this phenomenon across the medical, mathematical, and coding domains and to deeply analyze why it occurs, we observe the change and shifts in model’s internal representations.
+
+Our contributions are as follows :
+
+- We present the first comprehensive study of *machine unlearning* not as a privacy safeguard, but as a deliberate preparatory stage to enhance fine-tuning of large language models (LLMs) for domain specialization.
+- We introduce *Forget-to-Focus (F2F)*, a two-stage training procedure that strategically unlearns unnecessary general domain knowledge using a forget set (with an optional retain set), followed by domain-specific fine-tuning. This protocol consistently outperforms standard fine-tuning, DAPT, and parameter-efficient baselines across coding, mathematics, and medical domains.
+- Through large-scale experiments on diverse models (from 0.6B to 72B parameters) with different architecture, we show that F2F helps in substantial pass@1 gains (e.g., 10.7% performance increase on MBPP for Qwen-0.6B, and 9% performance increase Qwen-72B compared to LoRA fine-tuning) while improving calibration on sensitive tasks such as medical QAs.
+- Using centered kernel alignment (CKA), SVCCA, Fisher information, PCA-shift analyses, we observe that unlearning reshapes representational geometry, reallocated parameter sensitivity. These findings provide direct evidence that unlearning reduces negative transfer by suppressing interfering generalist features.
+- Through extensive experiments, we show that both the size and quality of the forget set significantly impact fine-tuning performance, and that the relative weighting of the retain and forget sets further shapes performance across different models.
+
+## 2 FORGET-TO-FOCUS
+
+The current pattern of pre-training followed by fine-tuning leverages broad knowledge from large, general purpose datasets. However, this general knowledge is not always beneficial. When adapting a model to a specialized domain, a subset of the pre-trained knowledge can be irrelevant or even counterproductive, leading to a phenomenon known as negative transfer. We analyze that explicitly removing this irrelevant knowledge prior to fine-tuning allows the model to specialize more effectively. This leads to our central proposition.
+
+{2}------------------------------------------------
+
+Let  $\theta_0$  denote pretrained parameters. We wish to specialize to domain  $D$  with loss  $L_D(\theta)$  while suppressing the rooted pretraining priors that induce negative transfer. The core intuition (Fig. 1) is that explicitly removing priors that can hurt the fine-tuning process, helps in a cleaner optimization landscape for specialization.
+
+Formally, let  $\theta^* = \arg \min_{\theta} L_D(\theta)$ . The Forget-to-Focus (F2F) protocol constructs a new initialization  $\tilde{\theta}_0$  such that
+
+$$\|\tilde{\theta}_0 - \theta^*\| < \|\theta_0 - \theta^*\| \implies L_D(\text{FINE-TUNE}(\tilde{\theta}_0)) < L_D(\text{FINE-TUNE}(\theta_0)), \quad (1)$$
+
+We assume access to (i) a *forget set*  $F$  cause spurious general-domain behavior and (ii) a *small retain set*  $R$  (often a subset of  $D$ ) that preserves essential capabilities during unlearning. The objective we minimize to achieve Equation 1 is shown in the Equation 2 with gradient-accumulation averaging over  $A$  micro-steps:
+
+$$\tilde{\theta}_0 = \arg \min_{\theta} \frac{1}{A} \sum_{a=1}^A \left[ -\lambda \underbrace{\ell_F^{(a)}(\theta)}_{(\text{GA/Forget term})} + \sigma \underbrace{\ell_R^{(a)}(\theta)}_{(\text{GD/Retain term})} \right], \quad (2)$$
+
+where  $\lambda, \sigma > 0$  weight the forget/retain terms. In practice we realize (2) via *gradient ascent* on  $F$ , *forget set* and *gradient descent* on  $R$ , *retain set*:
+
+$$\theta \leftarrow \theta + \eta \lambda \nabla \ell_F(\theta) - \eta \sigma \nabla \ell_R(\theta), \quad (3)$$
+
+where  $\eta > 0$  is the step size. Thus features predictive on  $F$  are de-emphasized or can be forgotten while  $R$  stabilizes core competence. After  $T_u$  steps we obtain  $\tilde{\theta}_0$  and then fine-tune on  $D$ .
+
+**Unlearn.** In this phase, we initialize  $\theta \leftarrow \theta_0$ . For  $t=1:T_u$ : sample minibatches  $B_F \subset F, B_R \subset R$ , compute  $g_F = \nabla \ell(B_F; \theta)$ ,  $g_R = \nabla \ell(B_R; \theta)$ , and update via (3). Set  $\tilde{\theta}_0 \leftarrow \theta$ . **Retune.** And in retune phase, we initialize  $\theta \leftarrow \tilde{\theta}_0$  and optimize  $\min_{\theta} L_D(\theta)$  with standard fine-tuning.
+
+While LLM training objective is non-convex, we use a convex linear surrogate to clarify the mechanism in a setting where the optimization is normal and interpretable. Consider, regularized linear models  $f_{\theta}(x) = \theta^T x$  with convex,  $\beta$ -smooth,  $\mu$ -strongly convex losses. Suppose the feature space decomposes as  $\mathbb{R}^p = \mathcal{V} \oplus \mathcal{U}$ , where  $\mathcal{V}$  are *domain-relevant* directions and  $\mathcal{U}$  are *irrelevant* (spurious) w.r.t.  $D$ . Assume  $\theta^* \in \mathcal{V}$  and the forget risk  $L_F$  has curvature along  $\mathcal{U}$  (Hessian  $\succeq \mu_F I$  on  $\mathcal{U}$ ).
+
+**Proposition.** (*Contraction on irrelevant directions with bounded retain perturbation*). Considering the update in Equation 3 Assume: (i) the parameter space decomposes orthogonally as  $\mathbb{R}^p = \mathcal{V} \oplus \mathcal{U}$  with projections  $P_V, P_U$ ; (ii)  $L_F$  is  $\mu_F$  strongly convex on  $\mathcal{U}$  (curvature lower bound  $\mu_F > 0$  along  $\mathcal{U}$ ); (iii)  $L_F, L_R$  are  $\beta$ -smooth (gradient-Lipschitz with constant  $\beta$ ); (iv) the retain gradient along  $\mathcal{U}$  is uniformly bounded:  $\|P_U \nabla L_R(\theta)\| \leq G_R$  for all iterates. If  $0 < \eta \leq 1/\beta$ , then the  $\mathcal{U}$  component contracts as
+
+$$\|P_U \theta^+\| \leq (1 - \eta \lambda \mu_F) \|P_U \theta\| + \eta \sigma G_R.$$
+
+Iterating for  $T_u$  unlearn steps gives
+
+$$\|P_U \theta_{T_u}\| \leq (1 - \eta \lambda \mu_F)^{T_u} \|P_U \theta_0\| + \frac{\sigma G_R}{\lambda \mu_F}.$$
+
+Here,  $\theta$  are model parameters;  $\theta^+$  is the next iterate;  $P_U, P_V$  are orthogonal projections onto the “irrelevant” subspace  $\mathcal{U}$  and “relevant” subspace  $\mathcal{V}$ ;  $\mu_F$  is the strong convexity constant of  $L_F$  along  $\mathcal{U}$ ;  $\beta$  is the smoothness constant;  $G_R$  bounds the retain gradient on  $\mathcal{U}$ ;  $T_u$  is the number of unlearn steps.
+
+![Figure 1: Schematic illustration of how pretraining priors create optimization barriers. The diagram shows two elliptical regions representing the optimization landscape. The left region is labeled 'theta_0 Pretrained Prior' and contains a point 'theta_0'. The right region is labeled 'theta^* = Optimal Point' and contains a point 'theta^*'. A dashed line separates the two regions, with a label 'Irrelevant prior' below it. A green arrow labeled 'theta_0 Unlearning Prior' points from the 'theta_0' point in the left region towards the 'theta^*' point in the right region, indicating the path of optimization after unlearning the prior.](826227f3016572a1a1e791c12e2ed86e_img.jpg)
+
+Figure 1: Schematic illustration of how pretraining priors create optimization barriers. The diagram shows two elliptical regions representing the optimization landscape. The left region is labeled 'theta\_0 Pretrained Prior' and contains a point 'theta\_0'. The right region is labeled 'theta^\* = Optimal Point' and contains a point 'theta^\*'. A dashed line separates the two regions, with a label 'Irrelevant prior' below it. A green arrow labeled 'theta\_0 Unlearning Prior' points from the 'theta\_0' point in the left region towards the 'theta^\*' point in the right region, indicating the path of optimization after unlearning the prior.
+
+Figure 1: Schematic illustration of how pretraining priors create optimization barriers that slow convergence and induce suboptimal local minima when fine-tuning from  $\theta_0$ . Unlearning these priors yield a cleaner optimization path and lower final loss
+
+{3}------------------------------------------------
+
+**Corollary. (Retune convergence and downstream risk).** Let  $\tilde{\theta}_0 := \theta_{T_u}$  be the post-unlearn iterate. Suppose the downstream objective  $L_D$  is  $\mu$  strongly convex and  $\beta$ -smooth with minimizer  $\theta^* \in \mathcal{V}$ . Running gradient descent on  $L_D$  with any step size  $\alpha \in (0, 1/\beta]$  from  $\tilde{\theta}_0$  satisfies:
+
+$$T_{\text{retune}}(\tilde{\theta}_0, \varepsilon) \leq \frac{\beta}{\mu} \log\left(\frac{L_D(\tilde{\theta}_0) - L_D(\theta^*)}{\varepsilon}\right), \quad L_D(\theta) - L_D(\theta^*) \leq \frac{\beta}{2} \|\theta - \theta^*\|^2.$$
+
+Moreover, since  $\theta^* \in \mathcal{V}$ ,
+
+$$\|\tilde{\theta}_0 - \theta^*\| \leq \|P_{\mathcal{V}}\tilde{\theta}_0 - \theta^*\| + (1 - \eta \lambda \mu_F)^{T_u} \|P_u \tilde{\theta}_0\| + \frac{\sigma G_R}{\lambda \mu_F},$$
+
+so increasing the forget to retain ratio  $\lambda/\sigma$  tightens the starting distance for fine-tuning and hence improves both the iteration complexity and the final risk bound.
+
+$\tilde{\theta}_0$  is the post unlearn initialization;  $L_D$  is the downstream fine-tuning objective with smoothness  $\beta$  and strong convexity  $\mu$ ;  $\theta^*$  is its minimizer;  $\varepsilon > 0$  is the target suboptimality;  $T_{\text{retune}}$  is the number of GD steps to reach  $\varepsilon$ .
+
+## 3 EXPERIMENTAL SETUP
+
+### 3.1 UNLEARNING ALGORITHMS
+
+The F2F can be implemented using various machine unlearning algorithms. In practice, these methods realize the objective stated in Equation 2. In our experiments we explored the following unlearning methods :
+
+(1) **GA+GD** : Using gradient ascent (GA) combined with gradient descent (GD) (Yao et al., 2024) on forget and the retain set (GA+GD) directly pushes the model parameters away from encoding the irrelevant data while simultaneously preserving the desired domain knowledge.
+
+(2) **GA** ( $\sigma = 0$ ) : Using only gradient ascent on the forget set ( $\sigma = 0$ ). This is a more aggressive approach that focuses solely on forgetting, which can be effective if the retain set is not strictly necessary for maintaining core capabilities.
+
+(3) **GA+KL** : Another approach is to use Kullback-Leibler divergence (KL) with GA to make sure the model does not diverge too much from the original parameters while preserving the desired domain-specific knowledge. In this case, the objective becomes  $\tilde{\theta}_0 = \arg \min_{\theta} \frac{1}{A} \sum_{a=1}^A \left[ -\lambda \ell_F^{(a)}(\theta) + \sigma \text{KL}(p_{\theta} \| p_{\theta_0}) \right]$ , where  $p_{\theta_0}$  denotes the original model distribution.
+
+(4) **Negative Preference Optimization (NPO)** (Zhang et al., 2024), samples from the forget set are treated as “unpreferred” or “rejected” responses. The model is then optimized to lower its likelihood of producing such outputs, effectively unlearning the associated knowledge while maintaining its general utility. The objective minimizes
+
+$$\tilde{\theta} = \arg \min_{\theta} \mathbb{E}_{(x,y) \in \mathcal{F}} \left[ -\frac{2}{\beta} \log \text{sigmoid} \left( -\beta \log \frac{\pi_{\theta}(y|x)}{\pi_{\text{ref}}(y|x)} \right) \right] \quad (4)$$
+
+where  $\pi_{\text{ref}}$  is the reference model, and  $\beta$  controls the sharpness of the penalty.
+
+### 3.2 FINE-TUNING METHODS
+
+To assess whether F2F consistently outperforms standard fine-tuning, we compare against following baselines:
+
+(1) **SFT** (Supervised Fine-Tuning): Fine-tune all model parameters on task-labeled data with a cross-entropy objective, following the standard recipe (Devlin et al., 2019).
+
+(2) **DAPT** (Domain-Adaptive Pretraining): Continue unsupervised pretraining on domain specific text prior to task-specific fine-tuning to better match target distribution (Gururangan et al., 2020).
+
+(3) **LoRA**: Update only low-rank adapter matrices inserted into attention/FFN projections while freezing the original weights. This method reduces trainable parameters and memory both (Hu et al., 2022).
+
+(4) **CurlLora** : We used (Fawi, 2024) which continually updates production LLMs with new data streams, minimizing model degradation and retraining costs.
+
+{4}------------------------------------------------
+
+### 3.3 MODELS AND DATASETS
+
+We performed our experiments on models of different sizes, architecture, variants, and family : Qwen-2 72B-Instruct (Peng et al., 2023), LLaMA-2 13B (Touvron et al., 2023), LLaMA 3.1 8B-Instruct (Grattafiori et al., 2024), Gemma-2B-Instruct (Team et al., 2024) and Qwen-3-0.6B (Yang et al., 2025) to demonstrate the effectiveness of F2F to make the model adapt to certain domains.
+
+We conducted experiments across three domains: medicine, mathematics, and coding.
+
+#### Unlearning Step.
+
+For the unlearning step, we considered three types of forget sets from the Bookcorpus dataset (Kobayashi, 2018; Jagtap): (i) BC-select : a curated subset where we manually excluded texts overlapping with the target domain (e.g., biomedical for PubMedQA), focusing instead on general narrative and fiction content. This ensured that the forget set contained minimal domain-relevant knowledge, and (ii) BC-Mixed : a subset combining 800 random non-domain samples from BookCorpus with 200 domain-related samples (e.g., humaneval (Chen et al., 2021) for coding domain),(iii) BC-Cosine : a curated subset where we automatically extract samples which are not aligned with our target domain i.e., we encode each sample  $x$  with a Transformer (Vera et al., 2025)  $h_x = f_\theta(x)$ , define the target-domain centroid  $c_T = \frac{1}{|D_T|} \sum_{x' \in D_T} f_\theta(x')$ , and rank samples by the cosine distance  $d_{\text{cos}}(x) = 1 - \frac{h_x^\top c_T}{\|h_x\| \|c_T\|}$ , selecting samples with large  $d_{\text{cos}}(x)$ . This setup interpolates between a clean forget set and one partially contaminated with target-domain knowledge. This helps us analyze of how domain overlap or forget set quality affects unlearning. The retain set is a small subset of the fine-tuning data, following prior work (Geng et al., 2025). Figure 2 demonstrates the clear boundary between the two domains in the BC-mixed dataset ensuring no domain leakage.
+
+**Fine-tuning Step.** In the medical domain, we utilized PubMedQA (Jin et al., 2019), PubMed Guidelines (Chen et al., 2023b;c), and MedMCQA (Pal et al., 2022)’s training split as training datasets, and evaluated performance on the PubMedQA and MedMCQA test sets. For the coding domain, we trained on train set of OpenCoder (Huang et al., 2024) and evaluated on test set of HumanEval (Chen et al., 2021) and MBPP (Austin et al., 2021). For the mathematics domain, we used the NVIDIA’s OpenMathInstruct-1 dataset (Toshniwal et al., 2024) for training, while evaluation was carried out on the Hendrycks MATH (Hendrycks et al., 2021) and GSM8K (Cobbe et al., 2021) benchmarks. For the evaluation, we used LM-EVALUATION-HARNESS repository by Eleuther (Gao et al., 2024b).
+
+### 3.4 HYPERPARAMETER CONFIGURATION
+
+**Unlearning Step.** During the unlearning step, we adopted a consistent set of hyperparameters across all models, unless otherwise specified. The base learning rate was fixed at  $1 \times 10^{-5}$ . We set the gradient ascent (GA) weight to 1.0 and the gradient descent (GD) weight to 0.5. The only exception was the LLaMA model, for which a higher learning rate of  $3 \times 10^{-5}$  was found to be more effective in stabilizing convergence during unlearning. All models were trained with a batch size of 8 for Qwen 0.6B model and 2 for rest of the models. For the Qwen 72B model specifically, we employed QLoRA with rank 16 and a dropout 0.05, using bfloat16 precision.
+
+**Fine-tuning Step.** For the fine-tuning stage, we set a uniform learning rate of  $2 \times 10^{-5}$  across all models. Training epochs varied across models: the Qwen 0.6B model was finetuned for 8 epochs, while the remaining models were trained for a single epoch, due to their larger parameter sizes and to reduce the risk of overfitting on relatively small domain-specific datasets. All models were
+
+![Figure 2: t-SNE plot titled 'Embedding Clusters : BC-Mixed'. The plot shows two distinct clusters of points. The left cluster, colored blue, represents 'Bookcorpus text' and is centered around coordinates (-20, 0). The right cluster, colored red, represents 'Code Instruction' and is centered around coordinates (50, 0). The axes range from -40 to 60 on the x-axis and -30 to 30 on the y-axis. The clear separation between the two clusters indicates distinct representational regions with limited overlap.](1a6d75c94d3fd49936527eadd25e9278_img.jpg)
+
+Figure 2: t-SNE plot titled 'Embedding Clusters : BC-Mixed'. The plot shows two distinct clusters of points. The left cluster, colored blue, represents 'Bookcorpus text' and is centered around coordinates (-20, 0). The right cluster, colored red, represents 'Code Instruction' and is centered around coordinates (50, 0). The axes range from -40 to 60 on the x-axis and -30 to 30 on the y-axis. The clear separation between the two clusters indicates distinct representational regions with limited overlap.
+
+Figure 2: t-SNE of MiniLM (Wang et al., 2020) embeddings for the BC-Mixed forget set (800 BookCorpus non-domain + 200 domain-related code samples). The separation indicates distinct representational regions with limited overlap.
+
+{5}------------------------------------------------
+
+170 optimized using the AdamW optimizer. The effective batch size was 128, obtained through gradient  
+ 171 accumulation with an accumulation step size of 32. For Qwen-72B model, we adopt 4bit  
+ 172 quantization and tuned it with only 50% of the original dataset. For models such as LLaMA-8B,  
+ 173 LLaMA-13B, and Qwen-72B, we performed LoRA-based supervised fine-tuning (SFT) using FP16  
+ 174 precision. Trainings were performed on 80GB A100 GPUs.
+
+## 4 EVALUATION
+
+### 4.1 EFFECT OF F2F ON CODING PERFORMANCE
+
+175  
+176  
+177  
+178  
+179  
+180  
+181  
+182  
+183  
+184  
+185  
+186  
+187  
+188  
+189  
+190  
+191  
+192  
+193  
+194  
+195  
+196  
+197  
+198  
+199  
+200  
+201  
+202  
+203  
+204  
+205  
+206  
+207  
+208  
+209  
+210  
+211  
+212  
+213  
+214  
+215  
+216  
+217  
+218  
+219  
+220  
+221  
+222  
+223  
+224  
+225  
+226  
+227  
+228  
+229  
+230  
+231  
+232  
+233  
+234  
+235  
+236  
+237  
+238  
+239  
+240  
+241  
+242  
+243  
+244  
+245  
+246  
+247  
+248  
+249  
+250  
+251  
+252  
+253  
+254  
+255  
+256  
+257  
+258  
+259  
+260  
+261  
+262  
+263  
+264  
+265  
+266  
+267  
+268  
+269  
+270  
+271  
+272  
+273  
+274  
+275  
+276  
+277  
+278  
+279  
+280  
+281  
+282  
+283  
+284  
+285  
+286  
+287  
+288  
+289  
+290  
+291  
+292  
+293  
+294  
+295  
+296  
+297  
+298  
+299  
+300  
+301  
+302  
+303  
+304  
+305  
+306  
+307  
+308  
+309  
+310  
+311  
+312  
+313  
+314  
+315  
+316  
+317  
+318  
+319  
+320  
+321  
+322  
+323
+
+Table 1 presents pass@1 accuracies on MBPP and HumanEval for multiple model architectures and a comparative assessment of different fine-tuning strategies. For unlearning, we used 100 samples for Qwen-0.6B, and 1000 samples for the other models, with 1000 samples for the retain dataset. We can observe four principal insights :
+
+(1) Across both Qwen, Gemma and LLaMA models, performing unlearning prior to fine-tuning yields consistently higher coding performance compared to fine-tuning alone. For Qwen 0.6B model, applying  $Unl_{GA+GD}$  followed by fine-tuning improves performance on HumanEval from 19.50 to 42.07, demonstrating a considerable gain. Similarly, for LLaMA 8B-Instruct HumanEval performance increases by 22.7% after applying unlearning before fine-tuning compared with other fine-tuning methods, F2F enhances performance the most. These results confirm our central hypothesis that actively removing irrelevant pre-training knowledge can create additional capacity for specialized learning.
+
+(2) Gradient ascent and descent combined ( $Unl_{GA+GD}$ ) strategy consistently outperforms the GA-only variant. While GA-only unlearning sometimes leads to degradation or instability (e.g., LLaMA 8B HumanEval drops to 1.20 without subsequent fine-tuning), the GA+GD variant produces more reliable gains. This suggests that balancing removal (GA) with stability-preserving retention (GD) is crucial to prevent catastrophic forgetting of useful priors. However, the GA variant demonstrates that unlearning can be more effective than conventional fine-tuning approaches. For example, on the Qwen-0.6B model, GA achieves a pass@1 of 40.02 on HumanEval, surpassing LoRA (37.50) and SFT (31.71).
+
+(3) The effect of unlearning varies across architectures. For models like Gemma 2B, unlearning had affected the performance (e.g., 0.00 performance after  $Unl_{GA+GD}$ ). This indicates that aggressive unlearning may overwhelm models with limited capacity and limited pretraining domain specific knowledge. In contrast, after tuning, it improves the pass@1, and even performs better than usual fine-tuning where the model performance degrades after tuning.
+
+(4) Across fine-tuning methods, the performance challenge remains evident. In the case of the Gemma-2B-Instruct model, LoRA fine-tuning reduces HumanEval accuracy by 11.3%. However, following unlearning, performance improves substantially, rising by 29.4%.
+
+(5) For Gemma-2B-Instruct, we observed that the strongest configuration is F2F+SFT, which slightly improves over the base model on MBPP and substantially improves HumanEval (Table 1); in contrast, the rows with large drops (e.g.,  $Unl_{GA+GD}$  without SFT) correspond to intermediate unlearning checkpoints rather than the final tuned models.
+
+These observations highlight that preparatory unlearning causes more effective fine-tuning which strategically suppresses irrelevant pre-training knowledge causing the model align better with domain-specific objectives, thereby mitigating negative transfer and unlocking performance gains. Retention of broad skills beyond target domains are provided in Appendix A.
+
+### 4.2 F2F W/ FINE-TUNING VARIANTS
+
+To study the interaction between fine-tuning and unlearning, we tuned the models on a medical dataset and evaluated them under identical conditions. Table 2 highlights that across both model families, full SFT consistently delivers the strongest improvements, indicating that direct parameter updates provide the most effective alignment with domain-specific data. For Qwen 0.6B, SFT yields the largest gains, while LoRA and CurlLoRA provide modest but stable improvements, suggesting that lightweight adapters capture useful task knowledge but lack the depth of full tuning. DAPT
+
+{6}------------------------------------------------
+
+Table 1: MBPP and HumanEval pass@1 across different models (Qwen-2 72B-Instruct (Peng et al., 2023), LLaMA-2 13B (Touvron et al., 2023), LLaMA 3.1 8B-Instruct (Grattafiori et al., 2024), Gemma-2B-Instruct (Team et al., 2024) and Qwen-3-0.6B (Yang et al., 2025)) and tuning methods (higher is better). **Best** ; **Second best**
+
+| Coding | Qwen 0.6B |  | Gemma 2B |  | LLaMA 8B-Instruct |  | LLaMA 13B |  | Qwen 72B |  |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|
+|  | MBPP | HumanEval | MBPP | HumanEval | MBPP | HumanEval | MBPP | HumanEval | MBPP | HumanEval |  |
+| (1) Base Model | 22.60 | 19.50 | <b>19.80</b> | 16.46 | 49.00 | 33.54 | 27.22 | 0.60 | 67.21 | 70.12 |  |
+| (1) + SFT | 28.80 | 31.71 | 12.80 | 16.20 | 56.60 | 56.71 | 37.01 | 40.21 | 69.50 | 71.12 |  |
+| (1) + DAPT | 29.30 | 39.80 | 19.00 | 17.05 | 53.55 | 56.20 | 39.50 | 42.70 | <b>71.90</b> | 72.50 |  |
+| (1) + LORA | 28.55 | 37.50 | 16.23 | 14.60 | 51.08 | 45.31 | 36.55 | 20.15 | 66.50 | 70.30 |  |
+| (1) + CurLoRA | 31.00 | 40.91 | 13.22 | 18.51 | 57.40 | 52.93 | 40.50 | 42.00 | 69.00 | 68.20 |  |
+| F2F { | (2) $Unl_{GA+GD}$ | 30.00 | 21.34 | 7.80 | 0.00 | 43.60 | 54.88 | 27.22 | 0.60 | 71.30 |  |
+|  | (2) + SFT | <b>31.60</b> | <b>42.07</b> | <b>20.05</b> | <b>21.30</b> | <b>60.10</b> | <b>60.37</b> | <b>50.31</b> | <b>46.15</b> | <b>72.50</b> | <b>78.50</b> |
+|  | (3) $Unl_{GA}$ | 24.00 | 20.73 | 0.80 | 0.00 | 22.60 | 1.20 | 0.00 | 25.50 | 60.05 | 65.02 |
+|  | (3) + SFT | <b>31.60</b> | <b>40.02</b> | 19.40 | <b>18.02</b> | <b>58.66</b> | <b>57.70</b> | <b>45.01</b> | <b>44.70</b> | 70.45 | <b>76.00</b> |
+
+sits between the two, showing that continued pretraining transfers domain knowledge effectively but still underperforms SFT. For LLaMA 8B-Instruct, the pattern shifts: combining SFT with LoRA achieves the best balance of adaptation and efficiency, while LoRA and CurLoRA trail behind, highlighting diminishing returns when adapters are applied in isolation. DAPT with LoRA provides gains but remains weaker than full SFT-based approaches, suggesting that structured fine-tuning remains essential for larger models.
+
+Table 2: Evaluation results on PubMedQA and MedMCQA for Qwen 3 0.6B and LLaMA 3.1 8B-Instruct under different adaptation methods. **↑ Performance improvement over base model.**
+
+|  | Qwen 0.6B |  | LLaMA 8B-Instruct |  |
+|-|-|-|-|-|
+|  | PubMedQA | MedMCQA | PubMedQA | MedMCQA |
+| SFT | <b>69.60</b> | <b>11.8</b> | 45.31 | <b>13.06</b> |
+| LoRA | 64.35 | <b>7.55</b> | 44.90 | <b>12.65</b> |
+| CurlLoRA | 65.00 | <b>7.22</b> | 45.00 | <b>12.75</b> |
+| DAPT | 68.00 | <b>10.20</b> | 45.90 | <b>13.45</b> |
+
+### 4.3 F2F W/ UNLEARNING VARIANTS
+
+Figure 3 illustrates a comparative analysis in the medical domain (PubMedQA and MedMCQA) for two models of differing architectures and scales: Qwen-0.6B and LLaMA-8B-Instruct. The results show that combined gradient ascent and descent (GA+GD) unlearning yields the most substantial performance gains after fine-tuning, outperforming both unlearning-only and alternative unlearning approaches. Across PubMedQA and MedMCQA, unlearning reliably enhances the effectiveness of subsequent tuning. Notably, for smaller models such as Qwen-0.6B, tuning after  $\sigma=0$  (only GA) unlearning tends to underperform, underscoring the importance of stability-preserving retention. In contrast, for larger models like LLaMA-8B, GA-only unlearning achieves performance comparable to, and in some cases exceeding, other unlearning variants due to the less dependency on stability-preserving corrections like GD.
+
+### 4.4 EFFECT OF FORGET SET QUALITY
+
+Table 3 compares performance when different forget sets (BC-Select vs. BC-Mixed vs. BC-Cosine) are applied across coding, medical, and mathematical domains. An important factor of F2F lies in the composition of the forget set. Across Qwen, Gemma, and LLaMA models, unlearning with a BC-Select forget set consistently produces greater downstream improvements following fine-tuning compared to using BC-Mixed. For instance, in the case of Qwen 0.6B, applying  $Unl_{GA+GD}$  followed by tuning on BC-Select increases MBPP accuracy to 31.60, in contrast to 29.90 with BC-Mixed. This indicates that BC-Select, being more curated and less noisy, enables more precise removal of irrelevant pre-training features. Moreover, as it is not intermixed with domain-specific data points, it avoids erasing domain-relevant knowledge. In the case of BC-Cosine, where we selected forget set based on low cosine similarity demonstrates and proves to perform better than the baseline and other SOTA tuning methods. For LLaMA 8B-Instruct, the performance is very similar
+
+{7}------------------------------------------------
+
+![Figure 3: Comparative performance of different unlearning methods across different models with different architectures and sizes. The figure contains two bar charts. The left chart is for Qwen 3 0.6B and the right chart is for LLaMA 3.1 8B-Instruct. Both charts show performance (likely accuracy) for four methods: GA+GD, GA, NPO, and GA+KL. Each method has two bars: PubMedQA (blue) and MedMCQA (red). In the Qwen 3 0.6B chart, PubMedQA performance is around 60-70, and MedMCQA is around 25-45. In the LLaMA 3.1 8B-Instruct chart, PubMedQA performance is around 70-85, and MedMCQA is around 55-65. The methods are grouped under 'Tuning' and 'Unlearning' (implied by the legend).](3121afa7ca030b22ee0345864ca6f38b_img.jpg)
+
+Figure 3: Comparative performance of different unlearning methods across different models with different architectures and sizes. The figure contains two bar charts. The left chart is for Qwen 3 0.6B and the right chart is for LLaMA 3.1 8B-Instruct. Both charts show performance (likely accuracy) for four methods: GA+GD, GA, NPO, and GA+KL. Each method has two bars: PubMedQA (blue) and MedMCQA (red). In the Qwen 3 0.6B chart, PubMedQA performance is around 60-70, and MedMCQA is around 25-45. In the LLaMA 3.1 8B-Instruct chart, PubMedQA performance is around 70-85, and MedMCQA is around 55-65. The methods are grouped under 'Tuning' and 'Unlearning' (implied by the legend).
+
+Figure 3: Comparative performance of different unlearning methods across different models with different architectures and sizes.
+
+to the BC-Select which shows that cosine similarity can be used to select forget set if the domain is distinct.
+
+Across all model sizes and domains, the results clearly demonstrate that the F2F protocol consistently outperforms standard fine-tuning. Models equipped with F2F show increasing gains in pass@1 accuracy. For instance, Qwen3-0.6B improves from 21.34 to 42.07 on HumanEval after applying unlearning and tuning, while LLaMA3.1-8B reaches 60.37 when compared to a baseline of 33.54. These improvements indicate that suppressing irrelevant pretraining knowledge helps models specialize in algorithmic reasoning.
+
+These results highlight that the effectiveness of unlearning is highly dependent on the choice of forget set, the target domain, and capacity of the model. BC-Select forget sets appear more reliable for guiding domain adaptation, while BC-Mixed provides mixed benefits that depend on task alignment.
+
+### 4.5 REPRESENTATION GEOMETRY ANALYSIS (CKA & SVCCA)
+
+We analyze how unlearning Xu et al. (2025) and fine-tuning alter internal representations using *Centered Kernel Alignment* (CKA) Kornblith et al. (2019) and *Singular Vector Canonical Correlation Analysis* (SVCCA) Raghu et al. (2017).
+
+**CKA.** Let  $X \in \mathbb{R}^{N \times d_x}$  and  $Y \in \mathbb{R}^{N \times d_y}$  be mean-pooled, sample-centered layer representations of the same inputs, i.e.,  $X_c = X - \bar{X}$  and  $Y_c = Y - \bar{Y}$ . The linear CKA is  $\text{CKA}(X, Y) = \frac{\|X_c^T Y_c\|_F^2}{\|X_c\|_F^2 \|Y_c\|_F^2}$ , which captures similarity of representational geometry and is invariant to orthogonal transforms and isotropic rescaling. Across the three domains, CKA reveals different representational drift patterns. Across all three domains, tuning overwrites most representations (low similarity), with F2F also highly divergent. This highlights that the extent of representational change depends on the domain, with F2F consistently pushing representations further from the unlearned model.
+
+![Figure 4: Representational drift measured by linear CKA. The figure contains three line plots for different domains: Medical Domain (left), Mathematics Domain (middle), and Coding Domain (right). Each plot shows Linear CKA on the y-axis (ranging from 0.0 to 1.0) against Layer Index on the x-axis (ranging from 0 to 28). Three lines are plotted: UnLearned (red dashed line, constant at 1.0), Base Model (Tuned) (blue dashed line, starts at 1.0 and drops to around 0.2-0.4), and F2F (green solid line, starts at 1.0 and drops to around 0.1-0.2). The F2F line shows a more pronounced departure from the unlearned model than the Base Model (Tuned) line.](f5e70cbe66e71e65b4ae4aa7816d266a_img.jpg)
+
+Figure 4: Representational drift measured by linear CKA. The figure contains three line plots for different domains: Medical Domain (left), Mathematics Domain (middle), and Coding Domain (right). Each plot shows Linear CKA on the y-axis (ranging from 0.0 to 1.0) against Layer Index on the x-axis (ranging from 0 to 28). Three lines are plotted: UnLearned (red dashed line, constant at 1.0), Base Model (Tuned) (blue dashed line, starts at 1.0 and drops to around 0.2-0.4), and F2F (green solid line, starts at 1.0 and drops to around 0.1-0.2). The F2F line shows a more pronounced departure from the unlearned model than the Base Model (Tuned) line.
+
+Figure 4: Representational drift measured by linear CKA. Across three domains, tuning substantially lowers similarity to the unlearned model; F2F exhibits the most pronounced departure. From left to right : Medical Domain, Mathematics Domain and Coding Domain.
+
+{8}------------------------------------------------
+
+Table 3: Effect of forget-set quality on F2F across domains. We compare curated *BC-Select* vs. mixed *BC-Mixed* vs. *BC-Cosine* forget sets on Qwen3-0.6B, LLaMA3.1-8B-Instruct, and LLaMA2-13B over coding (MBPP, HumanEval), medical (PubMedQA, MedMCQA), and math (Hendrycks-MATH, GSM8K) benchmarks (higher is better). **Best** ; **Second best**
+
+| FD | Method | Coding |  | Medical |  | Mathematics |  |
+|-|-|-|-|-|-|-|-|
+|  |  | MBPP | HumanEval | PubMedQA | MedMCQA | Hendrycks | GSM8K |
+| Qwen3 0.6B | (1) $Unl_{GA+GD}$ | 30.00 | 21.34 | 61.60 | 31.44 | 39.07 | 0.26 |
+|  | <b>(1) + Tuning</b> | <b>31.60</b> | <b>42.07</b> | <b>69.60</b> | <b>45.31</b> | <b>54.11</b> | <b>15.30</b> |
+|  | (2) $Unl_{GA}$ | 24.00 | 20.73 | 60.40 | 31.29 | 35.09 | 0.24 |
+|  | <b>(2) + SFT</b> | <b>31.60</b> | 40.02 | 58.80 | 40.26 | 51.20 | <b>14.00</b> |
+|  | (1) $Unl_{GA+GD}$ | 24.20 | 20.12 | 61.80 | 30.38 | 37.47 | 0.06 |
+|  | (1) + Tuning | 29.90 | 40.00 | 60.20 | 23.31 | 52.00 | 13.21 |
+|  | (2) $Unl_{GA}$ | 23.80 | 20.12 | 60.20 | 31.89 | 25.00 | 0.00 |
+|  | (2) + Tuning | 28.00 | 33.10 | 61.20 | 35.43 | 50.00 | 13.51 |
+|  | (1) $Unl_{GA+GD}$ | 24.01 | 18.00 | 61.20 | 29.32 | 29.05 | 0.10 |
+|  | (1) + Tuning | 31.55 | <b>41.90</b> | <b>67.33</b> | <b>45.00</b> | <b>54.85</b> | 13.20 |
+| LLaMA3.1 8B | (2) $Unl_{GA}$ | 22.22 | 18.23 | 58.45 | 29.00 | 25.00 | 0.00 |
+|  | (2) + Tuning | 29.91 | 40.50 | 57.65 | 38.75 | 48.90 | 13.07 |
+|  | (3) <i>Baseline</i> | 22.60 | 19.50 | 57.80 | 32.25 | 41.09 | 0.02 |
+|  | (3) + Tuning | 28.80 | 31.71 | 62.60 | 42.12 | 50.06 | 12.30 |
+|  | (1) $Unl_{GA+GD}$ | 43.60 | 54.88 | 79.21 | 60.50 | 18.00 | 61.70 |
+|  | <b>(1) + Tuning</b> | <b>60.10</b> | <b>60.37</b> | <b>89.90</b> | <b>70.25</b> | <b>29.50</b> | <b>70.51</b> |
+|  | (2) $Unl_{GA}$ | 22.60 | 1.20 | 75.22 | 60.20 | 10.51 | 50.91 |
+|  | (2) + Tuning | 58.66 | 57.70 | 87.00 | 67.15 | 25.70 | 67.20 |
+|  | (1) $Unl_{GA+GD}$ | 40.50 | 52.52 | 79.50 | 59.30 | 17.00 | 51.00 |
+|  | (1) + Tuning | 56.20 | 55.76 | <b>87.61</b> | 70.10 | <b>28.81</b> | 65.20 |
+|  | (2) $Unl_{GA}$ | 33.20 | 25.50 | 72.30 | 57.00 | 5.20 | 35.20 |
+|  | (2) + Tuning | 52.30 | 40.90 | 86.90 | 61.20 | 23.01 | 66.15 |
+|  | (1) $Unl_{GA+GD}$ | 42.55 | 55.76 | 79.00 | 58.22 | 17.91 | 61.00 |
+|  | <b>(1) + Tuning</b> | <b>59.55</b> | <b>59.86</b> | <b>85.31</b> | <b>71.02</b> | <b>28.33</b> | <b>68.57</b> |
+|  | (2) $Unl_{GA}$ | 20.35 | 0.90 | 73.05 | 58.99 | 9.32 | 50.00 |
+|  | (2) + Tuning | 57.76 | 57.55 | 85.31 | 66.00 | 27.01 | 67.10 |
+|  | (3) <i>Baseline</i> | 49.00 | 33.54 | 75.20 | 59.43 | 19.90 | 62.85 |
+|  | (3) + Tuning | 56.60 | 56.71 | 85.31 | 64.20 | 25.51 | 66.70 |
+| LLaMA2 13B | (1) $Unl_{GA+GD}$ | 27.22 | 0.60 | 74.90 | 38.68 | 29.00 | 5.10 |
+|  | <b>(1) + Tuning</b> | <b>50.31</b> | <b>46.15</b> | <b>90.11</b> | <b>60.10</b> | <b>51.50</b> | <b>21.50</b> |
+|  | (2) $Unl_{GA}$ | 0.00 | 25.50 | 70.00 | 36.51 | 24.35 | 2.00 |
+|  | (2) + Tuning | 45.01 | 44.70 | 89.33 | 57.93 | <b>50.90</b> | <b>20.00</b> |
+|  | (1) $Unl_{GA+GD}$ | 27.20 | 0.45 | 73.00 | 37.50 | 27.00 | 5.10 |
+|  | (1) + Tuning | 47.50 | <b>45.91</b> | 89.55 | <b>61.30</b> | 50.30 | <b>20.00</b> |
+|  | (2) $Unl_{GA}$ | 0.00 | 10.00 | 65.99 | 29.55 | 23.55 | 1.05 |
+|  | (2) + Tuning | 39.55 | 40.01 | 87.00 | 50.60 | 47.60 | <b>20.00</b> |
+|  | (1) $Unl_{GA+GD}$ | 25.30 | 0.52 | 73.44 | 37.62 | 29.09 | 6.30 |
+|  | (1) + Tuning | <b>48.91</b> | 44.30 | <b>90.00</b> | 58.42 | 50.33 | 18.03 |
+|  | (2) $Unl_{GA}$ | 0.00 | 23.33 | 69.55 | 36.22 | 24.00 | 0.92 |
+|  | (2) + Tuning | 44.33 | 42.05 | 89.10 | 60.99 | 49.62 | 19.52 |
+|  | (3) <i>Baseline</i> | 27.22 | 0.60 | 75.20 | 38.68 | 27.5 | 2.00 |
+|  | (3) + Tuning | 37.01 | 40.21 | 86.30 | 54.00 | 37.09 | 16.30 |
+
+**SVCCA**. SVCCA compresses each space to retain a fraction  $\alpha = 0.99$  of variance via SVD, then computes the mean canonical correlation between the compressed features; if  $X' \in \mathbb{R}^{N \times k_x}$ ,  $Y' \in \mathbb{R}^{N \times k_y}$ , and  $\rho_1, \dots, \rho_k$  are the canonical correlations with  $k = \min(k_x, k_y)$ , then  $\text{SVCCA}(X, Y) = \frac{1}{k} \sum_{i=1}^k \rho_i$ , emphasizing shared, high-variance factors which is complementary global geometry view of CKA. The SVCCA heatmaps indicate that tuning preserves partial alignment with the base model, while F2F introduces more substantial representational shifts. Base model vs. unlearned shows limited overlap beyond trivial self-similarity, whereas F2F vs. base model tuned reveals only localized correspondences. This highlights that tuning induces domain-dependent but structured drift, while F2F consistently drives stronger alterations in the representational subspace. *More analysis and ablations are given in the appendix section A.*
+
+{9}------------------------------------------------
+
+![Figure 5: Four heatmaps showing representational similarity measured by SVCCA. The heatmaps are labeled: BM V/S BM(Tuned), BM V/S Unlearn, BM V/S F2F, and F2F V/S BM(Tuned). Each heatmap shows a grid of similarity values between different layers, with a color scale on the right indicating similarity levels from 0.000 to 1.000. The diagonal line in each heatmap represents perfect self-similarity.](4e0ade2f41b66d5602160da5cc978274_img.jpg)
+
+Figure 5: Four heatmaps showing representational similarity measured by SVCCA. The heatmaps are labeled: BM V/S BM(Tuned), BM V/S Unlearn, BM V/S F2F, and F2F V/S BM(Tuned). Each heatmap shows a grid of similarity values between different layers, with a color scale on the right indicating similarity levels from 0.000 to 1.000. The diagonal line in each heatmap represents perfect self-similarity.
+
+Figure 5: Heatmaps of representational similarity measured by SVCCA. We compare layer-wise representations across (i) Base model(BM) vs. fine-tuned base model, (ii) Base model (BM) vs. unlearned model, (iii) Base model (BM) vs. F2F, and (iv) Fine-tuned base model vs. F2F. SVCCA emphasizes alignment of shared high-variance factors.
+
+## 5 CONCLUSION
+
+We demonstrate that Forget-to-Focus (F2F) a simple two-stage pipeline : unlearns targeted general domain knowledge (forget) and then fine-tunes to adapt to a domain specific model (focus) consistently improves domain adaptation of LLMs across coding, math, and medical tasks, from 0.6B to 72B scales. F2F delivers higher accuracy than standard fine-tuning and parameter-efficient baselines, improves calibration on sensitive QA, and induces clear representational shifts (via CKA/SVCCA, Fisher, PCA) away from generalist features toward domain-useful structure. These gains arise from suppressing interfering priors from pretraining, causing stabler optimization and reduced spurious correlations. The method is modular, data-driven (via forget/retain sets), and compatible with common training stacks. Overall, F2F reframes unlearning as capacity reallocation for specialization, offering a practical path to more reliable in-domain LLMs.
+
+## REFERENCES
+
+- Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, et al. Program synthesis with large language models. *arXiv preprint arXiv:2108.07732*, 2021.
+- Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. Piqa: Reasoning about physical commonsense in natural language. In *Proceedings of the AAAI conference on artificial intelligence*, volume 34, pp. 7432–7439, 2020.
+- Sungmin Cha, Sungjun Cho, Dasol Hwang, and Moontae Lee. Towards robust and parameter-efficient knowledge unlearning for llms. *arXiv preprint arXiv:2408.06621*, 2024.
+- Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidi Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, Nick Ryder, Mikhail Pavlov, Alethea Power, Lukasz Kaiser, Mohammad Bavarian, Clemens Winter, Philippe Tillet, Felipe Petroski Such, Dave Cummings, Matthias Plappert, Fotios Chantzis, Elizabeth Barnes, Ariel Herbert-Voss, William Hebbegen Guss, Alex Nichol, Alex Paino, Nikolas Tezak, Jie Tang, Igor Babuschkin, Suchir Balaji, Shantanu Jain, William Saunders, Christopher Hesse, Andrew N. Carr, Jan Leike, Josh Achiam, Vedant Misra, Evan Morikawa, Alec Radford, Matthew Knight, Miles Brundage, Mira Murati, Katie Mayer, Peter Welinder, Bob McGrew, Dario Amodei, Sam McCandlish, Ilya Sutskever, and Wojciech Zaremba. Evaluating large language models trained on code, 2021.
+- Yihong Chen, Kelly Marchisio, Roberta Raitanu, David Ifeoluwa Adelani, Pontus Stenetorp, Sebastian Riedel, and Mikel Artetxe. Improving language plasticity via pretraining with active forgetting. 2023a. URL <https://dl.acm.org/doi/abs/10.5555/3666122.3667491>.
+- Zeming Chen, Alejandro Hernández-Cano, Angelika Romanou, Antoine Bonnet, Kyle Matoba, Francesco Salvi, Matteo Pagliardini, Simin Fan, Andreas Köpf, Amirkeivan Mohtashami, Alexandre Sallinen, Alireza Sakhaeirad, Vinitra Swamy, Igor Krawczuk, Deniz Bayazit, Axel Marmet,
+
+ Rest of paper (reference and Appendix) is removed.

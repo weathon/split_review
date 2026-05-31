@@ -1,0 +1,250 @@
+
+
+{0}------------------------------------------------
+
+# PHYSICS-CONSTRAINED FINE-TUNING OF FLOW-MATCHING MODELS FOR GENERATION AND INVERSE PROBLEMS
+
+Jan Tauberschmidt<sup>1,2</sup>, Sophie Fellenz<sup>2</sup>, Sebastian J. Vollmer<sup>1,2</sup>, Andrew B. Duncan<sup>3</sup>
+
+<sup>1</sup>DSA, German Research Center for Artificial Intelligence (DFKI)
+
+<sup>2</sup>Department of Computer Science, University of Kaiserslautern-Landau (RPTU)
+
+<sup>3</sup>Department of Mathematics, Imperial College London
+
+{jan.tauberschmidt, sebastian.vollmer}@dfki.de,  
+fellenz@cs.uni-kl.de, a.duncan@imperial.ac.uk
+
+## ABSTRACT
+
+We present a framework for fine-tuning flow-matching generative models to enforce physical constraints and solve inverse problems in scientific systems. Starting from a model trained on low-fidelity or observational data, we apply a differentiable post-training procedure that minimizes weak-form residuals of governing partial differential equations (PDEs), promoting physical consistency and adherence to boundary conditions without distorting the underlying learned distribution. To infer unknown physical inputs, such as source terms, material parameters, or boundary data, we augment the generative process with a learnable latent parameter predictor and propose a joint optimization strategy. The resulting model produces physically valid field solutions alongside plausible estimates of hidden parameters, effectively addressing ill-posed inverse problems in a data-driven yet physics-aware manner. We validate our method on canonical PDE problems, demonstrating improved satisfaction of physical constraints and accurate recovery of latent coefficients. Further, we confirm cross-domain utility through fine-tuning of natural-image models. Our approach bridges generative modeling and scientific inference, opening new avenues for simulation-augmented discovery and data-efficient modeling of physical systems.
+
+## 1 INTRODUCTION
+
+Physical systems with rich spatio-temporal structure can be effectively represented by deep generative models, including diffusion and flow-matching methods (Kerrigan et al., 2024; Erichson et al., 2025; Baldan et al., 2025; Price et al., 2023). Although their dynamics can be highly complex, these systems are often governed by fundamental principles, such as conservation laws, symmetries, and boundary conditions, that constrain the space of admissible solutions. Incorporating such physical structure into generative modeling can improve both sample fidelity and out-of-distribution generalization.
+
+In many scientific domains, including atmospheric and oceanographic modeling, seismic inversion, and medical imaging, we often observe system states without access to the underlying physical parameters that govern them. Crucially, PDE-based constraints are typically parameter-dependent, with residuals that vary according to material properties, source terms, or other latent variables. Prior work has largely focused on simple or global constraints—such as fixed boundaries or symmetries, that apply uniformly across the data distribution. Handling parameter-dependent constraints naively would require training over the joint distribution of solutions and parameters, which is often infeasible because parametric labels are missing, expensive to obtain, or high-dimensional. Addressing this limitation is critical for scientific discovery. Many inverse problems in the natural sciences and engineering require reasoning about unobserved parameters or exploring hypothetical scenarios inaccessible to direct experimentation. A generative model that can enforce parameter-dependent PDE constraints using only observational data would provide a powerful tool for data-efficient sim-
+
+{1}------------------------------------------------
+
+ulation, hypothesis testing, and the discovery of new physical phenomena, helping to bridge the gap between raw observations and mechanistic understanding.
+
+This work proposes a framework for fine-tuning flow-matching generative models to enforce parameter-dependent PDE constraints without requiring joint parameter-solution training data. This work aligns with a growing trend of simulation-augmented machine learning (Karniadakis et al., 2021), where generative models accelerate scientific discovery by efficiently exploring physically plausible solution spaces. Our approach reformulates fine-tuning as a stochastic optimal control problem via Adjoint Matching (Domingo-Enrich et al., 2025), guided by weak-form PDE residuals. By augmenting the model with a latent parameter evolution, we enable joint generation of physically consistent solution-parameter pairs, addressing ill-posed inverse problems. We evaluate our proposed fine-tuning framework on four representative PDE families spanning elliptic diffusion, elasticity, wave propagation, and incompressible flow and show an application to natural images. We demonstrate denoising and conditional generation capabilities, including robustness to noisy data and the ability to infer latent parameters from sparse observations. Visual and quantitative results, including strong reductions in residuals across tasks and robustness to model misspecification, highlight the flexibility of our method for integrating physical constraints into generative modeling.
+
+To sum up, our contributions are as follows:
+
+- **POST-TRAINING ENFORCEMENT OF PHYSICAL CONSTRAINTS:** We introduce a fine-tuning strategy that tilts the generative distribution toward PDE-consistent samples using weak-form residuals, improving physical validity while preserving diversity.
+- **ADJOINT-MATCHING FINE-TUNING WITH THEORETICAL GROUNDING:** Leveraging the adjoint-matching framework, we recast reward-based fine-tuning as a stochastic control problem, extending flow-matching models to generate latent parameters alongside states, enabling inverse problem inference without paired training data.
+- **BRIDGING GENERATIVE MODELING AND PHYSICS-INFORMED LEARNING:** Our approach connects preference-aligned generation with physics-based inference, enabling simulation-augmented models to generate solutions that respect complex physical laws.
+
+An implementation of our method is available at <https://github.com/jantauberschmidt/PCFT>.
+
+## 2 RELATED WORK
+
+**Physics-Constrained Generative Models** Integrating physical constraints—such as boundary conditions, symmetry invariances, and partial differential equation (PDE) constraints—into machine learning models improves both accuracy and out-of-distribution generalization. Classical approaches, such as Physics-Informed Neural Networks (PINNs, Raissi et al. (2019)), directly regress solutions that satisfy governing equations. While effective for forward or inverse problems, PINNs do not capture distributions over solutions, making them unsuitable for generative tasks that require sampling diverse plausible outcomes.
+
+In the generative setting, the main challenge is ensuring that the physically constrained samples retain the variability of the underlying generative model, avoiding pathological issues such as mode collapse. Bastek et al. (2024) proposes a unified framework for introducing physical constraints into Denoising Diffusion Probabilistic Models (DDPMs, Ho et al. (2020)) at pre-training time, by adding a first-principles physics-residual loss to the diffusion training objective. This loss penalizes violations of governing PDEs (e.g. fluid dynamics equations) so that generated samples inherently satisfy physical laws. The method was empirically shown to reduce residual errors for individual samples significantly, while simultaneously acting as a regularizer against overfitting, thereby improving generalization. To evaluate the physics-residual loss, one needs to compute the expected PDE residual of the final denoised sample conditioned on the current noisy state in the DDPM process. Accurately estimating this expectation requires generating multiple reverse-diffusion trajectories from the same noisy sample, which makes pre-training significantly more expensive. A common alternative is to use Tweedie’s formula to approximate the conditional expectation in a single pass, but this shortcut introduces bias, particularly in the final denoising steps.
+
+{2}------------------------------------------------
+
+![Figure 1: Visual depiction of the proposed method. The diagram is divided into two horizontal tracks. The top track, 'Flow of State x', shows a sequence of states x_0, x_1^base, x_t^base, and x_T^base. A denoising process is shown from x_T^base back to x_0. A vector v_{t,x}^{reg} points from x_t^base to x_T^base. The bottom track, 'Flow of Parameter alpha', shows a sequence of parameters alpha_0, alpha_1^base, alpha_t^base, and alpha_T^base. A denoising process is shown from alpha_T^base back to alpha_0. A vector v_{t,alpha}^{reg} points from alpha_t^base to alpha_T^base. On the right, a block labeled phi takes x_T^base and alpha_T^base as inputs and produces predicted parameters alpha_1^base and alpha_1^t. Arrows indicate the flow of information between the state and parameter tracks.](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+Figure 1: Visual depiction of the proposed method. The diagram is divided into two horizontal tracks. The top track, 'Flow of State x', shows a sequence of states x\_0, x\_1^base, x\_t^base, and x\_T^base. A denoising process is shown from x\_T^base back to x\_0. A vector v\_{t,x}^{reg} points from x\_t^base to x\_T^base. The bottom track, 'Flow of Parameter alpha', shows a sequence of parameters alpha\_0, alpha\_1^base, alpha\_t^base, and alpha\_T^base. A denoising process is shown from alpha\_T^base back to alpha\_0. A vector v\_{t,alpha}^{reg} points from alpha\_t^base to alpha\_T^base. On the right, a block labeled phi takes x\_T^base and alpha\_T^base as inputs and produces predicted parameters alpha\_1^base and alpha\_1^t. Arrows indicate the flow of information between the state and parameter tracks.
+
+Figure 1: Visual depiction of proposed method. Starting at state  $x_t^{\text{base}}$  or  $x_T^{\text{ft}}$ , we use the base vector field  $v_{t,x}^{\text{base}}$  to predict the final sample  $[a]$ . Through the inverse predictor  $\varphi$ , we recover the corresponding predicted parameters  $\hat{\alpha}_1^{\text{base}}$  and  $\hat{\alpha}_1^{\text{ft}}$  [b]. These estimates can be used as a target for evolving  $\alpha_t^{\text{base}}$  [c] or as a baseline for the fine-tuned evolution of  $\alpha_t^{\text{ft}}$  [d]. For purposes of regularization, we further consider  $v_{t,\alpha}^{\text{reg}}$ , pointing from the current  $\alpha_t^{\text{ft}}$  to the predicted final parameter of the base evolution  $\hat{\alpha}_1^{\text{base}}$  [e].
+
+Zhang & Zou (2025) proposes enforcing constraints through a post-hoc distillation stage, where a deterministic student model is trained from a vanilla diffusion model to generate samples in one-step, regularized by a PDE residual loss. In Wang et al. (2025) the authors introduce PhyDA, diffusion-based data assimilation framework that ensures reconstructions obey PDE-based dynamics, specifically for atmospheric science. An autoencoder is used to encode sparse observations into a structured latent prior for the diffusion model, which is trained with an additional physical residual loss.
+
+**Inference- and Post-Training Constraint Enforcement** Various works have proposed approaches to enforce PDE constraints at inference time, often in combination with observational constraints, drawing connections to conditional diffusion models (Dhariwal & Nichol, 2021; Ho & Salimans, 2021). Huang et al. (2024) introduce guidance terms within the denoising update of a score-based diffusion model to steer the denoising process towards solutions which are both consistent with data and underlying PDEs. A related approach was considered by Xu et al. (2025), further introducing an adaptive constraint to mitigate instabilities in early diffusion steps. In Christopher et al. (2024), the authors recast the inference-time sampling of a diffusion process as a constrained optimization problem, each diffusion step is projected to satisfy user-defined constraints or physical principles. This allows strict enforcement of hard constraints (including convex and non-convex constraints, as well as ODE-based physical laws) on the generated data. Lu & Xu (2024) consider the setting where the base diffusion model is trained on cheap, low-fidelity simulations, leveraging a similar approach to generate down-scaled samples via projection.
+
+**Flow-Matching Models for Simulation and Inverse Problems** Flow-matching (FM, Lipman et al. (2023)) has emerged as a flexible generative modeling paradigm for complex physical systems across science, including molecular systems (Hassan et al., 2024), weather (Price et al., 2023) and geology (Zhang et al., 2025). In the context of physics-constrained generative models Utkarsh et al. (2025) introduces a zero-shot inference framework to enforce hard physical constraints in pre-trained flow models, by repeatedly projecting the generative flow at sampling time. Similarly, Cheng et al. (2024) proposed the ECI algorithm, to adapt a pre-trained flow-matching model so that it exactly satisfies constraints without using analytical gradients. In each iteration of flow sampling, ECI performs: an Extrapolation step (advancing along the learned flow), a Correction step (applying a constraint-enforcement operation), and an Interpolation step (adjusting back towards the model’s trajectory). While projection approaches are a compelling strategy for hard constraints, they can be
+
+{3}------------------------------------------------
+
+challenging particularly for local constraints such as boundary conditions, as direct enforcement can introduce discontinuities. The above approach mitigates this by interleaving projections with flow steps, however this relies on the flow’s ability to rapidly correct such non-physical artifacts.
+
+Baldan et al. (2025) propose Physics-Based Flow Matching (PBFM), which embeds constraints (PDE or symmetries) directly into the FM loss during training. The approach leverages temporal unrolling to refine noise-free final state predictions and jointly minimizes generative and physics-based losses without manual hyperparameter tuning of their tradeoff. To mitigate conflicts between physical constraints and the data loss, they employ the ConFIG (Liu et al., 2024), which combines the gradients of both losses in a way that ensures that gradient updates always minimize both losses simultaneously.
+
+Related to our approach are the works on generative models for Bayesian inverse problems (Stuart, 2010), where the goal is to infer distributions over latent PDE parameters given partial or noisy observations. Conditional diffusion and flow-matching models can be used to generate samples from conditional distributions and posterior distributions, supporting amortized inference and uncertainty quantification (Song et al., 2021; Utkarsh et al., 2025; Zhang et al., 2023). Conditioning is typically achieved either through explicit parameter inputs or guidance mechanisms during sampling, as in classifier-guided diffusion. While effective when large volumes of paired training data is available, these approaches are less relevant to observational settings where parameters are unobserved. In contrast, our approach connects the observed data to the latent parameters only during post-training, requiring substantially smaller volumes of data.
+
+## 3 METHOD
+
+FM models are trained to learn and sample from a given distribution of data  $p_{\text{data}}$ . They approximate this distribution by constructing a Markovian transformation from noise to data, such that the time marginals of this transformation match those of a *reference flow*  $X_t = \beta_t X_1 + \gamma_t X_0$ . Specifically FM models learn a vector field  $v_t(x)$  that transports noise to data, via the ODE  $dX_t = v_t(X_t) dt$ . We can optionally inject a noise schedule  $\sigma(t)$  along the trajectory to define an equivalent SDE that preserves the same time marginals (Maoutsa et al., 2020),
+
+$$dX_t = \left( v_t(X_t) + \frac{\sigma(t)^2}{2\eta_t} \left( v_t(X_t) - \frac{\dot{\beta}_t}{\beta_t} X_t \right) \right) dt + \sigma(t) dB_t =: b_t(X_t) dt + \sigma(t) dB_t, \quad (1)$$
+
+where we combine coefficients  $\beta_t$  and  $\gamma_t$  into  $\eta_t = \gamma_t (\frac{\dot{\beta}_t}{\beta_t} \gamma_t - \dot{\gamma}_t)$ .
+
+Assuming we have access to a FM model which generates samples according to distribution  $p(x)$ , we seek to adjust this model so as to generate samples from the tilted distribution  $p_r(x) \propto e^{\lambda r(x)} p(x)$ , where  $r$  is a reward function and  $\lambda$  characterizes the degree of distribution shift induced by fine-tuning. To achieve this, we leverage the adjoint-matching framework of Domingo-Enrich et al. (2025). This work reformulates reward fine-tuning for flow-based generative models as a control problem in which the base generative process given by  $v_t^{\text{base}}$  is steered toward high-reward samples via modifying the learned vector field, which we denote as  $v_t^h$  with corresponding drift term  $b_t^h$ . Our approach is conceptually related to reward- or preference-based fine-tuning of generative models (Christiano et al., 2017; Sun et al., 2024), where a learned or computed reward steers generation toward desired properties. Here, the reward is defined via PDE residuals, encoding knowledge about underlying dynamics and physical constraints to the solutions space as deviations to differential operators or boundary conditions. Notably, we assume that the distribution generated by the base model  $p(x)$  only captures an observed quantity, but does not provide us with corresponding parameters or coefficient fields often needed to evaluate the respective differential operator. In the following, we will present a strategy of jointly recovering unknown parameters and fine-tuning the generation process.
+
+### 3.1 REWARD
+
+A generative model can reproduce the visual characteristics of empirical data while ignoring the physics that governs it, thereby rendering the samples unusable for downstream scientific tasks. To bridge this gap we impose the known governing equations as *soft constraints*, expressed through
+
+{4}------------------------------------------------
+
+differential operators  $\mathcal{L}_\alpha x = 0$  with parameters  $\alpha$ . Throughout, a generated sample  $x$  is interpreted as a discretization of a continuous field  $x(\xi)$  on a domain  $\Omega$ . The *strong* PDE residual is defined as
+
+$$\mathcal{R}_{\text{strong}}(x, \alpha) = \|\mathcal{L}_\alpha x\|_{L^2(\Omega)}^2.$$
+
+In practice, strong residuals involve high-order derivatives that make the optimization landscape unstable. We therefore adopt *weak-form residuals* of the form  $\langle \mathcal{L}_\alpha x, \psi \rangle_{L^2(\Omega)}$  for suitably chosen test functions  $\psi \in \Psi$ , which are numerically more stable under noisy or misspecified data. Repeated applications of integration-by-parts can transfer derivatives from  $x$  to  $\psi$ . The set  $\Psi$  is composed of compactly supported local polynomial kernels. For each evaluation we draw  $N_{\text{test}}$  such functions; their centers and length-scales are sampled at random. A mollifier enforces  $\psi|_{\partial\Omega} = 0$ , justifying the integration by parts. The resulting residual is
+
+$$\mathcal{R}_{\text{weak}}(x, \alpha) = \frac{1}{N_{\text{test}}} \sum_{i=1}^{N_{\text{test}}} |\langle \mathcal{L}_\alpha x, \psi^{(i)} \rangle_{L^2(\Omega)}|^2.$$
+
+These randomly sampled local test functions act as stochastic probes of PDE violations, providing a low-variance, data-efficient learning signal. A more detailed description of the test functions used can be found in Appendix D.3. Note that the residual might be augmented by adding soft constraints for boundary conditions.
+
+### 3.2 JOINT EVOLUTION
+
+Fine-tuning is nontrivial in our setting because we must infer latent physical parameters jointly with the generated solutions. On fully denoised samples, we can train an inverse predictor, i.e.,  $\varphi(x_1) = \alpha_1$ , such that the weak PDE residual is minimized. As a naïve approach, this already induces a joint distribution over  $(x_1, \alpha_1)$  via the push-forward through  $\varphi$ . However, we advocate a more principled formulation that evolves *both*  $x$  and  $\alpha$  along vector fields, enabling joint sampling of parameters and solutions, as well as a controlled regularization of fine-tuning through the Adjoint Matching framework as outlined below. In the fine-tuning model, this can be achieved by directly learning the vector field  $v_{t,\alpha}^n$  jointly with  $v_{t,x}^n$  by augmenting the neural architecture. Since no ground-truth flow of  $\alpha$  for the base model is available, at each state  $(x_t, \alpha_t)$  we define a *surrogate base flow* using the inverse predictor  $\varphi$ . Specifically, we consider the one-step estimates
+
+$$\hat{x}_1 = x_t + (1-t)v_t^{\text{base}}(x_t), \quad \hat{\alpha}_1 = \varphi(\hat{x}_1).$$
+
+The direction from the current state  $\alpha_t$  to the predicted final parameter  $\hat{\alpha}_1$  serves as a base vector field which we use to evolve  $\alpha$ , i.e.  $v_{t,\alpha}^{\text{base}}(\alpha_t) = (\hat{\alpha}_1 - \alpha_t)/(1-t)$  inducing corresponding drift  $b_{t,\alpha}^{\text{base}}$ . This *surrogate base flow*, starting at a noise sample  $\alpha_0^{\text{base}} \sim \mathcal{N}(0, I)$ , emulates a denoising process of the recovered parameter. We denote by  $\alpha^{\text{base}}$  the parameter aligned with the base trajectory  $x^{\text{base}}$ . While the evolution of  $\alpha^{\text{base}}$  does not influence the trajectory of  $x^{\text{base}}$ , the inferred vector field can be used to effectively regularize the generation of the fine-tuned model. Similarly, to regularize towards the parameter recovered under the base model, we introduce an additional field  $v_{t,\alpha}^{\text{reg}}(\alpha_t^h) = (\hat{\alpha}_t^{\text{base}} - \alpha_t^h)/(1-t)$ . This vector field points from the current parameter estimate of the fine-tuned trajectory  $\alpha_t^h$  to the recovered parameter under the base model  $\hat{\alpha}_t^{\text{base}}$ . The field is used to pull the fine-tuned dynamics towards final samples associated with parameters similar to those of the base trajectory. The introduced vector fields are visualized in Fig. 1.
+
+### 3.3 ADJOINT MATCHING
+
+Considering an augmented state variable of the joint evolution  $\tilde{X}_t = (X_t^T, \alpha_t^T)^T$ , we cast fine-tuning as a stochastic optimal control problem:
+
+$$\begin{aligned} \min_{\tilde{u}} \quad & \mathbb{E} \left[ \int_0^1 \left( \frac{1}{2} \|\tilde{u}_t(\tilde{X}_t)\|^2 + f(\tilde{X}_t) \right) dt + g(\tilde{X}_1) \right] \\ \text{s.t.} \quad & d\tilde{X}_t = \left( b_t^{\text{base}}(\tilde{X}_t) + \sigma(t) \tilde{u}_t(\tilde{X}_t) \right) dt + \sigma(t) d\tilde{B}_t \end{aligned} \quad (2)$$
+
+with control  $\tilde{u}_t(\tilde{X}_t)$ , running state cost  $f(\tilde{X}_t)$ , and terminal cost  $g(\tilde{X}_1)$ . In this formulation, fine-tuning amounts to a point-wise modification of the base drift through application of control  $\tilde{u}$ , i.e.
+
+$$\tilde{b}_t^h(\tilde{X}_t) = b_t^{\text{base}}(\tilde{X}_t) + \sigma(t) \tilde{u}_t(\tilde{X}_t).$$
+
+{5}------------------------------------------------
+
+In Domingo-Enrich et al. (2025), Adjoint Matching is introduced as a technique with lower variance and computational cost than standard adjoint methods. The method is based on a *Lean Adjoint* state, which is initialized as
+
+$$\tilde{a}_1^T = \tilde{\lambda} \nabla_{\tilde{x}} g(\tilde{X}_1) = (\lambda_x \nabla_x g(X_1, \alpha_1), \lambda_\alpha \nabla_\alpha g(X_1, \alpha_1))$$
+
+and evolves backward in time according to
+
+$$\frac{d}{dt} \tilde{a}_t = - \left( \nabla_{\tilde{x}} \tilde{b}_t^{\text{base}} (\tilde{X}_t)^T \tilde{a}_t + \nabla_{\tilde{x}} f(\tilde{X}_t)^T \right) = - \begin{pmatrix} J_{xx}^T & J_{\alpha x}^T \\ J_{x\alpha}^T & J_{\alpha\alpha}^T \end{pmatrix} \begin{pmatrix} a_{t,x} \\ a_{t,\alpha} \end{pmatrix} - \begin{pmatrix} \nabla_x f(X_t, \alpha_t)^T \\ \nabla_\alpha f(X_t, \alpha_t)^T \end{pmatrix} \quad (3)$$
+
+where the block-Jacobian is evaluated along the base drift for  $X$  and  $\alpha$ , which means that  $J_{ij} = \nabla_j b_{ti}^{\text{base}}(X_t, \alpha_t)$  for  $i, j \in \{x, \alpha\}$ . The hyperparameters  $\lambda_x$  and  $\lambda_\alpha$  can be used to regulate the extent to which the fine-tuned distribution departs from the base distribution. The *Adjoint Matching* objective can then be formulated as a consistency loss:
+
+$$\begin{aligned} \mathcal{L}(\tilde{u}; \tilde{X}) &= \frac{1}{2} \int_0^1 \|\tilde{u}_t(\tilde{X}_t) + \sigma(t) \tilde{a}_t\|^2 dt \\ &= \frac{1}{2} \int_0^1 \left( \|u_{t,x}(\tilde{X}_t, \alpha_t) + \sigma(t) a_{t,x}\|^2 + \|u_{t,\alpha}(\tilde{X}_t, \alpha_t) + \sigma(t) a_{t,\alpha}\|^2 \right) dt. \end{aligned} \quad (4)$$
+
+It can be shown (Domingo-Enrich et al., 2025) that with  $f = 0$ , this objective is consistent with the tilted target distribution for reward  $r = -g$ , if optimized with a *memoryless* noise schedule. This schedule ensures sufficient mixing during generation such that the final sample  $X_1$  is independent of  $X_0$ . To stabilize fine-tuning we introduce a scaled variant of the memoryless noise schedule. Instead of using the canonical choice  $\sigma^2(t) = 2\eta_t$  identified by Domingo-Enrich et al. (2025), we adopt
+
+$$\sigma^2(t) = (1 - \kappa) 2\eta_t, \quad 0 \leq \kappa < 1,$$
+
+which retains the theoretical memoryless property (see Lemma 1 in Appendix D.4) while attenuating the magnitude of the noise variance. The introduction of the scaling factor  $0 \leq \kappa < 1$  constitutes a simple but novel extension of the adjoint-matching framework. Whereas prior work highlighted a unique schedule, our analysis shows that a family of scaled schedules remains consistent with the memoryless condition. This additional degree of freedom acts as a *numerical stabilisation knob*, mitigating blow-ups near  $t \rightarrow 0$  without losing theoretical consistency. Further, it offers a *control-fidelity trade-off* by regulating the amount of exploration. In practice, this flexibility allows practitioners to adapt fine-tuning to the conditioning of the PDE residuals and the stability of the solver, a feature not available in the original formulation.
+
+Equation 2 is optimized by iteratively sampling trajectories with the fine-tuned model while following a memoryless noise schedule, numerically computing the lean adjoint states by solving the ODE in Equation 3, and taking a gradient descent step to minimize the loss in Equation 4. Note that gradients are only computed through the control  $\tilde{u}_t$  and not through the adjoint, reducing the optimization target to a simple regression loss. We state the full training algorithm and implementation details in Appendix D.5.
+
+Adjoint Matching steers the generator toward the reward-tilted distribution, thereby reshaping the entire output distribution rather than correcting individual trajectories. However, when fine-tuning observational data or under system misspecification, we might be interested in retaining sample-specific detail. Empirically we find that this can be effectively encoded by imposing similarity of the inferred coefficients between base and fine-tuned model. Therefore, we add a running state cost
+
+$$f(\alpha) = \lambda_f \|v_{t,\alpha}^{\text{ft}}(\alpha) - v_{t,\alpha}^{\text{reg}}(\alpha)\|^2$$
+
+which penalizes deviations of the fine-tuned  $\alpha$ -drift from the direction pointing toward the base estimate  $\tilde{\alpha}_1^{\text{base}}$ . The hyper-parameter  $\lambda_f$  controls a smooth trade-off:  $\lambda_f = 0$  recovers pure Adjoint Matching, while larger  $\lambda_f$  progressively anchors the final parameters  $\alpha_1$  obtained under the fine-tuned model to their base-model counterparts, thus retaining trajectory-level detail.
+
+## 4 EXPERIMENTS
+
+We evaluate across five settings: four PDE systems (including boundary and system misspecification, and observational noise) and a natural-image model. Unlike latent-space fine-tuning for
+
+{6}------------------------------------------------
+
+images, our PDE models operate directly in pixel space. High-variance noise during sampling can drive off-manifold trajectories and perturb PDE residuals, motivating  $\kappa > 0$  for these models. For base Flow Matching backbones, we use U-FNO (Wen et al., 2022) for PDEs and the DiT-based latent FM of Dao et al. (2023) for images. In all experiments we first sample from the base generator and pre-train the inverse predictor  $\varphi$  to recover  $\alpha$  by minimizing the (PDE) residual, then fine-tune. Following Domingo-Enrich et al. (2025), fine-tuning is initialized from the base weights. We augment capacity to condition  $v_{t,x}^n$  on  $\alpha_t$  and add a separate head for  $v_{t,\alpha}^n$ . Fine-tuning uses a memoryless noise schedule, while all reported results are generated without injected noise ( $\sigma(t) = 0$ ). Implementation details appear in App. D.2.
+
+**Comparisons, ablations, and metrics.** Our proposed method converts a single-variable flow into a joint generative model (Sec. 3.2). We compare against: (i) a *Base AM* variant (vanilla Adjoint Matching) where  $\varphi$  is frozen and used only to compute residuals, (ii) a *Base AM+ $\varphi$*  variant where  $\varphi$  continues to train but the flow over  $\alpha$  is not modeled jointly, and (iii) *PBFM* (Baldan et al., 2025), augmented with our pre-trained  $\varphi$  to enable residual evaluation. Details on the comparison methods can be found in App. E.2. All evaluations use 256 samples, generated from shared seeds across methods. We report weak and strong residuals,  $R_{\text{weak}}$  and  $R_{\text{strong}}$ , scaled by the mean residual of a fixed reference set. The reference set  $\mathcal{D}_{\text{ref}}$  is a synthetic, clean dataset generated under the target PDE specification assumed during fine-tuning (no noise, modified BCs, lossless Helmholtz, or unforced Stokes respectively). We also report Maximum Mean Discrepancy (MMD) based distributional similarities for states and parameters ( $\text{MMD}_x$ ,  $\text{MMD}_\alpha$ ) computed against this dataset (details in App. E.1). While the main text shows representative results, the complete set of experimental evaluations is provided in App. F.
+
+### 4.1 DARCY FLOW
+
+Consider a square domain  $\Omega = [0, 1]^2$  where a permeability  $\alpha(\xi)$  and forcing  $f(\xi)$  induce a pressure field  $x(\xi)$  governed by  $-\nabla \cdot (\alpha(\xi) \nabla x(\xi)) - f(\xi) = 0$  with zero Dirichlet boundary conditions and constant  $f$ . We draw  $\alpha$  from a discretized Gaussian process and corrupt pressures with observation noise before training the base FM. Dataset details are in App. B. Figure 2 compares three Darcy samples generated from the *same* noise seed  $x_0$ : the base draw, fine-tuning with our regularization (here  $\lambda_f = 1.0$ ), and fine-tuning without regularization. The base pressure  $x^{\text{base}}$  is visibly contaminated by high-frequency noise, and the inverse predictor  $\varphi$  correspondingly yields a scattered, artifact-ridden permeability map  $\alpha^{\text{base}}$ . With regularization enabled, fine-tuning attenuates noise in the pressure  $x^{\text{ft}}$  while remaining close to  $\alpha^{\text{base}}$ . Because  $\alpha^{\text{base}}$  is itself fragmented, some artifacts persist. In contrast, disabling regularization produces a fully denoised pressure and a markedly more coherent  $\alpha^{\text{ft}}$ , but at the expected expense of erasing sample-specific details present in the base realization.
+
+![Figure 2: Darcy denoising (qualitative). The figure shows three columns of heatmaps. The first column is labeled 'Base' and contains two heatmaps: x^base (pressure) and alpha^base (permeability). The second column is labeled 'Fine-tuned w/ regularization' and contains two heatmaps: x^ft (pressure) and alpha^ft (permeability). The third column is labeled 'Fine-tuned w/o regularization' and contains two heatmaps: x^ft (pressure) and alpha^ft (permeability). The heatmaps show a central high-pressure region (red/orange) surrounded by a lower-pressure region (blue). The permeability maps show a complex, fragmented structure (red/brown) on a blue background. The 'Fine-tuned w/ regularization' column shows a smoother pressure map and a more coherent permeability map compared to the 'Base' column. The 'Fine-tuned w/o regularization' column shows a fully denoised pressure map and a more coherent permeability map, but with some artifacts.](4279c8be6ec4ed56f4b3349be98bb426_img.jpg)
+
+Figure 2: Darcy denoising (qualitative). The figure shows three columns of heatmaps. The first column is labeled 'Base' and contains two heatmaps: x^base (pressure) and alpha^base (permeability). The second column is labeled 'Fine-tuned w/ regularization' and contains two heatmaps: x^ft (pressure) and alpha^ft (permeability). The third column is labeled 'Fine-tuned w/o regularization' and contains two heatmaps: x^ft (pressure) and alpha^ft (permeability). The heatmaps show a central high-pressure region (red/orange) surrounded by a lower-pressure region (blue). The permeability maps show a complex, fragmented structure (red/brown) on a blue background. The 'Fine-tuned w/ regularization' column shows a smoother pressure map and a more coherent permeability map compared to the 'Base' column. The 'Fine-tuned w/o regularization' column shows a fully denoised pressure map and a more coherent permeability map, but with some artifacts.
+
+Figure 2: Darcy denoising (qualitative). Base vs. fine-tuned outputs for a fixed seed. Regularization ( $\lambda_f = 1.0$ ) denoises while staying close to the base sample. Removing it denoises more aggressively at the cost of fidelity to the base realization. Additional non-curated samples in App. F.3.1. Color maps throughout this work taken from Cramer et al. (2020).
+
+We quantify the controllable trade-offs in Fig. 3. Panel (a) increases  $\lambda_x = \lambda_\alpha$  at  $\lambda_f = 0$ , which reduces the PDE residual while also reducing diversity in the inferred permeabilities (measured via the complement of the mean pairwise SSIM; see App. E.1). Panel (b) fixes  $\lambda_x = \lambda_\alpha = 20K$  and varies  $\lambda_f$ , reporting  $\text{MMD}_x$  between the fine-tuned samples and the base dataset. As expected, stronger regularization preserves distributional fidelity (lower MMD) but yields higher residuals.
+
+{7}------------------------------------------------
+
+These ablations illustrate how practitioners can target residual reduction or distributional fidelity by tuning  $(\lambda_x, \lambda_\alpha, \lambda_f)$ .
+
+![Figure 3: Darcy ablations. (a) Increasing lambda_x = lambda_alpha with lambda_f = 0 lowers the PDE residual but reduces diversity in the inferred parameters (reported via SSIM-based diversity). (b) Sweeping lambda_f trades PDE residuals against fidelity to the base distribution (MMD_x).](a71911ad87414271aeb190e0eebcb989_img.jpg)
+
+Figure 3 consists of two line plots. Plot (a) shows  $R_{\text{weak}}$  (rel) on the left y-axis (0 to 4) and SSIM Diversity  $\alpha$  on the right y-axis (0.842 to 0.987) against a logarithmic x-axis (base, 100, 1k, 10k, 100k, 1M, 10M). The blue line for  $R_{\text{weak}}$  decreases from ~3.5 to ~1.5, while the orange line for SSIM Diversity  $\alpha$  decreases from ~0.98 to ~0.84. Plot (b) shows  $R_{\text{weak}}$  (rel) on the left y-axis (0 to 4) and  $\text{MMD}_x$  on the right y-axis (0.003 to 0.055) against a logarithmic x-axis (base, 10, 1, 0.1, 0.01, 0). The blue line for  $R_{\text{weak}}$  decreases from ~3.5 to ~1.0, while the orange line for  $\text{MMD}_x$  increases from ~0.005 to ~0.05.
+
+Figure 3: Darcy ablations. (a) Increasing lambda\_x = lambda\_alpha with lambda\_f = 0 lowers the PDE residual but reduces diversity in the inferred parameters (reported via SSIM-based diversity). (b) Sweeping lambda\_f trades PDE residuals against fidelity to the base distribution (MMD\_x).
+
+Figure 3: Darcy ablations. (a) Increasing  $\lambda_x = \lambda_\alpha$  with  $\lambda_f = 0$  lowers the PDE residual but reduces diversity in the inferred parameters (reported via SSIM-based diversity). (b) Sweeping  $\lambda_f$  trades PDE residuals against fidelity to the base distribution ( $\text{MMD}_x$ ). Each point averages 256 samples with shared noise seeds across settings.
+
+Computationally, adaptation is lightweight: fine-tuning on noisy Darcy requires only 20 gradient steps (hyperparameters in App. E.3) and completes in under 15 minutes on a single NVIDIA L40S, after which sampling proceeds at base-model cost with no inference-time adjustments.
+
+### 4.2 GUIDANCE ON SPARSE OBSERVATIONS
+
+In many realistic settings dense observations of a state variable are available for pre-training a generative model, whereas only a few measurements of the latent parameter can be collected. To sample from the posterior of parameter-state pairs that respect such sparse evidence we steer the generative process through *guidance*. Huang et al. (2024) demonstrate guided sampling towards sparse observations from a model that was pre-trained on the joint parameter-state distribution. Our approach applies a similar guidance mechanism, however, to a model that was pre-trained on noisy state observations alone. We state details on the guiding mechanism in E.4. Figure 4 shows that the guided sampler adheres to sparse measurements while preserving realistic variability in the generated samples. Additional results for different amounts of conditioning observations are given in Appendix F.3.5.
+
+![Figure 4: Three samples through guidance towards sparse observations (white markers in right panel) of the permeability, showing a plausible conditional distribution.](aa14b9ec884bf40ce06c161be468cd84_img.jpg)
+
+Figure 4 displays three pairs of images. Each pair shows a permeability map on the left and a sparse observation map on the right. The sparse observation maps feature white markers indicating the locations of measurements. The permeability maps show a complex, noisy pattern, while the sparse observation maps show a more uniform, noisy pattern with distinct white markers.
+
+Figure 4: Three samples through guidance towards sparse observations (white markers in right panel) of the permeability, showing a plausible conditional distribution.
+
+Figure 4: Three samples through guidance towards sparse observations (white markers in right panel) of the permeability, showing a plausible conditional distribution.
+
+### 4.3 LINEAR ELASTICITY
+
+We consider plane-strain linear elasticity on  $\Omega = [0, 1]^2$  with spatially varying Young’s modulus  $\alpha(\xi)$  and fixed Poisson ratio. Boundaries are Dirichlet: left/right clamped, top/bottom receive inward sinusoidal *normal* displacements with zero tangential slip. During fine-tuning, we impose a modified lower-boundary amplitude to induce controlled misspecification (see App. B) and include an MSE boundary penalty in the weak residual. We report quantitative BC results as the MSE at the boundary in Table 4.3 and a qualitative comparison is provided in App. F. Our method attains low weak/strong residuals while keeping distributional shift modest; PBFM and FM+ECI drift distributionally or present high residuals (full details and non-curated samples in App. E.5, F.3.2).
+
+{8}------------------------------------------------
+
+| Model | BC error (MSE) ↓ | $\mathcal{R}_{\text{weak}}$ (rel) ↓ | $\mathcal{R}_{\text{strong}}$ (rel) ↓ | $\text{MMD}_x$ ↓ | $\text{MMD}_\alpha$ ↓ |
+|-|-|-|-|-|-|
+| FM | $6.98 \times 10^{-5}$ ( $\pm 0.53$ ) | $1.59 \times 10^1$ ( $\pm 0.37$ ) | $1.83 \times 10^1$ ( $\pm 0.66$ ) | 0.24 | 0.05 |
+| PBFM | $2.32 \times 10^{-5}$ ( $\pm 0.87$ ) | $6.32 \times 10^0$ ( $\pm 0.82$ ) | $4.22 \times 10^0$ ( $\pm 0.26$ ) | 0.92 | 0.54 |
+| FM+ECI | 0.0 | $1.01 \times 10^3$ ( $\pm 0.13$ ) | $2.49 \times 10^2$ ( $\pm 0.32$ ) | 1.16 | 0.36 |
+| Ours | $1.71 \times 10^{-6}$ ( $\pm 0.50$ ) | $6.15 \times 10^0$ ( $\pm 0.77$ ) | $3.79 \times 10^0$ ( $\pm 0.87$ ) | 0.15 | 0.12 |
+
+Table 1: Linear elasticity under BC misspecification. Quantitative boundary-condition (BC) error, relative weak/strong residuals, and distributional metrics. Our method achieves low residuals with limited distributional shift.
+
+### 4.4 HELMHOLTZ
+
+We consider time-harmonic wave propagation governed by the heterogeneous Helmholtz equation  $-\Delta u - (1 - i \tan \delta) \kappa(x)^2 u = s$  on  $\Omega = [0, 1]^2$  with Robin boundary conditions. Training data use a small damping term ( $\tan \delta > 0$ ) producing complex attenuated fields, while fine-tuning assumes the idealized lossless model ( $\tan \delta = 0$ ), inducing a controlled model mismatch.
+
+| Model | Criterion | $\mathcal{R}_{\text{weak}}$ (rel) ↓ | $\mathcal{R}_{\text{strong}}$ (rel) ↓ | $\text{MMD}_x$ ↓ | $\text{MMD}_\alpha$ ↓ |
+|-|-|-|-|-|-|
+| FM | – | $1.5 \times 10^1$ ( $\pm 0.59$ ) | $2.55 \times 10^1$ ( $\pm 0.55$ ) | 0.18 | 0.03 |
+| PBFM | – | $8.33 \times 10^0$ ( $\pm 3.04$ ) | $1.22 \times 10^1$ ( $\pm 0.33$ ) | 0.09 | 0.03 |
+| Base AM | $\mathcal{R}_{\text{weak}}$ | $4.9 \times 10^0$ ( $\pm 1.85$ ) | $1.34 \times 10^1$ ( $\pm 0.32$ ) | 0.15 | 0.04 |
+| Base AM | $\text{MMD}_x$ | $5.64 \times 10^0$ ( $\pm 2.09$ ) | $1.59 \times 10^1$ ( $\pm 0.33$ ) | 0.13 | 0.04 |
+| Base AM + $\varphi$ | $\mathcal{R}_{\text{weak}}$ | $4.99 \times 10^0$ ( $\pm 2.12$ ) | $1.16 \times 10^1$ ( $\pm 0.33$ ) | 0.13 | 0.05 |
+| Base AM + $\varphi$ | $\text{MMD}_x$ | $5.46 \times 10^0$ ( $\pm 1.94$ ) | $1.59 \times 10^1$ ( $\pm 0.33$ ) | 0.12 | 0.04 |
+| AM | $\mathcal{R}_{\text{weak}}$ | $4.3 \times 10^0$ ( $\pm 1.29$ ) | $1.14 \times 10^1$ ( $\pm 0.29$ ) | 0.07 | 0.04 |
+| AM | $\text{MMD}_x$ | $4.32 \times 10^0$ ( $\pm 1.43$ ) | $1.05 \times 10^1$ ( $\pm 0.30$ ) | 0.06 | 0.04 |
+
+Table 2: Helmholtz: residuals and distribution (representative configs). Normalized weak/strong residuals and MMD metrics. We include AM variants and a PBFM-style baseline.
+
+Table 2 reports representative configurations for each method, selected as either the setting with the lowest weak residual ( $\mathcal{R}_{\text{weak}}$ ) or the lowest  $\text{MMD}_x$ . Full results are provided in App. F. The base FM model shows the largest weak and strong residuals due to the damped-vs.-lossless mismatch. PBFM substantially reduces both residuals relative to FM and, notably, also lowers  $\text{MMD}_x$  and preserves  $\text{MMD}_\alpha$ . The AM ablations (Base AM and Base AM+ $\varphi$ ) further reduce the weak residuals into the range  $4.9 \times 10^0$ – $5.6 \times 10^0$ , with strong residuals similar to those of PBFM, but they incur a moderate increase in  $\text{MMD}_x$  and  $\text{MMD}_\alpha$  compared to PBFM. Our full joint AM model achieves the lowest residuals overall (weak residuals down to  $4.3 \times 10^0$  and strong residuals near  $1.05 \times 10^1$ ) while simultaneously attaining the lowest  $\text{MMD}_x$  among all methods and maintaining  $\text{MMD}_\alpha$  comparable to the ablations. This indicates that the joint flow most effectively resolves the misspecification while preserving distributional fidelity.
+
+### 4.5 STOKES LID-DRIVEN CAVITY
+
+We consider steady incompressible flow in the Stokes regime (linear, low-Reynolds-number proxy) governed by  $-\nabla \cdot (\nu(x) \nabla u) + \nabla p = f$ ,  $\nabla \cdot u = 0$  with no-slip walls and a smooth moving lid. The dataset uses nonzero Kolmogorov forcing  $f \neq 0$ , while fine-tuning assumes  $f \equiv 0$ , creating a systematic model mismatch. Figure 5 reports the residual-distribution trade-offs for the Stokes lid-driven cavity. We show only the Base AM variants and our joint model: the base FM model exhibits extremely large residuals ( $3.05 \times 10^2 \pm 3.16$ ) and is omitted for clarity, while PBFM fails to converge to meaningful velocity-pressure fields (strong residuals  $1.15 \times 10^1 \pm 0.05$ ; see App. F). In contrast to Darcy and Helmholtz, the attainable weak residuals of all remaining variants are similar ( $\mathcal{R}_{\text{weak}} \approx 4$ –15). However, the joint model reaches *substantially lower* parameter-distribution discrepancies, achieving  $\text{MMD}_\alpha \approx 0.07$ –0.13, whereas both ablations remain around 0.22–0.28. Overall, although residual levels are similar across AM variants, only the joint model can enter the low- $\text{MMD}$  regime—particularly for  $\text{MMD}_\alpha$ . This highlights the joint flow’s greater flexibility in achieving high-fidelity parameter distributions.
+
+{9}------------------------------------------------
+
+![Figure 5: Stokes lid-driven cavity: residual-distribution trade-offs. Two scatter plots showing R_weak (rel) vs MMD_x and MMD_alpha. The left plot (a) shows MMD_x on the x-axis (0.2 to 1.0) and R_weak (rel) on the y-axis (0 to 40). The right plot (b) shows MMD_alpha on the x-axis (0.10 to 0.35) and R_weak (rel) on the y-axis (0 to 40). Both plots compare Base AM (blue squares), Base AM + phi (orange circles), and AM (green triangles). AM consistently achieves lower residuals and lower MMD values than the other two methods.](4e0ade2f41b66d5602160da5cc978274_img.jpg)
+
+Figure 5: Stokes lid-driven cavity: residual-distribution trade-offs. Two scatter plots showing R\_weak (rel) vs MMD\_x and MMD\_alpha. The left plot (a) shows MMD\_x on the x-axis (0.2 to 1.0) and R\_weak (rel) on the y-axis (0 to 40). The right plot (b) shows MMD\_alpha on the x-axis (0.10 to 0.35) and R\_weak (rel) on the y-axis (0 to 40). Both plots compare Base AM (blue squares), Base AM + phi (orange circles), and AM (green triangles). AM consistently achieves lower residuals and lower MMD values than the other two methods.
+
+Figure 5: Stokes lid-driven cavity: residual-distribution trade-offs. Weak residuals  $R_{\text{weak}}$  versus (a)  $\text{MMD}_x$  and (b)  $\text{MMD}_\alpha$ . Across all variants, attainable residuals are comparable, but the joint model (green) reaches *much lower* parameter-distribution discrepancies ( $\text{MMD}_\alpha \approx 0.07\text{--}0.13$ ) than the Base AM (blue) and Base AM+ $\varphi$  (orange) ablations, which remain around  $0.22\text{--}0.28$ .
+
+### 4.6 NATURAL IMAGES: PARAMETRIC COLOR TRANSFORMATION
+
+To demonstrate cross-domain utility, we apply our method to natural images by introducing a parametric recoloring pathway: analogous to the hidden PDE parameter,  $\alpha$  here specifies a polynomial color transform that operates outside the latent space, enabling exploration of image appearances not well supported by the base distribution. We use a class-conditional Latent Flow Matching (LFM) model (Dao et al., 2023) pre-trained on ImageNet-1k (Deng et al., 2009) and optimize PickScore (Kirstain et al., 2023) with a globally fixed prompt. As a concrete example, we fine-tune on the class *macaw* with the prompt “close-up Pop Art of a macaw parrot,” yielding the samples in Fig. 6. Joint fine-tuning with recoloring produces markedly more vibrant palettes and, crucially, *joint* adjustments (e.g., background textures that the recoloring exploits). Details about the recoloring parametrization are given in Appendix E.7 and further non-curated samples are provided in Appendix F.3.6.
+
+![Figure 6: Fine-tuning of LFM model on macaw class using prompt 'close-up Pop Art of a macaw parrot'. The figure shows two rows of three images each. The top row (a) shows results from Vanilla Adjoint Matching, with images appearing somewhat muted. The bottom row (b) shows results from the Joint model with parametric recoloring, which produces more vibrant, saturated colors and better background textures.](61ce9760bffbecba8f5e63310be1ebec_img.jpg)
+
+Figure 6: Fine-tuning of LFM model on macaw class using prompt 'close-up Pop Art of a macaw parrot'. The figure shows two rows of three images each. The top row (a) shows results from Vanilla Adjoint Matching, with images appearing somewhat muted. The bottom row (b) shows results from the Joint model with parametric recoloring, which produces more vibrant, saturated colors and better background textures.
+
+Figure 6: Fine-tuning of LFM model on *macaw* class using prompt “close-up Pop Art of a macaw parrot”, comparing *vanilla* Adjoint Matching with our joint approach.
+
+## 5 CONCLUSION
+
+We have introduced a framework for post-training fine-tuning of flow-matching generative models to enforce physical constraints and jointly infer latent physical parameters informing the constraints. Through a novel architecture, combined with the combination of weak-form PDE residuals with an adjoint-matching scheme our method can produce samples that adhere to complex constraints without significantly affecting the sample diversity. Experiments across PDE problems demonstrate the potential of this method to reduce residuals and enable joint solution-parameter generation, supporting its promise for physics-aware generative modeling. Future steps include adaptive approaches to optimizing trade-off between constraint enforcement and generative diversity, and extending the framework to more complex and multi-physics systems, including coupled PDEs and stochastic or chaotic dynamics. We would also explore how this methodology can be leveraged for uncertainty quantification and propagation, and downstream tasks such as optimal sensor placement and scientific discovery workflows.
+
+ Rest of paper (reference and Appendix) is removed.

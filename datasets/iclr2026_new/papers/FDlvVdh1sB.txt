@@ -1,0 +1,341 @@
+
+
+{0}------------------------------------------------
+
+# FLOW-GUIDED LATENT REFINER POLICIES FOR SAFE OFFLINE REINFORCEMENT LEARNING
+
+## ABSTRACT
+
+Safe offline reinforcement learning remains challenging due to two coupled obstacles: (i) reconciling soft penalty designs with hard safety requirements, and (ii) avoiding out-of-distribution (OOD) actions when the learned policy departs from the behavior data. Existing approaches often rely on penalty tuning that under- or over-regularizes safety, solve constrained objectives that depend on accurate simulators or online rollouts, or train powerful generative policies that still explore low-density, safety-unknown regions at deployment. We introduce a constraint-free offline framework that addresses both issues by (a) learning a flow-based latent action manifold that concentrates density on empirically safe regions and admits tractable bounds on policy deviation and OOD shift, and (b) applying a lightweight refiner stage that performs small, ordered updates in latent space to decouple reward, safety, and OOD control, stabilizing multi-objective optimization. This design keeps policy search inside the modeled data manifold, while a feasibility-aware training signal steers the refiner toward in-support, low-violation solutions without requiring explicit constraints or online interaction. Across a range of safe offline benchmarks, the proposed method achieves lower violation rates while matching or outperforming baselines in return, demonstrating its potential as a practical and effective approach to safer offline policy learning.
+
+## 1 INTRODUCTION
+
+Safe offline reinforcement learning (Safe Offline RL) seeks to learn policies that maximize return while satisfying stringent safety requirements from a fixed dataset—without risky, expensive online interaction (Levine et al., 2020). Training from logs allows practitioners to leverage prior operations, simulators, or demonstrations to deploy policies in safety-critical domains (robotics (Wu et al., 2024), driving (Zhang et al., 2025), industrial control (Yu et al., 2025; Wang et al., 2025)) where exploration is untenable, offering clear practical benefits over online learning.
+
+However, simultaneously achieving high performance and strict safety from static data remains elusive (Kushwaha et al., 2025). Most prior work (Ding & Lavaei, 2023; Le et al., 2019; Lee et al., 2022; Fujimoto et al., 2019) encodes safety as soft constraints—risk penalties or constrained Markov decision processes (CMDPs) (Altman, 2021) with Lagrangian updates, so violations are discouraged in expectation. When constraints are tight or objectives conflict, these updates often under-enforce safety, yielding policies that either ignore constraints or require brittle penalty tuning, which is undesirable in engineering settings that demand near-zero violations. Hard-constraint formulations (Wang et al., 2023; Yu et al., 2022) strengthen safety but typically induce conservatism and measurable return sacrifice, especially offline, where feasible exploration is absent.
+
+Orthogonal to constraint design, a second challenge is out-of-distribution (OOD) shift. Offline policies must evaluate and improve without querying unseen actions; otherwise, bootstrapping on OOD actions produces extrapolation error and overestimation, which in turn elevates safety risk at deployment (Kumar et al., 2019). Recent studies further note that OOD states at test time can also degrade behavior, indicating that distribution shift is a coupled state-action phenomenon (Levine et al., 2020; Kushwaha et al., 2025). Optimizing safety and return jointly under OOD constraints is therefore difficult. A prominent line of work learns a generative manifold in the latent action or trajectory space and restricts policy updates to this manifold by using VAE-, flow-, or diffusion-based generative policies combined with latent-constraint methods (Zhou et al., 2021; Koirala et al.,
+
+{1}------------------------------------------------
+
+2024; Akimov et al., 2022). These approaches reduce extrapolation by biasing policies toward high-density regions of the learned model, but OOD control typically remains *implicit*—through decoder support, bounded bases, or density thresholds—and is rarely coupled with safety to yield explicit, tunable guarantees on distribution shift in safe offline RL.
+
+To tackle these challenges, we introduce a density-first framework for safe offline RL that enforces stringent safety while simultaneously optimizing for high returns. Our approach treats safety assurance and OOD control as a representation problem within a task-conditioned latent manifold. Specifically, we equip the critics with Hamilton-Jacobi (HJ)-inspired (Bansal et al., 2017) safety signals: feasibility values are learned via a reversed expectile objective, and action-values are updated using an HJ-style backup derived from sparse safety labels, yielding reliable feasibility estimates directly from offline data. On top of this estimator, a structured conditional flow model acts as a latent prior that shapes the density so that, for each state, the induced action distribution concentrates around data-supported, empirically safe regions. Actions are generated by a high-capacity decoder that remains frozen during refinement; together with the invertible, exact-likelihood flow, this enables us to derive theoretical upper bounds on distributional shift in both the action and policy spaces, thereby offering principled control over OOD actions in the offline setting. Building on this property, we develop a three-expert refiner—comprising reward, safety, and shared experts—that performs small, ordered updates in the base latent space with decoupled, advantage-weighted objectives. This design pushes reward improvements within feasibility-shaped regions while pulling the policy away from unsafe, low-density areas, stabilizing multi-objective optimization and tying safety, reward, and OOD suppression together under purely offline training.
+
+Extensive experiments across diverse safe offline benchmarks demonstrate that combining safety-shaped density with latent-space refinement yields a consistently better return-safety trade-off under hard-constraint scenarios compared to strong baselines.
+
+## 2 PRELIMINARIES
+
+**Safe offline RL.** Safe RL is typically formulated as a Constrained Markov Decision Process  $\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, \mathcal{T}, r, h, c, \gamma \rangle$ , where  $h: \mathcal{S} \rightarrow \mathbb{R}$  encodes a state constraint and  $c(s) = \max\{h(s), 0\}$  is the induced cost, with  $c(s) > 0$  indicating a constraint violation. The discount factor is  $\gamma \in (0, 1)$ . In the offline setting, we are given a fixed dataset  $\mathcal{D} = \{(s, a, r, c, s')\}$  collected by an unknown behavior policy  $\pi_\beta$ . We adopt the basic offline safe RL objective:
+
+$$\max_{\pi} \mathbb{E}_s[V_s^{\pi}(s)] \quad \text{s.t.} \quad \mathbb{E}_s[V_c^{\pi}(s)] \leq \ell, \quad D_{\text{KL}}(\pi \| \pi_\beta) \leq \varepsilon, \quad (1)$$
+
+where  $V_s^{\pi}(s) = \mathbb{E}_\pi[\sum_{t=0}^{\infty} \gamma^t r(s_t, a_t) \mid s_0 = s]$  is the reward value function and  $V_c^{\pi}(s) = \mathbb{E}_\pi[\sum_{t=0}^{\infty} \gamma^t c(s_t) \mid s_0 = s]$  is the cost value function.  $\ell$  is the cost limit. The KL divergence  $D_{\text{KL}}(\cdot \| \cdot)$  constrains the deviation of  $\pi$  from the behavior policy  $\pi_\beta$ . In this work, we target on the zero cost budget case ( $\ell = 0$ ); see Appendix B.2 for a discussion of non-zero budgets.
+
+**Normalizing flows.** Normalizing flows (NFs)<sup>1</sup> (Kobyzev et al., 2020) are powerful generative models for complex distribution modeling. Let  $u \sim \mathcal{N}(0, I)$  and  $z = f_\phi(u; \text{cond})$  be a bijection
+
+<sup>1</sup>In this paper, ‘flow’ always refers to normalizing flows (e.g., RealNVP/CNF-style models), and should not be confused with flow-matching or probability flow ODE terminology.
+
+![Figure 1: Overview of the proposed method. The diagram illustrates the training and inference pipeline. In the training phase, an encoder takes state-action pairs (s, a) from an offline dataset D and maps them to a safety-dense embedding z. A conditional normalizing flow p_phi(z|s, u) is used to generate a base Gaussian distribution u ~ N(0, 1). In the inference phase, the encoder maps a state s to a safety-dense embedding z. A decoder reconstructs the action a from z. Three refiners (safety, reward, and shared) operate in the base Gaussian space to adjust samples toward high-density, in-support regions, maximizing return while suppressing OOD actions and enforcing safety constraints.](72bc1a2b64dd6bac8285f560440c1218_img.jpg)
+
+Figure 1: Overview of the proposed method. The diagram illustrates the training and inference pipeline. In the training phase, an encoder takes state-action pairs (s, a) from an offline dataset D and maps them to a safety-dense embedding z. A conditional normalizing flow p\_phi(z|s, u) is used to generate a base Gaussian distribution u ~ N(0, 1). In the inference phase, the encoder maps a state s to a safety-dense embedding z. A decoder reconstructs the action a from z. Three refiners (safety, reward, and shared) operate in the base Gaussian space to adjust samples toward high-density, in-support regions, maximizing return while suppressing OOD actions and enforcing safety constraints.
+
+Figure 1: Overview of the proposed method. An encoder maps  $(s, a)$  into a safety-dense latent embedding. A conditional normalizing flow  $p_\phi(z|s, u)$  with base  $u \sim \mathcal{N}(0, 1)$  serves as the prior, providing exact forward/inverse transforms between the base and latent spaces; a decoder then reconstructs actions  $a$  from  $z$ . At inference, three refiners (safety, reward, and a shared refiner) operate in the *base* Gaussian space to adjust samples toward high-density, in-support regions—maximizing return while suppressing OOD actions and enforcing safety constraints.
+
+{2}------------------------------------------------
+
+conditioned on  $\text{cond}$  (e.g., state or task context). The log-density of  $z$  is computed by the change-of-variables formula (derivation is deferred to Appendix C.1):
+
+$$\log p_\phi(z \mid \text{cond}) = \log p(u) + \log \left| \det \frac{\partial u}{\partial z} \right|. \quad (2)$$
+
+In our implementation, we adopt a RealNVP-style (Dinh et al., 2016) flow architecture based on coupling layers. Each layer splits the input  $z$  into two parts: an identity component  $z_{\text{id}}$  that remains unchanged, and a transform component  $z_u$  that is updated through an affine transformation:
+
+$$z'_u = z_u \odot \exp s_\phi(z_{\text{id}}, \text{cond}) + t_\phi(z_{\text{id}}, \text{cond}), \quad \log |\det J| = \sum s_\phi(\cdot), \quad (3)$$
+
+where  $s_\phi$  and  $t_\phi$  are scale and translation networks. These layers yield tractable log-likelihoods and exact inverses by construction. Stacking multiple such layers increases the expressiveness of the model while preserving efficient computation due to the triangular structure of the Jacobian.
+
+## 3 METHODOLOGY
+
+To address the twin challenges of under-enforced soft constraints and out-of-distribution drift in offline settings, we first recast the objective as a *state-wise zero-violation* hard constraint. Concretely, we require  $h(s_t) \leq 0$  almost surely under  $a_t \sim \pi(\cdot \mid s_t)$  for all  $t \in \mathbb{N}$ . Consequently, the soft safety constraint in Eq. 1 is replaced by a state-wise requirement together with an offline trust region:
+
+$$\max_{\pi} \mathbb{E}_s [V_r^\pi(s)] \quad \text{s.t.} \quad V_c^\pi(s) \leq 0, \quad \text{D}_{\text{KL}}(\pi \parallel \pi_\beta) \leq \varepsilon. \quad (4)$$
+
+Building on this formulation, we adopt a base-space refinement strategy, where optimization is performed entirely within a conditional latent density that is confined to a data-supported manifold, as illustrated in Figure 1. We refer to our method as **FLRP—Flow-guided Latent Refiner Policies**—which enables in-distribution policy improvement with near-zero constraint violations. The core components of FLRP are detailed in the following subsections.
+
+### 3.1 FEASIBILITY-BASED VALUE FUNCTION
+
+The state-wise zero-violation requirement in Eq. 4 calls for a representation that certifies safety along the entire trajectory, not only in expectation. Hamilton–Jacobi (HJ) reachability Bansal et al. (2017) from safe control provides exactly such a representation through signed safety functions and value-based certificates, and has been shown to be effective for enforcing hard constraints in recent safe RL studies (Fisac et al., 2018; Yu et al., 2022). Following this line, we cast the hard constraint into a pair of feasibility value functions based on Definition 1 that we can learn from offline data and then use as a unified signal for policy generation and refinement.
+
+**Definition 1** (Optimal feasible value functions). *Let  $h : \mathcal{S} \rightarrow \mathbb{R}$  be a signed safety function with  $h(s) \leq 0$  denoting safety. The optimal state-wise and action-wise feasibility values are defined by*
+
+$$V_h^*(s) := \min_{t \in \mathbb{N}} \max_{\pi} h(s_t), \quad s_0 = s, a_t \sim \pi(\cdot \mid s_t), s_{t+1} \sim T(\cdot \mid s_t, a_t), \quad (5)$$
+
+$$Q_h^*(s, a) := \min_{\pi} \max_{t \in \mathbb{N}} h(s_t), \quad s_0 = s, a_0 = a, a_{t \geq 1} \sim \pi(\cdot \mid s_t). \quad (6)$$
+
+By construction,  $V_h^*(s) \leq 0$  implies the existence of a policy whose entire trajectory from  $s$  remains safe; likewise,  $Q_h^*(s, a) \leq 0$  certifies zero violations when starting with action  $a$ . In offline settings, they can be estimated by the Feasible Bellman Operator with a discounted factor  $\gamma$ .
+
+**Definition 2** (Feasible Bellman operator). *For  $\gamma \in (0, 1)$  and any  $Q : \mathcal{S} \times \mathcal{A} \rightarrow \mathbb{R}$ , the feasible Bellman operator is defined by*
+
+$$(\mathcal{P}^*Q)(s, a) := (1 - \gamma)h(s) + \gamma \max\{h(s), V^*(s')\}, \quad V^*(s') := \min_a Q(s', a). \quad (7)$$
+
+This operator is a  $\gamma$ -contraction under the sup norm and admits a unique fixed point  $Q_{h,\gamma}^*$  with  $V_h^*(s) = \min_a Q_{h,\gamma}^*(s, a)$ ; as  $\gamma \uparrow 1$ , it recovers the HJ-style values  $Q_h^*$  and  $V_h^*$  in Definition 1. Proof is deferred to Appendix C.3.
+
+{3}------------------------------------------------
+
+We parameterize  $(Q_h, V_h)$  with neural networks. To avoid extrapolation errors that arise from querying actions outside the data support (Fujimoto et al., 2019), we approximate  $Q_h(s, \cdot)$  by reversed expectile regression and train  $Q_h$  with a one-step target that uses  $V_h$  in place of  $\min_{a'} Q_h(s', a')$ :
+
+$$\mathcal{L}_{V_h} = \mathbb{E}_{(s,a) \sim \mathcal{D}} [\rho_{\tau_h}^{\text{rev}}(Q_h(s, a) - V_h(s))], \quad (8)$$
+
+$$\mathcal{L}_{Q_h} = \mathbb{E}_{(s,a,s') \sim \mathcal{D}} \left[ \left( (1 - \gamma)h(s) + \gamma \max\{h(s), V_h^{\text{tgt}}(s')\} - Q_h(s, a) \right)^2 \right]. \quad (9)$$
+
+where  $\rho_{\tau}^{\text{rev}}(u) = |\tau - \mathbf{1}\{u > 0\}| u^2$  and  $V_h^{\text{tgt}}$  is a slowly updated target network. The reversed expectile with  $\tau_h \in (0.5, 1)$  down-weights overly optimistic  $Q_h$  values and sharpens the zero level set  $V_h \approx 0$ , while the target network stabilizes bootstrapping.
+
+### 3.2 CONDITIONAL FLOW-BASED SAFE POLICY GENERATION
+
+Rather than learning a policy directly in action space, we model a conditional latent action distribution, where high-quality samples correspond to higher density. Thus, instead of being pushed by hard constraints, safety is pulled by density: **we do not project actions onto an estimated safe set, but regularize the latent actions to remain in the high-density region of the flow, while unsafe behaviours are relegated to low-density regions.** Given the empirical feasibility signals learned in Sec. 3.1, we instantiate a conditional flow prior/posterior with a decoder. Compared with other generative models, normalizing flows offer exact likelihood, tractable inverse mapping, and strong expressivity (Papamakarios et al., 2021)—making them well-suited for both density modeling and OOD control.
+
+**Safety-weighted ELBO.** Let  $u \sim \mathcal{N}(0, I)$  be a base latent vector. The prior flow maps  $u$  to a latent variable  $z = f_{\phi}(u; s)$ , where the log-density is tractable:
+
+$$\log p_{\phi}(z | s) = \log p(u) + \log \left| \det \frac{\partial u}{\partial z} \right|. \quad (10)$$
+
+The posterior flow  $q_{\psi}(z | s, a)$  serves as an amortized recognizer, while a decoder  $\pi_{\theta}(a | s, z)$  maps latent codes back to actions. Training follows a safety-weighted variational objective that encourages accurate reconstruction and alignment with the prior:
+
+$$\mathcal{L}_{\text{ELBO}} = \mathbb{E}_{(s,a) \sim \mathcal{D}} \mathbb{E}_{z \sim q_{\psi}} [-w(s, a) \log \pi_{\theta}(a | s, z)] + \beta \mathbb{E}_{(s,a) \sim \mathcal{D}} [w(s, a) \text{D}_{\text{KL}}(q_{\psi} || p_{\phi})], \quad (11)$$
+
+where  $w(s, a) = \sigma(-Q_h(s, a)/T_v) \sigma(-V_h(s)/T_q)$  is a feasibility-weighted score derived from the critics in Sec. 3.1,  $T_v$  and  $T_q$  are temperatures, and  $\sigma$  is the logistic function. We formally justify that the above objective remains a consistent variational estimator by showing that it performs a KL projection of the model joint distribution onto a safety-weighted behavior distribution, as stated in the following lemma.
+
+**Lemma 1.** Let  $\tilde{p}_{\mathcal{D}}(s, a) \propto w(s, a) p_{\mathcal{D}}(s, a)$  be a behavior-weighted empirical distribution. Then
+
+$$\mathcal{L}_{\text{ELBO}} = \text{const} + \text{D}_{\text{KL}}(\tilde{p}_{\mathcal{D}}(s, a) q_{\psi}(z | s, a) || p_{\phi}(z | s) \pi_{\theta}(a | s, z)).$$
+
+This result shows that  $\mathcal{L}_{\text{flow}}$  amounts to a KL projection of the behavior-weighted posterior onto the generative model distribution. The proof is provided in Appendix C.3.
+
+**Prior Density Shaping.** Compared to a Gaussian prior, the flow-based prior is capable of modeling more complex and multimodal latent structures, but this expressiveness also introduces challenges during training. To mitigate these difficulties, we introduce a regularization objective that encourages empirically feasible regions in the action space to be mapped back to high-density regions in the latent base space. A key advantage of normalizing flows is their ability to compute an exact inverse transformation from  $z$  to  $u$ . We leverage this to define the following prior-shaping loss:
+
+$$\mathcal{L}_{\text{shape}} = \mathbb{E}_{(s,a) \sim \mathcal{D}} \left[ \exp(Q_r(s, a) - V_r(s)/\beta_r) \cdot \mathbf{I}_{\text{feas}}(s, a) \cdot \left\| T_{\phi}^{-1}(z_q | s) \right\|^2 \right] \quad (12)$$
+
+Here,  $\mathbf{I}_{\text{feas}}(s, a) = \mathbf{1}\{Q_h(s, a) \leq 0\}$  is a binary indicator derived from the feasibility critic, and  $T_{\phi}^{-1}(z_q | s)$  denotes the inverse transformation that maps a decoded action back to the latent base space. This encourages the flow prior to assign higher and smoother base-space density to actions that are both safe and high-reward, thereby shaping the latent manifold to better align with feasible and desirable behaviors.
+
+{4}------------------------------------------------
+
+**Freezing the decoder and distribution shift.** At inference time, actions are generated by sampling  $u \sim \mathcal{N}(0, I)$ , transforming it through the prior flow  $z = f_\phi(u; s)$ , and decoding via  $a = \pi_\theta(z, s)$ . In the subsequent refinement stage (Sec. 3.3), the decoder  $\pi_\theta$  is frozen and only  $u$  is updated. This confines policy updates to the safety-shaped latent manifold and avoids reintroducing distribution shift through unconstrained decoding.
+
+We show in the following that, under a fixed decoder, the divergence between the learned policy and the behavior policy can be decomposed into controllable terms.
+
+**Lemma 2.** *Let  $\pi_\theta(\cdot|s) := T_{s\#}\mathcal{N}$  be the action distribution obtained by pushing the standard Gaussian through the frozen prior and decoder, and  $\Pi_\theta(a|s)$  denotes the learned policy distribution (after refinement). Assume absolute continuity and a bounded density ratio  $R_\theta(s) := \sup_a \frac{\pi_\theta(a|s)}{\pi_\beta(a|s)} < \infty$  on the data support. Then for any state  $s$  (proofs are in Appendix C.4),*
+
+$$D_{\text{KL}}(\Pi_\theta(\cdot|s) \parallel \pi_\beta(\cdot|s)) \leq D_{\text{KL}}(\Pi_\theta(\cdot|s) \parallel \pi_0(\cdot|s)) + \log R_\theta(s).$$
+
+Moreover, by data-processing inequality (DPI) (Beaudry & Renner, 2011) and flow invariance,  $D_{\text{KL}}(\Pi_\theta \parallel \pi_0) \leq D_{\text{KL}}(q_u \parallel \mathcal{N})$ , hence  $D_{\text{KL}}(\Pi_\theta \parallel \pi_\beta) \leq D_{\text{KL}}(q_u \parallel \mathcal{N}) + \log R_\theta(s)$ .
+
+This result shows that the decoder decouples policy shifts into (i) a base-space divergence term and (ii) a modeling error term, both of which can be controlled during training.
+
+**Full objective.** We summarize the flow module’s objective as:
+
+$$\mathcal{L}_{\text{flow}} = \mathcal{L}_{\text{ELBO}} + \mathcal{L}_{\text{shape}} + \lambda_H (H_0 - \mathbb{E}_{q_u}[-\log q_\phi(z|s, a)])_+, \quad (13)$$
+
+where the final term softly enforces a minimum posterior entropy to prevent mode collapse. Having shaped a structured latent manifold through feasibility-aware density modeling, we next develop a refiner module that further improves performance by optimizing within this base space.
+
+### 3.3 BASE-SPACE OPTIMIZATION VIA EXPERT REFINER
+
+While the flow module already shapes a safety-aware latent manifold, it does not directly optimize task performance, as a high reward is also desired. Inspired by recent progress on Mixture-of-Experts (MoE) (Jayawardana et al., 2025; Obando-Ceron et al., 2024) architectures, we design an expert refiner that operates on the Gaussian base latent  $u \sim \mathcal{N}(0, I)$  learned in Sec. 3.2. The refiner performs small, ordered updates in the base space to improve reward while keeping search confined to the safety-shaped manifold.
+
+**Architecture.** The refiner consists of three latent-space experts: a reward expert  $f_r$ , a safety expert  $f_h$ , and a shared expert  $f_{\text{sh}}$ . Each expert applies a residual update in the latent base space conditioned on the state  $s$ . At each refinement step  $t = 0, \dots, T-1$ , we start from  $u_0 \sim \mathcal{N}(0, I)$  and apply the following sequential updates:
+
+$$u_{t+1} = u_t + f_k(s, u_t), \quad \text{for } k \in \{r, h, \text{sh}\},$$
+
+where the final update is always performed by the shared expert  $f_{\text{sh}}$ . After  $T$  steps, the refined latent  $u_T$  is mapped to  $z = f_\phi(u_T; s)$  via the frozen prior flow, and then decoded to an action distribution  $\pi_\theta(\cdot|s, z)$  using the decoder. We denote its decoded mean by  $\bar{a}(s, u_T)$  and use it for downstream evaluation or rollouts.
+
+**Expert-specific objectives.** Let  $\bar{a}(s, u_T) := \arg \max_a \pi_\theta(a|s, f_\phi(u_T; s))$  denote the decoded mean action, and reuse the learned critics  $(Q_h, V_r)$  and  $(Q_h, V_h)$  from Sec. 3.1. Each expert is trained using a modular, advantage-weighted regression (AWR) (Peng et al., 2019; Hansen-Estruch et al., 2023) objective:
+
+(i) *Safety expert.* Minimizes the violation gap with a push-pull form:
+
+$$L_h = \mathbb{E}_{s, a \sim \mathcal{D}}[\phi(Q_h(s, \bar{a}(s, u_T)) - V_h(s)) + w_h(s, a) \cdot |\bar{a}(s, u_T) - a|_2], \quad (14)$$
+
+where  $w_h(s) = \exp(-[Q_h(s, \bar{a}) - V_h(s)]/\beta_h) \cdot \mathbb{I}_{\text{feas}}$ , and  $\phi(\cdot)$  is a soft penalty (e.g., softplus). The first term penalizes the positive safety advantage  $Q_h(s, \bar{a}) - V_h(s)$  of the refined action, while the second term performs supervised regression on safety-weighted behaviour data.
+
+{5}------------------------------------------------
+
+(ii) *Reward expert.* Maximizes return within feasible states as a supervised learning:
+
+$$\mathcal{L}_r = -\mathbb{E}_{s,a \sim \mathcal{D}} [w_r(s, a) \cdot |\bar{a}(s, u_T) - a|_2]. \quad (15)$$
+
+where  $w_r(s, a) = \exp(|Q_r(s, a) - V_r(s)|/\beta_r) \cdot \mathbf{I}_{\text{feas}}$  up-weights positive reward advantage and prevents reward-only updates from steering into unsafe states.
+
+(iii) *Shared expert.* Regularizes refinement in the base space. As stated in Lemma 2: once the decoder is frozen, the policy shift is entirely induced by the divergence of the refined base distribution  $D_{\text{KL}}(q_u \parallel \mathcal{N})$ . Considering the base is a standard Gaussian distribution, we use its energy as an explicit regularizer, together with a small proximal term that discourages large steps:
+
+$$\mathcal{L}_{\text{sh}} = \|u_T\|^2 + \|u_T - u_0\|^2. \quad (16)$$
+
+The full refiner loss is:
+
+$$\mathcal{L}_{\text{ref}} = \lambda_r \mathcal{L}_r + \lambda_h \mathcal{L}_h + \lambda_{\text{sh}} \mathcal{L}_{\text{sh}} \quad (17)$$
+
+Refining in the base space with a fixed process provides distributional control for *all* downstream spaces. Because the flow and decoder are both invertible or frozen, any change in the base space deterministically propagates through the latent and action spaces. While Lemma 2 establishes a general data-processing inequality under pushforward mappings, we now apply this result specifically to our architecture. The next lemma formalizes the KL chain via pushforwards in our method.
+
+**Lemma 3.** Let  $q_u$  be the refined base distribution and  $\mathcal{N}$  the standard Gaussian. Let  $f_\phi(\cdot; s)$  be the (invertible) flow and  $q_z = f_\phi \# q_u$ ,  $p_\phi = f_\phi \# \mathcal{N}$ , and action distributions  $\pi = T_{s\#} q_u$ ,  $\pi_0 = T_{s\#} \mathcal{N}$  with  $T_s(u) := \bar{a}(s, u)$ . Then (proofs are in Appendix C.5):
+
+$$D_{\text{KL}}(\pi(\cdot | s) \parallel \pi_0(\cdot | s)) \leq D_{\text{KL}}(q_z \parallel p_\phi) = D_{\text{KL}}(q_u \parallel \mathcal{N}). \quad (18)$$
+
+The equality follows from the invariance of KL under invertible mappings (the flow), and the inequality is the data-processing inequality through the decoder.
+
+**Corollary 1** (Deviation bounds from base KL). Let  $L_g$  be the Lipschitz constant of  $g_\theta$  on the latent chart,  $W_2(\cdot, \cdot)$  denotes the 2-Wasserstein distance, and  $\text{TV}(\cdot, \cdot)$  stands for total variation distance between distributions. Then for any  $s$  (proofs are in Appendix C.6):
+
+$$\begin{aligned} W_2(\pi, \pi_0) &\leq L_g \sqrt{2 D_{\text{KL}}(q_u \parallel \mathcal{N})} \\ \text{TV}(\pi, \pi_\beta) &\leq \sqrt{\frac{1}{2} D_{\text{KL}}(\pi \parallel \pi_0)} + \text{TV}(\pi_0, \pi_\beta) \end{aligned} \quad (19)$$
+
+and for any measurable OOD region  $\mathcal{O}$ :
+
+$$\pi(\mathcal{O}) \leq \pi_\beta(\mathcal{O}) + \sqrt{\frac{1}{2} D_{\text{KL}}(q_u \parallel \mathcal{N})} + \text{TV}(\pi_0, \pi_\beta). \quad (20)$$
+
+These results justify our design: keeping  $D_{\text{KL}}(q_u \parallel \mathcal{N})$  small bounds downstream deviation—latent, action, and final policy—across multiple metrics, whereas direct perturbations in  $z$  or  $a$  lack such guarantees. Building on this, Appendix C.8 derives explicit reward and cost policy-gap guarantees in terms of the base-space KL upper bound and the prior–behavior mismatch. This further motivates us to optimize in the base space, where our loss concentrates mass in high-density regions so that stable base-space updates induce meaningful latent refinements.
+
+### 3.4 PRACTICAL IMPLEMENTATION
+
+We employ expectile regression to obtain in-sample, asymmetric value estimates that are biased toward high-value actions without querying out-of-distribution actions, following the practice in IQL (Kostrikov et al., 2021), which trains  $V_r$  using asymmetric expectile regression and  $Q_r$  by TD updates toward  $V_r$ .
+
+$$\mathcal{L}_{V_r} = \mathbb{E}_{(s,a) \sim \mathcal{D}} [\rho_r(Q_r(s, a) - V_r(s))], \quad \rho_r(u) = |\tau - \mathbf{1}\{u < 0\}| u^2, \quad (21)$$
+
+$$\mathcal{L}_{Q_r} = \mathbb{E}_{(s,a,s') \sim \mathcal{D}} [(Q_r(s, a) - \hat{Q}_r(s, a))^2], \quad \hat{Q}_r(s, a) := r(s, a) + \gamma V_r(s'). \quad (22)$$
+
+{6}------------------------------------------------
+
+Table 1: Performance Comparison on DSRL benchmark.  $\uparrow$  means the higher the better,  $\downarrow$  means the lower the better.
+
+| Task | BCQL |  | CPQ |  | CDT |  | FISOR |  | LSPC |  | FLRP(Ours) |  |
+|-|-|-|-|-|-|-|-|-|-|-|-|-|
+|  | reward $\uparrow$ | cost $\downarrow$ | reward $\uparrow$ | cost $\downarrow$ | reward $\uparrow$ | cost $\downarrow$ | reward $\uparrow$ | cost $\downarrow$ | reward $\uparrow$ | cost $\downarrow$ | reward $\uparrow$ | cost $\downarrow$ |
+| <b>Safety-Gymnasium</b> |  |  |  |  |  |  |  |  |  |  |  |  |
+| CarButton1 | 0.16 | 4.20 | 0.13 | 2.44 | 0.21 | 1.60 | <b>-0.04</b> | <b>0.58</b> | <b>-0.15</b> | <b>0.58</b> | <b>0.03</b> | <b>0.36</b> |
+| CarButton2 | 0.07 | 3.47 | 0.17 | 7.05 | 0.13 | 1.58 | <b>-0.01</b> | <b>0.22</b> | <b>-0.03</b> | <b>0.59</b> | <b>0.04</b> | <b>0.38</b> |
+| CarPush1 | <b>0.09</b> | <b>0.56</b> | <b>-0.14</b> | <b>0.80</b> | <b>0.31</b> | <b>0.40</b> | <b>0.26</b> | <b>0.21</b> | <b>0.21</b> | <b>0.13</b> | <b>0.20</b> | <b>0.04</b> |
+| CarPush2 | <b>0.06</b> | <b>0.61</b> | 0.10 | 5.66 | 0.19 | 1.30 | <b>0.16</b> | <b>0.71</b> | 0.04 | 1.37 | <b>0.24</b> | <b>0.36</b> |
+| CarGoal1 | <b>0.13</b> | <b>0.90</b> | <b>0.22</b> | <b>0.79</b> | 0.66 | 1.21 | <b>0.42</b> | <b>0.88</b> | <b>0.23</b> | <b>0.71</b> | <b>0.27</b> | <b>0.00</b> |
+| CarGoal2 | 0.13 | 2.38 | 0.17 | 3.10 | 0.48 | 1.25 | <b>0.06</b> | <b>0.06</b> | <b>0.11</b> | <b>0.50</b> | <b>0.20</b> | <b>0.28</b> |
+| AntVel | 0.29 | 2.08 | <b>-0.31</b> | <b>0.00</b> | <b>0.98</b> | <b>0.39</b> | <b>0.90</b> | <b>0.00</b> | <b>0.91</b> | <b>0.02</b> | 0.69 | 0.00 |
+| HalfCheetahVel | 1.04 | 7.06 | 0.08 | 2.56 | <b>0.97</b> | <b>0.55</b> | <b>0.88</b> | <b>0.00</b> | <b>0.86</b> | <b>0.18</b> | <b>0.94</b> | <b>0.16</b> |
+| SwimmerVel | 0.29 | 4.10 | 0.31 | 2.66 | 0.67 | 1.47 | <b>0.01</b> | <b>0.01</b> | 0.47 | 1.26 | <b>0.06</b> | <b>0.00</b> |
+| <b>Safety-Gym Avg</b> | 0.25 | 2.82 | 0.08 | 2.78 | 0.51 | 1.08 | <b>0.29</b> | <b>0.40</b> | <b>0.29</b> | <b>0.59</b> | <b>0.33</b> | <b>0.18</b> |
+| <b>Bullet-Safety-Gym</b> |  |  |  |  |  |  |  |  |  |  |  |  |
+| AntRun | 0.05 | 4.63 | <b>0.13</b> | <b>0.01</b> | 0.69 | 1.24 | <b>0.45</b> | <b>0.76</b> | 0.94 | 1.46 | <b>0.52</b> | <b>0.00</b> |
+| BallRun | <b>0.35</b> | <b>0.20</b> | 0.85 | 13.67 | <b>0.88</b> | <b>0.86</b> | <b>0.14</b> | <b>0.00</b> | <b>0.08</b> | <b>0.00</b> | <b>0.16</b> | <b>0.00</b> |
+| CarRun | 0.75 | 2.51 | <b>0.75</b> | <b>0.52</b> | 0.99 | 1.47 | <b>0.80</b> | <b>0.00</b> | <b>0.75</b> | <b>0.22</b> | <b>0.87</b> | <b>0.00</b> |
+| DroneRun | <b>0.65</b> | <b>0.71</b> | <b>0.26</b> | <b>0.44</b> | <b>0.71</b> | <b>0.60</b> | <b>0.41</b> | <b>0.57</b> | 0.62 | 1.34 | <b>0.59</b> | <b>0.02</b> |
+| AntCircle | 0.61 | 1.42 | <b>0.00</b> | <b>0.00</b> | 0.46 | 2.74 | <b>0.23</b> | <b>0.00</b> | <b>0.40</b> | <b>0.78</b> | <b>0.45</b> | <b>0.25</b> |
+| BallCircle | 0.79 | 1.20 | 0.40 | 4.37 | 0.79 | 1.64 | <b>0.45</b> | <b>0.00</b> | 0.29 | 1.83 | <b>0.46</b> | <b>0.00</b> |
+| CarCircle | 0.64 | 1.80 | 0.49 | 4.48 | 0.70 | 1.20 | <b>0.34</b> | <b>0.00</b> | <b>0.28</b> | <b>0.04</b> | <b>0.66</b> | <b>0.06</b> |
+| DroneCircle | 0.68 | 1.19 | -0.27 | 1.29 | 0.59 | 1.56 | <b>0.60</b> | <b>0.00</b> | 0.66 | 1.37 | <b>0.54</b> | <b>0.00</b> |
+| <b>Bullet-SG Avg</b> | 0.57 | 1.71 | 0.33 | 3.10 | 0.73 | 1.41 | <b>0.43</b> | <b>0.17</b> | <b>0.50</b> | <b>0.88</b> | <b>0.54</b> | <b>0.04</b> |
+| <b>Safe MetaDrive</b> |  |  |  |  |  |  |  |  |  |  |  |  |
+| Easysparse | 0.94 | 9.25 | <b>-0.05</b> | <b>0.15</b> | <b>0.25</b> | <b>0.15</b> | <b>0.41</b> | <b>0.50</b> | 0.74 | 1.55 | <b>0.32</b> | <b>0.20</b> |
+| Easymean | 0.99 | 7.22 | <b>-0.06</b> | <b>0.00</b> | <b>0.42</b> | <b>0.25</b> | <b>0.43</b> | <b>0.67</b> | <b>0.70</b> | <b>0.68</b> | <b>0.25</b> | <b>0.10</b> |
+| Easysdense | 0.20 | 1.76 | <b>-0.06</b> | <b>0.16</b> | 0.35 | 1.17 | 0.52 | 1.26 | 0.74 | 1.48 | <b>0.33</b> | <b>0.11</b> |
+| Mediumsparse | 0.94 | 2.83 | <b>-0.08</b> | <b>0.12</b> | 0.78 | 1.24 | <b>0.43</b> | <b>0.08</b> | <b>0.97</b> | <b>0.79</b> | <b>0.31</b> | <b>0.06</b> |
+| Mediummean | 0.70 | 4.45 | <b>-0.07</b> | <b>0.16</b> | 0.72 | 2.74 | <b>0.36</b> | <b>0.02</b> | <b>0.92</b> | <b>0.89</b> | <b>0.52</b> | <b>0.63</b> |
+| Mediumdense | 0.76 | 3.90 | <b>-0.08</b> | <b>0.10</b> | 0.70 | 2.62 | <b>0.51</b> | <b>0.39</b> | <b>0.87</b> | <b>0.88</b> | <b>0.33</b> | <b>0.07</b> |
+| Hardsparse | 0.49 | 3.16 | <b>-0.05</b> | <b>0.10</b> | <b>0.26</b> | <b>0.46</b> | <b>0.33</b> | <b>0.24</b> | 0.52 | 1.32 | <b>0.35</b> | <b>0.34</b> |
+| Hardmean | 0.29 | 3.80 | <b>-0.05</b> | <b>0.15</b> | <b>0.20</b> | <b>0.61</b> | <b>0.27</b> | <b>0.01</b> | <b>0.41</b> | <b>0.57</b> | <b>0.28</b> | <b>0.10</b> |
+| Harddense | 0.42 | 2.95 | <b>-0.04</b> | <b>0.12</b> | 0.22 | 1.38 | <b>0.30</b> | <b>0.26</b> | 0.53 | 1.63 | <b>0.36</b> | <b>0.11</b> |
+| <b>MetaDrive Avg</b> | 0.64 | 4.37 | <b>-0.06</b> | <b>0.12</b> | 0.45 | 1.18 | <b>0.40</b> | <b>0.38</b> | 0.71 | 1.09 | <b>0.34</b> | <b>0.19</b> |
+
+*Note:* **Bold:** safe policy; Gray: unsafe policy; **Bold blue:** best safe policy; **Bold:** second best safe policy
+
+As summarized in Appendix D.5, Alg. 1, there are two main phases for the overall training procedure. In Stage 1 (critic and flow pretraining), we jointly train the safety and reward critics  $(Q_h, V_h), (Q_r, V_r)$  together with the flow prior/posterior and decoder using offline transitions, and the safety-weighted ELBO and density-shaping objectives in Sec. 3.2. In Stage 2 (latent refiner training), we freeze this base model and optimize the three refiners in base space via AWR-style updates to reward and safety, together with the base-space regularizer for OOD control. All components are trained purely offline from the fixed dataset, and this two-phase, modular design lets critics, flow, and refiners specialize in feasibility shaping, density modeling, and reward-safety refinement while maintaining a consistent in-distribution optimization pipeline. At inference time, we sample  $u \sim \mathcal{N}(0, I)$ , apply the expert refiner for  $T$  steps to obtain  $u_T$ , decode through the frozen flow and decoder to obtain the final action. Training details can be found in Appendix D.5.
+
+## 4 EXPERIMENTS
+
+**Experiment Setup.** We evaluate the proposed method against several strong offline safe RL baselines across two widely-used benchmark environments: **Safety-Gymnasium** (Ji et al., 2023), **Bullet-Safety-Gym** (Gronauer, 2022) and **Safe MetaDrive** (Li et al., 2022) from the DSRL suite (Liu et al., 2023a). We adopt *normalized return* and *normalized cost* as evaluation metrics, which we refer to as “reward” and “cost” for clarity and brevity. We set a uniform cost limit of 10 for all tasks.
+
+{7}------------------------------------------------
+
+![Figure 2: Example visualization of the refiner principle on CarRun. The figure consists of three panels: (a) Cost critic change, (b) Value critic change, and (c) Decoder log probability. Each panel shows a 2D action space with Velocity on the horizontal axis and Steering Angle on the vertical axis. The background color represents the respective metric, with a color bar on the right of each panel. A black cross marks the base action, and colored triangles (H, R, SH) show refinement trajectories. Panel (a) shows feasibility (darker is safer), panel (b) shows reward (lighter is higher), and panel (c) shows decoder log-density (lighter is higher).](3121afa7ca030b22ee0345864ca6f38b_img.jpg)
+
+Figure 2: Example visualization of the refiner principle on CarRun. The figure consists of three panels: (a) Cost critic change, (b) Value critic change, and (c) Decoder log probability. Each panel shows a 2D action space with Velocity on the horizontal axis and Steering Angle on the vertical axis. The background color represents the respective metric, with a color bar on the right of each panel. A black cross marks the base action, and colored triangles (H, R, SH) show refinement trajectories. Panel (a) shows feasibility (darker is safer), panel (b) shows reward (lighter is higher), and panel (c) shows decoder log-density (lighter is higher).
+
+Figure 2: Example visualization of the refiner principle on CarRun. Each panel shows the 2D action space (velocity on the horizontal axis, steering angle on the vertical), where background colors indicate (a) feasibility (darker is safer), (b) reward (lighter is higher), and (c) decoder log-density (lighter is higher). The black cross is the base action from the flow prior, and colored curves (H, R, SH) show the refinement trajectories in base space, with triangles marking the final refined actions toward safer, higher-return, and data-supported regions.
+
+**Baselines.** We compare our approach against five representative baselines: (1) **BCQL** (Fujimoto et al., 2019): A batch-constrained Q-learning with an adaptive Lagrangian penalty on constraint violations. (2) **CPQ** (Xu et al., 2022): A Q-learning methods that penalize unsafe and out-of-distribution state-action pairs. (3) **CDT** (Liu et al., 2023b): A transformer-based offline safe RL method that learns cost-conditioned action generators for constraint enforcement. (4) **LSPC** (Koirala et al., 2024): A latent safety-constrained approach that uses a conditional variational autoencoder to model safety in the latent space. (5) **FISOR** (Zheng et al., 2024): A feasibility-guided method that uses a diffusion model to policy sampling.
+
+**Main Results** Table 1 summarizes results on Safety-Gymnasium, Bullet-Safety-Gym, and Safe MetaDrive. Overall, our method learns safe policies with competitive returns. BCQL uses a Lagrangian trade-off but often fails to meet safety constraints; CPQ is more conservative and improves safety at the cost of reward; and CDT, though capable of high returns via target conditioning, tends to violate safety more frequently. FISOR and LSPC are strong baselines with distinct characteristics. FISOR produces uniformly safe but slightly conservative policies via feasibility guidance, while LSPC is more aggressive—seeking the most rewarding action in a learned safe latent space—which can become unreliable under OOD states/actions. Our FLRP trains safety and shared refiners to concentrate probability mass in high-density regions of the encoder’s latent space, naturally biasing actions toward on-support, safer choices. FLRP performs strongly on Safety-Gymnasium and Bullet-Safety-Gym, and is mildly conservative on Safe MetaDrive due to limited overlap between high-reward and low-cost regions, which complicates hard-constrained optimization. Even so, it enforces safety effectively, achieving violation rates far below the second-best method (e.g., 0.18 vs. 0.40 in Safety-Gymnasium, 0.04 vs. 0.88 in Bullet-Safety-Gym, and 0.19 vs. 0.38 in Safe MetaDrive) while maintaining strong performance.
+
+## 5 ABLATION STUDY AND ANALYSIS
+
+**Justification of Each Refiner.** A core challenge in safe RL is reconciling reward maximization with safety constraints, which can pull updates in opposite directions. Figure 2 illustrates this on a fixed state from the CarRun task. Each panel visualizes the 2D action space with velocity on the horizontal axis and steering angle on the vertical axis; the background color represents, respectively, (a) feasibility  $Q_h(s, a)$  (darker is safer), (b) reward value  $Q_r(s, a)$  (lighter is higher return), and (c) decoder log-density  $\log \pi_\theta(a|s)$  (lighter is higher density). In this particular state, the regions associated with high reward and high safety are largely non-overlapping, and both can be misaligned with the high-density area of the action decoder. As a result, the refinement steps taken by the reward and safety refiners can diverge significantly, often steering the latent action representation into areas that are poorly supported by the decoder and thus prone to OOD issues. The shared
+
+{8}------------------------------------------------
+
+![Figure 3: Two bar charts showing normalized reward and cost across four tasks (CarRun, AntCircle, DroneCircle, BallCircle) for four refinement schedules: H→R→SH (blue), R→H→SH (orange), Random (green), and No refine (red). Error bars represent one standard deviation.](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+Figure 3 consists of two bar charts. The left chart is titled 'Reward' and the right chart is titled 'Cost'. Both charts share a common legend: H→R→SH (blue), R→H→SH (orange), Random (green), and No refine (red). The x-axis for both charts lists four tasks: CarRun, AntCircle, DroneCircle, and BallCircle. The y-axis for the 'Reward' chart ranges from 0.0 to 1.0, and for the 'Cost' chart from 0.0 to 0.6. Error bars representing one standard deviation are shown for each bar.
+
+| Task | H→R→SH (Reward) | R→H→SH (Reward) | Random (Reward) | No refine (Reward) | H→R→SH (Cost) | R→H→SH (Cost) | Random (Cost) | No refine (Cost) |
+|-|-|-|-|-|-|-|-|-|
+| CarRun | ~0.85 | ~0.88 | ~0.42 | ~0.05 | ~0.02 | ~0.05 | ~0.02 | ~0.18 |
+| AntCircle | ~0.45 | ~0.58 | ~0.38 | ~0.08 | ~0.25 | ~0.38 | ~0.25 | ~0.02 |
+| DroneCircle | ~0.55 | ~0.55 | ~0.25 | ~0.15 | ~0.02 | ~0.12 | ~0.18 | ~0.25 |
+| BallCircle | ~0.48 | ~0.48 | ~0.42 | ~0.25 | ~0.02 | ~0.08 | ~0.05 | ~0.02 |
+
+Figure 3: Two bar charts showing normalized reward and cost across four tasks (CarRun, AntCircle, DroneCircle, BallCircle) for four refinement schedules: H→R→SH (blue), R→H→SH (orange), Random (green), and No refine (red). Error bars represent one standard deviation.
+
+Figure 3: Effect of refiner order on normalized reward (left) and cost (right) across four tasks. Each group of bars corresponds to four refinement schedules (H→R→SH, R→H→SH, Random, No refine), with error bars showing one standard deviation.
+
+refiner stabilizes and regularizes this process by keeping actions on support while balancing both experts, coordinating their updates when reward, safety, and data support are in tension.
+
+**HJ-feasibility Function.** We first assess the benefit of incorporating HJ reachability by replacing the feasibility function with a cost value function, states/actions whose cost falls below the empirical 75th percentile of zero-violation samples are treated as feasible and used for flow training, while refiner training is unchanged; we denote this variant as *w/o HJ*. As reported in Table 2, this heuristic thresholding yields noisier feasibility estimates, which in turn leads to higher evaluation costs and lower returns than the HJ-based approach. In contrast, HJ reachability propagates safety constraints through the dynamics, which is robust to sampling noise and uneven cost distributions. The results indicate that structured HJ reachability is crucial for stable constraint satisfaction in offline settings.
+
+Table 2: Ablations on HJ reachability.
+
+| Task | w/o HJ |  | FLRP |  |
+|-|-|-|-|-|
+|  | $r \uparrow$ | $c \downarrow$ | $r \uparrow$ | $c \downarrow$ |
+| AntRun | 0.65 | 0.13 | 0.52 | 0.00 |
+| BallRun | 0.08 | 0.14 | 0.16 | 0.00 |
+| CarRun | 0.83 | 0.13 | 0.87 | 0.00 |
+| DroneRun | 0.16 | 5.24 | 0.59 | 0.02 |
+| AntCircle | 0.23 | 0.01 | 0.45 | 0.25 |
+| BallCircle | 0.44 | 0.00 | 0.46 | 0.00 |
+| CarCircle | 0.63 | 0.49 | 0.66 | 0.06 |
+| DroneCircle | 0.56 | 0.67 | 0.54 | 0.00 |
+
+**The Order of Refinement.** We compare four refiner schedules on four tasks (BallCircle, CarRun, AntCircle, DroneCircle) to assess how sensitive FLRP is to the refiner order: two fixed orders (H→R→SH and R→H→SH), a random permutation, and a “No refine” baseline that samples directly from the flow prior. The results in Figure 3 show that all refiner variants substantially improve normalized return over No refine, confirming the benefit of latent refinement. Across all tasks, H→R→SH and R→H→SH achieve clearly higher return than no refinement baseline with low normalized cost, while the random-order variant is intermediate but with larger variability. We also observe a consistent trade-off pattern: H→R→SH generally yields lower cost with strong but slightly lower return, whereas R→H→SH attains the highest return at the price of higher cost. This supports our design choice of using a fixed schedule with the shared refiner applied last so that it can consistently regularize and coordinate the preceding safety and reward updates.
+
+**Other Ablations.** We further examine the effect of the prior. As a comparison, we train a variant that replaces our flow-based prior with a conventional Gaussian prior and report results in Table 3. The flow prior consistently yields higher returns and lower costs. We also study the number of refinement steps  $T$  at inference on CarCircle. We do not vary the refinement order: the safety expert is always applied first, and the shared expert last. This design choice reflects our latent geometry—density concentrates on safety rather than reward—so an early safety refinement helps place trajectories in high-density (feasible) regions. The intermediate refiners alternate between safety and reward experts. As shown in Figure 4, increasing  $T$  reduces cost and variability: a larger  $T$  is more likely to explore the learned latent space and lowers the rate of out-of-distribution actions. The trade-off is that a very large  $T$  can induce slightly more conservative behavior. In practice, an intermediate value (e.g.,  $T = 3$ ) can yield a favorable trade-off.
+
+{9}------------------------------------------------
+
+Table 3: Ablations on the prior used.
+
+| Task | Gaussian Prior |  | Flow Prior |  |
+|-|-|-|-|-|
+|  | $r \uparrow$ | $c \downarrow$ | $r \uparrow$ | $c \downarrow$ |
+| CarButton1 | -0.14 | 0.22 | 0.03 | 0.36 |
+| CarButton2 | 0.01 | 0.82 | 0.04 | 0.38 |
+| CarPush1 | 0.07 | 0.08 | 0.20 | 0.04 |
+| CarPush2 | 0.06 | 0.00 | 0.24 | 0.36 |
+| CarGoal1 | 0.06 | 0.00 | 0.27 | 0.00 |
+| CarGoal2 | 0.05 | 0.74 | 0.20 | 0.28 |
+
+![Figure 4: Ablation on the number of refinement steps. Two line graphs show Normalized Return and Normalized Cost over Train Steps (x10^6) for T=1, T=3, T=6, and T=9. Return increases and plateaus, while cost decreases and plateaus. T=9 shows the highest return and lowest cost.](f519a5be118c846f631c992412353fb9_img.jpg)
+
+Figure 4: Ablation on the number of refinement steps. Two line graphs show Normalized Return and Normalized Cost over Train Steps (x10^6) for T=1, T=3, T=6, and T=9. Return increases and plateaus, while cost decreases and plateaus. T=9 shows the highest return and lowest cost.
+
+Figure 4: Ablation on the number of refinement steps.
+
+Table 4: Representative generative latent(-space) policy methods for offline (safe) RL.
+
+| Method | Backbone | Safety-aware? | Likelihood | OOD control |
+|-|-|-|-|-|
+| PLAS (Zhou et al., 2021) | CVAE | No | Approx. | Implicit (latent manifold) |
+| LSPC (Koirala et al., 2024) | CVAE | Yes | Approx. | Implicit (bounded latent) |
+| LDGC (Venkatraman et al., 2023) | Diffusion | No | Implicit | Implicit (batch-constrained) |
+| FISOR (Zheng et al., 2024) | Diffusion | Yes | Implicit | Implicit (HJ-weighted data) |
+| CNF (Akimov et al., 2022) | Flow | No | Exact | Implicit (bounded latent) |
+| <b>FLRP (ours)</b> | <b>Flow</b> | <b>Yes</b> | <b>Exact</b> | <b>Explicit (base-KL)</b> |
+
+## 6 RELATED WORK
+
+Offline safe RL aims to learn constraint-satisfying policies from fixed datasets, avoiding risky on-line interaction. Early work incorporates penalty or Lagrangian terms into value learning—e.g., CPQ (Xu et al., 2022), BCQ-Lag (Fujimoto et al., 2019), and BEAR-Lag (Liu et al., 2023a)—to account for safety in the Bellman objectives. Others adopt distribution-correction methods such as COptiDICE (Lee et al., 2022), which model the stationary distribution under constraints. Sequence models like CDT (Liu et al., 2023b) and SaFormer (Zhang et al., 2023b) encode safety via cost-aware conditioning in Decision Transformer frameworks. These methods typically enforce soft constraints, allowing for occasional violations. Recent approaches (Yu et al., 2022; Ganai et al., 2023) instead leverage Hamilton–Jacobi (HJ) reachability to enforce strict state-wise safety. Complementary to these formulations, another line of work learns a generative policy or latent manifold to encourage safe behavior. Notably, LSPC (Koirala et al., 2024) learns a cost-sensitive latent policy via a CVAE prior, while FISOR (Zheng et al., 2024) couples diffusion-based behavior learning with HJ-based feasibility guidance. While these methods achieve strong empirical safety, they typically handle OOD generalization implicitly by relying on the expressivity of the generative prior or support-based constraints, without substantial improvements over general offline RL methods (Zhou et al., 2021; Akimov et al., 2022; Chen et al., 2022) in OOD robustness. Table 4 summarizes representative generative approaches and compares the key distinctions along four axes, with an extended discussion on B.1. FLRP unifies these two lines by combining a flow-based latent policy with explicit base-space KL control, and by using HJ reachability not as an external filter but as a feasibility-guided signal that shapes the latent manifold, yielding provable bounds on total variation.
+
+## 7 CONCLUSION
+
+We present a safe offline RL framework based on latent refinement. A multi-expert policy iteratively adjusts a base latent via safety- and reward-guided residuals, while a normalizing-flow prior shapes a feasible latent manifold for explicit safety control. We prove order-agnostic bounds on the final policy distribution and show strong performance across three standard safe RL benchmarks. The main limitations arise from the feasibility critics. The offline feasibility critics use a Hamilton–Jacobi–style Bellman operator with sparse cost, which can over-conservatively estimate value; genuinely safe but rare samples may be undervalued, introducing bias or sample inefficiency. Latent-space refinement also adds hyperparameters (e.g., expert loss weights and prior shaping temperature). That said, we used a single configuration across 26 tasks, suggesting reasonable robustness. Future work includes adaptive refinement schedules, more principled objectives for shaping the prior, and hierarchical expert architectures to improve flexibility and generalization.
+
+ Rest of paper (reference and Appendix) is removed.

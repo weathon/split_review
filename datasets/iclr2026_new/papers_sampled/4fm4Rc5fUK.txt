@@ -1,0 +1,327 @@
+
+
+{0}------------------------------------------------
+
+# AUTOFORMALIZER WITH TOOL FEEDBACK
+
+## ABSTRACT
+
+Autoformalization addresses the scarcity of data for Automated Theorem Proving (ATP) by translating mathematical problems from natural language into formal statements. Efforts in recent work shift from directly prompting large language models to training an end-to-end formalizer model from scratch, achieving remarkable advancements. However, existing formalizer still struggles to consistently generate valid statements that meet syntactic validity and semantic consistency. To address this issue, we propose the Autoformalizer with Tool Feedback (ATF), a novel approach that incorporates syntactic and consistency information as tools into the formalization process. By integrating Lean 4 compilers for syntax corrections and employing a multi-LLMs-as-judge approach for consistency validation, the model is able to adaptively refine generated statements according to the tool feedback, enhancing both syntactic validity and semantic consistency. The training of ATF involves a cold-start phase on synthetic tool-calling data, an expert iteration phase to improve formalization capabilities, and Direct Preference Optimization to reduce ineffective revisions. Experimental results show that ATF markedly outperforms a range of baseline formalizer models, with its superior performance further validated by human evaluations. Subsequent analysis reveals that ATF demonstrates excellent inference scaling properties. Moreover, we open-source Numina-ATF, a dataset containing 750K synthetic formal statements to facilitate advancements in autoformalization and ATP research.
+
+## 1 INTRODUCTION
+
+Recent advancements in the reasoning capabilities of large language models have significantly accelerated progress in the field of Automated Theorem Proving (ATP) (Yang et al., 2024). Unlike traditional mathematical tasks, ATP requires models to start from a formalized theorem statement and construct rigorous logical proofs that can be verified within formal languages such as Lean (De Moura et al., 2015) and Isabelle (Paulson, 1994). However, the training of recent massive provers, such as DeepSeek-Prover (Ren et al., 2025) and Kimina-Prover (Wang et al., 2025), is hindered by the scarcity of formalized mathematical queries. Autoformalization addresses this by translating mathematical problems expressed in natural language into verifiable formal statements.
+
+A significant challenge in autoformalization is the absence of a universal automatic evaluation standard (Li et al., 2024b). As widely recognized in previous work (Liu et al., 2025b), a valid formalization is supposed to meet two key criteria: (1) **Syntactic Validity**: the generated formal statements should be compiled successfully in the target formal language, and (2) **Semantic Consistency**: the translated statements should be semantically equivalent to the original mathematical problems. Earlier approaches primarily focus on autoformalization by directly prompting or utilizing in-context learning to instruct LLMs to generate valid formal statements (Azerbayev et al., 2023a; Yu et al., 2025). However, such approaches suffer from the limited formalization capabilities of LLMs, resulting in suboptimal results. Recent efforts shift towards training a specialized formalizer model from scratch (Wang et al., 2025; Wu et al., 2025; Lin et al., 2025). The formalizer is typically trained on extensive high-quality informal-formal pairs that are both syntactically valid and semantically consistent, demonstrating improved performance.
+
+Despite the promise, existing formalization approaches tend to be suboptimal due to the following issues: (1) **Lack of Formal Knowledge**. The scarcity of formal language data in the pre-training corpora limits the foundational models' ability to inherently understand and generate formal statements effectively. Solely relying on post-training is insufficient for models to produce syntactically
+
+{1}------------------------------------------------
+
+![Figure 1: Illustration of Challenges in Autoformalization using Kimina-Autoformalizer. The diagram shows the flow from informal statements to formal statements via Kimina-Autoformalizer. It highlights that 63% of statements remain after formalization, while 37% fail. Three examples of failures are shown with red 'X' marks and explanations: 1. Mistakes: using existential quantification (∃) instead of universal quantification (∀). 2. Mistakes: using modulo 100 (a century) instead of modulo 12 (month). 3. A third failure is shown without an explanation.](9ba3dc91984c80b96f217fb1bddd5c06_img.jpg)
+
+**Informal statements**  
+ How many people must be in a group for at  
+ least two of them to be born in the same month?  
+ Prove that the answer is 13.  
+
+**Kimina Autoformalizer**  
+
+**Lean**  
+
+**63% remaining**
+
+**theorem thm: IsLeast**  
+ $(n : \mathbb{N} \mid \exists s : \text{Finset } \mathbb{N}, s.\text{card} = n \wedge \exists x \in s, \exists y \in s, x \neq y \wedge x \equiv 12 \pmod{12}) \rightarrow 13 := \text{by sorry}$
+
+**Mistakes: using existential quantification (∃) instead of universal quantification (∀)**
+
+**theorem thm: IsLeast**  
+ $(n : \mathbb{N} \mid \forall s : \text{Finset } \mathbb{N}, s.\text{card} = n \rightarrow \exists a \in s, \exists b \in s, a \neq b \wedge a \equiv b \pmod{12}) \rightarrow 13 := \text{by sorry}$
+
+**Mistakes: using modulo 100 (a century) instead of modulo 12 (month)**
+
+**theorem thm: IsLeast**  
+ $(n : \mathbb{N} \mid \forall s : \text{Finset } \mathbb{N}, s.\text{card} = n \rightarrow \exists m \in s, \exists k \in s, m \neq k \wedge m \equiv k \pmod{100}) \rightarrow 13 := \text{by sorry}$
+
+Figure 1: Illustration of Challenges in Autoformalization using Kimina-Autoformalizer. The diagram shows the flow from informal statements to formal statements via Kimina-Autoformalizer. It highlights that 63% of statements remain after formalization, while 37% fail. Three examples of failures are shown with red 'X' marks and explanations: 1. Mistakes: using existential quantification (∃) instead of universal quantification (∀). 2. Mistakes: using modulo 100 (a century) instead of modulo 12 (month). 3. A third failure is shown without an explanation.
+
+Figure 1: Illustration of Challenges in Autoformalization using Kimina-Autoformalizer. Approximately 40% of the statements fail to pass syntax validation, while the remaining statements tend to exhibit subtle misalignments with the original queries.
+
+valid statements stably. For instance, Goedel-Formalizer-v2 (Lin et al., 2025), as the currently leading formalizer, achieves only 62.31% syntax pass@1 on combibench. Additionally, considering significant variations between different versions of formal languages (e.g. Lean 4 v.s. Lean 3), the trained formalizer often lacks generalizability across versions. (2) **Rough Consistency Validation.** Due to the high costs of manual data annotations, previous work relies on LLMs to assess the consistency between informal and formal expressions. However, the reliability of such LLMs-as-judge approach has not been thoroughly validated. As illustrated in fig. 1, generated formal statements exhibit subtle misalignments with their informal queries, which has also been observed in previous work (Wu et al., 2025), necessitating more precise and dependable consistency verification to ensure the semantic equivalence of translated statements.
+
+To address these issues, we propose *Autoformalizer with Tool Feedback (ATF)* which integrates syntactic and consistency information as tools into the formalization process, thereby guiding models to adaptively refine the statements during generation. Specifically, we develop distinct tools for syntactic validity and semantic consistency. For syntactic validity, the tool processes formal statements and returns comprehensive compilation feedback from the Lean 4 compilers, offering precise guidance for syntax corrections. For semantic consistency, we benchmark the ability of LLMs to discern subtle misalignments between informal-formal pairs and implement a multi-LLMs-as-judge approach for consistency validation. The integration of syntactic information effectively compensates for the model’s unfamiliarity with formal languages, allowing adjustments tailored to different language versions. Besides, the incorporation of consistency information helps the model to identify and address misalignments between informal and formal statements, enhancing semantic consistency. The training of ATF involves a cold-start phase on synthetic data to teach the model effective tool usage, an expert iteration phase to enhance the model’s formalization capability and its ability to effectively implement revisions based on tool feedback, followed by a Direct Preference Optimization (DPO) phase to reduce ineffective revisions. Extensive experiments across three widely-used benchmarks demonstrate that ATF achieves substantial improvements over existing state-of-the-art formalizers (e.g., 29.13% semantic consistency improvement on CombiBench compared to the strongest Goedel-V2-Formalizer-32B). We further analyze the inference-time scaling properties of ATF and leverage it to synthesize formal statements from open-source mathematical queries, thereby contributing resources to advance future research in autoformalization and ATP.
+
+The core components of this paper can be highlighted as:
+
+- We develop two evaluation tools that effectively assess the validity of formal statements, providing accurate measurements of both syntactic validity and semantic consistency.
+- We propose Autoformalizer with Tool Feedback (ATF), which enables models to invoke evaluation tools during the formalization process and adjust statements based on feedback, achieving superior results compared to existing baseline formalizers.
+- We open-source Numina-ATF, a formal dataset containing 750K formal statements from Numina-v1.5 queries synthesized by ATF-32B (see Appendix D for details), supporting further development of formalizers and provers.
+
+{2}------------------------------------------------
+
+## 2 RELATED WORK
+
+### 2.1 AUTOFORMALIZATION USING LLMs
+
+Recent research in autoformalization has focused on using LLMs to accurately interpret and convert mathematical queries into structured formal languages, which can be categorized into two approaches: (1) Prompting powerful general models. Azerbayev et al. (2023a) and Wu et al. (2022) utilize In-context learning with carefully crafted formalization examples. Yu et al. (2025) directly asks DeepSeek-R1 (Guo et al., 2025) to transform mathematical queries into formal statements followed by data filtering to ensure the quality of the generated statements. This approach heavily relies on the inherent capabilities of the general model and the quality of prompts, resulting in poor performance. (2) Training a specialized model. Wang et al. (2025) leverage human-annotated cold-start data and employs an expert iteration strategy to train a lightweight Autoformalizer model. Lin et al. (2025) synthesize high-quality datasets containing reasoning paths from Claude 4, integrating reasoning capabilities into the autoformalization process. Wu et al. (2025) enhance the accuracy of the Autoformalizer by training on a combination of a knowledge-distilled dataset and a reasoning dataset. Though effective, this method requires extensive high-quality informal-formal pairs and faces challenges like data scarcity and limited adaptability across different formal languages. Our method adapts from (2) but innovatively incorporates formal standards directly into the generation process. By leveraging the model’s reflective capabilities, it produces more accurate samples by refining statements using syntactic and consistency feedback.
+
+### 2.2 TOOL-INTEGRATED REASONING
+
+LLMs encounter limitations in tasks demanding precise calculation, faithful verification, or access to information beyond their knowledge. Tool-Integrated Reasoning (Lin & Xu, 2025) has emerged as a powerful approach to tackle these challenges, integrating external tools to enhance model performance. Proof assistants such as Lean 4 are well-suited to serve as tools that assist in ATP, which enables LLMs to access theorem databases and verify the correctness of the proof process. Li et al. (2024a) leverages retrieval-augmented generation (RAG) (Gao et al., 2023) to incorporate relevant theorems from formal libraries into the proof construction process, enhancing the precision and relevance of theorem proving. Ji et al. (2025) implement Lean 4-verifier into iterative refinement loops, allowing models to autonomously revise candidate proofs based on feedback, which complements the structural approach with continual improvement strategies. Different from the verification of proof, compiler results can not check the correctness of formalization. Our approach focuses on syntax and consistency to construct reliable tools that aid the formalization process.
+
+## 3 METHODOLOGY
+
+In this section, we systematically elaborate on the main components of ATF. We start with the construction of tools, detailing how we design reliable validity evaluation tools from the perspectives of syntax and consistency. Following this, we explain the ATF training pipeline, as depicted in fig. 2, which comprises three phases: an initial cold-start phase, an expert iteration phase, and a final Direct Preference Optimization (DPO) phase. During inference, ATF actively utilizes the developed tools to generate Lean 4 statements, iteratively modifying the output based on feedback until it passes both syntax and consistency checks.
+
+### 3.1 TOOL DESIGN
+
+To achieve reliable evaluation of formal statements, we design two distinct tools: **syntax check** for syntactic validity and **consistency check** for semantic consistency. The syntactic validity tool processes formal statements and returns detailed compilation feedback from Lean 4 compilers. We employ a pre-check stage and a grouped execution method to ensure more stable and rapid tool responses. The consistency check receives pairs of informal and formal statements and returns consistency results along with concise explanations. Notably, we implement a multi-LLMs-as-judge approach in consistency check, which is benchmarked to effectively discriminate minor inconsistencies in formal statements. Detailed implementation of tools can be found in Appendix A.
+
+{3}------------------------------------------------
+
+![Figure 2: Framework of ATF. The diagram is divided into three main stages: Cold Start, Expert Iteration, and DPO. Cold Start uses Informal Data, Tool Instructions, Claude-4-Gemini, and Initial Formalizer to produce Cold Start Data. Expert Iteration uses Rejected Data, Inference, Formalizer, and Verification to produce Inference Data and Verified Data. DPO uses Rejected Data, Formalizer, and DPO to produce Final Formalizer. A prompt example is shown on the right, illustrating the process of formalizing a Lean 4 theorem.](2fa4a1bf91d0f34e87c689fbc1211fe3_img.jpg)
+
+**Prompt**  
+ Automate the following method in Lean 4.  
+ Prove that for all positive integers  $n$ , the expression  $3^n - 2$  is not divisible by 13.
+
+```
+
+example
+  (n : ℕ)
+  (h : n > 0)
+  : ¬ (13 ∣ (3^n - 2))
+  := by sorry
+  
+```
+
+**Tool Call**  
+ Syntax  
+ Syntax  
+ Consistency
+
+Figure 2: Framework of ATF. The diagram is divided into three main stages: Cold Start, Expert Iteration, and DPO. Cold Start uses Informal Data, Tool Instructions, Claude-4-Gemini, and Initial Formalizer to produce Cold Start Data. Expert Iteration uses Rejected Data, Inference, Formalizer, and Verification to produce Inference Data and Verified Data. DPO uses Rejected Data, Formalizer, and DPO to produce Final Formalizer. A prompt example is shown on the right, illustrating the process of formalizing a Lean 4 theorem.
+
+Figure 2: Framework of ATF consisting of three training stages: a cold-start phase to introduce basic tool usage with synthetic trajectories, followed by an expert iteration phase to refine formalization skills, and concluding with DPO to favor more effective paths with fewer revisions.
+
+#### 3.1.1 SYNTAX CHECK
+
+Acquiring compiler feedback from Lean 4 (Moura & Ullrich, 2021) execution is an intuitive and direct method for syntactic validation checking, and it is widely used in ATP to verify the correctness of proofs. However, Lean 4 execution is quite time-consuming, struggling to handle large-scale statements. This presents a challenge in acquiring low-overhead and rapid execution responses.
+
+To overcome such drawbacks in efficiency, we first implement a pre-check stage that filters out statements with obvious syntactic errors before compilation, such as missing necessary libraries and unmatched parentheses, aiming to reduce the workload. Additionally, we utilize a grouped method to enable batch execution of Lean 4 code. Statements are grouped based on import libraries. As fig. 3 shows, statements within the same group are concatenated into a single code file separated by namespaces. Then, Execution results are mapped to the corresponding statements based on their line numbers, enabling efficient batch processing of Lean 4 code. In this paper, we adopt Lean 4 of version 4.15 <sup>1</sup>, which is a stable version widely utilized in previous work (Yu et al., 2025).
+
+![Figure 3: Grouped Lean 4 Execution. The diagram shows the flow from 'Grouped by Import Mathlib' to 'Lean4 Code' (Namespace 1, Statements 1, Namespace 2, Statements 2, ..., Namespace 8-1, Statements 8-1, Namespace 8, Statements 8) to 'Final results' (Statements 1 X, Statements 2 ✓, ..., Statements 8-1 X, Statements 8-2 ✓).](12a6537c92844d5b393104c02e8dfc2f_img.jpg)
+
+Figure 3: Grouped Lean 4 Execution. The diagram shows the flow from 'Grouped by Import Mathlib' to 'Lean4 Code' (Namespace 1, Statements 1, Namespace 2, Statements 2, ..., Namespace 8-1, Statements 8-1, Namespace 8, Statements 8) to 'Final results' (Statements 1 X, Statements 2 ✓, ..., Statements 8-1 X, Statements 8-2 ✓).
+
+Figure 3: Grouped Lean 4 Execution.
+
+#### 3.1.2 CONSISTENCY CHECK
+
+LLMs-as-judge methods have been widely adopted to replace manual evaluations for assessing the semantic consistency of formalizations (Huang et al., 2025). Although Wang et al. (2024) measure the abilities of different models to distinguish semantically correct formalizations, their capacities to discern subtle inconsistencies in similar formal statements remain underexplored.
+
+To obtain more refined consistency feedback, we constructed a benchmark containing similar positive and negative statements. Specifically, we sampled 800 math queries from widely used formalization datasets (Azerbayev et al., 2023b; Zheng et al., 2021; Tsoukalas et al., 2024), where each query has a valid formal statement as the positive statement. We then instruct Gemini-2.5-Pro to generate perturbations for each statement, selecting 4 different perturbations as negative statements based on the following criteria:
+
+- Character-level similarity with the positive statement is greater than 0.95.
+- Syntactically valid but are not semantically consistent with the original statement.
+
+<sup>1</sup>
+
+{4}------------------------------------------------
+
+Table 1: Performance metrics of models in consistency checks, including Precision, Recall, FNR, TNR, and FPR.
+
+| Model | Precision<br>(↑) | Recall (TPR)<br>(↑) | FNR<br>(↓) | TNR<br>(↑) | FPR<br>(↓) |
+|-|-|-|-|-|-|
+| QWQ-32B | 0.8029 | 0.6758 | 0.3242 | 0.9171 | 0.0829 |
+| Qwen3-32B | 0.7949 | <b>0.7367</b> | <b>0.2633</b> | 0.9050 | 0.0950 |
+| Ensemble Vote | <b>0.8374</b> | 0.5967 | 0.4033 | <b>0.9421</b> | <b>0.0579</b> |
+
+Following the setup in (Wang et al., 2024), we evaluate two widely used open-source models QWQ-32B and Qwen3-32B (Yang et al., 2025) in consistency checks on the benchmark. We find that an ensemble vote method (where consistency is only confirmed when both models give identical conclusions) effectively enhances the models’ ability to discern subtle inconsistencies. As illustrated in table 1, while QWQ-32B and Qwen3-32B demonstrated comparable performance, their FPR was suboptimal (indicating that approximately 9% of inconsistent statements are misclassified). In contrast, the ensemble vote approach effectively reduces the FPR to below 6%. Therefore, we adopt this multi-LLMs-as-judge approach in this paper to ensure a more accurate consistency evaluation tool. More details about Benchmark constructions can be found in Appendix A.2.
+
+### 3.2 TRAINING PIPELINE
+
+With the tools constructed above, we implement the training pipeline for ATF using Qwen3-32B. The entire training process consists of three identical stages: a cold-start phase to teach the model the use of tools, an expert iteration phase to enhance the model’s formalization capabilities, and a Direct Preference Optimization (DPO) phase to reduce ineffective revisions found in multiple iterations.
+
+**Data** The whole training process of ATF is conducted based on the NuminaMath-1.5 dataset (LI et al., 2024), which contains approximately 900k competition-level math problems ranging from Chinese high school math exercises to international mathematics Olympiad competition problems. Following (Wang et al., 2025), we select a challenging subset of NuminaMath-1.5, consisting of 178k entries that cover several competition-level data sources. Detailed information about different data sources can be found in table 2.
+
+Table 2: Overview of data sources.
+
+| Source | Size |
+|-|-|
+| ame_aime | 1,805 |
+| olympiads_ref | 3,221 |
+| cn_contest | 20,791 |
+| olympiad | 152,652 |
+| Total | 178,469 |
+
+**Cold Start for Tool Integration** The cold-start phase begins by prompting Claude-4-Sonnet to generate multi-turn tool invocation reasoning paths. Considering that the consistency check using multi-LLMs-as-judge is more time-consuming compared to the syntax check, we establish several rules for more efficient revisions:
+
+- Consistency check is only permitted after syntax check passes.
+- Syntax check must be invoked first after revision.
+- The process stops if and only if both the syntax and consistency checks pass.
+
+Following the default format of Claude, the tool invocations and returned information are respectively enclosed in `<tool_call></tool_call>` and `<tool_result></tool_result>` tags. To enable multiple rounds of tool calls and revisions within a limited context length, we prompt Claude to perform concise reasoning. Ultimately, we extract approximately 10% queries from the dataset for data synthesis, and upsample the reasoning paths with more than one revision to obtain a final 24K cold-start dataset. We choose Qwen3-32B as the foundation model and mask the losses on tool result tokens in training to prevent the model from directly mimicking the tool executions.
+
+**Expert Iteration for Formalization Capability Enhancement** After fine-tuning the formalizer on the synthetic cold-start dataset, the model is familiar with the format of tool invocation and has acquired the behavior of making revisions based on error feedback from tools. Next, we conduct an expert iteration training on the remaining data, aiming to further improve the model’s formalization
+
+{5}------------------------------------------------
+
+capabilities. Following a standard expert iteration pipeline, in each iteration, we use the current model to generate formalization attempts on the remaining math queries and filter out those that violate the tool invocation rules above. We collect all successful formalization trajectories with the revision attempts  $< 8$  and merge them with data from previous rounds for training, retaining failed queries for the next iteration. We conduct training from the base model in each iteration, and the configuration remains the same as in the cold-start phase.
+
+**DPO for Effective Revision** After expert iteration, the formalizer excels in generating valid statements through iterative tool calling and revision. However, we observe that the model sometimes exhibits consecutive identical errors (e.g., the same syntax error appearing multiple times without being resolved). To guide the model to reduce such ineffective revisions, we further conduct a DPO (Rafailov et al., 2023) training to encourage the model to complete formalization in fewer attempts. Specifically, we first perform self-sampling on the remaining data from the expert iteration. For each math query, we select the trajectory with fewer revision attempts as the positive sample and the one with more revision attempts as the negative sample (maintaining their revision attempt difference  $\geq 3$ ), finally collecting 10K pairs. In addition to masking the loss on tool result tokens, we also mask tool invocation-related tokens to prevent instability in tool invocation behavior. Considering that the pairs share similar distributions, we adopt the DPO loss along with a negative log-likelihood (NLL) loss (Dubey et al., 2024) on chosen trajectories to avoid the decline of chosen reward in training
+
+$$\mathcal{L} = -\mathbb{E} \left[ \log \sigma \left( \beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)} \right) \right] - \alpha \mathbb{E} [\log \pi_\theta(y_w|x)], \quad (1)$$
+
+where  $\pi_\theta$  is the policy model,  $\pi_{\text{ref}}$  is the reference model,  $y_w$  and  $y_l$  are the chosen and rejected trajectories respectively,  $\beta$  is the temperature parameter,  $\alpha$  is the weighting coefficient, and  $\sigma$  represents the sigmoid function. Notably, we adopt DPO instead of online reinforcement learning algorithms such as GRPO (Shao et al., 2024), because the model has already achieved strong capabilities after expert iteration, resulting in a relatively low proportion of negative trajectories in self-sampling, which makes DPO more efficient.
+
+## 4 EXPERIMENTS
+
+### 4.1 EXPERIMENTAL SETUP
+
+**Training Configurations** For the SFT training involved in cold-start and expert iteration phases, we conduct full parameter fine-tuning on 128 NPUs with an initial learning rate of  $2\text{e-}5$ , using a cosine decay style that decays to  $1\text{e-}7$  over 3 epochs. The DPO training is conducted with hyper-parameters ( $\beta = 0.1$ ) and ( $\alpha = 0.3$ ) on 128 NPUs for 1 epoch. In addition to the ATF-32B model, we also train an ATF-8B-Distilled using the same data. Detailed training parameters are listed in Appendix B.
+
+**Baselines** For baseline comparisons, we evaluate ATF against a series of the most performant formalizer models, including: Kimina-Autoformalizer-7B (Wang et al., 2025), StepFun-Formalizer-7B/32B (Wu et al., 2025), and Goedel-V2-Formalizer-8B/32B (Lin et al., 2025).
+
+**Evaluations** Following Wu et al. (2025), we select three widely-used ATP datasets for evaluation, including two in-distribution datasets: FormalMath-Lite (Yu et al., 2025) and ProverBench (Ren et al., 2025), along with an out-of-distribution dataset CombiBench (Liu et al., 2025a). To ensure fair comparison, we perform similarity-based decontamination on all training data against these evaluation sets. In terms of evaluation metrics, we assess both syntactic validity and consistency validity of generated statements using the tools designed above (only syntactically valid statements proceed to consistency evaluation). For each math query, we sample 16 times with temperature = 0.6 and report unbiased Pass@1, Pass@8, and Pass@16 pass rates. For ATF we set the max revision attempts  $< 4$  which results in output lengths roughly equivalent to those of Goedel-V2-Formalizer-32B. Considering the limitations of LLMs-as-judge in terms of consistency check, we further conduct human evaluation on 32B-scale models as the gold standard. Specifically, we randomly sample 100 instances from each benchmark, and each instance is evaluated by 3 experts independently, with the majority opinion serving as the final judgment. Detailed evaluation procedures are provided in Appendix C.
+
+{6}------------------------------------------------
+
+Table 3: Performance comparison of different Formalizers. SC represents Syntax Check pass rate (%) and CC represents Consistency Check pass rate (%). The best results are presented in **bold** and the second with underline.
+
+| Model | FormalMath-Lite |  | ProverBench |  | CombiBench |  |
+|-|-|-|-|-|-|-|
+|  | SC | CC | SC | CC | SC | CC |
+| <b>Pass@1</b> |  |  |  |  |  |  |
+| Kimina-Autoformalizer-7B (Wang et al., 2025) | 93.11 | 64.77 | 86.44 | 45.95 | 63.19 | 14.00 |
+| StepFun-Formalizer-7B (Wu et al., 2025) | 89.31 | 69.72 | 71.52 | 45.16 | 46.94 | 16.50 |
+| Goedel-V2-Formalizer-8B (Lin et al., 2025) | 95.25 | 83.06 | 92.36 | 78.64 | 59.94 | 31.44 |
+| StepFun-Formalizer-32B (Wu et al., 2025) | 91.87 | 73.11 | 69.73 | 49.70 | 55.19 | 25.50 |
+| Goedel-V2-Formalizer-32B (Lin et al., 2025) | 95.72 | 85.41 | 91.39 | 79.70 | 62.31 | 36.25 |
+| ATF-8B-Distilled | <u>96.55</u> | <u>91.12</u> | <u>91.49</u> | <u>85.16</u> | <u>74.00</u> | <u>51.69</u> |
+| ATF-32B | <b>97.94</b> | <b>94.51</b> | <b>94.29</b> | <b>89.78</b> | <b>86.69</b> | <b>65.38</b> |
+| <b>Pass@8</b> |  |  |  |  |  |  |
+| Kimina-Autoformalizer-7B (Wang et al., 2025) | 99.42 | 86.81 | 95.82 | 65.51 | 93.72 | 26.56 |
+| StepFun-Formalizer-7B (Wu et al., 2025) | 96.82 | 88.22 | 86.46 | 68.59 | 78.11 | 36.17 |
+| Goedel-V2-Formalizer-8B (Lin et al., 2025) | 98.67 | 96.23 | 96.28 | 94.03 | 90.77 | 57.78 |
+| StepFun-Formalizer-32B (Wu et al., 2025) | 98.05 | 90.63 | 89.03 | 74.71 | 83.14 | 46.10 |
+| Goedel-V2-Formalizer-32B (Lin et al., 2025) | 99.21 | 97.68 | 96.28 | 94.27 | 90.64 | 70.58 |
+| ATF-8B-Distilled | <u>99.95</u> | <u>98.82</u> | <u>99.11</u> | <u>97.24</u> | <u>97.49</u> | <u>81.88</u> |
+| ATF-32B | <b>99.97</b> | <b>99.27</b> | <b>99.66</b> | <b>98.20</b> | <b>98.73</b> | <b>92.22</b> |
+| <b>Pass@16</b> |  |  |  |  |  |  |
+| Kimina-Autoformalizer-7B (Wang et al., 2025) | 99.76 | 90.67 | 96.52 | 69.13 | 97.00 | 30.00 |
+| StepFun-Formalizer-7B (Wu et al., 2025) | 97.37 | 90.67 | 89.13 | 73.91 | 84.00 | 44.00 |
+| Goedel-V2-Formalizer-8B (Lin et al., 2025) | 99.04 | 97.13 | 96.52 | 94.78 | 96.00 | 66.00 |
+| StepFun-Formalizer-32B (Wu et al., 2025) | 98.80 | 93.54 | 91.30 | 79.57 | 87.00 | 51.00 |
+| Goedel-V2-Formalizer-32B (Lin et al., 2025) | <u>99.52</u> | <u>98.80</u> | <u>96.52</u> | <u>95.22</u> | <u>93.00</u> | <u>79.00</u> |
+| ATF-8B-Distilled | <b>100.00</b> | <b>99.52</b> | <b>99.57</b> | <b>97.83</b> | <b>99.00</b> | <b>87.00</b> |
+| ATF-32B | <b>100.00</b> | <b>99.52</b> | <b>100.00</b> | <b>98.70</b> | <b>100.00</b> | <b>96.00</b> |
+| <b>Human Evaluation</b> |  |  |  |  |  |  |
+| Kimina-Autoformalizer-7B (Wang et al., 2025) | 92.00 | 70.00 | 87.00 | 59.00 | 59.00 | 7.00 |
+| StepFun-Formalizer-32B (Wu et al., 2025) | 92.00 | 75.00 | 70.00 | 57.00 | 53.00 | 18.00 |
+| Goedel-V2-Formalizer-32B (Lin et al., 2025) | 97.00 | 92.00 | 93.00 | 81.00 | 60.00 | 22.00 |
+| ATF-32B | <b>98.00</b> | <b>95.00</b> | <b>94.00</b> | <b>85.00</b> | <b>90.00</b> | <b>49.00</b> |
+
+### 4.2 MAIN RESULTS
+
+Based on the main experimental results listed in table 3, we draw several summarizations:
+
+**ATF consistently outperforms all baseline models across all benchmarks on both syntax and consistency metrics.** ATF-32B achieves superior performance on all three evaluation datasets, with particularly notable improvements in semantic consistency. For example, ATF-32B achieves Pass@1 consistency scores of 94.51% on FormalMath-Lite, 89.78% on ProverBench, and 65.38% on CombiBench, consistently surpassing the best baseline Goedel-V2-Formalizer-32B by margins of 9.1%, 10.08%, and 29.13% respectively.
+
+**ATF demonstrates strong generalization capabilities in out-of-distribution scenarios.** The substantial performance improvements are particularly evident on CombiBench, which contains diverse combinatorial mathematics problems that significantly differ from the training data distribution. While most baseline models struggle significantly on this dataset (e.g., StepFun-Formalizer-32B achieves only 25.50% Pass@1 in consistency), ATF-32B maintains robust performance at 65.38%, indicating strong generalization beyond the training distribution.
+
+**ATF benefits significantly from increased sampling (Pass@k) and maintains excellent performance even at the 8B scale.** The performance gains become more pronounced at higher sampling rates, with ATF-32B achieving remarkable scores (>96%) on consistency checks across all benchmarks at Pass@16. Moreover, ATF-8B-Distilled demonstrates remarkable efficiency, achieving 91.12% Pass@1 consistency on FormalMath-Lite while using significantly fewer parameters than 32B baseline models, showcasing the effectiveness of our training methodology.
+
+{7}------------------------------------------------
+
+Table 4: Ablation study of ATF components across different benchmarks using the pass@1 (%) metric.
+
+| Components | FormalMath-Lite |  | ProverBench |  | CombiBench |  |
+|-|-|-|-|-|-|-|
+|  | SC | CC | SC | CC | SC | CC |
+| <b>SYNTAX CHECK + CONSISTENCY CHECK</b> |  |  |  |  |  |  |
+| <i>Cold Start</i> | 93.91 | 89.01 | 91.25 | 84.32 | 61.50 | 42.44 |
+| + <i>Expert Iteration</i> | 97.85 | 94.15 | 94.16 | 89.10 | 85.12 | 63.88 |
+| + <i>DPO</i> | 97.94 | 94.51 | 94.29 | 89.78 | 86.69 | 65.38 |
+| <b>SYNTAX CHECK ONLY</b> |  |  |  |  |  |  |
+| <i>Cold Start</i> | 93.91 | 73.77 | 91.25 | 67.96 | 61.50 | 27.12 |
+| + <i>Expert Iteration</i> | 97.85 | 80.26 | 94.16 | 75.54 | 85.12 | 40.12 |
+| + <i>DPO</i> | 97.94 | 81.13 | 94.29 | 75.68 | 86.69 | 41.68 |
+| <b>NO TOOLS</b> |  |  |  |  |  |  |
+| <i>Cold Start</i> | 79.22 | 64.23 | 66.39 | 51.25 | 35.00 | 16.06 |
+| + <i>Expert Iteration</i> | 86.39 | 71.96 | 73.75 | 60.54 | 48.38 | 22.88 |
+| + <i>DPO</i> | 86.77 | 72.89 | 73.89 | 60.92 | 50.81 | 23.69 |
+
+**Human evaluation validates both the effectiveness of the consistency check tool and the superior performance of ATF.** Although the strictness of the multi-LLMs-as-judge method results in some sacrifices in recall (see table 1), ATF still consistently outperforms the baselines, especially on CombiBench where existing models achieve a maximum pass rate of only 22%. We further compute the Pearson correlation coefficient (Sedgwick, 2012) between the results obtained from the consistency check tool and those from human evaluation, yielding a coefficient of 0.746. This value indicates a strong positive linear relationship, confirming the reliability of our consistency check.
+
+### 4.3 ABLATIONS
+
+To understand the contribution of each component in ATF, we conduct comprehensive ablation studies by systematically removing different elements. Table 4 presents the results across three configurations: full ATF with both syntax and consistency checks, syntax check only, and no tools.
+
+**Tool feedback is essential for effective formalization.** The comparison between different tool configurations demonstrates the critical importance of our designed tools. Without any tool guidance, performance drops dramatically across all benchmarks. For example, on CombiBench consistency check, the no-tools configuration achieves only 23.69% Pass@1 compared to 65.38% with full tool feedback. Adding the consistency check on top of the syntax check provides further substantial gains, improving ProverBench consistency from 75.68% to 89.78%, highlighting that semantic validation is crucial beyond syntactic correctness.
+
+**Progressive training stages yield cumulative improvements.** Each training phase contributes meaningfully to the final performance. Expert iteration provides the most substantial improvements over cold start (e.g., CombiBench consistency improves from 42.44% to 63.88%), while DPO further offers additional refinements. This staged approach effectively teaches the model tool usage, enhances formalization capabilities, and improves efficiency.
+
+## 5 ANALYSIS
+
+### 5.1 SCALING ANALYSIS
+
+While our main experiments report performance under limited resource constraints, we further investigate ATF’s inference time scaling behavior by extending both the revision attempts and the parallel sampling counts  $K$ . Since syntax check already achieves high pass rates, we focus our analysis on consistency check performance. As illustrated in fig. 4a, although ATF is trained with revision attempts limited to fewer than 8, performance continues to improve gradually as the number of revision attempts increases. This suggests that the model has learned effective revision strategies that
+
+{8}------------------------------------------------
+
+![Figure 4: Inference time scaling of ATF. (a) Revision scaling: Pass@1 Success Rate (%) vs Revision Times (0 to 14). (b) Pass@K scaling: Success Rate (%) vs K (1 to 32).](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+Figure 4 consists of two line graphs. Graph (a) shows 'Pass@1 Success Rate (%)' on the y-axis (ranging from 20 to 100) against 'Revision Times' on the x-axis (ranging from 0 to 14). Three series are plotted: FormalMath-Lite (blue line with circles), ProverBench (orange line with squares), and CombiBench (red line with triangles). All three series show an initial rapid increase in success rate, plateauing after approximately 6 revisions. FormalMath-Lite reaches nearly 100% success rate, while CombiBench reaches about 80%.
+
+Graph (b) shows 'Success Rate (%)' on the y-axis (ranging from 88 to 100) against 'K' on the x-axis (ranging from 1 to 32). The same three series are plotted. An inset graph shows a zoomed-in view of the success rate for K values 1 to 32. All series show a steady increase in success rate as K increases, with FormalMath-Lite reaching nearly 100% and CombiBench reaching about 98%.
+
+Figure 4: Inference time scaling of ATF. (a) Revision scaling: Pass@1 Success Rate (%) vs Revision Times (0 to 14). (b) Pass@K scaling: Success Rate (%) vs K (1 to 32).
+
+Figure 4: Inference time scaling of ATF.
+
+generalize beyond the training constraints, enabling it to iteratively refine statements toward higher semantic consistency. Additionally, ATF can further benefit from increased parallel sampling (from Pass@1 to Pass@32 in fig. 4b), achieving 100% pass rates on CombiBench. This scaling behavior indicates that our tool-integrated approach not only improves individual formalization quality but also enhances the diversity and coverage of valid formalizations across multiple attempts.
+
+### 5.2 TOOL ANALYSIS
+
+We continue to analyze behavior of ATF when invoking the two types of tools. As shown in fig. 5, tool usage varies significantly across datasets, with CombiBench requiring the highest average tool calls (8.35) due to its combinatorial complexity, while FormalMath-Lite requires fewer attempts (3.19), demonstrating ATF’s ability to adapt revision intensity based on problem difficulty. The consistency check generally exhibits lower pass rates compared to the syntax check, reflecting the inherent difficulty of semantic alignment versus rule-based syntactic correctness. However, ProverBench presents an exception where consistency check (66.34%) outperforms syntax check (61.65%), primarily due to the dataset’s extensive calculus-related queries that introduce additional syntactic complexity in formal representations. We also find that the consistency check success rate consistently decreases with increasing revision attempts across all datasets from 69.5% on the first attempt to 8.8% on the 8th attempt. This declining pattern suggests that while ATF can identify semantic inconsistencies, the revision process becomes increasingly challenging as the model exhausts its most confident revision strategies.
+
+![Figure 5: Comparative Analysis of Tool Usage Metrics. (a) Average Tool Calls: Average Tool Calls vs Dataset. (b) Success Rates: Success Rate (%) vs Dataset. (c) Consistency by Attempts: Success Rate (%) vs Attempt Number.](0f3e3ea50bcceb86f6c524ab2b6f3e7a_img.jpg)
+
+Figure 5 contains three bar charts. Chart (a) shows 'Average Tool Calls' on the y-axis (ranging from 0 to 6) for three datasets: combibench, formalmath-lite, and proverbench. For each dataset, two bars are shown: Syntax Check (purple) and Consistency Check (orange). CombiBench has the highest average tool calls for both checks (Syntax: ~5.53, Consistency: ~2.70). FormalMath-Lite has the lowest (Syntax: ~1.80, Consistency: ~1.37). ProverBench is in between (Syntax: ~2.38, Consistency: ~1.48).
+
+Chart (b) shows 'Success Rate (%)' on the y-axis (ranging from 0 to 80) for the same three datasets. Syntax Check (purple) and Consistency Check (orange) bars are shown. For CombiBench, Syntax Check is ~53.8% and Consistency Check is ~30.1%. For FormalMath-Lite, Syntax Check is ~77.7% and Consistency Check is ~71.2%. For ProverBench, Syntax Check is ~61.6% and Consistency Check is ~66.3%.
+
+Chart (c) shows 'Success Rate (%)' on the y-axis (ranging from 0 to 100) against 'Attempt Number' on the x-axis (ranging from 1 to 8). A single series of blue bars shows the success rate for the consistency check across attempts. The success rate starts at 69.5% for the first attempt and decreases steadily to 8.8% for the eighth attempt.
+
+Figure 5: Comparative Analysis of Tool Usage Metrics. (a) Average Tool Calls: Average Tool Calls vs Dataset. (b) Success Rates: Success Rate (%) vs Dataset. (c) Consistency by Attempts: Success Rate (%) vs Attempt Number.
+
+Figure 5: Comparative Analysis of Tool Usage Metrics
+
+## 6 CONCLUSION
+
+In this paper, we presented *Autoformalizer with Tool Feedback* (ATF), a novel framework that enhances autoformalization by incorporating syntactic and semantic validation tools into the generation process to compensate for insufficient formal knowledge and unreliable semantic validation in previous formalizers. Experiments across three benchmarks show that ATF substantially outperforms existing formalizers and demonstrates promising scaling behavior during inference. We contribute an open-source dataset of 750K formal statements derived from competition-level mathematical queries, facilitating future research in autoformalization and automated theorem proving.
+
+{9}------------------------------------------------
+
+## REFERENCES
+
+- Zhangir Azerbayev, Bartosz Piotrowski, Hailey Schoelkopf, Edward W Ayers, Dragomir Radev, and Jeremy Avigad. Proofnet: Autoformalizing and formally proving undergraduate-level mathematics. *arXiv preprint arXiv:2302.12433*, 2023a.
+- Zhangir Azerbayev, Bartosz Piotrowski, Hailey Schoelkopf, Edward W Ayers, Dragomir Radev, and Jeremy Avigad. Proofnet: Autoformalizing and formally proving undergraduate-level mathematics. *arXiv preprint arXiv:2302.12433*, 2023b.
+- Leonardo De Moura, Soonho Kong, Jeremy Avigad, Floris Van Doorn, and Jakob von Raumer. The lean theorem prover (system description). In *International Conference on Automated Deduction*, pp. 378–388. Springer, 2015.
+- Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, et al. The llama 3 herd of models. *arXiv e-prints*, pp. arXiv–2407, 2024.
+- Yunfan Gao, Yun Xiong, Xinyu Gao, Kangxiang Jia, Jinliu Pan, Yuxi Bi, Yixin Dai, Jiawei Sun, Haofen Wang, and Haofen Wang. Retrieval-augmented generation for large language models: A survey. *arXiv preprint arXiv:2312.10997*, 2, 2023.
+- Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiao Bi, et al. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning. *arXiv preprint arXiv:2501.12948*, 2025.
+- Yanxing Huang, Xinling Jin, Sijie Liang, Peng Li, and Yang Liu. Formarl: Enhancing autoformalization with no labeled data. *arXiv preprint arXiv:2508.18914*, 2025.
+- Xingguang Ji, Yahui Liu, Qi Wang, Jingyuan Zhang, Yang Yue, Rui Shi, Chenxi Sun, Fuzheng Zhang, Guorui Zhou, and Kun Gai. Leanabell-prover-v2: Verifier-integrated reasoning for formal theorem proving via reinforcement learning. *arXiv preprint arXiv:2507.08649*, 2025.
+- Jia LI, Edward Beeching, Lewis Tunstall, Ben Lipkin, Roman Soletskyi, Shengyi Costa Huang, Kashif Rasul, Longhui Yu, Albert Jiang, Zijun Shen, Zihan Qin, Bin Dong, Li Zhou, Yann Fleureau, Guillaume Lample, and Stanislas Polu. Numinamath. [] (), 2024.
+- Yang Li, Dong Du, Linfeng Song, Chen Li, Weikang Wang, Tao Yang, and Haitao Mi. Hunyuan-prover: A scalable data synthesis framework and guided tree search for automated theorem proving. *arXiv preprint arXiv:2412.20735*, 2024a.
+- Zhaoyu Li, Jialiang Sun, Logan Murphy, Qidong Su, Zenan Li, Xian Zhang, Kaiyu Yang, and Xujie Si. A survey on deep learning for theorem proving. *arXiv preprint arXiv:2404.09939*, 2024b.
+- Heng Lin and Zhongwen Xu. Understanding tool-integrated reasoning. *arXiv preprint arXiv:2508.19201*, 2025.
+- Yong Lin, Shange Tang, Bohan Lyu, Ziran Yang, Jui-Hui Chung, Haoyu Zhao, Lai Jiang, Yihan Geng, Jiawei Ge, Jingruo Sun, et al. Goedel-prover-v2: Scaling formal theorem proving with scaffolded data synthesis and self-correction. *arXiv preprint arXiv:2508.03613*, 2025.
+- Junqi Liu, Xiaohan Lin, Jonas Bayer, Yael Dillies, Weijie Jiang, Xiaodan Liang, Roman Soletskyi, Haiming Wang, Yunzhou Xie, Beibei Xiong, et al. Combibench: Benchmarking llm capability for combinatorial mathematics. *arXiv preprint arXiv:2505.03171*, 2025a.
+- Qi Liu, Xinhao Zheng, Xudong Lu, Qinxiang Cao, and Junchi Yan. Rethinking and improving autoformalization: towards a faithful metric and a dependency retrieval-based approach. In *The Thirteenth International Conference on Learning Representations*, 2025b.
+- Leonardo de Moura and Sebastian Ullrich. The lean 4 theorem prover and programming language. In *International Conference on Automated Deduction*, pp. 625–635. Springer, 2021.
+
+ Rest of paper (reference and Appendix) is removed.

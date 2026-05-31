@@ -1,0 +1,412 @@
+
+
+{0}------------------------------------------------
+
+# THOUGHTBUBBLES: AN UNSUPERVISED METHOD FOR PARALLEL THINKING IN LATENT SPACE
+
+Anonymous authors
+
+Paper under double-blind review
+
+## ABSTRACT
+
+Current approaches for scaling inference-time compute in transformers rely on training them to emit explicit chain-of-thought tokens before producing an answer. While these methods are powerful, they are limited because they cannot be applied during pretraining and are limited to only serially-generated, natural-language verbalization to scale inference-time compute. In this work, we propose **Thoughtbubbles**, a transformer variant that natively performs parallel adaptive computation in latent space by learning to fork or delete residual streams. Thus, tokens that require a large amount of computation can form a “bubble” of cloned residuals in the middle of the network for additional computation. Crucially, this behavior is learned during pretraining with only language modeling loss. **Thoughtbubbles** outperforms both standard decoder LMs as well as non-adaptive parallel computation approaches on OpenWebText and pe2o perplexity and in zero-shot evaluations such as HellaSwag and LAMBADA after pretraining across 150M to 772M parameter scales. The implicit nature of our method enables adaptive computation to be learned starting at pretraining time, paving the way to unify train-time and test-time scaling behaviors.
+
+## 1 INTRODUCTION
+
+Despite their unprecedented success, Transformers (Vaswani et al., 2017) only have a fixed computation budget and working memory, which present both a theoretical (Merrill & Sabharwal, 2023) and practical limit (Sanford et al., 2024) for solving complex, multi-step problems.
+
+Due to the growing interest in extending the capabilities of transformers for difficult multi-step problems, many efforts are underway to surpass this bounded-computation limitation of transformers. The earliest and simplest is Chain of Thought (CoT) (Wei et al., 2023), where a transformer language model is explicitly prompted to provide a set of reasoning steps. This technique allows the model to break a problem down to subproblems, solve them individually, and cache intermediate results for the full solution—enabling a simple form of problem adaptivity (Merrill & Sabharwal, 2024).
+
+Extending this result, Pfau et al. (2024) show both theoretically and practically that CoT improves the expressiveness of transformers—even when the CoT traces are replaced with a unique thinking token (dots) at test time: indicating that even residual streams alone, not serial recurrence, can improve computational performance.
+
+Such an insertion of additional residual streams, the so-called “pause tokens”, has since become a growing trend of recent architecture research. Though methods vary in terms of where to actually insert the thinking tokens (Herel & Mikolov, 2024; Sun et al., 2025; Goyal et al., 2024), all pause token approaches insert additional computation streams prior to computation—limiting the model’s ability to allocate intermediate computation that is useful only in some, but not all layers (e.g., computation which is useful only after a few layers of attention). As Sun et al. (2025) notes, determining the location of these pause tokens often requires manual design following the structure of the problem, which may be intractable for general language models.
+
+In response, we introduce **Thoughtbubbles**, a novel Transformer-based architecture which enables the unsupervised and dynamic allocation of additional parallel residual streams for extra computation and memory. We achieve this by introducing a novel forking mechanism between some layers,
+
+{1}------------------------------------------------
+
+which computes and maintains a cumulative score for every residual stream and uses it to decide whether to *create* extra residuals or to *delete* existing ones.
+
+This formulation makes dynamic computation a budget-bounded allocation problem of these scores. In order to train these scores to be useful, we use these scores to mask both the model’s ability to attend to residual streams with low scores as well as limit the model’s ability to update them at each layer. This attenuation forces the model to provide higher scores to residual streams it deems more important, which will also result in increased forking of those streams. At the end of encoding, our model will decode each residual stream separately, including forked ones. Weighted by their scores, streams for the same token are then averaged together to produce the final distribution.
+
+Thus, our approach will essentially create “bubbles” of latent computation consisting of forked residuals for difficult tokens (i.e., those with high cumulative scores) for additional thinking, before merging them to produce the final output token.
+
+We conduct a variety of pretraining experiments across 150M to 772M scales and make the following contributions:
+
+1. We introduce the first-known architecture to enable the unsupervised dynamic allocation of latent parallel computation, trainable as a regular decoder LM without any additional signal beyond language modeling loss.
+2. We demonstrate that our approach performs better in validation perplexity as well in zero-shot evals of LAMBADA and HellaSwag against two competitive baselines—a regular *parameter matched* transformer, as well as a non-adaptive *computation matched* approach where the input residual is copied multiple times as filler tokens for additional computation before decoding. We additionally perform competitively against BLiMP and PIQA.
+3. We further show that our method correctly allocates computation at *interpretable* regions of extra computation. In particular, our method allocates more computation at regions of higher uncertainty (i.e., posterior entropy).
+
+We release pretrained adaptive compute LMs and a PyTorch implementation for the community.<sup>1</sup>
+
+## 2 METHODS
+
+### 2.1 OVERALL ARCHITECTURE
+
+Our architecture is a GPT-2-style decoder-only transformer (Radford et al., 2019), trained using the cross-entropy language modeling objective.
+
+To achieve parallel computation, we want to allocate more residual streams corresponding to tokens that require more computation. To enable this, we propose a special type of transformer operation named “forking”, described in section 2.3, which can duplicate or remove some input residual streams for future computation.
+
+The amount of forking is controlled by assigning a “cumulative score” between 0 and 1 to each residual stream. Each forking operation computes a “keep score” for each residual stream, which is multiplied to the cumulative score to update it, as well as a new “fork score” for the new residual. We describe the computation of these scores in section 2.3.
+
+<sup>1</sup>URL will be available upon acceptance
+
+![Figure 1: Overview of the method. The diagram shows a sequence of operations on a set of colored blocks representing residual streams. 1. Input: A row of blocks with scores: + 55, = 92, and others. 2. Output Probability Averaging: The blocks are processed, and the scores are averaged. 3. LM Decoding: The averaged scores are used for decoding. 4. Forking: The blocks are forked, creating a 'bubble' of computation. 5. Averaging: The forked streams are averaged back to the original block size. 6. Final Output: The final output is produced. Annotations explain that averaging reduces sequence length, forking creates a bubble of computation, and some streams are pruned (orange) while others are valuable (blue).](6d6fd934f0988fdb2e2dd22865e8d8ed_img.jpg)
+
+Figure 1: Overview of the method. The diagram shows a sequence of operations on a set of colored blocks representing residual streams. 1. Input: A row of blocks with scores: + 55, = 92, and others. 2. Output Probability Averaging: The blocks are processed, and the scores are averaged. 3. LM Decoding: The averaged scores are used for decoding. 4. Forking: The blocks are forked, creating a 'bubble' of computation. 5. Averaging: The forked streams are averaged back to the original block size. 6. Final Output: The final output is produced. Annotations explain that averaging reduces sequence length, forking creates a bubble of computation, and some streams are pruned (orange) while others are valuable (blue).
+
+Figure 1: Overview of our method: input tokens fork to form a bubble of latent computation (orange), which is then contracted to produce the final token. Some extraneous tokens may fork (dark blue), but then be pruned.
+
+{2}------------------------------------------------
+
+![Figure 2: Forking procedure diagram. The diagram illustrates the 'Forking' operation in a transformer block. On the left, the 'Input Residual Stream' contains tokens 'This', 'is', 'is', 'good'. The 'Forking' layer uses a 'Forking' function to produce 'P_keep' and 'P_fork' scores for each token. The 'is' token has two forks, while 'This' creates a new fork. The 'Top-k across P_keep and P_fork' layer selects the top-k scores for each token. The 'Attenuated Multi-Head Attention' layer then processes the tokens, with attention weights attenuated by the cumulative scores. The final output shows the tokens 'This', 'This', 'is', 'good' after the forking operation.](1b7d539e02a202c2cf2d97698b911447_img.jpg)
+
+The diagram illustrates the forking procedure. At the bottom, the 'Input Residual Stream' shows tokens 'This', 'is', 'is', 'good'. Above this, the 'Forking' layer (labeled 'Forking') produces 'P\_keep' and 'P\_fork' scores. The 'is' token has two forks, while 'This' creates a new fork. The 'Top-k across P\_keep and P\_fork' layer (labeled 'Top-k across P\_keep and P\_fork') selects the top-k scores. The 'Attenuated Multi-Head Attention' layer (labeled 'Attenuated Multi-Head Attention') then processes the tokens. The final output shows the tokens 'This', 'This', 'is', 'good' after the forking operation. The diagram also includes a legend for 'Keep and Fork based on surviving scores' and 'Set rightmost P\_keep of each token to 1'.
+
+Figure 2: Forking procedure diagram. The diagram illustrates the 'Forking' operation in a transformer block. On the left, the 'Input Residual Stream' contains tokens 'This', 'is', 'is', 'good'. The 'Forking' layer uses a 'Forking' function to produce 'P\_keep' and 'P\_fork' scores for each token. The 'is' token has two forks, while 'This' creates a new fork. The 'Top-k across P\_keep and P\_fork' layer selects the top-k scores for each token. The 'Attenuated Multi-Head Attention' layer then processes the tokens, with attention weights attenuated by the cumulative scores. The final output shows the tokens 'This', 'This', 'is', 'good' after the forking operation.
+
+Figure 2: Forking procedure. Token “is” has two forks, one of which will get deleted; the token “this” creates a new fork; we show a score-attenuated transformer block after a forking operation.
+
+This setup reduces the dynamic computation task to determining which residual streams to keep or delete based on the value of cumulative scores: we take the top-k of the scores and perform their corresponding (i.e., keep / fork) actions. As long as the “useful” tokens receive the highest scores, the extra computation should help the performance of the model. To train the model to use the scores correctly, attention and residual updates are attenuated by the cumulative scores (section 2.4). That is, the tokens that the model needs to attend to and update the most become implicitly the highest-scoring tokens to be duplicated.
+
+Additionally, we take special care about the RoPE position embeddings: we apply a “partial rotation” to the forked tokens proportional to the number of forks: the more forks a token has, the “closer together” each of their forks are. This design is described in detail in appendix D.
+
+### 2.2 NOTATION
+
+We will use  $x_j^{(k)} \in \mathbb{R}^{d_{\text{model}}}$  to denote the  $j^{\text{th}}$  residual stream at the  $k^{\text{th}}$  layer. To emphasize that a particular token is the  $j^{\text{th}}$  fork of token  $i$ , we will write  $x_{i,j}^{(k)}$ . We fork tokens to the left of the original input token. Thus, the original token is always  $x_{i,0}^{(0)}$ . A sequence of  $q$  forks and original token can be written as  $\left[ x_{i,q}^{(k)} \dots x_{i,0}^{(k)} \right]$ .
+
+Lastly, we use  $L$  to denote the input sequence length (i.e., “input block size”), the embedded input to the first block is  $x_{1,0}^{(0)} \dots x_{i,0}^{(0)}$ ,  $N$  to denote the block size at the input to each layer (i.e., before the first layer,  $N = L$ ). We omit the layer index for  $N$  to avoid clutter. Additionally, we take a parameter  $\kappa$  for the maximum block size. This means that the maximum number of forks each layer is  $\kappa - N$ .
+
+### 2.3 FORKING
+
+Residual stream insertion and deletion are performed in special forking layers inserted between our score-attenuated transformer blocks, described in section 2.4. Each “forking” layer  $k$  parametrized by  $\theta$  carries a new “forking decision” function  $f_{\theta}^{(k)} : \mathbb{R}^{d_{\text{model}}} \rightarrow \mathbb{R}^2$ . We apply this new function on each member of the residual stream in order to produce the fork and keep scores, which we then bottleneck using a top-k judgment in order to produce the forked output.
+
+**Scoring.** For each residual,  $x_i^{(k-1)}$  (note that the notation here is irrespective of forks or the original token, a distinction which we make later), we first apply the forking decision function along with a sigmoid activation  $\sigma$  to obtain a fork and keep scores:
+
+$$\sigma \left( f_{\theta}^{(k)} \left( x_i^{(k-1)} \right) \right) = \left[ p_{\text{fork},i}^{(k)}, p_{\text{keep},i}^{(k)} \right]. \quad (1)$$
+
+{3}------------------------------------------------
+
+We then update the fork and keep scores inductively based on a “cumulative score” ( $p_{\text{cum}}$ ) propagated from previous layers:
+
+$$\hat{p}_{\text{fork},i}^{(k)} = p_{\text{cum},i}^{(k-1)} \cdot p_{\text{fork},i}^{(k)} \quad (2)$$
+
+$$\hat{p}_{\text{keep},i}^{(k)} = p_{\text{cum},i}^{(k-1)} \cdot p_{\text{keep},i}^{(k)} \quad (3)$$
+
+We initialize the cumulative scores for each input token at the first layer as  $p_{\text{cum},(i,0)}^{(0)} = 1$ . A subset of these  $\hat{p}_{\text{keep}}^{(k)}, \hat{p}_{\text{fork}}^{(k)}$  scores is used as  $p_{\text{cum}}^{(k+1)}$ , after deciding which ones to keep, as described later.
+
+Note that, in practice, all scores (keep, fork, cumulative) are implemented in log-space for stability instead of being in probability space as shown here.
+
+**Forking Judgments.** To make sure we have a source token from which to predict each next token, we must ensure that at least one instance is kept throughout the whole model. To do so, we first define a modified keep score that is forced to be 1 (the maximum) for the original, rightmost tokens:
+
+$$\hat{p}_{\text{keep},(k,j)}' = \begin{cases} 1 & \text{if } j = 0 \\ \hat{p}_{\text{keep},(k,j)} & \text{otherwise} \end{cases} \quad (4)$$
+
+Given a set of scores for a layer  $k$ , we create a list  $P = \left[ \hat{p}_{\text{fork},0}^{(k)}, \hat{p}_{\text{keep},0}^{(k)}, \dots, \hat{p}_{\text{fork},n}^{(k)}, \hat{p}_{\text{keep},n}^{(k)} \right]$ , we compute a top-k to downsample this list to obtain  $P_\kappa$  where  $|P_\kappa| = \kappa$ . Using this list, we assemble the new residual stream set  $X^{(k)}$  by the following two rules:
+
+$$x_j^{(k)} \in X^{(k)} \text{ if } \hat{p}_{\text{keep},j}^{(k)} \in P_\kappa \quad (5)$$
+
+$$x_{\text{fork}}^{(k)} \in X^{(k)} \text{ if } \hat{p}_{\text{fork},j}^{(k)} \in P_\kappa \quad (6)$$
+
+In order to differentiate the forks from their sources, a per-layer learned fork embedding  $v_\theta^{(k)} \in \mathbb{R}^{d_{\text{model}}}$  is added to their parent at initialization:  $x_{\text{fork}}^{(k)} = x_j^{(k)} + v_\theta^{(k)}$ . We arrange the output tokens such that if a new forked residual is created, it is placed to the *left* of its parent.
+
+We define the new cumulative scores  $p_{\text{cum}}^{(k)}$  as  $\hat{p}_{\text{fork},j}$  for newly forked residuals, and  $\hat{p}_{\text{keep},j}$  for kept residuals (note that this is score for which the rightmost token does not have forced-maximum score of 1, allowing the model to ignore the rightmost token if desired.)
+
+### 2.4 RESIDUAL UPDATE ATTENUATION
+
+To learn useful scores, in all blocks, both residual writes and attention computation are modulated by the cumulative scores. Intuitively, this prevents the model from relying on tokens that are about to be deleted due to their low scores.
+
+Specifically, we stack the cumulative scores to a vector  $P^{(k)} \in \mathbb{R}^\kappa$ :
+
+$$P^{(k)} = \left[ p_{\text{cum},1}^{(k)}, \dots, p_{\text{cum},\kappa}^{(k)} \right] \quad (7)$$
+
+and use it to modulate both the attention computation and residual updates. We define the attenuated attention operation as:
+
+$$\text{Attn}\left(Q^{(k)}, K^{(k)}, V^{(k)}\right) = \text{softmax}\left(\frac{Q^{(k)} K^{(k)\top} + \mathbb{1} \log(P^{(k)})^\top}{\sqrt{d_{\text{model}}}}\right) \left(V^{(k)} \odot P^{(k)}\right) \quad (8)$$
+
+where  $\odot$  is the element-wise multiplication. We modify the transformer block (Vaswani et al., 2017) to attenuate the residual whites by  $P^{(k)}$  as follows:
+
+$$X^{(k)'} = \text{Attn}\left(f_Q\left(\text{LN}\left(X^{(k)}\right)\right), f_K\left(\text{LN}\left(X^{(k)}\right)\right), f_V\left(\text{LN}\left(X^{(k)}\right)\right)\right) \odot P^{(k)} \mathbb{1}^\top + X^{(k)} \quad (9)$$
+
+$$X^{(k+1)} = \text{MLP}\left(\text{LN}\left(X^{(k)'}\right)\right) \odot P^{(k)} \mathbb{1}^\top + X^{(k)'} \quad (10)$$
+
+for  $X^{(k)}$  being the catenated list of residual streams in the input of the layer, LN being layernorm, and  $f_{Q,K,V}$  being the attention projections. If forking occurred prior to this layer,  $X^{(k)}$  is as defined in eqs. 5 and eq. (6), *after* forking takes place.
+
+{4}------------------------------------------------
+
+### 2.5 OUTPUT AVERAGING
+
+After all transformer layers, we obtain a residual stream set where an input token might be represented by multiple residual streams. To compute a single output distribution for these distributions, we decode each of the residual streams and mix the resulting probability distributions using the cumulative scores. For  $\text{Dec}_\theta : \mathbb{R}_{\text{model}}^d \rightarrow |V|$  being the vocabulary output projection, and  $f$  being the last layer of the network, we have:
+
+$$x_i^{(k)} = \frac{1}{\sum_j p_{\text{cum},(i,j)}^{(f)}} \sum_j p_{\text{cum},(i,j)}^{(f)} \text{softmax} \left( \text{Dec}_\theta \left( x_{i,j}^{(k)} \right) \right). \quad (11)$$
+
+We compute this weighted average using the log-sum-exp trick (Blanchard et al., 2021) for stability.
+
+### 2.6 SCORING AND SAMPLING
+
+Because of the possibility of varying  $\kappa$  at inference time, there are two main ways inference can be performed in our model. Naively, we can set the inference budget  $\kappa_{\text{inference}}$  to be the same as in training time  $\kappa_{\text{train}}$ , two or four times the block size at training. We call this **fixed forking**. Alternatively, we can set the inference budget to be the same *ratio* as the training budget.  $\kappa_{\text{inference}}$  is set to a value that maintains its same ratio to block size as during training; that, if  $\kappa_{\text{train}} = 2l_{\text{train}}$ , then  $\kappa_{\text{sample}} = 2l_{\text{sample}}$ . We call this **dynamic forking**, and discuss this method further in appendix E.1.
+
+**Scoring** To obtain a probability judgment from our model of a sequence, we provide the entire sequence as input to our model and obtain the posterior probabilities our model assigns to each token of our sequence. For all of our results in table 1, we use dynamic forking.
+
+**Sampling** We perform autoregression with both fixed and dynamic forking, and discuss the trade-offs of both, in section 5.1. Note that dynamic forking is especially pertinent here because initial sequences for autoregression is small.
+
+## 3 EXPERIMENTAL SETUP
+
+### 3.1 PARAMETER SELECTION AND TRAINING
+
+Because our architecture takes token embeddings as input and produces token probabilities, it trains exactly like a regular decoder-only language model. As mentioned above, this means that the loss function can be standard language-modeling cross-entropy loss. Optimization is performed by the AdamW optimizer (Loshchilov & Hutter, 2017). Further optimization and architecture details can be found in appendix A.
+
+We insert the first forking layer after a few regular transformer blocks to ensure that the forking score judgments see a broader context window. This is important in order to judge a token’s relative importance compared to the others. For all models in section 4, we train models at various scales with token forking placed prior to layers 3, 7, and 11. This means that for models with more layers, the majority of the latter half of transformer will contain no forking. We discuss this choice in appendix B.
+
+### 3.2 PRETRAINING DATASETS
+
+We pretrain our approach on two datasets: OpenWebText (Gokaslan et al., 2019), a standard web-text pretraining corpus, as well as peS2o (Soldaini & Lo, 2023), a collection of academic papers sourced from the Semantic Scholar Open Research corpus (Lo et al., 2020). Pretraining is conducted for 2.5 billion tokens (75,000 steps). We sample batches at random positions throughout each dataset without additional masking.
+
+### 3.3 BASELINES
+
+**Regular Transformer.** We first compare against a GPT-2-like (Radford et al., 2019) transformer with RoPE (Su et al., 2024). Our model is based on nanoGPT<sup>2</sup>. We make no changes other than removing the learned position embeddings and including rotational ones in the attention pass.
+
+<sup>2</sup><https://github.com/karpathy/nanoGPT>
+
+{5}------------------------------------------------
+
+**Duplicated Filler Tokens.** Though a regular transformer is a parameter-matched baseline, our approach will necessarily utilize more computation due to the expanded latent block size (i.e., after forking, the block-size is longer). A naive model of parallel computation that would allow us to slightly exceed the computation of our approach is by simply copying the input residual multiple times before running the transformer, and then taking the rightmost residual for decoding.
+
+### 3.4 PRETRAINING EVALUATIONS
+
+After pretraining, we conduct a variety of zero-shot evaluations on our models and baselines to examine their quality. They include the model’s measured perplexity on a holdout validation set, LAMBADA (Paperno et al., 2016) for context extraction, HellaSwag (Zellers et al., 2019) for common sense reasoning, BLIMP (Warstadt et al., 2020) for syntax understanding, and PIQA (Bisk et al., 2020) for embodied physical inference.
+
+For each zero-shot downstream task, we use the dynamic budget as described in appendix E.1. We describe in detail the implementation of the zero-shot evaluations, including what to measure, in appendix E. Across all evaluations, we use the trained models as-is without additional fine-tuning.
+
+## 4 RESULTS
+
+| Dataset | Size | Approach | Perplexity (↓) | LAMBADA (↑) | HellaSwag (↑) | BLIMP (↑) | PIQA (↑) |
+|-|-|-|-|-|-|-|-|
+| OpenWebText | 772M | Baseline | 21.22 | 23.9 | 30.6 | 79.6 | <b>62.3</b> |
+|  |  | Copy-3 | 21.20 | 22.8 | 29.0 | 81.2 | 60.4 |
+|  |  | Copy-5 | 20.90 | 19.9 | 29.1 | 80.9 | 60.2 |
+|  |  | Ours ( $\kappa = 2L$ ) | 20.19 | 27.9 | 31.1 | 80.4 | 62.0 |
+|  |  | Ours ( $\kappa = 4L$ ) | <b>19.74</b> | <b>29.4</b> | <b>32.25</b> | <b>81.6</b> | 61.9 |
+|  | 319M | Baseline | 21.56 | 22.1 | 28.7 | 79.0 | 60.5 |
+|  |  | Copy-3 | 21.51 | 21.9 | 28.6 | <b>80.5</b> | 60.1 |
+|  |  | Copy-5 | 21.28 | 21.1 | 28.4 | 79.6 | 60.5 |
+|  |  | Ours ( $\kappa = 2L$ ) | 20.55 | 22.9 | <b>29.3</b> | 78.3 | <b>60.9</b> |
+|  |  | Ours ( $\kappa = 4L$ ) | <b>20.23</b> | <b>23.2</b> | 29.0 | 78.8 | 60.1 |
+|  | 150M | Baseline | 24.51 | 18.2 | 26.9 | 76.7 | 57.9 |
+|  |  | Copy-3 | 24.44 | 17.6 | 27.1 | <b>79.3</b> | 58.9 |
+|  |  | Copy-5 | 24.40 | 18.9 | 26.9 | 78.8 | 59.4 |
+|  |  | Ours ( $\kappa = 2L$ ) | 23.78 | 21.1 | 27.3 | 77.5 | 59.0 |
+|  |  | Ours ( $\kappa = 4L$ ) | <b>23.19</b> | <b>25.5</b> | <b>27.7</b> | 78.1 | <b>60.6</b> |
+| peS2o | 772M | Baseline | 14.64 | 9.9 | 27.3 | 69.8 | 55.4 |
+|  |  | Copy-3 | 14.37 | 9.5 | 27.2 | <b>73.3</b> | 55.3 |
+|  |  | Copy-5 | 14.50 | 10.3 | 27.3 | 71.6 | 54.5 |
+|  |  | Ours ( $\kappa = 2L$ ) | 13.98 | 10.5 | 27.4 | 68.4 | <b>56.3</b> |
+|  |  | Ours ( $\kappa = 4L$ ) | <b>13.77</b> | <b>12.9</b> | <b>27.6</b> | 67.4 | 54.6 |
+|  | 319M | Baseline | 16.61 | 9.3 | 26.4 | 68.4 | <b>55.3</b> |
+|  |  | Copy-3 | 16.41 | 9.4 | <b>27.2</b> | <b>71.8</b> | 54.7 |
+|  |  | Copy-5 | 16.16 | 8.5 | 26.6 | 70.1 | 55.1 |
+|  |  | Ours ( $\kappa = 2L$ ) | 15.84 | 10.5 | 26.5 | 67.0 | 53.8 |
+|  |  | Ours ( $\kappa = 4L$ ) | <b>15.61</b> | <b>12.3</b> | <b>27.2</b> | 68.6 | 53.6 |
+|  | 150M | Baseline | 17.10 | 8.1 | 26.4 | 68.6 | 54.5 |
+|  |  | Copy-3 | 16.95 | 7.1 | 26.3 | <b>69.6</b> | 54.1 |
+|  |  | Copy-5 | 16.90 | 7.2 | 26.0 | 69.3 | 54.0 |
+|  |  | Ours ( $\kappa = 2L$ ) | 16.90 | 5.0 | 26.2 | 66.6 | <b>55.1</b> |
+|  |  | Ours ( $\kappa = 4L$ ) | <b>16.42</b> | <b>10.3</b> | <b>26.9</b> | 67.9 | 55.1 |
+
+Table 1: Zero-shot evaluation results across all model scales after pretraining on 2.5 billion tokens. Each setting is parameter-matched; baseline is a standard GPT-2-like model; copy-3 and copy-5 are models where the input residuals are copied multiple times and can attend to each other; ours is the **thoughtbubbles** transformer, with forking budget set to 2 ( $\kappa = 2L$ ) and 4 ( $\kappa = 4L$ ) times the input block size. The latter of which is roughly FLOPs-matched against copy-5 baseline.
+
+**Our approach performs the best against all baselines in validation perplexity, even exceeding models of bigger scale.** Across both parameter and computation matched settings, we find that our model scores the lowest perplexity across all evaluations. Figure 3 highlights the scalability of our approach: surprisingly, our approach at a 319M parameter scale has lower perplexity on OpenWebText than the baseline approach at the 772M scale.
+
+{6}------------------------------------------------
+
+134 **Across most zero-shot evaluations, our approach outperforms baselines.** For all LAMBADA  
+135 and HellaSwag evaluations, we find that our approach outperforms both the parameter-matched  
+136 baselines as well as the computation-matched baselines. However, we note that for BLiMP (syntax  
+137 understanding) our model only outperforms the parameter-matched, but not computation-matched  
+138 baselines—indicating that pruned dynamic parallel computation may not be as helpful for syntax  
+139 matches. Finally, our model performs similarly to the baseline for embodied reasoning. We at-  
+140 tribute this degraded performance to the fact that a short (2.5BT) training may not capture enough  
+141 information for the embodied NLI to be effectively measured.
+
+![Figure 3: Dev-set perplexity of our approach and various baselines as a function of model scale on both OpenWebText and pes2o datasets. The figure contains two line plots. The left plot is for Dataset = openwebtext and the right plot is for Dataset = pes2o. Both plots show Perplexity (Y-axis) vs. Size (M) (X-axis) for model sizes 200, 400, 600, and 800. The legend indicates: Baseline (blue line with circles), Copy-3 (orange line with circles), Copy-5 (green line with circles), Ours (k=2n) (red line with circles), and Ours (k=4n) (purple line with circles). In both datasets, the 'Ours' methods (red and purple lines) consistently achieve lower perplexity than the baselines and copy methods across all model scales. Lower perplexity indicates better performance.](c0843c6d138705289960d9f53a6e72a1_img.jpg)
+
+132  
+133
+
+Figure 3: Dev-set perplexity of our approach and various baselines as a function of model scale on both OpenWebText and pes2o datasets. The figure contains two line plots. The left plot is for Dataset = openwebtext and the right plot is for Dataset = pes2o. Both plots show Perplexity (Y-axis) vs. Size (M) (X-axis) for model sizes 200, 400, 600, and 800. The legend indicates: Baseline (blue line with circles), Copy-3 (orange line with circles), Copy-5 (green line with circles), Ours (k=2n) (red line with circles), and Ours (k=4n) (purple line with circles). In both datasets, the 'Ours' methods (red and purple lines) consistently achieve lower perplexity than the baselines and copy methods across all model scales. Lower perplexity indicates better performance.
+
+145 Figure 3: Dev-set perplexity of our approach and various baselines as a function of model scale on  
+146 both OpenWebText and pes2o datasets. Across all scales, note that our method outperforms all  
+147 baselines, including both computation and parameter-matched ones. Lower is better.
+
+###### 350 5 ANALYSIS
+
+351  
+352 **Forks meaningfully influence the value**  
+353 **of the parent token.** In fig. 4, we see  
+354 the rightmost (“og”) token attends to its  
+355 children with attention scores more than  
+356 an order of magnitude higher than other  
+357 tokens—second only to attention of those  
+358 tokens to themselves. This result indicate  
+359 that the forking tokens play a large role  
+360 in the computation of the residual update  
+361 for the rightmost token than most other  
+362 tokens, indicating their utility in computing  
+363 the final output.
+
+364 **Our model dynamically allocates more**  
+365 **computation at regions of higher uncertainty**  
+366 **without explicit supervision ...**  
+367 Despite no explicit interventions or regu-  
+368 larization, our method learned to allocate  
+369 more computation to areas of greater un-  
+370 certainty. We see in fig. 5 that our method  
+371 allocates more computation tokens with high output distribution entropy; this is true both for the  
+372 entropy measured from the forking model as well as an independently trained, parameter matched  
+373 decoder LM that does not fork. This is in-line with recent literature (Wang et al., 2025) that highlights the informativeness of high entropy tokens.
+
+374  
+375 **... but will reduce computation at areas of greatest uncertainty.** Despite the previous point,  
+376 however, we note that our model allocates relatively less budget at tokens of the highest uncertainty,  
+377 forming a concave parabolic relationship between entropy and computation allocation. We hypothe-  
+size that this is due to the relatively higher utility of further computation at areas of moderate (but not
+
+![Figure 4: Analysis of attention allocation between the main (rightmost, “og”) token and its child forks on our approach trained on openwebtext. The figure consists of six box plots arranged in a 3x2 grid. The left column shows attention scores for the main token to its children, siblings, and everyone else. The right column shows attention scores for the forked tokens to themselves, their parent, and everyone else. The y-axis scales vary: the top-left plot ranges from 0 to 0.04, the top-right from 0 to 0.10, the middle-left from 0 to 0.03, the middle-right from -0.05 to 0.05, the bottom-left from 0 to 0.00325, and the bottom-right from 0.00126 to 0.00128. In all plots, the median attention score for the main token to its children is significantly higher than for other tokens, while the attention scores for forked tokens to their parent are notably low.](023b142f90e1253702ac88b18380d3ec_img.jpg)
+
+Figure 4: Analysis of attention allocation between the main (rightmost, “og”) token and its child forks on our approach trained on openwebtext. The figure consists of six box plots arranged in a 3x2 grid. The left column shows attention scores for the main token to its children, siblings, and everyone else. The right column shows attention scores for the forked tokens to themselves, their parent, and everyone else. The y-axis scales vary: the top-left plot ranges from 0 to 0.04, the top-right from 0 to 0.10, the middle-left from 0 to 0.03, the middle-right from -0.05 to 0.05, the bottom-left from 0 to 0.00325, and the bottom-right from 0.00126 to 0.00128. In all plots, the median attention score for the main token to its children is significantly higher than for other tokens, while the attention scores for forked tokens to their parent are notably low.
+
+Figure 4: Analysis of attention allocation between the main (rightmost, “og”) token and its child forks on our approach trained on openwebtext. Note that since we place child token embeddings to the left of the main token, forked children cannot attend to its parent.
+
+{7}------------------------------------------------
+
+378  
+379  
+380  
+381  
+382  
+383  
+384  
+385  
+386  
+387  
+388  
+389  
+390  
+391  
+392  
+393  
+394  
+395  
+396  
+397  
+398  
+399  
+400  
+401  
+402  
+403  
+404  
+405  
+406  
+407  
+408  
+409  
+410  
+411  
+412  
+413  
+414  
+415  
+416  
+417  
+418  
+419  
+420  
+421  
+422  
+423  
+424  
+425  
+426  
+427  
+428  
+429  
+430  
+431
+
+![Figure 5: Two heatmaps showing normalized number of forks in the final layer across a window of 4 tokens. The left heatmap shows entropy as measured by the forking transformer, and the right heatmap shows entropy as measured by a baseline decoder LM. Both plots have 'Mean Entropy' on the x-axis (0 to 8) and 'Mean number of forks' on the y-axis (1.0 to 2.0). A color bar on the right of each plot indicates the normalized number of forks, ranging from 0.0 (dark purple) to 0.4 (light yellow).](a71911ad87414271aeb190e0eebcb989_img.jpg)
+
+Figure 5: Two heatmaps showing normalized number of forks in the final layer across a window of 4 tokens. The left heatmap shows entropy as measured by the forking transformer, and the right heatmap shows entropy as measured by a baseline decoder LM. Both plots have 'Mean Entropy' on the x-axis (0 to 8) and 'Mean number of forks' on the y-axis (1.0 to 2.0). A color bar on the right of each plot indicates the normalized number of forks, ranging from 0.0 (dark purple) to 0.4 (light yellow).
+
+Figure 5: Normalized number of forks in the final layer across a window of 4 tokens as a function of the mean entropy of those 4 tokens on OpenWebText. Left: entropy as measured by the forking transformer; right: entropy as measured by a baseline decoder LM.
+
+low) uncertainty: for instance, while choosing between a few options; conversely, areas of highest uncertainty are often caused by the edges of clauses or coreferences, where additional computation will not help resolve the uncertainty.
+
+### 5.1 AUTOREGRESSION
+
+![Figure 6: Box plot showing the perplexity distribution and mean perplexity of our 772M (κ = 2L) model over a smaller subset of OpenWebText dev set. The x-axis represents Perplexity (10 to 60). The y-axis represents the methods: Blockwise (blue), Dynamic (orange), Fixed (green), and Baseline (red). The plot shows that the Baseline method has the highest perplexity, while the Blockwise method has the lowest.](27b22513fc27a0ff5f230b062ad3112f_img.jpg)
+
+Figure 6: Box plot showing the perplexity distribution and mean perplexity of our 772M (κ = 2L) model over a smaller subset of OpenWebText dev set. The x-axis represents Perplexity (10 to 60). The y-axis represents the methods: Blockwise (blue), Dynamic (orange), Fixed (green), and Baseline (red). The plot shows that the Baseline method has the highest perplexity, while the Blockwise method has the lowest.
+
+Figure 6: Perplexity distribution and mean perplexity of our 772M ( $\kappa = 2L$ ) model over smaller subset of OpenWebText dev set between blockwise forward versus autoregression. Left: naive autoregression; right: autoregression with forking budget proportional to input size. Lower is better.
+
+As seen in fig. 6, implementing autoregression naively with a fixed block size irrespective of the input sequence length results in a distribution shift between blockwise forward pass and autoregression—since the maximum allowed number of forks is much higher if input sequence length is smaller while the total budget remains the same.
+
+However, if we apply the forking budget scaling mitigation described in appendix E.1, we find that our model performs roughly equivalently to the blockwise forward pass, and retains our approach’s performance gains above baseline. This result indicates that, while our result can adapt to different inference-time input sizes, care must be taken to scale the adaptive computation budget accordingly.
+
+## 6 RELATED WORK
+
+**Chain-of-Thought Approaches** Chain-of-thought (Wei et al., 2023) is a simple form of adaptive computation which uses natural-language-based autoregression with additional tokens to achieve thinking. Variants of this approach include simply supervising the output chain (Zhang & Ding, 2024), to replacing them with continuous traces (Hao et al., 2024) or controlled non-adaptive filler tokens (Pfau et al., 2024). Unlike chain-of-thought, our method performs adaptive computation not with recurrence but parallel computation, improving efficiency as well as being able to be trained without additional supervision.
+
+**Adaptive Computation** Methods vary to force a dynamic amount of computation from a neural model based on the problem. The oldest approaches involves explicitly forcing recurrence (Graves, 2016), while modern LMs yield performance improvements through forcing very simple interventions to existing chain of thoughts (Muenninghoff et al., 2025), skipping or adding recurrent compute across layers without adding additional streams of computation (Dehghani et al., 2019; Csordás
+
+{8}------------------------------------------------
+
+et al., 2024; Chen et al., 2024; Murty et al., 2023; Raposo et al., 2024; Kallini et al., 2024), or—most similar to our approach—by adding additional residual streams when computation is needed (Herei & Mikolov, 2024; Goyal et al., 2024; Sun et al., 2025). Unlike prior art, our method removes the need to insert latent tokens explicitly during training or inference, but still gives the ability to gain additional streams of computation through latent residual streams.
+
+**Analysis of Latent Computation** There’s a large and robust literature on the complexity-theoretic power of transformers. Results have shown the limited expressive power of standard transformer computation (Merrill & Sabharwal, 2023), and the additional power that chain-of-thought or even padding tokens add to the computation (Merrill & Sabharwal, 2025; London & Kanade, 2025). Work has also shown the limitations given by single special-token thinking approaches that are not input adaptive (Vennam et al., 2024). Prior work have also shown through techniques in interpretability that even simple chain of thought computation carries implicit intermediate computation similar to depth-bounded recurrence (Brinkmann et al., 2024). We also demonstrate here the power of adaptive latent computation in our work by demonstrating its superior performance even against computation matched baselines; furthermore, we demonstrate that we are indeed performing additional computation in “decisive” high entropy tokens, in line with prior analyses (Wang et al., 2025).
+
+## 7 CONCLUSION
+
+In this work we introduce **thoughtbubbles**, the first adaptive parallel computation architecture that’s 1) trainable without additional supervision beyond LM loss 2) allocates computation and memory at interpretable regions of uncertainty and 3) performs better than baseline models in both perplexity and across a suite of zero-shot evals on both parameter-matched and computation-matched settings.
+
+This method unlocks the previously missing input-adaptivity of transformer computation, which allows our model to solve more difficult tasks that require scaling inference-time computation. We demonstrate the efficacy of our method via a suite of zero-shot evaluations on models pretrained on both OpenWebText and peS2o in both computation and parameter matched settings. Excitingly, our method at a smaller 319M scale outperformed baselines at 772M scale.
+
+Most importantly, our model enables learning latent adaptive computation in a language model already during the pre-training phase. Unlike CoT approaches, it does not rely on being exposed to step-wise instructions during pre-training. We hope that this will unlock a new generation of transformer architectures with more general latent computation, which in turn enables more helpful and capable adaptive compute models.
+
+## 8 LIMITATIONS
+
+**Time-matched evaluations** Our current approach is implemented in raw PyTorch, requiring no other hardware-level adaptations apart from scatter-max kernels.<sup>3</sup> As such, though our implementation exceeds the performance of a computation-matched approach, its raw wall-clock efficiency is relatively low. Further efforts in implementing hardware-adaptive kernels for operations like forking gather will enable faster computational performance.
+
+**Top-K Gradient Bottleneck** While forking in earlier layers improves the performance of our models, we note that, interestingly, too much forking results in no further performance improvement at a fixed block size budget (appendix B). We believe this is due to certain tokens with high cumulative scores early on in the model being dropped by hard top-k decisions later in the model, thus resulting in no gradients to update the early large cumulative scores. By implementing training time randomization and noise, this can be mitigated to improve deep forking performance.
+
+**Downstream Reasoning Tasks** Given our hardware limitations, we cannot experiment with approaches at sufficient scale to enable non-noisy measurements on hard reasoning datasets such as GSM8k (Cobbe et al., 2021), which—without customized training regimes—usually emerges with good performance only around the multi-billion-parameter scale (Liu et al., 2023). In future work, we hope to perform these evaluations with additional resources.
+
+<sup>3</sup>[https://github.com/rustyls/pytorch\\_scatter](https://github.com/rustyls/pytorch_scatter)
+
+{9}------------------------------------------------
+
+## USE OF LARGE LANGUAGE MODELS
+
+We use LLMs for copyediting only. All ideas and content contained herein are our own.
+
+## REFERENCES
+
+- Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. Piqa: Reasoning about physical commonsense in natural language. In *Proceedings of the AAAI conference on artificial intelligence*, volume 34, pp. 7432–7439, 2020.
+- Pierre Blanchard, Desmond J Higham, and Nicholas J Higham. Accurately computing the log-sum-exp and softmax functions. *IMA Journal of Numerical Analysis*, 41(4):2311–2330, 2021.
+- Jannik Brinkmann, Abhay Sheshadri, Victor Levoso, Paul Swoboda, and Christian Bartelt. A Mechanistic Analysis of a Transformer Trained on a Symbolic Multi-Step Reasoning Task, June 2024.
+- Qian Chen, Wen Wang, Qinglin Zhang, Siqi Zheng, Shiliang Zhang, Chong Deng, Hai Yu, Jiaqing Liu, Yukun Ma, and Chong Zhang. Skip-layer attention: Bridging abstract and detailed dependencies in transformers. *arXiv preprint arXiv:2406.11274*, 2024.
+- Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. Training verifiers to solve math word problems. *arXiv preprint arXiv:2110.14168*, 2021.
+- Róbert Csordás, Kazuki Irie, Jürgen Schmidhuber, Christopher Potts, and Christopher D. Manning. Moeut: Mixture-of-experts universal transformers. In A. Globerson, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang (eds.), *Advances in Neural Information Processing Systems*, volume 37, pp. 28589–28614. Curran Associates, Inc., 2024. URL [https://proceedings.neurips.cc/paper\\_files/paper/2024/file/321387ba926b8e58d3591c0aeb52ffc2-Paper-Conference.pdf](https://proceedings.neurips.cc/paper_files/paper/2024/file/321387ba926b8e58d3591c0aeb52ffc2-Paper-Conference.pdf).
+- Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: Fast and memory-efficient exact attention with io-awareness. *Advances in neural information processing systems*, 35:16344–16359, 2022.
+- Mostafa Dehghani, Stephan Gouws, Oriol Vinyals, Jakob Uszkoreit, and Łukasz Kaiser. Universal Transformers, March 2019.
+- Aaron Gokaslan, Vanya Cohen, Ellie Pavlick, and Stefanie Tellex. Openwebtext corpus. <http://Skylion007.github.io/OpenWebTextCorpus>, 2019.
+- Sachin Goyal, Ziwei Ji, Ankit Singh Rawat, Aditya Krishna Menon, Sanjiv Kumar, and Vaishnavh Nagarajan. Think Before You Speak: Training Language Models with Pause Tokens. 2024.
+- Alex Graves. Adaptive computation time for recurrent neural networks. *arXiv preprint arXiv:1603.08983*, 2016.
+- Shibo Hao, Sainbayar Sukhbaatar, DiJia Su, Xian Li, Zhiting Hu, Jason Weston, and Yuandong Tian. Training Large Language Models to Reason in a Continuous Latent Space, December 2024.
+- David Herel and Tomas Mikolov. Thinking Tokens for Language Modeling, May 2024.
+- Julie Kallini, Shikhar Murty, Christopher D Manning, Christopher Potts, and Róbert Csordás. Mrt5: Dynamic token merging for efficient byte-level language models. *arXiv preprint arXiv:2410.20771*, 2024.
+- Bingbin Liu, Sebastian Bubeck, Ronen Eldan, Janardhan Kulkarni, Yuanzhi Li, Anh Nguyen, Rachel Ward, and Yi Zhang. Tinygsm: achieving 80% on gsm8k with small language models. *arXiv preprint arXiv:2312.09241*, 2023.
+
+ Rest of paper (reference and Appendix) is removed.

@@ -1,0 +1,328 @@
+
+
+{0}------------------------------------------------
+
+# FINE-TUNING QUANTIZED NEURAL NETWORKS WITH ZEROTH-ORDER OPTIMIZATION
+
+Sifeng Shang<sup>1</sup> Jiayi Zhou<sup>1</sup> Chenyu Lin<sup>1</sup> Minxian Li<sup>2</sup> Kaiyang Zhou<sup>1,✉</sup>
+
+<sup>1</sup>Hong Kong Baptist University
+
+<sup>2</sup>Nanjing University of Science and Technology
+
+<https://github.com/maifoundations/QZO>
+
+## ABSTRACT
+
+As the size of large language models grows exponentially, GPU memory has become a bottleneck for adapting these models to downstream tasks. In this paper, we aim to push the limits of memory-efficient training by minimizing memory usage on model weights, gradients, and optimizer states, within a unified framework. Our idea is to eliminate both gradients and optimizer states using zeroth-order optimization, which approximates gradients by perturbing weights during forward passes to identify gradient directions. To minimize memory usage on weights, we employ model quantization, e.g., converting from bfloat16 to int4. However, directly applying zeroth-order optimization to quantized weights is infeasible due to the precision gap between discrete weights and continuous gradients, which would otherwise require de-quantization and re-quantization. To overcome this challenge, we propose Quantized Zeroth-order Optimization (QZO), a simple yet effective approach that perturbs the continuous quantization scale for gradient estimation and uses a directional derivative clipping method to stabilize training. QZO is orthogonal to both scalar-based and codebook-based post-training quantization methods. Compared to full-parameter fine-tuning in 16 bits, QZO can reduce the total memory cost by more than  $18\times$  for 4-bit LLMs, and enables fine-tuning Llama-2-13B within a single 24GB GPU.
+
+## 1 INTRODUCTION
+
+Pre-trained large language models (LLMs) (Zhang et al., 2022; Touvron et al., 2023a;b; Grattafiori et al., 2024) have demonstrated great potential in numerous downstream applications, ranging from sentiment classification and text summarization, to more challenging open-ended question answering and creative writing. However, with the model size growing at an exponential rate, adapting LLMs to downstream tasks presents significant challenges to computational resources. For instance, fine-tuning a Llama-7B model stored in bfloat16 typically requires 56GB GPU memory: 14GB for model weights, 14GB for gradients, and another 28GB for optimizer states when adaptive gradient-based optimization methods are used (e.g., the first and second moments in AdamW (Loshchilov & Hutter, 2017), which cost twice the size of gradients). Such an enormous memory cost makes it infeasible for researchers and practitioners with limited computational resources to fine-tune LLMs.
+
+In general, there are four key components that determine memory usage: (1) model weights, (2) gradients (typically the same size as weights), (3) optimizer states (often twice the size as gradients), and (4) activations cached for gradient computation. Since activations are mostly affected by the size of mini-batch, existing memory-efficient training methods mainly target the first three components (Zhao et al., 2024; Malladi et al., 2023). In this work, we aim to push the limits of memory-efficient training by minimizing memory usage on model weights, gradients, and optimizer states, within a *unified* framework.
+
+Our main idea is to eliminate gradients and optimizer states using zeroth-order optimization (Spall, 1992), which gets rid of backpropagation by approximating gradients solely through forward passes (i.e., perturbing model weights to identify gradient directions). When it comes to model weights, the
+
+<sup>✉</sup>Corresponding author
+
+{1}------------------------------------------------
+
+![Bar chart titled 'Memory Profiling on SST2' showing VRAM (GB) usage for different LLMs and optimization methods. The chart compares OPT-6.7B, Llama-2-7B, and Llama-3.1-8B across four methods: Fine-tune w/ AdamW (16-bit), Fine-tune w/ SGD (16-bit), MeZO (16-bit), and QZO (4-bit). QZO consistently shows the lowest memory usage, with speedup factors of 18.3x, 18.4x, and 18.3x compared to the 16-bit methods.](49ad3a646d84bcfeac02bdf2b3792a3e_img.jpg)
+
+| Model | Fine-tune w/ AdamW (16-bit) | Fine-tune w/ SGD (16-bit) | MeZO (16-bit) | QZO (4-bit) |
+|-|-|-|-|-|
+| OPT-6.7B | 87.6 | 26.8 | 15.2 | 4.8 (18.3x) |
+| Llama-2-7B | 92.2 | 26 | 14.8 | 5 (18.4x) |
+| Llama-3.1-8B | 113.7 | 31.9 | 20.4 | 6.2 (18.3x) |
+
+Bar chart titled 'Memory Profiling on SST2' showing VRAM (GB) usage for different LLMs and optimization methods. The chart compares OPT-6.7B, Llama-2-7B, and Llama-3.1-8B across four methods: Fine-tune w/ AdamW (16-bit), Fine-tune w/ SGD (16-bit), MeZO (16-bit), and QZO (4-bit). QZO consistently shows the lowest memory usage, with speedup factors of 18.3x, 18.4x, and 18.3x compared to the 16-bit methods.
+
+Figure 1: Memory profiling on SST-2 (Socher et al., 2013) with (per-device) batch size set to 1. Fine-tuning w/ AdamW is done with fully-sharded data parallel.
+
+optimal approach is to quantize the weights, e.g., converting from bfloat16 to int4 can significantly cut the memory cost by  $4\times$ . However, directly applying zeroth-order optimization to quantized weights is non-trivial because (1) quantized weights cannot be perturbed in the continuous space, and (2) the gradients estimated by a zeroth-order optimizer are continuous and therefore cannot be used to update discrete quantized weights (which would otherwise require de-quantization and re-quantization).<sup>1</sup>
+
+To overcome the aforementioned challenges, we propose a novel approach called Quantized Zeroth-order Optimization (QZO), which enables quantized neural networks to be fine-tuned with zeroth-order optimization, hence achieving maximum reduction in memory consumption—compared to full-parameter fine-tuning in 16 bits, QZO significantly reduces the total memory cost by  $18\times$  for 4-bit LLMs (see Figure 1). Specifically, QZO approximates the gradients of quantized weights by perturbing the continuous quantization scale parameter(s) rather than the discrete weights, which are kept fixed throughout training. To further stabilize training, we propose a gradient clipping method and provide a theoretical proof to justify that the clipping method essentially reduces the variance of the gradient estimate.
+
+We evaluate QZO on different families of LLMs including OPT (Zhang et al., 2022) and Llama (Touvron et al., 2023b; Grattafiori et al., 2024), as well as using a diverse set of quantization methods. The experiments are conducted on five popular NLP benchmarks including both classification and generation tasks. Using 4-bit LLMs, QZO significantly outperforms both quantized and un-quantized zero-shot models while performing on par with MeZO (Malladi et al., 2023), which applies zeroth-order optimization to un-quantized models. In the extreme quantization case where the model is quantized to 2-bit, QZO still beats the zero-shot baseline by a large margin, demonstrating the effectiveness of QZO in fine-tuning quantized models. We also provide both theoretical evidence and ablation experiments to demonstrate the effectiveness of directional derivative clipping in stabilizing the training, which functions through reducing the variance of the gradient estimates.
+
+## 2 RELATED WORK
+
+**Memory-Efficient Training** Fine-tuning LLMs often requires a significant amount of GPU memory, making it challenging for model adaptation on resource-constrained hardware. In general, current memory-efficient training methods mainly focus on reducing GPU memory usage for the following components: (1) learnable model weights, (2) gradients, (3) optimizer states storing additional gradient information, and (4) activations cached for gradient computation. To save memory cost
+
+<sup>1</sup>By quantization, we refer to post-training quantization throughout this work, unless specified otherwise.
+
+{2}------------------------------------------------
+
+for optimizer states, GaLore (Zhao et al., 2024) projects the first and second moments of gradients in AdamW (Loshchilov & Hutter, 2017) onto a low-rank subspace. MeZO (Malladi et al., 2023) eliminates gradients and optimizer states by using a zeroth-order optimizer (Spall, 1992), which estimates gradients using only forward passes and therefore keeps the memory cost the same as inference. CoLM (Nguyen et al., 2025) uses small mini-batches whose gradients match those of large mini-batches, leading to huge memory reduction in activations. Our approach further pushes the limits of memory-efficient training by fine-tuning quantized LLMs with zeroth-order optimization, which significantly cuts memory usage across all components requiring GPU memory.
+
+**LLM Quantization** Post-training quantization (PTQ) is a popular paradigm for compressing LLMs. Most PTQ methods (Dettmers et al., 2022; Frantar et al., 2023; Lin et al., 2024; Xiao et al., 2023; Ashkboos et al., 2024) reduce the bit width for each model parameter by representing the numerical range with low-precision integers while using full precision for quantization parameters. These methods can achieve up to 4-bit quantization, resulting in up to  $4\times$  reduction in memory usage compared to the widely-used BF16 representation. Different from the popular scalar-based quantization paradigm, recent research (Tseng et al., 2024; Egiazarian et al., 2024; Liu et al., 2024) has explored using codebooks for storing full-precision numbers, which are indexed with integers to represent the original model weights. These codebook-based methods can achieve extreme quantization in 2 or 3 bits without observing significant performance drops. Typically, quantized LLMs are not suitable for fine-tuning because continuous gradients cannot be directly applied to updating discrete quantized weights (which would require de-quantization and re-quantization). Our approach seamlessly combines memory-efficient training with quantization to enable fine-tuning on quantized LLMs, achieving maximal reduction on GPU memory usage. More importantly, our approach is orthogonal to most PTQ methods, including both 4-bit and 2-bit quantization methods.
+
+**Zeroth-order Fine-tuning for Quantized Models** Inspired by a foundational approach, ZO-signSGD (Liu et al., 2019), several prior works (Feng et al., 2024; Zhou et al., 2025; Bar & Giryes, 2025) expand on this study to enable the fine-tuning of quantized models, using a shared paradigm that involves quantizing perturbation noises and directly applying sign-based SGD on discrete, quantized weights. Although sharing a similar spirit in minimizing the memory footprint, namely combining zeroth-order optimization with quantization, the proposed QZO approach is inherently more efficient and flexible, as it does not require quantization of perturbation noises or re-quantization of model weights at each optimization iteration. Furthermore, it can be applied to existing scalar-based or codebook-based PTQ methods, such as GPTQ (Frantar et al., 2023) and AQLM (Egiazarian et al., 2024), in a plug-and-play manner.
+
+## 3 METHODOLOGY
+
+### 3.1 BACKGROUND: ZEROTH-ORDER OPTIMIZATION
+
+Zeroth-order optimization (ZO) methods are often used in cases where gradients and higher-order derivatives of the objective cannot be directly computed or are unreliable (Conn et al., 2009). The pioneering work, Simultaneous Perturbation Stochastic Approximation (SPSA) (Spall, 1992), is defined as follows.
+
+**Definition 3.1** (Simultaneous Perturbation Stochastic Approximation, SPSA (Spall, 1992)). *Given a model parameterized by  $\theta \in \mathbb{R}^d$  and a loss function  $\mathcal{L}$ , SPSA estimates the gradients of  $\theta$  on a mini-batch  $\mathcal{B}$  using the following formula:*
+
+$$\hat{\nabla}_{\theta} \mathcal{L}(\theta; \mathcal{B}) = \frac{\mathcal{L}(\theta + \epsilon z; \mathcal{B}) - \mathcal{L}(\theta - \epsilon z; \mathcal{B})}{2\epsilon} z \approx z z^{\top} \nabla_{\theta} \mathcal{L}(\theta; \mathcal{B}), \quad (1)$$
+
+where  $z \in \mathbb{R}^d$  is a random vector sampled from  $\mathcal{N}(0, \mathbf{I}_d)$ , and  $\epsilon$  the perturbation scale.
+
+Built on top of SPSA, a recent work (Malladi et al., 2023) proposed memory-efficient zeroth-order optimization (MeZO) for LLMs. In particular, MeZO uses random seeds as a trick to eliminate the storage cost of  $z$ , and as a result, the memory footprint is kept the same level as inference. MeZO also replaces the regular SGD (Robbins & Monro, 1951) with zeroth-order stochastic gradient descent (ZO-SGD), which is defined below:
+
+{3}------------------------------------------------
+
+**Definition 3.2** (Zeroth-Order Stochastic Gradient Descent, ZO-SGD (Malladi et al., 2023)). *Given a learning rate  $\eta$ , ZO-SGD updates the parameters  $\theta_t$  at  $t$ -th step using gradients estimated by SPSA as follows:*
+
+$$\theta_{t+1} = \theta_t - \eta \hat{\nabla}_{\theta_t} \mathcal{L}(\theta_t; \mathcal{B}_t) \quad (2)$$
+
+where  $\mathcal{B}_t$  denotes the input mini-batch at step  $t$ .
+
+### 3.2 QZO: QUANTIZED ZEROTH-ORDER OPTIMIZATION
+
+QZO minimizes the memory usage not only on gradients and optimizer states but also on model weights—this can save huge memory cost when using large models of more than 10B parameters, e.g., when using bfloat16, a 10B model’s weights consume 20GB of memory, while using int4, the weights only take 5GB of memory. QZO consists of two core modules: Quantized Simultaneous Perturbation Stochastic Approximation (Q-SPSA), and directional derivative clipping. The former extends SPSA to quantized weights while the latter stabilizes training by reducing the variance of gradient estimation.
+
+#### 3.2.1 FROM SPSA TO Q-SPSA
+
+SPSA (Eq. 1) cannot be directly applied to quantized weights because (1) quantized weights are discrete and therefore cannot be perturbed in the continuous space, and (2) the continuous gradients cannot be used to update discrete weights, which would otherwise require de-quantization and re-quantization. To overcome these challenges, we propose Quantized Simultaneous Perturbation Stochastic Approximation (Q-SPSA), which only applies perturbation to the continuous quantization scale. We begin by introducing quantization and de-quantization, which are two essential steps in model quantization. Concretely, for each single element  $w$  in a weight set  $\mathcal{W}$ , these two steps can be formulated as
+
+$$\bar{w} = \lfloor \frac{w}{\Delta} \rceil, \quad (3)$$
+
+$$w = \Delta \cdot \bar{w}, \quad (4)$$
+
+where  $\Delta$  denotes an element-wise quantization scale, and  $\bar{w}$  the quantized counterpart stored using lower bits. The weight set  $\mathcal{W}$  is determined by the choice of quantization group, while the implementation of  $\Delta$  varies among different quantization methods. For example, when  $\Delta = \frac{\text{absmax}(\mathcal{W})}{2^{k-1}-1}$ , Eqs. 3 and 4 refer to the standard scalar-based quantization in  $k$ -bit.
+
+Since the de-quantization process in Eq. 4 aligns with the normal forward propagation, we decompose the model parameters  $\theta$  in Eq. 1 into  $\Delta \odot \bar{\theta}$ , and perturb the scaling component  $\Delta$  while keeping the discrete weights  $\bar{\theta}$  fixed. Therefore, Q-SPSA can be formulated as
+
+**Definition 3.3** (Quantized Simultaneous Perturbation Stochastic Approximation, Q-SPSA). *Given a quantized model with integer parameters  $\bar{\theta} \in \mathbb{R}^d$  and quantization scales  $\Delta$ , and a loss function  $\mathcal{L}$ , Q-SPSA estimates the gradients of  $\Delta$  over a mini-batch  $\mathcal{B}$  using the following formula:*
+
+$$\begin{aligned} \hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B}) &= \frac{\mathcal{L}((\Delta + \epsilon z) \odot \bar{\theta}; \mathcal{B}) - \mathcal{L}((\Delta - \epsilon z) \odot \bar{\theta}; \mathcal{B})}{2\epsilon} z \\ &\approx z z^{\top} \nabla_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B}), \end{aligned} \quad (5)$$
+
+where  $z \in \mathbb{R}^d$  is a random vector sampled from  $\mathcal{N}(0, \mathbf{I}_d)$ ,  $\epsilon$  the perturbation scale, and  $\odot$  the Hadamard product.
+
+Similar to MeZO, all quantization scales within a linear layer are perturbed to save computation. In practice, one may choose to fine-tune the continuous quantization scale only, or combine Q-SPSA with SPSA to jointly update the unquantized counterparts. It is worth noting that Q-SPSA can be applied to both scalar-based and codebook-based quantization methods: in the experiments we show that our approach can successfully fine-tune both 4-bit LLMs quantized by the scalar-based GPTQ (Frantar et al., 2023) and 2-bit LLMs quantized by the codebook-based AQLM (Egiazarian et al., 2024) (in this case both the channel-wise scales and un-quantized weights are updated).
+
+{4}------------------------------------------------
+
+#### 3.2.2 DDC: DIRECTIONAL DERIVATIVE CLIPPING
+
+Gradient estimation via ZO is notorious for causing unstable training due to large gradient variance (Malladi et al., 2023). This was also observed when combining Q-SPSA with the vanilla ZO-SGD method in our preliminary experiments where training often collapsed. To mitigate this problem, we propose Directional Derivative Clipping (DDC) and apply this method before updating the model with ZO-SGD at each optimization step.
+
+Specifically, the gradient estimate in Eq. 5 can be viewed as a product of the random vector  $z$  and the estimated directional derivative of loss function along  $z$  w.r.t.  $\Delta$  (which is essentially a scalar). Let  $d$  denote the estimated directional derivative, Eq. 5 can be re-written as  $\hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B}) = d \cdot z$ . Then, DDC applies clipping to  $d$  by:
+
+$$d' = \begin{cases} C, & \text{if } d > C \\ d, & d \in [-C, C] \\ -C, & \text{if } d < -C \end{cases} \quad (6)$$
+
+where  $C$  is a non-negative constant. The gradient estimate then becomes  $\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B}) = d' \cdot z$ , which is plugged into ZO-SGD. We provide theoretical evidence to highlight that DDC can reduce the variance of the gradient estimate and thereby stabilize the training. We first propose the following theorem as a preliminary to our analysis. The proof of Theorem 1 is available in Appendix A.
+
+**Theorem 1.** *Clipped gradient estimate  $\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})$  is an unbiased estimate of the full gradient of loss w.r.t quantization scales  $\nabla_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta})$ .*
+
+Since  $d'^2 \leq d^2$  by definition of DDC in Eq. 6, the following inequality holds:
+
+$$\mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})\|^2] = \mathbb{E}[d'^2 \|z\|^2] \leq \mathbb{E}[d^2 \|z\|^2] = \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B})\|^2] \quad (7)$$
+
+Therefore, the element-wise variance of the clipped gradient estimate has the following derivation:
+
+$$\begin{aligned} Var[\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})] &= \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})\|^2] - \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})\|]^2 \\ &\leq \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B})\|^2] - \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})\|]^2 \\ &= Var[\hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B})] + \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B})\|]^2 - \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})\|]^2 \\ &= Var[\hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B})] + (\nabla_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}))^2 - \mathbb{E}[\|\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})\|]^2 \end{aligned} \quad (8)$$
+
+By Theorem 1,  $Var[\hat{\nabla}_{\Delta} \mathcal{L}'(\Delta \odot \bar{\theta}; \mathcal{B})] \leq Var[\hat{\nabla}_{\Delta} \mathcal{L}(\Delta \odot \bar{\theta}; \mathcal{B})]$  holds almost surely.
+
+Our experimental results in Section 4.3 also reveal that DDC effectively stabilizes the training through rectifying abnormal loss values, and the ablation study also demonstrates that QZO is relatively robust to the magnitude of  $C$ .
+
+#### 3.2.3 ALGORITHM
+
+We summarize QZO in Algorithm 1. Note that although the quantization scales are perturbed per parameter in the pseudo code, in practice one may perturb the entire quantization scales of a linear layer to save training time (Malladi et al., 2023).
+
+**Remarks** QZO seamlessly combines ZO with quantization and therefore leads to maximum reduction in memory usage: gradients and optimizer states are eliminated while model weights are compressed. To further cut memory usage on activations, one can divide the batch size while increasing the total number of optimization steps, or release activations during forward passes since ZO does not need to cache activations for gradient computation.
+
+## 4 EXPERIMENTS
+
+### 4.1 EXPERIMENTAL SETUP
+
+**Models and Datasets** We evaluate our approach using three 7B-level LLMs, namely OPT-6.7B (Zhang et al., 2022), Llama-2-7B (Touvron et al., 2023b), and Llama-3.1-
+
+{5}------------------------------------------------
+
+#### **Algorithm 1** Quantized Zeroth-order Optimization
+
+**Require:** quantization scales  $\Delta \in \mathbb{R}^d$ , quantized weights  $\tilde{\theta} \in \mathbb{R}^d$ , loss function  $\mathcal{L} : \mathbb{R}^d \rightarrow \mathbb{R}$ , learning rate  $\eta_t$ , optimization steps  $T$ , perturbation scales  $\epsilon$ , clipping threshold  $C$ .
+
+```
+
+for  $t = 1 \dots T$  do
+  Sample batch of inputs  $\mathcal{B}$  and random seed  $s$ 
+   $\Delta \leftarrow \text{PERTURB\_SCALES}(\Delta, \epsilon, s)$ 
+   $\ell_+ \leftarrow \mathcal{L}(\Delta \odot \tilde{\theta}; \mathcal{B})$  ▷ 1st forward pass
+   $\Delta \leftarrow \text{PERTURB\_SCALES}(\Delta, -2\epsilon, s)$ 
+   $\ell_- \leftarrow \mathcal{L}(\Delta \odot \tilde{\theta}; \mathcal{B})$  ▷ 2nd forward pass
+   $\Delta \leftarrow \text{PERTURB\_SCALES}(\Delta, \epsilon, s)$ 
+   $d \leftarrow (\ell_+ - \ell_-)/(2\epsilon)$ 
+   $d' \leftarrow \text{CLIP}(d, -C, C)$  ▷ Directional derivative clipping, Eq. 6
+  Reset random number generator with seed  $s$ 
+  for  $\Delta_i \in \Delta$  do
+     $z \sim \mathcal{N}(0, 1)$ 
+     $\Delta_i \leftarrow \max(\Delta_i - \eta_t * d' * z, 0)$  ▷ Ensure non-negative scales
+  end for
+end for
+
+procedure PERTURB_SCALES( $\Delta, \epsilon, s$ )
+  Reset random number generator with seed  $s$ 
+  for  $\Delta_i \in \Delta$  do
+     $z \sim \mathcal{N}(0, 1)$ 
+     $\Delta_i \leftarrow \Delta_i + \epsilon z$ 
+  end for
+end procedure
+
+```
+
+8B (Grattafiori et al., 2024), and one large-sized model with 13B parameters, i.e., Llama-2-13B (Touvron et al., 2023b). For QZO, the 7B models are quantized to 4-bit while the 13B model to 2-bit to test QZO’s effectiveness under extreme quantization. Following prior work (Malladi et al., 2023), we evaluate our approach on five popular NLP datasets covering both classification and generation tasks. Specifically, for classification, we use SST2 (Socher et al., 2013) and three subsets from SuperGLUE collection (Wang et al., 2019), i.e., RTE (Dagan et al., 2005; Haim et al., 2006; Giampiccolo et al., 2007; Bentivogli et al., 2009), CB (De Marneffe et al., 2019) and BoolQ (Clark et al., 2019). For generation, we use SQuAD (Rajpurkar et al., 2016), which is a question answering dataset. Following the common practice, we randomly sample 1,000 examples for training, 500 examples for validation, and 1,000 examples for testing. We report accuracy for classification tasks, whereas the metric for generation tasks is F1 score.
+
+**Baseline Methods** A wide range of baseline methods is chosen for comparison to justify QZO’s effectiveness. Specifically, QZO is compared with: (1) Zero-Shot, and Zero-Shot-Q, the original and quantized zero-shot models, respectively, which are viewed as the lower-bound; (2) Fine-tuning on 16-bit models, which is considered as the upper-bound;<sup>2</sup> (3) MeZO (Malladi et al., 2023), which applies ZO to un-quantized models.
+
+**Implementation Details** For 4-bit quantization, we apply GPTQ (Frantar et al., 2023) to the 7B-level LLMs (i.e., OPT-6.7B, Llama-2-7B, and Llama-3.1-8B).<sup>3</sup> The quantization group in GPTQ is set to 128. For extreme quantization in 2-bit, we apply AQLM (Egiazarian et al., 2024) with 1 codebook of 16 bits to Llama-2-13B.<sup>4</sup> We use QZO to fine-tune the channel-wise scales in AQLM. Following prior work (Egiazarian et al., 2024; Tseng et al., 2024), the un-quantized parts are jointly fine-tuned using the regular SPSA and ZO-SGD. To accelerate QZO fine-tuning in 2-bit, we also
+
+<sup>2</sup>Due to limited budget on computational resources, fine-tuning experiments are conducted with SGD optimizer unless otherwise specified.
+
+<sup>3</sup><https://github.com/ModelCloud/GPTQModel>
+
+<sup>4</sup><https://huggingface.co/ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf>
+
+{6}------------------------------------------------
+
+Table 1: Experiments based on OPT-6.7B, Llama-2-7B, and Llama-3.1-8B. Zero-Shot and Zero-Shot-Q serve as the lower-bound, while Fine-tuning (with SGD) is the upper-bound. QZO works well across different model architectures on all datasets, with a memory footprint significantly lower than MeZO and Fine-tuning.
+
+|  |  | Model Precision | Memory Profiling | SST-2 | Classification |  |  | Generation |
+|-|-|-|-|-|-|-|-|-|
+|  |  |  |  |  | RTE | CB | BoolQ | SQuAD |
+| OPT-6.7B | Fine-tuning | 16 bits | 26.8GB | 95.4 | 79.8 | 73.2 | 69.6 | 77.6 |
+|  | Zero-Shot | 16 bits | - | 61.2 | 55.2 | 51.8 | 59.5 | 36.5 |
+|  | Zero-Shot-Q | 4 bits | - | 60.1 | 53.8 | 51.8 | 59.1 | 35.9 |
+|  | MeZO | 16 bits | 14.8GB | 93.0 | 64.6 | 67.9 | 66.8 | 79.6 |
+|  | QZO | 4 bits | 4.8GB | 87.6 | 61.7 | 67.9 | 66.4 | 78.5 |
+| Llama-2-7B | Fine-tuning | 16 bits | 26.0GB | 92.8 | 63.2 | 60.7 | 75.0 | 83.7 |
+|  | Zero-Shot | 16 bits | - | 58.1 | 61.7 | 32.1 | 66.0 | 55.6 |
+|  | Zero-Shot-Q | 4 bits | - | 58.5 | 53.4 | 35.7 | 64.6 | 53.6 |
+|  | MeZO | 16 bits | 14.8GB | 83.5 | 58.1 | 67.9 | 69.6 | 80.7 |
+|  | QZO | 4 bits | 5.0GB | 90.0 | 59.2 | 69.6 | 68.2 | 85.5 |
+| Llama-3-8B | Fine-tuning | 16 bits | 31.9GB | 93.7 | 71.5 | 62.5 | 83.4 | 84.9 |
+|  | Zero-Shot | 16 bits | - | 59.6 | 45.8 | 46.4 | 66.1 | 64.8 |
+|  | Zero-Shot-Q | 4 bits | - | 58.7 | 50.2 | 37.5 | 65.0 | 59.2 |
+|  | MeZO | 16 bits | 20.5GB | 92.5 | 70.0 | 91.1 | 83.4 | 86.9 |
+|  | QZO | 4 bits | 6.3GB | 93.0 | 66.8 | 69.6 | 78.2 | 88.3 |
+
+Table 2: Training statistics collected on SST-2. Overall, QZO is both memory-efficient and computation-efficient.
+
+|  |  | Trainable Parameters | Total FLOPs (SST-2) |
+|-|-|-|-|
+| OPT-6.7B | Fine-tuning | $6.65 \times 10^9$ | $2.17 \times 10^{16}$ |
+|  | MeZO | $6.65 \times 10^9$ | $9.91 \times 10^{17}$ |
+|  | QZO | $5.03 \times 10^7$ | $8.19 \times 10^{13}$ |
+| Llama-2-7B | Fine-tuning | $6.74 \times 10^9$ | $2.47 \times 10^{16}$ |
+|  | MeZO | $6.74 \times 10^9$ | $1.13 \times 10^{18}$ |
+|  | QZO | $5.06 \times 10^7$ | $2.26 \times 10^{16}$ |
+| Llama-3.1-8B | Fine-tuning | $8.03 \times 10^9$ | $2.48 \times 10^{16}$ |
+|  | MeZO | $8.03 \times 10^9$ | $1.13 \times 10^{18}$ |
+|  | QZO | $5.45 \times 10^7$ | $7.9 \times 10^{16}$ |
+
+modify AQLM’s Triton inference kernel to disentangle matrix reconstruction and matrix-vector multiplication.<sup>5</sup> For QZO, we set the learning rate to  $10^{-7}$ , the batch size to 16, training steps to 20k, the perturbation scale  $\epsilon$  to  $10^{-3}$ , and the clipping threshold  $C$  to 100. For fine-tuning experiments with SGD, the learning rate is initialized as  $8 \times 10^{-4}$  with a linearly scheduled decay, and the batch size is set to 8. A single Nvidia RTX 4090 GPU (24GB) is used for all experiments (except Fine-tuning, which requires an A100 80GB GPU). For MeZO, we adopt the official code.<sup>6</sup>
+
+### 4.2 MAIN RESULTS
+
+**QZO on 4-bit Quantization** Table 1 compares QZO with different baselines across three model architectures on the five NLP datasets. The detailed training statistics are shown in Table 2. Following MeZO, memory profiling measures the peak memory usage during the first 100 optimization steps. The dataset used for memory profiling is SST2 and the (per-device) batch size is set to 1 to test the minimum VRAM requirement. We summarize our main findings below.
+
+<sup>5</sup><https://github.com/triton-lang/triton>
+
+<sup>6</sup><https://github.com/princeton-nlp/MeZO>
+
+{7}------------------------------------------------
+
+Table 3: Experiments based on Llama-2-13B. QZO demonstrates strong potential under extreme quantization.
+
+|  |  | Model Precision | Memory Profiling | Classification |  |  |  | Generation |
+|-|-|-|-|-|-|-|-|-|
+|  |  |  |  | SST-2 | RTE | CB | BoolQ | SQuAD |
+| Llama-2-13B | Zero-Shot-Q | 2 bits | - | 57.6 | 53.1 | 46.4 | 69.2 | 55.4 |
+|  | QZO | 2 bits | 5.78GB | 80.5 | 54.5 | 55.4 | 70.2 | 59.4 |
+
+![Figure 2: Two line graphs comparing QZO with and without DDC. The left graph shows 'Directional Derivation Estimation' over 1,000 steps. The right graph shows 'Loss' over 1,000 steps. Both graphs show that without DDC, the training is unstable, leading to NaN values at the 22nd step.](d864789b0d8384da1d22fd6a5d76bbdf_img.jpg)
+
+The figure contains two line plots. The left plot shows 'Directional Derivation Estimation' on the y-axis (ranging from -200 to 300) against 'Steps' on the x-axis (ranging from 0 to 1,000). The right plot shows 'Loss' on the y-axis (ranging from 0.4 to 1.4) against 'Steps' on the x-axis (ranging from 0 to 1,000). Both plots compare 'QZO w/ DDC' (blue line) and 'QZO w/o DDC' (orange line). In both cases, the 'QZO w/o DDC' line shows extreme fluctuations and eventually reaches NaN at the 22nd step, while the 'QZO w/ DDC' line remains stable.
+
+Figure 2: Two line graphs comparing QZO with and without DDC. The left graph shows 'Directional Derivation Estimation' over 1,000 steps. The right graph shows 'Loss' over 1,000 steps. Both graphs show that without DDC, the training is unstable, leading to NaN values at the 22nd step.
+
+Figure 2: Directional derivatives (left) and loss values (right) collected during the early 1,000 training steps. Without DDC, the training is extremely unstable, often leading to abnormal directional derivatives and eventually NaN values for the loss.
+
+*QZO demonstrates effectiveness consistently across all model architectures and NLP tasks.* Specifically, QZO achieves significant improvements over Zero-Shot-Q, meaning that QZO successfully fine-tunes these quantized LLMs. On most datasets, QZO performs on par with MeZO, despite using  $3\times$  less memory; sometimes QZO even beats MeZO with noticeable margins, e.g., 85.5 vs. 80.7 on SQuAD when using Llama-2-7B. It is worth highlighting that MeZO is based on 16-bit models while QZO is based on 4-bit models *with much lower precision*. Compared with the upper-bound, i.e., fine-tuning, the gap is still huge on some of the tasks. This makes sense because ZO methods rely merely on forward passes for gradient estimation, which would be much less accurate than that of backpropagation.
+
+*QZO demonstrates both memory-efficiency and computation-efficiency.* QZO pushes memory-efficiency to the extreme by eliminating gradients and optimizer states while reducing weights precision. Therefore, the memory usage is minimal compared to the baselines like MeZO and Fine-tuning. Table 2 compares QZO with MeZO and Fine-tuning on learnable parameter count and FLOPs. It is worth noting that QZO uses only about 1% of the trainable parameters and 1% of the FLOPs of MeZO. This is because QZO only fine-tunes the continuous quantization scale while leaving most weights (which are quantized) fixed. We expect the difference to be further increased when more powerful quantization methods are used.
+
+**QZO on 2-bit Quantization** Table 3 shows that QZO beats the zero-shot model with significant margins. The results strongly justify QZO’s effectiveness under extreme quantization. QZO has the potential to be applied to on-device learning scenarios for edge devices.
+
+### 4.3 ABLATION STUDIES
+
+In this section, we mainly evaluate the DDC component. Recall that DDC (Directional Derivative Clipping, Eq. 6) clips abnormal directional derivatives estimated via QZO (i.e.,  $d$  in Eq. 6). We use QZO to train two Llama-2-7B models, with and without using DDC, and record the directional derivatives and loss values for the first 1,000 steps. Figure 2 shows that without DDC the directional
+
+{8}------------------------------------------------
+
+![Figure 3: A line plot showing Accuracy (Y-axis, 55 to 90) versus Clipping Threshold (X-axis, 0 to 150). The accuracy starts at approximately 60% at C=0, rises sharply to about 84% at C=25, and then stabilizes around 90% for C values of 75 and above.](b93cbfb52e37619e688175a6aad9edd9_img.jpg)
+
+| Clipping Threshold | Accuracy |
+|-|-|
+| 0 | 60 |
+| 25 | 84 |
+| 50 | 89 |
+| 75 | 90 |
+| 100 | 90 |
+| 125 | 90 |
+| 150 | 89 |
+
+Figure 3: A line plot showing Accuracy (Y-axis, 55 to 90) versus Clipping Threshold (X-axis, 0 to 150). The accuracy starts at approximately 60% at C=0, rises sharply to about 84% at C=25, and then stabilizes around 90% for C values of 75 and above.
+
+Figure 3: Impact of clipping threshold. A small  $C$  effectively avoids abnormal directional derivatives, but suffers from underfitting due to a small optimization step size. A large  $C$  fixes this issue, but may introduce the risk of producing abnormal values. Note the performance at  $C = 0$  corresponds with zero-shot accuracy of the quantized model.
+
+derivative often gets abnormal values that go beyond the range of  $[-C, C]$  ( $C$  is the clipping threshold in Eq. 6), leading to NaN value for the loss (which means the training collapses).
+
+We also study how sensitive QZO is to the clipping threshold  $C$ . Intuitively, a small  $C$  should effectively avoid abnormal directional derivatives, but may suffer from underfitting due to a small optimization step size. A large  $C$  fixes this issue, but also increases the risk of producing abnormal values. For quantitative analysis, we train Llama-2-7B models on SST-2 with different values of  $C$  and record the final accuracies. The results are presented in Figure 3. The trend of the line plot suggests underfitting at  $C \leq 50$ , and stable performances can be observed when  $C \geq 75$ . When  $C$  is set to a value bigger than 150, the training becomes unstable and sometimes collapse, which aligns with the observation in Figure 2 (QZO w/ DDC can be seen as setting  $C$  to an infinitely large value).
+
+## 5 CONCLUSION, LIMITATIONS, AND FUTURE WORK
+
+QZO enables fine-tuning quantized neural networks via ZO, which greatly reduces memory usage related to model weights, gradients, and optimizer states. We show that QZO works for a wide range of LLMs and is compatible with both scalar-based and codebook-based quantization methods. When using 4-bit LLMs, QZO achieves performance on par with MeZO, while using  $3\times$  less GPU memory. In the extreme quantization scenario, QZO successfully fine-tunes 2-bit Llama-2-13B across different NLP datasets. The results indicate that QZO has the potential to be applied to on-device learning for edge devices.
+
+In addition to LLMs, we have also applied QZO to fine-tuning text-to-image generation models, namely Stable Diffusion 3.5 Large (Esser et al., 2024). The results and discussions are presented in Appendix F. QZO fine-tunes Stable Diffusion 3.5 Large using only 12.4GB of memory in a single Nvidia RTX 4090 GPU. The visualization results are also encouraging: the data distribution generated by QZO is visually closer to the ground truth than the zero-shot model.
+
+However, QZO has some limitations. First, QZO’s performance depends on how good the quantization method is. Specifically, if the quantization method has a large quantization error, this makes the forward passes in ZO noisy and therefore could make the gradient estimation less accurate. On the other hand, QZO could benefit from a better quantization method with higher accuracy. Therefore, practitioners are suggested to choose high-precision quantization methods for QZO to maximize the gains.
+
+Second, the performance on diffusion models lags behind LLMs because there is a noticeable gap between QZO’s images and the ground truth. This may be caused by the mismatch in the noise scheduling between ZO and diffusion. One potential solution is to redesign the noise scheduling in ZO such that it aligns with diffusion. We leave this as future work.
+
+{9}------------------------------------------------
+
+## 6 ETHICS STATEMENT
+
+We clarify that our research is free from the issues in the code of ethics. Our research focuses on the efficiency of LLM training and does not include any human subjects. The datasets used do not include sensitive content that violates data privacy.
+
+## 7 REPRODUCIBILITY STATEMENT
+
+Our code has been publicly released to ensure reproducibility of experiments. All the datasets involved are also publicly accessible. The proof of Theorem 1 is provided in the Appendix.
+
+## 8 ACKNOWLEDGEMENT
+
+This research is supported by Hong Kong Research Grants Council Early Career Scheme (No. 22200824).
+
+## REFERENCES
+
+- Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated LLMs. In *The Thirty-eighth Annual Conference on Neural Information Processing Systems*, 2024. URL <https://openreview.net/forum?id=dfqsW38v1X>.
+- Noga Bar and Raja Giryes. Zoqo: Zero-order quantized optimization. In *ICASSP 2025-2025 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)*, pp. 1–5. IEEE, 2025.
+- Luisa Bentivogli, Peter Clark, Ido Dagan, and Danilo Giampiccolo. The fifth pascal recognizing textual entailment challenge. *TAC*, 7(8):1, 2009.
+- Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. Boolq: Exploring the surprising difficulty of natural yes/no questions. In *Proceedings of NAACL-HLT*, pp. 2924–2936, 2019.
+- Andrew R Conn, Katya Scheinberg, and Luis N Vicente. *Introduction to derivative-free optimization*. SIAM, 2009.
+- Ido Dagan, Oren Glickman, and Bernardo Magnini. The pascal recognising textual entailment challenge. In *Machine learning challenges workshop*, pp. 177–190. Springer, 2005.
+- Marie-Catherine De Marneffe, Mandy Simons, and Judith Tonhauser. The commitmentbank: Investigating projection in naturally occurring discourse. In *proceedings of Sinn und Bedeutung*, volume 23, pp. 107–124, 2019.
+- Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. GPT3.int8(): 8-bit matrix multiplication for transformers at scale. In Alice H. Oh, Alekh Agarwal, Danielle Belgrave, and Kyunghyun Cho (eds.), *Advances in Neural Information Processing Systems*, 2022. URL <https://openreview.net/forum?id=dXiGWqBoxaD>.
+- Tim Dettmers, Artidoro Pagnoni, Ari Holtzman, and Luke Zettlemoyer. Qlora: Efficient finetuning of quantized llms. *Advances in neural information processing systems*, 36:10088–10115, 2023.
+- Vage Egiazarian, Andrei Panferov, Denis Kuznedeleev, Elias Frantar, Artem Babenko, and Dan Alistarh. Extreme compression of large language models via additive quantization. In *International Conference on Machine Learning*, pp. 12284–12303. PMLR, 2024.
+- Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim Entezari, Jonas Müller, Harry Saini, Yam Levi, Dominik Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling rectified flow transformers for high-resolution image synthesis. In *Forty-first international conference on machine learning*, 2024.
+
+ Rest of paper (reference and Appendix) is removed.

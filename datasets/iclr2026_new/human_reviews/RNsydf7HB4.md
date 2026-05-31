@@ -1,0 +1,154 @@
+## Human Reviewer 1
+
+### Summary
+This paper proposes the Graph-aware Multi-modal Attention model (GAMA), a neural improvement method that extends Lu et al. 2019 for solving Vehicle Routing Problems (VRPs). The approach uses a newly designed neural network to dynamically select operators from a pool for local search. The key design is treating the problem instance and current solution as two separate modalities, processing them through dual GNNs with self-attention and cross-attention mechanisms combined via gated fusion. Results on CVRP instances with 20, 50, and 100 nodes demonstrate the effectiveness of the proposed network design.
+
+### Strengths
+The paper addresses an important challenge in neural improvement methods: effectively encoding both instance information and solution information in a unified representation. 
+
+The proposed GAMA network introduces a new architectural design that achieves improvements over the baseline Lu et al. 2019 method.
+
+### Weaknesses
+My main concern is the severe computational inefficiency of the proposed method. The major drawback of Lu et al. 2019 was its extremely poor computational efficiency, and unfortunately, this limitation is inherited by this work since the framework design closely follows Lu et al. 2019. Specifically, solving only 500 instances on the relatively small-scale CVRP100 benchmark requires 7 days of computation. This is largely infeasible for real-world applications and falls dramatically behind state-of-the-art neural constructive methods such as LEHD [1], SIL [2], as well as improvement-based baselines such as NeuOpt [3], NDS [4], and L2Seg [5]. Critically, the paper fails to compare against any of the above-mentioned solvers. Furthermore, training time is omitted for reporting. While the generalization results in Table 3 appear promising in terms of solution gap, the absence of time analysis prevents any reasonable conclusions from being drawn. It is fundamentally problematic to compare a method requiring days of computation against methods that run in seconds or minutes without acknowledging this massive disparity in computational resources.
+
+Secondly, the contribution of this paper seems incremental. The paper largely builds on and extends Lu et al. 2019 in terms of the backbone MDP design, the network decoder, and the training process. The only difference is a different dual GCN module for the encoder, but it remains conceptually similar to the design in DACT (Ma et al, 2021). The idea of cross attention and gated fusion is quite standard in modern Transformers, and thus, the technical novelty and contribution are unclear.
+
+Thirdly, the evaluation is limited to support the justification of the new dual GNN architecture for the following reasons: 1)  the paper did not compare with other ways of encoding both the instance information and the solution information, such as the Synth-Att proposed in Ma et al 2022 [6], or the attention-based method in NDS [4] and L2Seg [5]. Furthermore, the paper lacks in-depth analysis of critical design decisions, such as the selection of the gating parameter alpha, or how the proposed method produces superior learned representations compared to alternatives. As a result, the paper fails to provide compelling justification for why two separate modalities are necessary and why the proposed method should be fundamentally better than existing encoding options.
+
+Lastly, the proposed method is evaluated on limited scales (only 100 nodes) and limited variants (only CVRP) which fails to showcase the broader applicability and robustness of the proposed method.
+
+References
+
+* [1] Neural Combinatorial Optimization with Heavy Decoder: Toward Large Scale Generalization [NeurIPS 2023]
+* [2] BOOSTING NEURAL COMBINATORIAL OPTIMIZATION FOR LARGE-SCALE VEHICLE ROUTING PROBLEMS [ICLR 2025]
+* [3] Learning to Search Feasible and Infeasible Regions of Routing Problems with Flexible Neural k-Opt [NeurIPS 2023]
+* [4] Neural Deconstruction Search for Vehicle Routing Problems [TMLR 2025]
+* [5] Learning to Segment for Vehicle Routing Problems [arxiv 2025]
+* [6] Efficient Neural Neighborhood Search for Pickup and Delivery Problems [IJCAL 2022]
+
+### Questions
+In addition to addressing the weaknesses outlined above, I recommend that the authors investigate whether the proposed GAMA encoding module can be adapted to enhance other neural methods, such as the state-of-the-art approaches [1-6] referenced in the weakness section, to better demonstrate the broader applicability of the proposed method.
+
+### Soundness
+1
+
+### Presentation
+2
+
+### Contribution
+1
+
+### Rating
+2
+
+### Confidence
+5
+
+---
+
+## Human Reviewer 2
+
+### Summary
+This paper introduces GAMA (Graph-aware Multi-modal Attention), a neural neighborhood search method for solving VRPs. The method falls within the Learning-to-Improve (L2I) paradigm, where a policy is trained to iteratively select local search operators to refine a solution. The core contribution is an encoder architecture designed to address the limitations of simplistic state representations. GAMA models the problem instance and the evolving solution as two distinct modalities, encoding them with separate GCNs. It then uses stacked self-attention and cross-attention layers to model intra- and inter-modal interactions, and a gated fusion mechanism to integrate these representations. Experiments on CVRP instances show that GAMA achieves good results.
+
+### Strengths
+1. The paper is well-written, and the proposed architecture is clearly explained. 
+2. The motivation is sound. Identifying the static problem instance and the dynamic solution as two distinct modalities is an intuitive and sensible approach.
+
+### Weaknesses
+1. The practical value of the proposed method is questionable when analyzing the results in Table 1. (1) GAMA vs. Other L2I: On CVRP100 (T=20k), GAMA achieves an average cost of 15.6510 in 6.6 days. DACT (T=20k) achieves a very close 15.6925 in only 33 minutes. GAMA is approximately 288 times slower for a marginal 0.26% gap enhancement in solution quality. (2) vs. Classical Solvers: The classical solver HGS achieves an average cost of 15.6994 in 4.5 hours. GAMA not only fails to significantly beat this quality but also takes over 35 times longer to run.
+2. The results suggest an extremely unfavorable trade-off, making the method impractical compared to both existing neural and classical baselines.
+3. The empirical validation is somewhat thin. The method is only applied to CVRP , and the primary experiments focus on relatively small-scale problems (N=20, 50, 100). While the generalization study on CVRPLib instances is a good inclusion, it's a small sample and doesn't fully alleviate concerns about how the method's performance and significant runtime scale to more diverse and complex large-scale routing problems.
+
+### Questions
+1. Can the authors justify the massive computational cost (e.g., 6.6d on CVRP100) compared to DACT (33m) and HGS (4.5h) for a very minor improvement in solution quality? What is the source of this computational overhead?
+2. Can the authors extend the proposed method to an additional VRP variant?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+### Rating
+2
+
+### Confidence
+4
+
+---
+
+## Human Reviewer 3
+
+### Summary
+This paper presents  a neural neighborhood search method with Graph-aware Multi-modal Attention model, called GAMA for solving vehicle routing problems (VRPs). It encodes both instance and solution information using dual-GCN, and then stacked them through self-attention and cross-attention mechanism. Experiments on multiple CVRP benchmarks (n = 20–100) demonstrate superior performance to both classical heuristics (e.g., LKH3) and learning-based solvers (e.g., POMO, L2I).
+
+### Strengths
+1. This paper models problem instance and solution graphs as distinct modalities, then uses self-attention and cross-attention to learn  intra-modality and inter-modality dependencies. They are well-motivated and clearly improve information flow between modalities.
+2. Experimental results on standard VRP benchmarks show consistent improvements over strong neural and heuristic baselines.
+
+### Weaknesses
+1. This paper is some conceptual overlap with DACT[1] and N2S[2]. The ideas of separating instance and solution information, and learning them through both self-attention and cross-attention are very similar to DACT.
+2. The experiments only focus on CVRP problem, where more results on other representative VRP variants are expected.
+3. In comparison to DACT, the superiority of the proposed GAMA is not obvious, especially considering both optimality gaps and computation efficiency. For example, with comparable average cost on CVRP100 in Table 1, DACT(T=20k) needs 33m, while GAMA (T=20k) needs 6.6d.
+4. The experimental results lack the comparison with baselines on large-scale VRP instances.
+
+[1] Yining Ma, Jingwen Li, Zhiguang Cao, Wen Song, Le Zhang, Zhenghua Chen, and Jing Tang. Learning to iteratively solve routing problems with dual-aspect collaborative transformer. Advances in Neural Information Processing Systems, 34:11096–11107, 2021.
+
+[2] Ma Y, Li J, Cao Z, et al. Efficient Neural Neighborhood Search for Pickup and Delivery Problems[C]//Proceedings of the 31st International Joint Conference on Artificial Intelligence, IJCAI 2022. International Joint Conferences on Artificial Intelligence, 2022: 4776-4784.
+
+### Questions
+Please refer to the weakness.
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+### Rating
+2
+
+### Confidence
+4
+
+---
+
+## Human Reviewer 4
+
+### Summary
+This paper introduces GAMA, a neural neighborhood search (Learning-to-Improve) method for the Capacitated Vehicle Routing Problem. The core contribution is a graph-aware multi-modal attention encoder that processes the problem instance and the current solution as distinct modalities. It uses dual GCNs, cross-attention, and a gated fusion module to create a structured state representation, which in turn guides an adaptive operator selection policy.
+
+### Strengths
+The proposed multi-modal encoder architecture is a primary strength. The conceptual separation of the static instance graph and the dynamic solution graph is well-motivated, and the use of explicit cross-attention and gated fusion to integrate them is a logical and novel contribution. The ablation study effectively validates this design, demonstrating that both the cross-attention and gated fusion components contribute positively to the final solution quality.
+
+### Weaknesses
+The method's primary contribution is fundamentally undermined by its prohibitive computational cost. The results in Table 1 show that GAMA requires 6.6 days of inference time to solve CVRP100 instances. This is juxtaposed against the 33 minutes required by the DACT baseline and 4.5 hours by the classical HGS solver. An approximate 288-fold increase in runtime compared to DACT for a marginal 0.26% improvement in solution quality represents an unjustifiable trade-off, rendering the method unusable for any practical application.
+
+Furthermore, the paper's claims of superior zero-shot generalization are based on a flawed baseline comparison. The generalization study in Table 3 reports an average gap of 25.3% for the DACT baseline. This result is a clear anomaly and is highly inconsistent with previously published results for this strong baseline. This flawed comparison invalidates the claim of state-of-the-art generalization and suggests a lack of experimental rigor in the evaluation.
+
+### Questions
+Could the authors justify the 6.6-day inference time for CVRP100? Given that the policy only selects an operator, does this runtime stem from the exhaustive local search application (as mentioned in Line 127), the complexity of the GAMA encoder at each of the 20,000 steps, or both? How can this be reconciled with the goal of practical optimization?
+
+Please clarify the experimental setup for the DACT baseline in the generalization study (Table 3). A 25.3% average gap is exceptionally high and inconsistent with the literature. Can you confirm the source of this implementation and its hyperparameters, as this result calls the entire generalization comparison into question?
+
+### Soundness
+2
+
+### Presentation
+2
+
+### Contribution
+2
+
+### Rating
+4
+
+### Confidence
+4
