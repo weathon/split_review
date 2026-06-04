@@ -1,4 +1,9 @@
+
 # Agent System Prompt
+HARD RULE 1: ASK USER FOR EVERY SINGLE DECISION!
+HARD RULE 2: NO FALLBACK OR "BETTER PATH" UNLESS THEY DO THE SANE THING OR USER ALLOWED IT
+HARD RULE 3: YOU HAVE TO COUBLE CHECK WITH THIS GUIDELINE BEFORE YOU HAND OFF
+
 
 All these rules can be one time override by user.
 
@@ -10,7 +15,7 @@ Use .env for API keys.
 ## Code style: research, not production
 
 This is research code, NOT a production system. Optimize for **iteration speed and clarity**, not robustness or polish.
-
+- All the code follows user-is-the-developer setting, not production rules. Follow "offensive" programming not defensive programming.
 - Don't add defensive try/excepts, retry-with-backoff frameworks, structured logging, dependency injection, type-checked interfaces, or other "make it prod-ready" scaffolding unless explicitly asked.
 - Don't refactor working code into abstractions just because a pattern repeats twice. Three-way duplication is fine if the cases might diverge.
 - Don't add new tests, CI, or pre-commit hooks unless asked.
@@ -18,7 +23,7 @@ This is research code, NOT a production system. Optimize for **iteration speed a
 - Save artifacts and write files freely. Disk is cheap; recomputing expensive runs is not.
 - When in doubt, do the simplest thing that works for the next experiment, not the thing that would survive a code review at a SaaS company.
 - Do not use ("","","") to concat string, use """xyz"""
-- Do not make ANY assumptions, ask the user for any decisions
+- Do not make ANY assumptions, ask the user for any decisions. Your job is to code, not engineering. User should do all engineering decision making, do NOT make decision for them. 
 - When calling OpenAI (or other models) API, if JSON is needed, use client.chat.completions.parse(model=..., messages=..., response_format=PydanticModel) instead of forcing the model to output JSON by prompt. 
 - Do NOT use helper function unless you really need to
 - Keep code simple, short, and stupid.
@@ -58,13 +63,16 @@ Batch, benchmark, and one-shot experiment scripts must be written like research 
 - The cost of pausing to ask is low. The cost of an unauthorized workaround is high (wrong output, wasted compute, hidden divergence from user intent).
 - You should NEVER run code diff BEFORE you code
 - Always use library when possible, do not write your own code if you can use a library, do not assume it is not installed
-
+- When the user asked ou to do something, do exactly as what user asked, do not find a better way or shortcut. If user asked you to generate the file, do not use the cache even if there is. 
+- Only do what the user asked, NEVER give analysis or dignoses when asked to check the results. NEVER propose next step at the end of your response unless asked.
+- When downloading HF datasets, ALWAYS download the whole dataset using `datasets` do NEVER use curl, wget, etc. Do not download only one part. Download the whole thing, even if you only need one sample, even if the ratio is extream (only need one sample in a 6TB dataset, STILL download the whole thing). 
 
 ## Comments
 
 - Default to writing no comments. Only add one when the WHY is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader.
 - Don't explain WHAT the code does, well-named identifiers already do that.
 - Don't reference the current task, fix, or callers ("used by X", "added for the Y flow", "handles issue #123"). Those belong in the commit message and rot fast.
+
 
 ## Error handling: raise or skip, NEVER silently fall back
 
