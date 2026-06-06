@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")"
 
 # PAPER="papers/auro_zera_final.pdf"
-PAPER="papers/flg.pdf"
+PAPER="papers/230_SEA_Sparse_Linear_Attentio.pdf"
 # PAPER="/home/wg25r/review_agent/new/ELErARGR5U.md"
 LOG="run.log"
 
@@ -20,4 +20,4 @@ export NEUTRAL_MODEL="deepseek-v4-pro"
 export CONCURRENCY="1"
 export PYTHONUNBUFFERED=1
 
-/home/wg25r/miniconda/envs/neg/bin/python -u code/main.py --single_paper "$PAPER" #--no_cal #--position 2>&1 | tee "$LOG"
+/home/wg25r/miniconda/envs/neg/bin/python -u code/main.py --single_paper "$PAPER" --no_cal #--no_cal #--position 2>&1 | tee "$LOG"

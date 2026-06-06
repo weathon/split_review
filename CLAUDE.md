@@ -1,4 +1,3 @@
-
 # Agent System Prompt
 HARD RULE 1: ASK USER FOR EVERY SINGLE DECISION!
 HARD RULE 2: NO FALLBACK OR "BETTER PATH" UNLESS THEY DO THE SANE THING OR USER ALLOWED IT
@@ -15,7 +14,7 @@ Use .env for API keys.
 ## Code style: research, not production
 
 This is research code, NOT a production system. Optimize for **iteration speed and clarity**, not robustness or polish.
-- All the code follows user-is-the-developer setting, not production rules. Follow "offensive" programming not defensive programming.
+- All the code follows user-is-the-developer setting, not production rules. Follow "offensive" programming not defensive programming. 
 - Don't add defensive try/excepts, retry-with-backoff frameworks, structured logging, dependency injection, type-checked interfaces, or other "make it prod-ready" scaffolding unless explicitly asked.
 - Don't refactor working code into abstractions just because a pattern repeats twice. Three-way duplication is fine if the cases might diverge.
 - Don't add new tests, CI, or pre-commit hooks unless asked.
@@ -32,15 +31,10 @@ This is research code, NOT a production system. Optimize for **iteration speed a
 
 ## Benchmark / batch scripts
 
-Batch, benchmark, and one-shot experiment scripts must be written like research scripts, not reusable libraries.
-
-- Prefer top-level code with a single obvious worker function only when concurrency requires it.
-- Do NOT create layers of helper functions for argument parsing, env setup, result formatting, manifest writing, or discovery unless the script genuinely becomes unreadable without them.
-- Do NOT use underscore-prefixed helper names in these scripts. Use plain names like `run_pdf`.
-- Do NOT add broad `try/except` wrappers to keep a benchmark running after hidden failures. If one sample fails, let the worker fail loudly unless the user explicitly asked for skip/resume behavior.
-- Do NOT silently continue after missing parsed files, missing PDFs, malformed rows, empty outputs, or failed jobs. Raise with the concrete path/job id.
-- Hard-code the dataset path, worker count, and output path when the user gave a concrete benchmark request. Do not turn it into a generic reusable CLI unless asked.
+Same as Code style. Additionally:
+- Hard-code dataset path, worker count, and output path when the user gave a concrete benchmark request. Do not turn it into a generic reusable CLI unless asked.
 - Print JSONL progress rows for `batch_start`, `sample_start`, `sample_done`, and `batch_done`; keep the row fields concrete and minimal.
+- If one sample fails, let the worker fail loudly unless the user explicitly asked for skip/resume behavior. Do NOT silently continue after missing parsed files, missing PDFs, malformed rows, empty outputs, or failed jobs. Raise with the concrete path/job id.
 
 
 ## Scope discipline
@@ -50,16 +44,7 @@ Batch, benchmark, and one-shot experiment scripts must be written like research 
 - Don't add feature flags or backwards-compatibility shims when you can just change the code.
 - Prefer editing existing files to creating new ones.
 - No half-finished implementations. Either do the thing or say you didn't.
-- Do NOT use helper function unless you really need to
-- Keep code simple, short, and stupid.
-- If you were asked to do something and it is not working, do NOT find another path, stop and ask user
-
-- This is a HARD rule. Examples of forbidden workarounds:
-  - User pointed you at a file/tool/script and it errors → don't substitute "similar" tool, don't write a new equivalent script, don't proceed with a degraded version. Stop and report the error to the user.
-  - User said "use X" and X needs config/data you don't have → don't fabricate or use a placeholder; stop and ask where to get it.
-  - A required input (guideline file, baseline, dependency) is missing → don't generate a "minimal stub" to keep going; stop and ask.
-  - An interactive prompt blocks a background script → don't pipe an answer in, don't delete state to avoid the prompt; stop and ask.
-  - A command is denied by sandbox → don't try a different tool that achieves the same forbidden effect; tell the user and ask how to proceed.
+- If you were asked to do something and it is not working, do NOT find another path, stop and ask user. This is a HARD rule: when blocked, do not substitute tools, fabricate inputs, generate stubs, bypass prompts, or use a denied command via a different route. Stop and report.
 - The cost of pausing to ask is low. The cost of an unauthorized workaround is high (wrong output, wasted compute, hidden divergence from user intent).
 - You should NEVER run code diff BEFORE you code
 - Always use library when possible, do not write your own code if you can use a library, do not assume it is not installed
@@ -81,7 +66,7 @@ Batch, benchmark, and one-shot experiment scripts must be written like research 
 1. **Raise** — abort with a clear error. Use when the missing data invalidates the whole run.
 2. **Skip** — return None / log clearly / let the resume layer pick it up. Use when a single sample failed transiently. When skipping, you have to skip the whole sample, not a stage within a sample. 
 
-You **MUST NOT** add a fallback path that silently substitutes something else for the missing piece. No "if no X, infer from Y." No "if API failed, use a different model." No "if input is too long, truncate it." Substituting a different signal for a missing one silently invalidates downstream metrics.
+You **MUST NOT** add a fallback path that silently substitutes something else for the missing piece. No "if no X, infer from Y." No "if API failed, use a different model." No "if input is too long, truncate it." Substituting a different signal for a missing one silently invalidates downstream metrics. This includes silent input mangling: truncating to fit context, dropping unknown fields, "cleaning up" verbatim user data, or coercing types silently. Loud failure beats invisible mutation.
 
 This applies even when:
 - The fallback "would obviously work fine."
@@ -92,16 +77,6 @@ This applies even when:
 If unsure whether a recovery path counts as a fallback, **ask before adding it**. Default answer is no.
 
 When you find an existing fallback (look for: `if X is None: use Y`, `try X; except: use Y`, prompts saying "if no X, do Z"), flag it and ask. Don't silently keep it just because it's there.
-
-## No silent input mangling
-
-If an input is too long, malformed, or otherwise unfit, **stop and ask**. Do not:
-- Truncate inputs to fit context windows without saying so.
-- Drop fields you don't recognize.
-- "Clean up" data that the user gave you verbatim.
-- Coerce types silently.
-
-The user needs to know when their input was modified before being processed. Loud failure beats invisible mutation.
 
 ## Don't run things to "verify"
 
@@ -131,5 +106,5 @@ If you're orchestrating a multi-stage pipeline:
 
 
 ## Cost
-- Each paper review with DeepSeek API is about 0.05 USD, with GPT is about 1 USD, each CSPaper call is about 5 USD. Think and verify before you run your code. 
-- Do NOT do short polling or "keep an eye on" a running task, set a passive trigger and do NOT read stdout in full. Polling costs money (everytime you are waked up and read/output, it costs money). 
+- Each paper review with DeepSeek API is about 0.05 USD, with GPT is about 1 USD, each CSPaper call is about 0.5 USD. Think and verify before you run your code. 
+- Do NOT do short polling or "keep an eye on" a running task, set a passive trigger and do NOT read stdout in full. Polling costs money (everytime you are waked up and read/output, it costs money).
