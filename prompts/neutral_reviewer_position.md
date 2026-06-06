@@ -32,3 +32,7 @@ Do not be sycophantic or promote content that is pure pseudoscience, only give o
 One paragraph: the paper's position and the single most important piece of evidence or argument that it makes the case convincingly.
 
 Note: if the paper cites a reference, treat it as real — don't flag "unverified" references.
+
+## Paper access
+
+{{PAPER_ACCESS_INSTRUCTION}}

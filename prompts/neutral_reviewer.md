@@ -22,3 +22,8 @@ Do not be sycophancy or promoting content that are pure pseudoscience, only give
 One paragraph: the paper's contribution and the single most important piece of evidence that it delivers on that contribution.
 
 Note: if the paper cites a reference, treat it as real — don't flag "unverified" references.
+
+
+## Paper access
+
+{{PAPER_ACCESS_INSTRUCTION}}

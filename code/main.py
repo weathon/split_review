@@ -39,8 +39,8 @@ from agents import Agent, OpenAIChatCompletionsModel, OpenAIResponsesModel, Runn
 from agents.model_settings import ModelSettings
 
 _OPENROUTER_PROVIDER = os.environ.get("OPENROUTER_PROVIDER", "deepseek").strip()
-_MODEL_SETTINGS = ModelSettings(extra_body={"effort": "xhigh"})
-# _MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": [_OPENROUTER_PROVIDER]}, "effort": "medium"})
+# _MODEL_SETTINGS = ModelSettings(extra_body={"effort": "xhigh"})
+_MODEL_SETTINGS = ModelSettings(extra_body={"provider": {"only": [_OPENROUTER_PROVIDER]}, "effort": "xhigh"})
 import dotenv
 dotenv.load_dotenv()
 os.environ["OPENAI_DEFAULT_MODEL"] = os.getenv("OPENAI_DEFAULT_MODEL", "z-ai/glm-5.1")
@@ -93,7 +93,6 @@ _install_openrouter_cost_hook(custom_client)
 set_default_openai_client(custom_client)
 tracing_api_key = os.environ["OPENAI_API_KEY"]
 set_tracing_export_api_key(tracing_api_key)
-
 # Suppress SDK's internal error logging — we handle errors in run_agent_with_retry
 # logging.getLogger("openai.agents").setLevel(logging.CRITICAL) # this should be commented out in production to handle unexpected errors
 from helpers import _detect_leakage
@@ -147,6 +146,9 @@ with open(prompt_path("timeline.md"), "r") as f:
 
 PAPER_ACCESS_INJECTION = "The full paper text is included in the user message. Use it to verify reviewer claims directly."
 PAPER_ACCESS_FILE = "The paper path is provided in the user message. Use read_file to read the paper (it reads the whole file by default — do not pass start_line/end_line unless you specifically need a slice) and verify reviewer claims directly."
+PAPER_ACCESS_CHUNKED = """The paper path is provided in the user message. The paper is NOT included inline — read it from disk in sequential chunks using read_file with start_line/end_line, and use grep_file to locate specific claims or sections.
+
+Read the paper progressively, one chunk at a time. After each chunk, before reading the next one, pause and reason: think through what this part of the paper claims, whether the method/evidence/argument in it holds up, and note any concerns or strengths it surfaces. Build your assessment incrementally as you go — do not dump the whole paper into context and review it all at the end. Only move to the next chunk once you have thought through the current one. Choose reasonable chunk sizes (e.g. a section or a few hundred lines at a time)."""
 
 with open(prompt_path("cal_with.md"), "r") as _f:
     CAL_INSTRUCTION_WITH = _f.read()
@@ -205,10 +207,10 @@ if HARSH_MODEL.startswith("claude_sdk:"):
     _HARSH_SDK_MODEL = HARSH_MODEL[len("claude_sdk:"):]
     _harsh_sdk_system_prompt = load_prompts(_harsh_prompt, paper_access=PAPER_ACCESS_FILE)
 else:
-    harsh = Agent(name="Harsh Critic", instructions=load_prompts(_harsh_prompt), model=resolve_model(HARSH_MODEL), model_settings=_MODEL_SETTINGS)
+    harsh = Agent(name="Harsh Critic", instructions=load_prompts(_harsh_prompt, paper_access=PAPER_ACCESS_CHUNKED), model=resolve_model(HARSH_MODEL), tools=[read_file, grep_file], model_settings=_MODEL_SETTINGS)
     _HARSH_SDK_MODEL = None
     _harsh_sdk_system_prompt = None
-neutral_reviewer = Agent(name="Strength Finder", instructions=load_prompts(_neutral_prompt), model=resolve_model(NEUTRAL_MODEL), model_settings=_MODEL_SETTINGS)
+neutral_reviewer = Agent(name="Strength Finder", instructions=load_prompts(_neutral_prompt, paper_access=PAPER_ACCESS_CHUNKED), model=resolve_model(NEUTRAL_MODEL), tools=[read_file, grep_file], model_settings=_MODEL_SETTINGS)
 
 _NO_CAL = "--no_cal" in sys.argv
 
@@ -278,19 +280,13 @@ REVIEW_PROMPT = """Review the following paper thoroughly.
 
 The paper was extracted from PDF by an automated parser. Treat formatting artifacts (broken equations, garbled tables, OCR errors) as parser issues, not paper flaws. The appendix and references were stripped by the parser; assume they exist in the original submission and don't flag them as missing.
 
-{paper_path}
---- PAPER CONTENT START ---
-{paper_content}
---- PAPER CONTENT END (everything after references stripped by parser) ---"""
+Paper path: {paper_path}. The paper is not included inline — read it from disk in chunks (read_file / grep_file), reasoning through each chunk before reading the next, following the paper-access protocol in your instructions."""
 
 REVIEW_PROMPT_POSITION = """Review the following position paper thoroughly. This is a position paper that argues for a viewpoint or perspective, not a standard research paper reporting accomplished advances. Evaluate it on clarity of position, quality of argumentation, contemporary interest, and whether it invites productive discussion.
 
 The paper was extracted from PDF by an automated parser. Treat formatting artifacts (broken equations, garbled tables, OCR errors) as parser issues, not paper flaws. The appendix and references were stripped by the parser; assume they exist in the original submission and don't flag them as missing.
 
-{paper_path}
---- PAPER CONTENT START ---
-{paper_content}
---- PAPER CONTENT END (everything after references stripped by parser) ---"""
+Paper path: {paper_path}. The paper is not included inline — read it from disk in chunks (read_file / grep_file), reasoning through each chunk before reading the next, following the paper-access protocol in your instructions."""
 
 
 # ── Core pipeline ────────────────────────────────────────────────────
@@ -299,20 +295,18 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
     # time.sleep(random.uniform(10, 20))
     _or_cost_start = dict(_OR_COST_TOTAL)
     paper_path_abs = os.path.abspath(paper_path)
-    with open(paper_path, "r") as f:
-        paper_content = f.read()
-    paper_content = paper_content
+
+    # Phase-1 reviewers (both OpenAI and Claude SDK paths) read the paper from
+    # disk in chunks rather than receiving it inline. Grant read access to the
+    # paper's dir up front so read_file/grep_file permit it.
+    from tools import allow_path
+    allow_path(str(Path(paper_path_abs).parent))
 
     _review_template = REVIEW_PROMPT_POSITION if _POSITION_MODE else REVIEW_PROMPT
-    review_prompt = _review_template.format(paper_path=paper_path_abs, paper_content=paper_content)
+    review_prompt = _review_template.format(paper_path=paper_path_abs)
 
-    # Harsh Critic input: when running via Claude SDK, replace the inline paper
-    # content with a directive to read it from disk (SDK has a CLI input length
-    # limit). Otherwise, pass the full paper inline as before.
-    sdk_harsh_user_prompt = (
-        f"The paper was extracted from PDF by an automated parser. Treat formatting artifacts (broken equations, garbled tables, OCR errors) as parser issues, not paper flaws. The appendix and references were stripped by the parser; assume they exist in the original submission and don't flag them as missing.\n\n"
-        f"Paper path: {paper_path_abs}. Use read_file (in chunks) to read the paper end-to-end before reviewing."
-    )
+    # Claude SDK Harsh Critic uses the same path-based prompt.
+    sdk_harsh_user_prompt = review_prompt
 
     async def _run_harsh():
         if _HARSH_SDK_MODEL is not None:
@@ -370,10 +364,8 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
         agent_usages["Merger"] = None  # SDK usage tracked separately below
 
     else:
-        # OpenAI Agent SDK merger: grant read/grep access to the paper's dir and
-        # point the merger at the paper via path (not inline).
-        from tools import allow_path
-        allow_path(str(Path(paper_path_abs).parent))
+        # OpenAI Agent SDK merger: paper's dir already granted read access at the
+        # top of run_pipeline; point the merger at the paper via path (not inline).
         start_time = time.monotonic()
         merger_prompt = (
             f"Here is the paper being reviewed (extracted from PDF — formatting "

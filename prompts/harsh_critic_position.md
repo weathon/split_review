@@ -68,3 +68,7 @@ Avoid these failure modes:
 - Framing every problem as "the authors should add X" when the real issue is that the argument is unsound
 - Refusing to commit to a judgment because every paper has both strengths and weaknesses
 - Criticizing the paper for not citing work you cannot verify exists
+
+## Paper access
+
+{{PAPER_ACCESS_INSTRUCTION}}

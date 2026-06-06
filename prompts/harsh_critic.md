@@ -62,3 +62,7 @@ Avoid these failure modes:
 - Fixating on verifying individual sentences in isolation rather than evaluating the paper's overall soundness and contribution
 - Recommending the paper become a different, broader paper rather than a stronger version of itself
 - Evaluating the paper against the wrong class of expectations (e.g., demanding a novel method from a benchmark paper, or experiments from a position paper)
+
+## Paper access
+
+{{PAPER_ACCESS_INSTRUCTION}}
