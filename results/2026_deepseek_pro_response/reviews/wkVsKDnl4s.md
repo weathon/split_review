@@ -1,79 +1,119 @@
-Now I have enough calibration data. Let me finalize the review.
+Now I have a clear calibration picture. Let me finalize the review.
 
-**Bracket from Round 1:** The paper sits between the weak metagenomics papers (~3.3-3.75, not topically relevant) and strong bioinformatics papers (8.0, different level). Within the middle range, closest anchors are UnitigBin (4.33) and DNABERT-S (5.67). HighClass is clearly stronger than UnitigBin (better ablation, stronger statistical methodology) but weaker than DNABERT-S (fewer datasets, numerical issues, overclaiming).
+**Bracket summary:**
+- Round 1 bracket: 4.5–6.5
+- Round 2 anchors: DNABERT-2 (6.50, accepted), DNABERT-S (5.67, rejected), MeToken (5.80, accepted), DNALONGBENCH (5.67, rejected)
 
-**Narrowing from Round 2:** HighClass falls between dnaGrinder (4.50) — which has similar novelty concerns and lacks ablation studies — and Rethinking BERT for DNA (5.25) — which has more extensive evaluation but presentation issues. HighClass has a better ablation than dnaGrinder but more numerical sloppiness and substantially less evaluation breadth than Rethinking BERT.
+**Final comparison:**
+- HighClass is clearly below DNABERT-2 (6.50) — fewer experiments, statistical error, disconnected theory
+- HighClass is somewhat better than DNABERT-S (5.67, rejected) — more concrete contribution, better ablation
+- HighClass is comparable to MeToken (5.80, accepted) — similar quality but HighClass has the statistical reporting error
+- HighClass is stronger than CLBF (3.25, rejected)
 
-**Final score: 5.0.** The paper makes a real, well-demonstrated contribution but is undermined by numerical inconsistencies, overclaiming, missing benchmark results, and an undefined comparison target.
+**Score: 5.5** — borderline, slightly below acceptance threshold due to the statistical reporting error combined with inflated framing and disconnected theory, despite a genuinely strong ablation study.
+
+The decision is Reject — but the paper could be significantly improved by fixing the statistical reporting, connecting or removing the theory, and toning down the framing.
 
 ---
 
 ## Summary
-HighClass proposes replacing alignment-based operations in metagenomic classification with hash-based token lookup, using pre-trained quality-aware token vocabularies and gradient-based sparsification. The paper demonstrates that this substitution achieves 85.1% F1 on CAMI II Marine (within 1.5% of the authors' prior MetaTrinity at 86.6%) while delivering a 4.2× speedup and 68% memory reduction. The core technical novelty is substituting MetaTrinity's seed-and-extend alignment with inverted-index token mapping — an engineering substitution whose trade-offs are cleanly demonstrated through a well-designed ablation study.
+
+HighClass proposes replacing alignment-based operations with hash-based token mapping in metagenomic classification, using pre-trained QA-Token vocabularies and gradient-based sparsification. The paper's strongest evidence is its ablation study (Table 3), which cleanly demonstrates that the QA-Token vocabulary drives accuracy while hash-lookup replacement of alignment drives the ~4× speedup at a cost of ~1.1 pp F1. The system achieves 85.1% F1 on CAMI II at 0.5h runtime and 6.8 GB memory — a useful accuracy-efficiency operating point. The paper also presents a theoretical framework (Rademacher bounds, α-mixing concentration, MLE consistency) that is offered as a major contribution.
 
 ## Strengths
-- **Well-designed ablation study (Table 3):** The "QA-Token + MetaTrinity alignment" configuration (86.2% F1) cleanly isolates the token vocabulary's contribution from the hash-lookup replacement, showing the vocabulary captures nearly all accuracy and the ~1.5 pp drop is the cost of eliminating alignment.
-- **Detailed computational cost decomposition (Table 5):** The per-operation timing breakdown identifies that 85% of MetaTrinity's runtime goes to three alignment steps (containment search, seeding, chaining) that HighClass eliminates, making the 4.2× speedup claim mechanistic rather than a black-box assertion.
-- **Rigorous statistical methodology:** 10 independent runs, 95% bootstrap CIs (10,000 resamples), Wilcoxon signed-rank tests with Holm-Bonferroni correction, Cohen's d effect sizes, and power analysis — substantially beyond typical practice.
-- **Transparent trade-off reporting:** The paper explicitly notes that accuracy-normalized throughput (3.8×–4.1×) is less than the raw speedup (4.2×) due to the accuracy penalty, and shows the arithmetic.
+
+- **Exceptionally well-designed component ablation (Table 3):** The ablation cleanly isolates where accuracy and speed come from. The "QA-Token + MetaTrinity alignment" configuration (86.2% F1, nearly matching MetaTrinity's 86.6%) demonstrates that the pre-trained vocabulary is the primary accuracy driver, while the speedup comes from replacing alignment (containment search → seeding → chaining) with hash lookups, trading ~1.1 pp accuracy. This decomposition is unusually informative and supports the paper's core claims about the accuracy-speed tradeoff.
+
+- **Granular per-operation cost breakdown (Table 5):** The millisecond-per-read comparison quantifies that containment search (3.2ms), seeding (2.8ms), and chaining (1.9ms) — collectively 7.9ms/read — are replaced by token extraction (0.8ms) and token lookup (0.7ms), totaling 1.5ms/read. This mechanical evidence substantiates the speedup claim far more concretely than asymptotic complexity alone.
+
+- **Conceptual reframing (Section 5.5):** The distinction between "alignment-based methods ask where and how well a read matches a reference, whereas token-based classification asks which taxa contain the discriminative subsequences" is a crisp, testable insight that provides genuine intellectual scaffolding and explains both why the approach works and when it might fail.
+
+- **Scalability analysis (Table 4):** Comparison across database sizes from 100 to 10,000 genomes demonstrates genuine scaling advantages, with HighClass maintaining 689K reads/s at 10,000 genomes while the comparator drops below 1.3K reads/s and hits out-of-memory.
+
+- **Clear positioning against learned-tokenization-as-features (Section 2.4):** The contrast between tokens as embedding features for neural encoders versus tokens as mapping primitives for inverted-index lookups helpfully situates the work and explains the different computational and statistical properties.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The core contribution — demonstrating that hash-based token lookup can replace alignment in metagenomic classification at a favorable accuracy-speed tradeoff — is supported by the evidence.
 
 ### Major
-- **Overclaimed framing relative to contribution magnitude:** The paper positions itself as a "fundamental advance" and "first comprehensive theoretical framework" that "fundamentally transforms the computational paradigm." The actual contribution is replacing MetaTrinity's alignment with hash-based inverted-index lookup — a substitution that follows once a discriminative token vocabulary exists. The paper itself acknowledges (lines 87–90) that it synthesizes QA-Token vocabularies, MetaTrinity's architecture, and gradient-based sparsification from prior work. The ablation confirms this: QA-Token + MetaTrinity alignment achieves 86.2% F1 vs. MetaTrinity's 86.6%, establishing that the token vocabulary accounts for essentially all the accuracy. The hash-lookup substitution trades ~1.5 pp accuracy for ~4× speed — a useful engineering contribution, but the grand-claims framing invites scrutiny the paper cannot satisfy.
-- **Numerical inconsistencies across the paper:** Three different numbers are given for sparsification accuracy preservation: 94% (abstract, line 13), 99.5% (Section 5.4.3, line 260), and 99.2% (computed from Table 1: 85.1/85.8). Additionally, Table 1 reports "Full Index" F1 = 85.8% while Table 3 reports "QA-Token + no sparsification" F1 = 84.7% — configurations that appear to represent the same condition yet differ by 1.1 pp with no explanation. These inconsistencies undermine trust in the reported numbers.
-- **Theoretical results not formally stated in main text:** Theorem 6, Lemma 7, and Theorem 8 are listed as the paper's first contribution, yet none are formally stated in the main body — only prose paraphrases appear (Section 4). Additionally, the theory describes a generic token-based classifier rather than specifically analyzing HighClass: there is no theorem connecting the hash-mapping architecture, quality-weighting function, or sparsification procedure to the generalization bounds.
+
+- **Statistical reporting contains a mathematical error.** The paper reports p < 0.001 for runtime speedup, F1/hour improvement, and vocabulary impact using a Wilcoxon signed-rank test with n=10 (stated explicitly in the Table 2 caption). For a two-sided Wilcoxon signed-rank test with n=10 pairs, the minimum achievable p-value is 2/2^10 ≈ 0.002. Reporting p < 0.001 is mathematically impossible under the stated test. The paper does not specify one- versus two-sided testing, but the accuracy comparison reports p=0.032 (consistent with two-sided), making the p < 0.001 claims internally inconsistent with the stated methodology. This undermines confidence in the otherwise emphasized statistical rigor (bootstrap CIs, Holm-Bonferroni correction, Cohen's d).
+
+- **Theoretical framework is disconnected from both method design and empirical evaluation.** Section 4 presents three theoretical results (Rademacher generalization bound, α-mixing concentration, MLE consistency) as a major contribution. However, none of these results inform a design choice, explain an empirical observation, or provide a guarantee a practitioner could apply. The generalization bound's instantiation ("excess risk bound of approximately 0.021 with 95% confidence," Section 4.3) is never validated against empirical excess risk, and how the claimed mixing parameters (C≈2.3, γ≈0.15) were estimated from genomic data is never explained. The theory and system run on parallel tracks; the paper would be stronger if the theory were either empirically connected to the method or substantially reduced.
+
+- **Framing is substantially inflated relative to demonstrated contribution.** The abstract and introduction claim the method "fundamentally transforms the computational paradigm" and constitutes a "foundational advance" that "transforms sequence classification from heuristic approaches to principled methods." The paper's own Table 3 caption tells a more honest story: "Our speedup comes from replacing alignment with hash indexing, trading 1.1 pp accuracy for 3.8× faster runtime." This is a useful engineering optimization, not a paradigm transformation. The inflated framing mischaracterizes the nature of the contribution.
 
 ### Minor
-- **"Metalign" undefined in Table 4:** A comparison target called "Metalign" appears in the scalability experiment but is never defined, motivated, or cited anywhere in the paper, rendering its numbers uninterpretable.
-- **Only one of four datasets reported:** Section 5.3 lists CAMI II Marine, CAMI II Strain, HMP Mock, and Zymo Standards but results appear only for CAMI II Marine.
-- **Misattribution of vocabulary improvement:** The paper attributes the full 6.8 pp gap between Full HighClass (85.1%) and fixed k-mers (78.3%) to variable-length tokens, but this conflates vocabulary, quality weighting, and sparsification effects. The isolated vocabulary contribution (QA-Token + no quality weighting, 83.2%, vs. fixed k-mers, 78.3%) is 4.9 pp.
-- **Narrow baseline comparison:** The only competitive contemporary baseline is MetaTrinity (the authors' own prior work). Kraken2 (2019) and Centrifuge (2016) are significantly older.
+
+- **"Metalign" in Table 4 is undefined.** This method appears as the scalability comparator but is never introduced in the text, related work, or baseline descriptions. The reader cannot evaluate what is being compared against.
+
+- **Limited baseline comparison.** The evaluation compares against only three methods — MetaTrinity (2023), Kraken2 (2019), and Centrifuge (2016). Including at least one more recent method would strengthen the empirical case.
+
+- **Discrepancy between Table 1 and Table 3.** Table 1 reports Full Index F1 as 85.8%, while Table 3 reports QA-Token + no sparsification F1 as 84.7 ± 0.8%. If these represent comparable configurations, the 1.1 pp difference outside reported error bars is unexplained.
 
 ### Trivial
-- The abstract claims "94% accuracy" preserved under sparsification while the body claims "99.5% relative accuracy" — at minimum the abstract number is wrong.
+
+- The paper repeatedly claims 68% memory reduction when comparing against MetaTrinity (abstract, introduction), but Table 2 shows MetaTrinity at 19.3 GB vs HighClass at 6.8 GB, which is approximately 65%. The 68% figure is accurate for the sparsification comparison in Table 1 (21.3 → 6.8 GB) but is misleadingly applied to the MetaTrinity comparison.
 
 ## Nice-to-Haves
-- Formally state the main theorems in the body and explicitly connect their conditions to HighClass's architecture.
-- Report results on the three missing benchmark datasets or remove them from the experimental setup description.
-- Define or correct the "Metalign" entry in Table 4.
-- Include at least one additional contemporary metagenomic classifier beyond MetaTrinity for comparison.
+
+- Include at least one more recent baseline (2022–2025) to strengthen empirical positioning.
+- If retaining the theoretical framework, add an experiment that empirically connects it to the method — e.g., vary the effective mixing rate and show the predicted effect on classification reliability.
+- Make the main-text method description self-contained enough that a reader can understand the core classification rule without consulting the appendix.
 
 ## Removed Points
+
 These points are flagged to be removed, treat them with caution.
 
-- **"QA-Token 0.917 F1 discrepancy" (Harsh Critic):** Notes QA-Token achieves 0.917 F1 while HighClass achieves 85.1%, calling this unexplained. Removed because QA-Token's F1 is measured on its own tokenization benchmark (different evaluation protocol), not the full metagenomic classification pipeline — these are not comparable numbers and the paper is not claiming they should match.
-- **"Variance inflation factor of 31.7 is enormous" (Harsh Critic):** The paper transparently reports this factor and characterizes it as manageable. This is a judgment call about interpretation, not a factual error. Removed as a weakness.
-- **"Multiple benchmark datasets" as strength (Strength Finder):** Dropped because the paper only reports results for one of the four listed datasets, contradicting the claimed strength.
-- **"The variance inflation factor 31.7 means effective sample size reduced by ~97%, undermining sample complexity claims" (Harsh Critic):** The paper discusses this factor explicitly; the characterization as undermining is speculative without formal analysis of whether this actually violates the sample complexity bound. Demoted from Major.
-- **Demand for more baselines beyond what's included:** The comparison set, while narrow, includes standard benchmarks in the field. Retained as a minor weakness without the claim that this makes the evaluation invalid.
+- *Harsh Critic: "the method's contribution is an incremental engineering tradeoff, not a foundational advance"* — This is a subjective contribution judgment that overlaps with the framing inflation criticism already captured. The kept weakness focuses on the verifiable mismatch between claims and evidence rather than dismissing the contribution's value.
+
+- *Harsh Critic: "Section 2.4 does not actually engage with any specific prior information-theoretic method"* — The section cites Vinga & Almeida (2003) and Grosse et al. (2002), which is adequate for related work.
+
+- *Harsh Critic: "the dichotomy has persisted for over a decade claim is questionable"* — This is a matter of historical interpretation, not a factual error.
+
+- *Harsh Critic: "no experiment demonstrates deployment in real clinical settings"* — The paper claims to *enable* these applications, not to have deployed in them. Scope creep.
+
+- *Harsh Critic: "MLE consistency is a standard result"* — Subsumed under the theory disconnect criticism. The issue is not that the result is standard but that it is disconnected from the method.
+
+- *Harsh Critic: "the Rademacher bound is not a confidence interval"* — Subsumed under the theory disconnect criticism.
+
+- *Harsh Critic: "how mixing parameters were estimated is never explained"* — Subsumed under theory disconnect.
+
+- *Strength Finder: "Rigorous statistical framework throughout the evaluation"* — The p < 0.001 error with n=10 prevents this from being listed as an unqualified strength. The evaluation does use multiple runs, bootstrap CIs, and Holm-Bonferroni correction, which are positive.
+
+- *Strength Finder: generic strengths about problem importance* — Removed as not specific to this paper.
 
 ## Novel Insights
-None beyond the paper's own contributions. The paper's primary value is in the empirical demonstration that pre-trained token vocabularies can substitute for alignment in metagenomic classification with near-parity accuracy and substantial efficiency gains.
+
+The paper's most novel insight is crystallized in Table 3 and Section 5.5: for taxonomic classification, precise alignment positions are unnecessary — the key signal is which taxa contain the discriminative subsequences, not where or how well they align. The ablation demonstrates this concretely, showing that replacing MetaTrinity's expensive alignment pipeline with hash-based token lookups costs only ~1.1 pp accuracy while yielding ~4× speedup. This is a useful empirical finding about what information is actually needed for metagenomic classification.
 
 ## Suggestions
-- Recalibrate the paper's rhetorical framing to match its actual contribution: a systems/engineering demonstration that token-lookup can replace alignment when a high-quality token vocabulary is available, yielding practical speedups with modest accuracy cost.
-- Resolve the numerical inconsistencies (94% vs. 99.5% vs. 99.2%; 85.8% vs. 84.7%) by showing exact calculations for each number and correcting whichever is in error.
-- Either report results on all four listed benchmark datasets or remove the three unreported ones from the experimental setup.
 
----
+- Reconcile the p < 0.001 claims with n=10 by either specifying one-sided tests (with explicit justification) or reporting the correct significance thresholds (p < 0.002).
+- Clarify what "Metalign" refers to in Table 4, or replace it with a properly introduced baseline.
+- Either connect the theoretical analysis to the empirical results or reduce its prominence to match its functional role in the paper.
+- Reconcile the Full Index (Table 1) and QA-Token + no sparsification (Table 3) F1 numbers, or explain why they differ.
+- Temper the framing language to match what is actually demonstrated.
 
-**Calibration anchors used:**
+## Anchor Comparison
 
-| Anchor | Avg Score | Round | Comparison to HighClass |
+All anchors across both rounds:
+
+| Paper | Score | Round | Comparison |
 |---|---|---|---|
-| UnitigBin (vBw8JGBJWj) | 4.33 | R1, R2 | HighClass is stronger — better ablation, more rigorous statistics, clearer contribution |
-| dnaGrinder (phWflQbLhu) | 4.50 | R2 | HighClass is somewhat stronger — has the ablation study dnaGrinder lacks, but shares novelty-from-combination concerns |
-| Modelling Microbial Communities (cXs5md5wAq) | 4.50 | R2 | Different task; comparable contribution level |
-| Rethinking BERT for DNA (94FKDbtTqO) | 5.25 | R2 | HighClass is weaker — less extensive evaluation, numerical issues not present in BERT paper |
-| MOGIC (vKgDbYKZrH) | 5.25 | R2 | Different domain; comparable evaluation breadth concerns |
-| DNABERT-S (9klRFLY2TT) | 5.67 | R1, R2 | HighClass is weaker — DNABERT-S has 23 datasets vs. 1 reported, cleaner presentation |
-| Protein Discovery (zMPHKOmQNb) | 8.00 | R1 | Much stronger paper; different tier |
+| CLBF (GOjr2Ms5ID) | 3.25 | R1 | HighClass is substantially stronger — concrete ablation, clear engineering contribution |
+| QCR (TDzAqTqDHV) | 3.00 | R1 | Not topically comparable |
+| Protein LM (IEZjjDX0iC) | 3.00 | R1 | Not topically comparable |
+| DNABERT-2 (oMLQB4EZE1) | 6.50 | R1/R2 | HighClass is weaker — fewer experiments, statistical error, no benchmark contribution |
+| MeToken (noUF58SMra) | 5.80 | R1/R2 | Comparable in quality; HighClass has better ablation but statistical error pulls it below |
+| bio2token (6ktqrC1Bpf) | 5.00 | R1 | Not directly comparable; HighClass is stronger |
+| DNABERT-S (9klRFLY2TT) | 5.67 | R2 | HighClass is somewhat stronger — more concrete contribution, better ablation |
+| DNALONGBENCH (opv67PpqLS) | 5.67 | R2 | Different paper type; HighClass has more concrete engineering results |
 
-**Bracket:** Round 1 placed the paper between ~4.33 and ~5.67. Round 2 narrowed this to 4.50–5.25, with HighClass judged comparable to but slightly below the 5.25 anchor papers due to the numerical inconsistency and overclaiming issues.
+Round-1 bracket: 4.5–6.5. Round-2 narrowed to 5.0–6.0. Final score: **5.5**.
 
-MY FINAL SCORE: <score>5.0</score>
+MY FINAL SCORE: <score>5.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

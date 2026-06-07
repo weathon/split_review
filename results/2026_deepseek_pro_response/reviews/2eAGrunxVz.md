@@ -1,23 +1,28 @@
-Now I have a clear calibration picture. Let me compare the paper against the round-2 anchors:
+Now I have a clear picture. Let me compare:
 
-- **jlhBFm7T2J (6.50, PRC Watermark, Accept)**: Our paper's direct baseline. PRC was accepted despite reviewers flagging loose theoretical bounds, robustness inferior to alternatives, and noticeable image changes. Our paper improves on PRC across robustness (Table 2), speed (~30,000× faster, Figure 4), capacity scaling (Figure 6a), and matches it on undetectability (Table 1, Figure 2). Our paper has its own theoretical gap (3-design ≠ exact Gaussian) but this is comparable to the theoretical looseness flagged in PRC.
+- **ll2nz6qwRG / WIND (5.83)**: Single model, limited attacks, qualitative issues. Our paper is substantially stronger.
+- **1IwoEFyErz / Shallow Diffuse (6.00)**: Training-free but limited contribution, poor presentation, restricted attacks. Our paper is clearly better.
+- **jlhBFm7T2J / PRC Watermark (6.50)**: Direct competitor. Our paper demonstrably improves on PRC (speed, robustness, capacity scaling, encryption-free), but PRC has stronger theoretical foundations. Our paper's Theorem 3.1 flaw is real but fixable.
 
-- **1IwoEFyErz (6.00, Shallow Diffuse, Reject)**: Limited technical contribution, limited attacks, poor presentation. Our paper is clearly stronger.
-
-- **ll2nz6qwRG (5.83, WIND, Accept)**: Only one model evaluated, theoretical proof flagged as unconvincing. Our paper is stronger with more thorough evaluation.
-
-Our paper is stronger than the 6.50 PRC anchor due to practical improvements demonstrated head-to-head, and has comparable theoretical depth. Score: **7.0**.
+The paper under review sits at or slightly above PRC: stronger empirical results and practical advantages offset by weaker theoretical grounding. I'll score it **7.0**.
 
 ---
 
 ## Summary
-This paper introduces Spherical Watermark, a lossless watermarking method for diffusion models that maps binary watermarks to Gaussian noise through binary mixing (using a sparse embedding matrix T), spherical projection and normalization, orthogonal rotation (C), and chi-square scaling. The method eliminates per-image key management and cryptographic primitives, requiring only a single fixed secret signature. Experiments using Stable Diffusion v1.5/v2.1 show the method preserves FID, achieves chance-level classifier detectability at both latent and image levels, and extracts watermarks approximately four orders of magnitude faster than PRC Watermark while offering superior robustness.
+This paper proposes Spherical Watermark, an encryption-free, lossless watermarking scheme for diffusion models. The method maps binary watermarks to Gaussian noise through three reversible modules: binary embedding (XOR watermarks with random padding), spherical mapping (unit-sphere projection + orthogonal rotation + chi-square scaling), and diffusion integration. The key practical contributions are: (1) watermark extraction ~10^4× faster than the leading lossless competitor (PRC Watermark) by eliminating belief-propagation decoding, (2) no per-image key storage, and (3) strong empirical undetectability (FID matching unwatermarked baseline, classifiers at chance-level accuracy) with high tracing accuracy under both post-processing and adversarial attacks.
 
 ## Strengths
-- **Strong empirical undetectability:** Table 1 shows FID for the proposed method (48.12 on COCO SD v1.5) is indistinguishable from the original (48.13), while all other methods except PRC Watermark show measurable degradation. Figure 2 shows latent-level (MLP) and image-level (ResNet-18) classifiers at ~50% accuracy for the proposed method, while Tree-Ring and Gaussian Shading are trivially detected at 97–100%.
-- **Massive computational efficiency gain:** Figure 4 reports extraction time of ~10^(-3.5) s for the proposed method vs. ~10^1 s for PRC Watermark — approximately four orders of magnitude faster — due to replacing belief-propagation decoding with simple matrix multiplication and majority voting. Embedding is also faster.
-- **Thorough and informative ablation studies:** Figure 6(b) shows omitting binary embedding destroys undetectability; Figure 6(c) shows omitting spherical mapping causes robustness collapse under brightness adjustment. Table 3 systematically explores sparsity s and repetition N, confirming predictable degradation behavior. Tables 4–5 show solver and timestep choices have minimal impact.
-- **Non-trivial theoretical framework:** The chain from 3-wise independence of XOR-mixed bits (Theorem 3.1) to spherical 3-design (Theorem 3.2) to the chi-square polar decomposition connection (Lemma 3.4) is genuinely novel in the watermarking literature and provides a principled alternative to cryptographic approaches.
+- **Strong empirical undetectability**: Table 1 shows FID scores statistically identical to the unwatermarked baseline across two SD models and two prompt datasets, while all competitors except PRC Watermark show measurable degradation. Figure 2 confirms latent-level MLP and image-level ResNet-18 classifiers hover near 50% accuracy (chance) for the proposed method versus 97-100% for Tree-Ring and Gaussian Shading.
+
+- **Dramatic computational efficiency over PRC Watermark**: Figure 4 demonstrates ~10^4× faster extraction (~10^{-3.5}s vs ~10^1s), attributable to replacing belief-propagation decoding with simple matrix operations and rounding.
+
+- **Comprehensive and well-structured ablation**: Figures 6(b-c) cleanly isolate the contribution of each module (binary embedding for undetectability, spherical mapping for robustness). Tables 3-5 systematically ablate sparsity s, repetition N, ODE solver choice, and timestep schedules, showing the method is robust to these choices.
+
+- **Strong adversarial robustness**: Table 2 shows the method maintains 98.12% ACC and 99.83% TPR under WEvade adversarial attacks, substantially outperforming lossy baselines (which collapse to ~49% ACC) and maintaining a clear margin over PRC Watermark (95.38% TPR).
+
+- **Scalability across watermark capacities**: Figure 6(a) shows sustained detection rates across the full range of l_m under JPEG-70 compression, while PRC Watermark degrades and fails beyond l_m=2000.
+
+- **Clean method design**: The three-module decomposition (binary embedding → spherical mapping → diffusion integration) is elegant, invertible by construction, and genuinely avoids per-image key storage.
 
 ## Weaknesses
 
@@ -25,53 +30,76 @@ This paper introduces Spherical Watermark, a lossless watermarking method for di
 None.
 
 ### Major
-- **Theoretical gap between proof and claims.** The paper's central theoretical claim (abstract: "recover exact multivariate Gaussian noise"; introduction: "statistically indistinguishable from standard Gaussian noise"; Section 3.3 opening: "the final latent code z_w is distributed as N(0, I_{l_x})") does not follow from the presented analysis. Theorems 3.1–3.2 and Lemma 3.3 establish only that z^(3) is a spherical 3-design — matching the uniform spherical distribution in moments up to degree 3. Lemma 3.4 (polar decomposition) requires the direction vector to be *uniformly* distributed on S^{n-1} to recover N(0, I); a spherical 3-design does not satisfy this. The paper acknowledges the limitation in Section 5 ("higher-order moments may deviate from the true prior"), but the abstract, introduction, and conclusion overclaim what is actually proved. The empirical evidence (FID, classifier results) strongly supports practical indistinguishability, so this is a framing/correctness issue in the theoretical claims rather than a methodological flaw, but the claims throughout the paper need recalibration.
+- **Theorem 3.1 does not hold under the paper's default parameters (s=1, l_r=512)**. Algorithm 1 guarantees that the N copies of each watermark bit use disjoint padding bits, but places no restriction on padding-bit reuse *across different* watermark bits. Each of the l_m watermark-bit-copy pairs draws s padding bits from an independent random permutation of [1..l_r]. With default parameters (l_m=512, N=31, s=1, l_r=512), a total of 15,872 padding-bit assignments must be made from only 512 distinct padding bits. Padding-bit collisions across different watermark bits are inevitable. When s=1 and two entries (j1,c1) and (j2,c2) share a padding bit r_p, we have z^(1)_(j1,c1) = m_j1 ⊕ r_p and z^(1)_(j2,c2) = m_j2 ⊕ r_p, so their XOR is the known constant m_j1 ⊕ m_j2, violating pairwise independence. Since Theorem 3.2 (spherical 3-design) depends on the 2-wise/3-wise independence claim, the entire theoretical chain is undermined as stated. This does not invalidate the method — the empirical results remain strong and the rotation C likely masks residual dependencies — but requires correcting or qualifying the theorem (e.g., adding a no-collision condition l_r ≥ N×s×l_m, or providing a relaxed independence analysis).
 
 ### Minor
-- **"Encryption-free" terminology is imprecise.** The method uses a fixed secret Signature K = {T, C} that must be kept confidential to prevent unauthorized removal (Section 3.2, line 82). While the method genuinely avoids cryptographic primitives (stream ciphers, pseudorandom codes) and per-image key management, calling it "encryption-free" obscures that secret-key infrastructure is still required. More precise language (e.g., "cryptographic-primitive-free") would better capture the actual contribution.
-- **Classifier experiment could be strengthened.** The image-level classifier experiment (Figure 2) uses 1000 watermarked + 1000 unwatermarked images with ResNet-18. While Figure 2 does report both training loss and test accuracy separately (and ~50% test accuracy is consistent with the indistinguishability conclusion), the relatively small dataset size limits the independent evidential weight of this experiment. The conclusion is triangulated by FID and latent-level MLP results.
-- **No inversion baseline on unwatermarked images.** The extraction pipeline uses DDIM inversion with empty prompts (Eq. 12), which is inherently approximate. The residual ~0.01% extraction error under clean conditions (Table 2) could partially stem from inversion inaccuracy rather than watermark degradation. A baseline measuring inversion→re-extraction accuracy on unwatermarked images would disentangle these sources.
+- **Tension between "exact Gaussian" and "up to third-order moments"**. The abstract (line 9) claims the method produces "exact multivariate Gaussian noise" but the theoretical analysis only proves matching up to third-order moments via a spherical 3-design — a finite point set, not a uniform distribution on the sphere. Lemma 3.4 requires a uniform spherical distribution for exact Gaussianity. The paper acknowledges this in Section 5 ("higher-order moments may deviate from the true prior"), but the abstract's language is overstated.
+
+- **Cryptographic framing without cryptographic content**. Section 3.1 formalizes undetectability using negl(ρ) with a security parameter ρ that is never concretely defined, no hardness assumption is stated, and no reduction is provided. The actual evidence is statistical (FID, classifier accuracy) and moment-based (spherical 3-design), not cryptographic. This mismatch weakens coherence even though it does not undermine the practical contribution.
+
+- **No adversary-aware detection test**. The classifier-based undetectability experiments (Figure 2) train generic MLP/ResNet-18 architectures but do not test whether an adversary who knows the watermarking scheme's structure (e.g., the discrete support of z^(2) on a finite set of spherical shells) could train a more effective detector.
+
+- **Claim of generalization to any generative model (line 333) is unsupported in the main text**. The paper states the method "can generalize to any generative model with a Gaussian prior and invertible mappings" — the stripped appendix may contain supporting analysis, but the claim in the main body stands without evidence.
 
 ### Trivial
-- Minor notation collision: the symbol `r` is used for both the chi-square-distributed scalar in Eq. (10) and the random padding vector in Section 3.2, which could confuse readers.
+- The notation in Eq. (6) uses l_m to denote both the original watermark length and N×l_m, which is confusing. The block structure of T would be clearer with distinct notation for the stacked watermark dimension.
+
+- The storage cost of the signature K = {T, C} is mentioned only in footnotes. Quantifying storage requirements in the main text would strengthen the "encryption-free" claim.
 
 ## Nice-to-Haves
-- Include the original per-image-key Gaussian Shading configuration as a comparison point (even for a subset of experiments) to help readers understand the trade-off between key-management simplicity and extraction accuracy.
-- Add a statistical test for FID differences between methods, since the error bars overlap substantially.
-- Clarify the construction of C when l_c ≠ l_x: the footnote mentions choosing l_c as a factor of l_x for efficiency but the tiling/block-wise application mechanism is not described.
+- Fix Theorem 3.1 by either expanding the padding pool (l_r ≥ N×s×l_m) or providing a relaxed independence analysis that accounts for controlled padding-bit reuse and argues that the rotation C sufficiently masks residual dependencies.
+
+- Replace the cryptographic negl(ρ) formalism with honest statistical guarantees (moment-matching up to degree 3, empirical classifier resistance), aligning claims with what is actually proved and tested.
+
+- Train a scheme-aware adversary classifier that exploits knowledge of the spherical 3-design's discrete support, to test whether undetectability holds against stronger adversaries.
+
+- Clarify the relationship between the spherical 3-design guarantee and Lemma 3.4's requirement of uniform spherical distribution — the paper should explicitly state that the empirical validation is the primary evidence for Gaussianity.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **"Appendix proofs need verification"** — the appendix is stripped from the submission copy; this is not a reviewable concern per the review guidelines.
-- **"The security definition in Eqs. (2–4) is decorative / not engaged with"** — the paper borrows cryptographic formalism (PPT adversary, negligible functions) to frame the undetectability and traceability requirements. Using this framework to state design goals without proving security theorems is a stylistic choice, not a substantive flaw.
-- **"No comparison with original Gaussian Shading" claimed as a fatal gap** — the paper explicitly notes the fixed-key limitation (line 193) and the comparison is fair in context. Including the original version is a nice-to-have, not a weakness.
-- **"Statistical tests missing"** — moved to Nice-to-Haves; reporting mean and std over 5 runs is standard practice in this subfield; formal tests would strengthen but their absence is not a flaw.
-- **Strength Finder: "Encryption-free deployment advantage"** — partially qualified by the terminology concern but the core advantage (eliminating per-image key management and cryptographic primitives) is real and retained in the Strengths section.
+These points are flagged to be removed; treat them with caution.
+
+- **Harsh critic's claim about "the paper's explanation that lossy embeddings enable effective classifiers relies on Appendix E, which is stripped"**: REMOVED — per rules, we do not penalize for stripped appendix content.
+
+- **Strength Finder's "rigorous theoretical chain"**: DEMOTED — the theoretical chain has a verified flaw (Theorem 3.1), so "rigorous" is inaccurate.
+
+- **Harsh critic's complaint about "Table 5 addresses timesteps under PNG storage only, not under attacks"**: REMOVED — Table 4 already addresses attacks under different ODE solvers; Table 5's purpose is specifically timestep sensitivity under clean conditions.
+
+- **Harsh critic's comment about missing related work on other encryption-free approaches**: REMOVED — per rules, we do not flag missing related works.
+
+- **Harsh critic's concern about sensitivity to mismatch between generation and inversion ODE solvers**: REMOVED — Tables 4 and 5 directly address this (ODE solver and timestep ablations), showing insensitivity.
+
+- **Strength Finder's generic strengths about "important problem" and "interesting question"**: REMOVED as per filtering rules.
 
 ## Novel Insights
-The connection between binary watermark coding and spherical t-designs is genuinely underexplored. The insight that 3-wise independence of XOR-mixed bits (Theorem 3.1) can be leveraged to construct a spherical 3-design (Theorem 3.2) provides a clean algebraic bridge between discrete coding theory and continuous geometric distributions. This opens a direction for distribution-preserving watermarking that is structurally different from both cryptographic pseudorandomness and pattern-injection approaches.
+The review process reveals a subtle tension the paper does not fully explore: the method's practical success likely owes more to the orthogonal rotation C than to the independence properties of the binary embedding. Even with padding-bit collisions violating the claimed 2-wise/3-wise independence, the rotation C maps the (now-dependent) spherical points to new coordinates where the marginal distributions still approximate Gaussians (as Lemma 3.3 suggests for large l_x). This suggests the spherical 3-design guarantee may be sufficient for practical undetectability even if Theorem 3.1's strong independence claim is relaxed — a valuable nuance for future work in this area.
 
 ## Suggestions
-- Recalibrate the abstract, introduction, and conclusion to accurately reflect the theoretical result: the method produces noise matching N(0, I) up to third-order moments via spherical 3-design, which is empirically indistinguishable under standard metrics. Remove claims of "exact" Gaussian recovery.
-- Add an inversion baseline on unwatermarked images to quantify the irreducible error floor from DDIM inversion.
-- Replace "encryption-free" throughout with "cryptographic-primitive-free" or "eliminating per-image cryptographic overhead."
+- The highest-impact revision: correct or qualify Theorem 3.1. The simplest fix is to add a condition l_r ≥ N×s×l_m for the full independence guarantee, acknowledge that the default empirical setting operates with controlled padding-bit reuse, and argue that the rotation C masks residual dependencies sufficiently.
 
-## Calibration Notes
+- Replace the cryptographic formalism (negl(ρ), PPT adversary) with statistical guarantees throughout. The paper's real contribution is practical and empirical; dressing it in cryptographic language without cryptographic proofs weakens rather than strengthens the contribution.
 
-**Round 1 (Bracketing):**
-- HexshmBu0P (5.33, "A Recipe for Watermarking Diffusion Models", Reject): Recipe-based watermarking with limited novelty, poor image quality. Our paper is clearly stronger.
-- ll2nz6qwRG (5.83, "Hidden in the Noise", Accept): Two-stage noise-based watermarking, limited evaluation scope. Our paper is somewhat stronger.
-- j7b4mm7Ec9 (7.60, "Lightweight Deep Watermarking", Reject): Well-executed novel contribution. Our paper is weaker due to the theoretical gap.
+- Add a brief quantification of the signature storage cost in the main text to give a complete picture of the "encryption-free" trade-off.
 
-**Initial bracket: 5.8–7.0.**
+## Calibration Anchors
 
-**Round 2 (Narrowing):**
-- ll2nz6qwRG (5.83, WIND, Accept): Re-read. Limited to single model, incomplete evaluation. Our paper is clearly stronger.
-- jlhBFm7T2J (6.50, PRC Watermark, Accept): Direct baseline. Our paper demonstrates substantial improvements over PRC in robustness, speed (~30,000×), and capacity scaling, while matching undetectability. Both papers have nuanced theoretical issues flagged by reviewers. Our paper is somewhat stronger.
-- 1IwoEFyErz (6.00, Shallow Diffuse, Reject): Limited contribution, poor presentation. Our paper is clearly stronger.
-- f8S3aLm0Vp (6.50, DIAGNOSIS, Accept): Different topic (unauthorized data usage detection), not directly comparable.
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| jbfDg4DgAk (Sparse Watermarking LLMs) | 3.00 | R1 | Different domain; our paper far stronger |
+| fkNsgI1nye (Secure Diffusion Inference) | 3.00 | R1 | Different topic |
+| 2o58Mbqkd2 (Superposition of DMs) | 3.25 | R1 | Different topic |
+| rAZ3yCpc3K (Diverse Samples in DMs) | 3.00 | R1 | Different topic |
+| HexshmBu0P (Recipe for WM DMs) | 5.33 | R1 | Our paper has novel method + comprehensive eval; clearly stronger |
+| T0ebbDO60R (SuperMark) | 3.75 | R1 | Different approach (post-hoc); our paper stronger |
+| ETFfXGM3e4 (SAT-LDM) | 5.50 | R1 | Training-based; our paper has novel training-free method; stronger |
+| ll2nz6qwRG (WIND) | 5.83 | R2 | Single model, limited attacks; our paper comprehensively stronger |
+| 1IwoEFyErz (Shallow Diffuse) | 6.00 | R2 | Limited contribution, poor presentation; our paper clearly stronger |
+| jlhBFm7T2J (PRC Watermark) | 6.50 | R1/R2 | Direct competitor; our paper improves practically but has weaker theory |
+| f8S3aLm0Vp (DIAGNOSIS) | 6.50 | R2 | Different topic |
+| 71pur4y8gs (TabWak) | 7.20 | R2 | Different domain (tabular); our paper in more competitive image space |
+| agHddsQhsL (Targeted Attack Protection) | 7.50 | R2 | Different topic |
+| j7b4mm7Ec9 (Lightweight WM) | 7.60 | R2 | Different topic (traditional deep WM, not diffusion-specific) |
 
-**Final score: 7.0** — above the 6.50 PRC Watermark baseline due to demonstrated practical improvements in robustness, computational efficiency, and capacity scaling while maintaining comparable undetectability and theoretical depth.
+**Round 1 bracket**: 6.0–7.5. **Round 2 narrowing**: The paper sits above WIND (5.83) and Shallow Diffuse (6.00), is comparable to PRC Watermark (6.50) with better practical results but weaker theory, and is below the off-topic anchors at 7.20-7.60. **Final score: 7.0** — reflecting practical improvements over the prior SOTA (PRC) balanced against the Theorem 3.1 theoretical flaw and overstated claims.
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,111 +1,74 @@
-Now I have a clear picture. Let me calibrate:
+Now I have a solid comparative picture. Let me finalize my assessment.
 
-**Comparison with anchors:**
+**Bracket:** Round 1 placed the paper in **5.5–7.5**. Round 2 anchors:
+- pOoKI3ouv1 (5.75): accepted, purely theoretical, no experiments — our paper is stronger (has experiments, more actionable result)
+- YcW8i9VCf5 (6.00): accepted, solid theory + experiments — comparable, our theory is more complete
+- u63OVngeSp (7.00): accepted, strong theory + competitive experiments — our experiments are noticeably weaker
 
-- **YcW8i9VCf5 (6.0):** The paper under review is clearly stronger. The 6.0 anchor had substantive concerns about novelty (one reviewer said "I don't see any fundamental difference between the studied model and a standard bandit"), naming confusion, and unclear motivation. Our paper has a crisp, well-motivated problem formulation and clearly novel theoretical machinery.
+**Narrowing:** The paper sits clearly above pOoKI3ouv1 (better than pure theory, experiments exist) and clearly below u63OVngeSp (experiments are supplementary, not competitive). It is comparable to YcW8i9VCf5 in overall quality — slightly better theory, slightly weaker experiments. Score: **6.0**.
 
-- **u63OVngeSp (7.0):** Comparable quality. Both have novel theoretical constructs, proven guarantees, and algorithms. The 7.0 anchor had one reviewer give a 5 citing limited comparison to prior work and restrictive assumptions; another reviewer noted lack of real-world data. Our paper has real-world graph experiments but has the minor non-standard regret metric issue. The paper under review seems slightly more complete but comparable in overall quality.
-
-- **bjxuqI4KwU (7.5):** This is a more fundamental theoretical contribution (solving an identifiability gap for linear SCMs), with uniformly high reviewer scores (8,8,6,8). Our paper is well-executed but narrower in fundamental impact — it characterizes the search space for a specific problem class rather than solving a broad identifiability question.
-
-**Final assessment:** 7.0 — a solid accept. The paper makes a clean, well-scoped theoretical contribution with supporting empirical evidence. Only minor, fixable issues remain.
+Now let me write the final review.
 
 ---
 
 ## Summary
-
-This paper addresses the problem of finding the minimal set of nodes in a causal graph guaranteed to contain the optimal single-node conditional intervention for maximizing a target variable Y. The core contributions are: (1) proof that conditional-intervention superiority reduces to deterministic atomic-intervention superiority (Proposition 4), (2) a graphical characterization of the minimal globally interventionally superior set (mGISS) as the LSCA closure of Y's parents, equivalently the set of nodes forming Λ-structures over those parents (Theorems 12, 13), and (3) the C4 algorithm that computes this set in O(|V|+|E|) time (Theorem 16). Empirical results on random and real-world graphs demonstrate substantial search-space reduction and improved bandit convergence when using the mGISS.
+This paper introduces the conditional causal bandit problem, where arms are single-node conditional interventions of the form do(X = g(Z_X)) on a known causal DAG. The core contribution is a complete graphical characterization of the minimal node set (mGISS) guaranteed to contain the optimal intervention target — it equals the LSCA closure of Pa(Y) — along with the C4 algorithm that computes this set in O(|V|+|E|) time via a novel connector-propagation scheme. Empirical results on random and real-world graphs show substantial search-space pruning and improved bandit convergence.
 
 ## Strengths
-
-- **Elegant theoretical reduction (Proposition 4):** The equivalence between conditional-intervention superiority over probabilistic SCMs and deterministic atomic-intervention superiority is a non-trivial technical bridge. It allows the entire subsequent analysis to proceed in the simpler deterministic setting while guaranteeing the result holds for the more general conditional-intervention case.
-
-- **Novel Λ-structure characterization (Theorem 12):** The result that the LSCA closure equals the set of nodes forming Λ-structures over pairs in the target set provides an elegant, purely graph-theoretic characterization. Λ-structures (Definition 11, Figure 2a) — pairs of internally disjoint directed paths from a common ancestor to two target nodes — capture the exact condition under which a node can simultaneously influence multiple targets. This is a genuinely novel graph-theoretic concept.
-
-- **Linear-time C4 algorithm with correctness proof (Theorem 16, Algorithm 1):** The connector-based single-pass algorithm computes the mGISS in O(|V|+|E|) time, which is asymptotically optimal. The connector concept (Definition 14, Lemma 15) is clever: a node whose children all share the same connector is "covered" by that downstream node and can be pruned; a node whose children carry multiple distinct connectors must be retained. The algorithm is simple enough to be immediately usable.
-
-- **Complete pipeline from graph to minimal intervention set (Theorem 13):** The main result synthesizes the definitions into a single theorem: the mGISS equals the LSCA closure of Pa(Y). The counterexamples in Figure 1 (especially 1d) convincingly demonstrate that simpler heuristics (LCAs) fail, justifying the more sophisticated LSCA machinery.
-
-- **Substantial search-space reduction on real-world graphs:** On bnlearn benchmark graphs, the method achieves over 90% search-space reduction for several large models. The random-graph experiments show the method is most effective on sparse graphs, which real-world causal models tend to be.
+- **Proposition 4 (equivalence of superiority relations):** The proof that conditional-intervention superiority in probabilistic SCMs coincides with deterministic atomic-intervention superiority is a nontrivial reduction that elegantly simplifies the subsequent analysis. This is a genuinely surprising result that serves as the theoretical engine of the paper (Section 3, lines 102–122).
+- **Theorem 13 (graphical characterization of mGISS):** The central result — that mGISS_Y(G) = L^∞(Pa(Y)) — is complete, rigorous, and purely graph-based. Given only the causal DAG, one can deterministically identify the minimal search space with a formal guarantee that the optimal intervention node is retained (Section 4, line 215).
+- **C4 algorithm (Algorithm 1):** The connector-based linear-time algorithm for computing the LSCA closure is elegant. Lemma 15 formally ties connectors to the closure, and Theorem 16 proves correctness and O(|V|+|E|) complexity. The algorithm is remarkably simple — a single reverse-topological pass with a lightweight case analysis (Section 5, lines 229–257).
+- **Theorem 12 (Λ-structure characterization):** The characterization of the LSCA closure via Λ-structures (two internally disjoint directed paths from a node to two nodes in the base set) provides an intuitive, non-recursive alternative understanding of the closure and is instrumental in the proofs (Section 4, lines 199–200).
+- **Well-scoped problem formulation with concrete examples:** The paper grounds the conditional intervention framework in realistic scenarios (doctor adjusting treatments, traffic controller managing delays) that make the assumptions about observable conditioning sets feel natural. The differentiation from Lee & Bareinboim (2018, 2020) and contextual bandits is clear and precise (Sections 1–2, Section 7).
+- **Systematic search-space reduction experiments:** The Erdős-Rényi experiments sweep both graph size (20–500 nodes) and expected degree (2–11), convincingly showing that the method is most effective for large, sparse graphs — precisely the regime of real-world causal models. The bnlearn graph experiments confirm over 90% pruning on some large models (Section 6, lines 263–279).
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-None.
+- **Non-standard regret metric weakens the bandit experiments:** The cumulative regret in Section 6 is computed against the "estimated best arm" — defined as the arm most runs concluded to be best at the end of training (footnote 11) — rather than against the true optimal arm's mean reward. This metric conflates convergence speed with convergence quality: mGISS could in principle exclude the truly optimal node (contradicting the theoretical guarantee) yet still show lower regret if CondIntUCB converges faster to a suboptimal but adequate arm while brute-force continues to explore. Since the paper's key claim is that mGISS guarantees containment of the optimal intervention, computing regret against the true optimum (derivable from the known SCM) would be a direct test of this guarantee. As presented, the regret curves demonstrate faster convergence to *something*, not necessarily to the optimum.
+- **SCM parameterization for bandit experiments is unspecified:** The bnlearn repository provides Bayesian networks with graphical structure and conditional probability tables, not structural causal models with functional assignments. To simulate interventions in a bandit setting, one needs explicit structural equations and noise distributions. The paper never states what functional forms and noise distributions were used with each bnlearn graph (asia, sachs, child, pathfinder). Without this specification, the bandit experiments are not reproducible as described, and it is impossible to assess whether the SCMs used respect the causal graph structure claimed.
 
 ### Minor
-
-- **Non-standard regret metric in bandit experiments:** The cumulative regret is computed against the "estimated best arm, defined as the arm that most runs concluded to be the best at the end of training" (footnote 11), rather than against the true optimal arm. If the brute-force and mGISS approaches converge to different arms in finite samples, their regrets are measured against different baselines, partially confounding the comparison. Since Theorem 13 already guarantees the mGISS contains the true optimal node, the direction of the results is plausible, but the empirical evidence for improved convergence is weaker than it appears. This is fixable by computing regret against the true optimal arm (available since the SCM is known in the experimental setup).
-
-- **CondIntUCB algorithm is insufficiently specified:** The bandit algorithm used in Section 6 is described only narratively in two sentences — there is no pseudocode, and key parameters (UCB exploration constant, number of runs per context, convergence criteria) are not stated. This makes the bandit experiments difficult to reproduce without consulting the supplementary code.
-
-- **Limited scale of bandit experiments:** Only 4 datasets with relatively small graphs (8–109 nodes) are used for the bandit experiments. While partly justified by the need to run brute-force comparisons, this limits the demonstration of scaling benefits that the linear-time C4 algorithm theoretically enables.
+- **No empirical verification that mGISS contains the optimal intervention:** While Theorem 13 provides a theoretical guarantee, a direct empirical sanity check — e.g., computing the truly optimal conditional intervention for a few SCMs with known ground truth and confirming it lies in the mGISS — would close the loop between theory and experiment. This is not essential given the proof, but its absence leaves a gap in the experimental narrative.
+- **No sensitivity analysis for target Y selection:** All experiments pick Y as the node with the most ancestors (and >1 parent). While this is a reasonable heuristic, results could vary for randomly chosen targets, and a brief investigation would strengthen the generality claim.
+- **CondIntUCB context handling is not discussed:** For graphs with even modest numbers of ancestors, the number of possible context realizations (values of Z_X) can grow combinatorially. The paper does not address how sparse contextual data is managed — e.g., whether unseen contexts default to a prior or whether contexts are binned.
 
 ### Trivial
-
-- **Algorithm 1 does not handle the |C| = 0 case explicitly:** The loop iterates over all V ∈ V\U in reverse topological order, but for nodes not in An(U), the set C will be empty and c[V] is never assigned. This is harmless in practice but makes the pseudocode slightly incomplete. An explicit else branch or restriction to An(U) would clarify the intended behavior.
+- The claim in the introduction that "restricting to single-node interventions in fact makes the problem more challenging" (line 37) is debatable and could be toned down, as the paper itself notes this is only true in the narrow sense that the minimal search space is not trivially Pa(Y). This does not affect the technical contribution.
 
 ## Nice-to-Haves
-
-- **Minimality illustration:** While minimality is a theoretical claim and cannot be empirically "proven," including a concrete example where removing any single node from the mGISS causes a specific SCM to fail to find the optimal intervention would illustrate tightness for readers.
-- **Compute regret against true optimal arm** to make the bandit results unambiguous.
-- **Broader bandit evaluation** on larger graphs (even with approximate baselines) to better demonstrate scaling benefits.
+- A discussion of what happens when only a subset of ancestors is observed (relaxing the An(X)\{X} ⊆ Z_X assumption) would strengthen practical relevance.
+- Wall-clock time or computational cost of CondIntUCB relative to brute-force could be reported.
+- Multiple SCM parameterizations per graph would demonstrate robustness of the pruning benefit.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- **"The gap between the theoretical model and the bandit experiments is not fully bridged"** — The harsh critic noted that experiments don't validate the "minimal" part of the claim. This is inherent: minimality is a theoretical property that cannot be empirically validated by design. The paper already distinguishes between what the experiments demonstrate (search-space reduction + improved convergence) and what the theory guarantees (minimality). Not a weakness.
-
-- **"The conditioning set assumption is strong — what happens when Z_X is a proper subset of ancestors?"** — The paper explicitly addresses this in footnote 3: "We are not claiming that all variables in An(X)\{X\} need to be in Z_X for the best decision to be made, or for our results to hold, but that we can always include them in Z_X under the assumptions of our problem." The paper states its assumptions clearly and acknowledges the no-latent-confounders limitation in the conclusion. Removed.
-
-- **"Missing intuition before Proposition 4"** — This is a presentation preference, not a substantive weakness. The paper states the equivalence clearly and the formal proof is in the appendix.
-
-- **"Non-strict common ancestor motivation unclear"** — Already discussed through examples in the paper.
-
-- **"No comparison against alternative node selection approaches"** — The paper's contribution is the characterization itself; brute-force is the natural baseline. There are no existing alternative node-selection methods for this specific problem setting. Asking for comparison to non-existent methods is scope creep.
-
-- **Formatting/style nitpicks** from the harsh critic — Removed per hard rules.
+These points are flagged to be removed; treat them with caution:
+- Harsh Critic's concern about the appendix being stripped — this is a parser artifact, not an author error. The proofs and full reference list exist in the original submission.
+- Harsh Critic's note about Proposition 4/Proposition 6 proofs being unverifiable — the critic acknowledged the appendix was stripped and that the claim structure was plausible. Not a paper weakness.
+- Harsh Critic's comment that "the paper does not discuss what happens when Y has no parents" — the paper explicitly scopes to Y with at least one parent (Proposition 6 states "with at least one parent", Theorem 13 same), and the single-parent case is addressed in the intuition section (Figure 1c, line 153: "In the particular case where Y has a single parent A, that node is the only node worth intervening on").
+- Harsh Critic's criticism of "more challenging" claim — this is a framing choice, not a substantive error. Moved to Trivial.
+- Strength Finder's characterization of "Empirical regret reduction" as a core strength — kept as a strength but qualified given the non-standard regret metric.
+- Harsh Critic's concern about regret being computed against estimated best arm raised to Fatal — actually this is Major, not Fatal. The theoretical guarantee ensures the optimal node is in mGISS; the metric issue means the experiments don't *directly* verify the guarantee, but they still demonstrate practical benefit.
+- Harsh Critic's suggestion to relax the An(X)\{X} ⊆ Z_X assumption — this is scope creep. The paper explicitly sets this as a working assumption under no latent confounding and flags latent confounders as future work. Moved to Nice-to-Haves.
 
 ## Novel Insights
-
-The most novel technical insight is the equivalence between conditional and deterministic atomic superiority (Proposition 4), which reduces a complex stochastic optimization problem over conditional interventions to a deterministic graph-theoretic one. Combined with the Λ-structure characterization, this reveals that the answer to "which nodes could possibly be optimal to intervene on" depends only on graph topology — specifically on the existence of internally disjoint directed paths from a common ancestor to pairs of Y's parents. The connector-based C4 algorithm then provides an elegant computational realization: a node is worth testing exactly when its children have different "connectors" to the target set, meaning the node can influence the target through multiple distinct channels.
+The paper's key insight goes beyond the specific LSCA closure result: it shows that the problem of comparing conditional interventions in probabilistic SCMs reduces exactly to comparing atomic interventions in deterministic SCMs (Proposition 4). This equivalence is surprising and has implications beyond this paper — it suggests that for problems involving "best single-node intervention" queries on causal graphs, one can work entirely in the simpler deterministic-atomic framework without loss of generality. The Λ-structure characterization then gives this a clean graph-theoretic interpretation that connects naturally to the connector-based algorithm. The paper essentially maps a probabilistic decision problem onto a purely structural graph property.
 
 ## Suggestions
+- Replace the estimated-best-arm regret metric with regret computed against the true optimal arm (analytically derived from the known SCM). This directly tests the theoretical guarantee and removes the conflation between convergence speed and convergence quality.
+- Specify the SCM parameterization used with each bnlearn graph (structural equations, noise distributions). Ideally, use multiple parameterizations per graph to demonstrate robustness.
+- Add a brief empirical sanity check: for a few SCMs, compute the ground-truth optimal intervention and verify it lies in the mGISS.
+- Include a brief discussion of how CondIntUCB handles unseen context realizations.
 
-- Replace the estimated-best-arm regret metric with regret against the true optimal arm (computable offline since the SCM is known). This would make the bandit results unambiguously valid.
-- Add a concrete minimality example (a graph + SCM where removing any node from the mGISS causes the optimal intervention to be missed) to illustrate the tightness of the characterization.
-- Include pseudocode and parameter specification for CondIntUCB to improve reproducibility of the bandit experiments.
+## Anchor Comparisons
+- **IPayPEGwdE (5.00):** Causal contextual bandits with adaptive context — our paper has more complete theory (full characterization vs regret bounds) and more systematic experiments. Our paper is clearly stronger.
+- **oVVLBxVmbZ (5.25):** Conditional intervention in algorithmic recourse — our paper has a rigorous theoretical characterization that this paper lacks. Our paper is stronger.
+- **pOoKI3ouv1 (5.75):** Robust agents learn causal world models — purely theoretical, no experiments. Our paper is stronger due to having experiments and a directly actionable algorithm.
+- **YcW8i9VCf5 (6.00):** Adversarial Causal Bayesian Optimization — comparable overall quality. Our theory is more complete (exact characterization), our experiments are somewhat weaker. Roughly comparable; our paper is slightly better theoretically.
+- **u63OVngeSp (7.00):** Deriving Causal Order from Single-Variable Interventions — has strong theory and competitive experiments that outperform baselines. Our paper has comparable theory but weaker experiments. Our paper is clearly below this anchor.
 
----
-
-**Calibration summary (all anchors retrieved):**
-
-| Anchor | Avg Score | Round | Comparison |
-|--------|-----------|-------|------------|
-| MVpvyeVeyI (Causal BO Unknown Graphs) | 3.40 | R1 | Much weaker — rejected paper with limited contributions |
-| JzFLBOFMZ2 (CSL Supervised by LLM) | 3.20 | R1 | Much weaker — rejected |
-| fSxiromxAq (Sparse Causal Model) | 3.00 | R1 | Much weaker — rejected |
-| AvXrppAS2o (Outcome Prediction via CSL) | 3.00 | R1 | Much weaker — rejected |
-| IPayPEGwdE (Causal Contextual Bandits Adaptive) | 5.00 | R1 | Weaker — rejected, limited experiments, restrictive assumptions |
-| YcW8i9VCf5 (Adversarial CBO) | 6.00 | R1,R2 | Our paper is stronger — clearer contribution, fewer substantive weaknesses |
-| BZYIEw4mcY (Causal Discovery Latent Variables) | 6.00 | R1,R2 | Different topic; similar quality band |
-| pOoKI3ouv1 (Robust agents learn causal models) | 5.75 | R2 | Similar quality — interesting theory but less complete pipeline |
-| mGmx41FTTy (Two Time-Slices Topological) | 6.33 | R2 | Similar quality band |
-| jE6VXUhxq9 (Causal Discovery Deterministic) | 6.25 | R2 | Similar quality band |
-| u63OVngeSp (Causal Order Single-Var Interventions) | 7.00 | R2 | Our paper is comparable — slightly more complete empirical validation |
-| SKulT2VX9p (Interventional Fairness PDAG) | 6.67 | R2 | Our paper is slightly stronger |
-| bjxuqI4KwU (Linear SCM Identification) | 7.50 | R2 | Our paper is weaker — the anchor solves a more fundamental identifiability problem |
-| Bp0HBaMNRl (Differentiable Causal Discovery) | 6.75 | R2 | Our paper is comparable or slightly stronger |
-| FhQSGhBlqv (Versatile Causal Discovery Hidden) | 7.50 | R2 | Our paper is weaker — the anchor has broader fundamental results |
-
-**Round 1 bracket:** 5.5–7.5  
-**Round 2 narrowed to:** 6.5–7.5, with the paper sitting closest to the u63OVngeSp (7.0) anchor.
-
-MY FINAL SCORE: <score>7.0</score>
+MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

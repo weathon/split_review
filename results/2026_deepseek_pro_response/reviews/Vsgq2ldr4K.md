@@ -1,26 +1,25 @@
-Now let me finalize my comparison across all anchors to set the score:
+Now I have enough comparison anchors. Let me compile the final review with score.
 
-**Round 2 comparison:**
+**Round 1 Bracket:** 5.5–7.0
 
-- **Ouj6p4ca60 (5.50)**: GFlowNets for LLM inference. Less focused, more scattered evaluation. Current paper is stronger.
-- **VNckp7JEHn (5.75)**: Inference scaling laws. Stronger empirical rigor (error bars, compute budgets) but incrementally novel (PRM+MCTS). Current paper has more novel methodology but weaker empirical completeness. Comparable, current paper slightly ahead on novelty.
-- **6qUUgw9bAZ (6.50)**: Adaptive compute allocation. Well-executed, clear contribution, but focused on efficiency (~10% compute savings). Current paper's claims are bolder (matching RL) and the method is more novel, but empirical gaps pull it below this anchor.
-- **Ze4aPP0tIn (6.60)**: Twisted SMC. Closest comparator — SMC for math reasoning, requires trained verifier, solid evaluation. Current paper is training-free (advantage) but has empirical gaps (disadvantage). Slightly below.
+**Round 2 Narrowing:**
+- Twisted SMC (6.60): Our paper has broader evaluation and cleaner theory; comparable quality but our N_MCMC issue is a specific gap. Slightly below.
+- Inference-Aware Fine-Tuning (5.67): Our paper is clearly stronger (more models, more benchmarks, training-free, novel algorithm).
+- Inference Scaling Laws (5.75): Our paper is somewhat stronger (novel algorithm, broader benchmarks).
 
-The paper under review sits at **6.0**: a genuinely novel contribution with promising results, pulled down by significant empirical omissions (missing N_MCMC, no compute-equivalent baseline, questionable Phi-3.5 evidence). It would benefit greatly from a rebuttal addressing these, but in its current form the gaps are real.
+**Final assessment:** The paper's genuine contributions (Proposition 1, MCMC sampling algorithm, consistent gains across 3 model families, pass@k diversity preservation) are substantial. However, the two major weaknesses — opaque reporting of \(N_{\text{MCMC}}\) and absence of compute-matched baselines — prevent it from reaching the 7.0+ tier. The paper lands at **6.0**, above the 5.0–5.75 cluster (which had weaker or less novel contributions) but below the 7.0+ papers (which had more rigorous methodology and fewer reproducibility gaps).
 
 ---
 
 ## Summary
-This paper proposes a training-free, MCMC-based sampling algorithm that targets the power distribution p^α of a base LLM to elicit reasoning capabilities without RL post-training. The key theoretical contribution is a crisp distinction between the true power distribution (which uses "sum of exponents" to account for future-path quality) and standard low-temperature sampling (which uses "exponent of sums"). The method achieves results competitive with GRPO on Qwen2.5 models across MATH500, HumanEval, GPQA, and AlpacaEval 2.0, while preserving generation diversity (pass@k) that RL destroys.
+This paper proposes a training-free, inference-time sampling algorithm that elicits reasoning capabilities from base LLMs by targeting the *power distribution* \(p^\alpha\) via a Metropolis-Hastings MCMC procedure with progressive block-wise resampling. The central empirical finding is that sampling from \(p^\alpha\) can achieve single-shot reasoning performance comparable to GRPO posttraining — and can even outperform GRPO on out-of-domain tasks — while preserving generation diversity that RL methods sacrifice.
 
 ## Strengths
-- **Rigorous characterization of the gap between low-temperature sampling and the power distribution (Proposition 1, Example 1).** The "sum of exponents" vs. "exponent of sums" distinction is crisp, non-obvious, and provides a theoretically grounded motivation for why targeting p^α should benefit reasoning. Example 1 concretely illustrates this with a minimal two-token, two-vocabulary case showing p^α preferring the path to the single highest-likelihood completion while low-temperature sampling is misled by multiple mediocre completions.
-- **Training-free, dataset-free, verifier-free method achieving RL-competitive results on Qwen2.5 base models (Table 1).** On Qwen2.5-Math-7B, power sampling scores 74.8% on MATH500 versus GRPO's 78.5%, and outperforms GRPO on HumanEval (57.3% vs. 53.7%) and AlpacaEval 2.0 (2.88 vs. 2.38). On Qwen2.5-7B, it similarly matches on MATH500 (70.6% vs. 74.0%) and exceeds on HumanEval (62.2% vs. 56.1%). This cross-model evidence — without any training, curated data, or verifier signal — substantiates the core claim.
-- **Preservation of generation diversity demonstrated via pass@k curves (Figure 5).** Power sampling's pass@k climbs from 0.72 at k=1 to 0.98 at k=16, nearly matching the base model's pass@16, while GRPO plateaus at 0.90. This directly addresses the known RL diversity-collapse problem, delivering single-shot quality without sacrificing multi-shot potential.
-- **Progressive block-wise MCMC design as a practical solution to the mixing-time problem (Algorithm 1, Section 4.3).** The sequential annealing strategy — growing sequences in blocks and using intermediate-distribution samples to initialize the next MH chain — is well-justified for high-dimensional token spaces. The expected token cost formula (Eq. 12) gives practitioners a concrete compute budget framework.
-- **Empirical evidence linking base-model likelihood/confidence to reasoning quality (Figure 4).** Histograms show both power sampling and GRPO shift mass toward higher-likelihood, higher-confidence regions, triangulating the thesis that higher base-model likelihood correlates with correct reasoning.
-- **Generalizability to unverifiable domains (AlpacaEval 2.0, Table 1).** Because the method relies solely on base model likelihoods, it naturally extends to tasks where ground-truth verifiers are unavailable — a meaningful practical advantage over RLVR.
+- **Clean theoretical contribution (Proposition 1):** The paper provides a crisp proof that low-temperature sampling does not sample from \(p^\alpha\), identifying the "sum of exponents" vs. "exponent of sums" distinction. The worked two-token example (Example 1) makes this concrete and directly motivates why MCMC targeting \(p^\alpha\) should outperform naive temperature scaling.
+- **Consistent empirical gains across three model families and four benchmarks (Table 1):** Power sampling lifts MATH500 from 49.6% → 74.8% (Qwen2.5-Math-7B), 49.8% → 70.6% (Qwen2.5-7B), and 40.0% → 50.8% (Phi-3.5-mini-instruct). Gains on HumanEval are even larger. The inclusion of a low-temperature baseline confirms that power sampling provides value beyond simple temperature scaling (e.g., MATH500: 69.0% → 74.8%).
+- **Power sampling matches or exceeds GRPO on single-shot reasoning without training (Table 1):** On Qwen2.5-Math-7B, power sampling (74.8%) nearly matches GRPO (78.5%) on in-domain MATH500. On out-of-domain tasks, power sampling outperforms GRPO: HumanEval 57.3% vs. 53.7%, AlpacaEval 2.88 vs. 2.38. The pattern holds across all three models.
+- **Pass@k analysis demonstrates preserved generation diversity (Figure 5):** Power sampling pass@k rises from ~0.72 at k=1 to ~0.98 at k=16, tracking the base model's asymptotic performance. In contrast, GRPO plateaus at ~0.90 by k=8. This addresses a known weakness of RL posttraining — redistribution of pass@k into pass@1 at the cost of diversity — and shows power sampling does not suffer from this tradeoff.
+- **Longer reasoning traces emerge without explicit length incentives (Section 5.3):** On MATH500 (Qwen2.5-Math-7B), power sampling averages 679 tokens — nearly identical to GRPO's 671 and substantially longer than the base model's 600. That pure sampling from \(p^\alpha\) induces this behavior without reward shaping for length is an intriguing corroboration of the connection between high-likelihood regions and reasoning capability.
 
 ## Weaknesses
 
@@ -28,62 +27,56 @@ This paper proposes a training-free, MCMC-based sampling algorithm that targets 
 None.
 
 ### Major
-- **N_MCMC — the central hyperparameter controlling compute cost and MCMC convergence — is never reported numerically.** Section 5.1 specifies B=192, α=4.0, and proposal temperature, but the actual value of N_MCMC (which governs expected token cost via Eq. 12 and appears in Algorithm 1) is never given. The paper only says it uses "relatively small values" (line 231). This prevents exact reproduction of the reported results and makes the inference-time compute cost opaque — critical since the method's value proposition is fundamentally about trading compute for accuracy.
-- **Phi-3.5-mini-instruct results are problematic evidence for the paper's thesis.** The paper's title and framing are explicitly about "base models," yet Phi-3.5-mini-instruct is an instruction-tuned model. Moreover, the GRPO baseline for this model appears non-functional: GRPO improves MATH500 from 40.0% to only 40.6% (negligible) and degrades HumanEval from 21.3% to 13.4% (worse than the starting model). The 59.8% gap on HumanEval (73.2% vs. 13.4%) drives the "outperforms" narrative but measures against a broken comparator. These results should not carry the weight the paper assigns them.
-- **No compute-equivalent baseline is provided.** The method expends substantial additional inference compute (expected ~N_MCMC · T²/4B extra tokens, thousands per sample), but there is no comparison against best-of-N or majority-vote sampling from the base model with the same token budget. The low-temperature baseline uses far less compute. Without a compute-matched comparison, the conclusion that the MCMC structure specifically is responsible for gains — rather than simply spending more compute — is not established.
+- **\(N_{\text{MCMC}}\) is never given a concrete value, making results irreproducible and compute cost opaque.** The paper introduces \(N_{\text{MCMC}}\) as a central hyperparameter in Algorithm 1, provides a formula for expected token cost that depends on it (Eq. 12: \(\mathbb{E}_{\text{tokens}} \approx N_{\text{MCMC}} T^2 / (4B)\)), and describes it as a lever in the \(B\) vs. \(N_{\text{MCMC}}\) tradeoff — yet never reports what value was used in any experiment. The only guidance is the qualitative statement that the method works for "relatively small values of \(N_{\text{MCMC}}\)." This is a straightforward reproducibility failure.
+- **No compute-matched baseline — performance gains are confounded with inference-time compute budget.** The headline claim is that base models can match RL "by pure sampling." But power sampling consumes substantially more inference compute than standard decoding (Eq. 12 scales with \(N_{\text{MCMC}}\)), and the paper provides neither wall-clock time, FLOP counts, nor a compute-controlled comparison (e.g., best-of-\(N\) from the base model at equal total token budget). Without such a baseline, one cannot distinguish between "the base model knows more than we thought" and "spending more compute helps." This undermines the central thesis.
 
 ### Minor
-- **No statistical significance or confidence intervals reported.** All results in Table 1 and Figure 5 are point estimates. While single-run evaluation is standard in LLM benchmarking, some measure of variance (e.g., bootstrap confidence intervals) would strengthen the central claim of "matching" GRPO, especially for the 3.7 percentage point gap on MATH500 with Qwen2.5-Math-7B (74.8% vs. 78.5%).
-- **Several experimental details are underspecified.** (a) The low-temperature baseline temperature is not explicitly stated (presumably τ=1/α=0.25, but should be confirmed). (b) For AlpacaEval 2.0, the proposal temperature is τ=0.5 but whether α remains 4.0 is not stated. (c) The base model's default decoding strategy is not specified.
-- **No MCMC convergence diagnostics provided.** The paper provides no trace plots, acceptance rate curves, effective sample size estimates, or other diagnostics to assess whether N_MCMC steps suffice for the chain to mix. Given the high-dimensional discrete state space (T up to 3072, vocabulary ~50K+), this is a genuine concern — though the strong empirical results partially mitigate it.
+- **GRPO baseline for Phi-3.5-mini-instruct is minimally informative.** GRPO posttraining produces negligible improvement on MATH500 (0.400 → 0.406) and degrades HumanEval (0.213 → 0.134). The paper attributes this to "out-of-domain" degradation, but the MATH500 result — which is in-domain (trained on MATH) — shows essentially no gain. This suggests the GRPO training for this model did not converge properly, inflating the apparent advantage of power sampling on this model. The other two models show proper GRPO gains, so this does not threaten the overall conclusion but weakens one data point.
+- **No sensitivity analysis for key hyperparameters.** The paper states \(\alpha = 4.0\) was found empirically to be "most performant" but provides no sweep. The same applies to \(B\) and \(N_{\text{MCMC}}\). The reader cannot assess how brittle performance is to these choices. The proposal temperature differs between reasoning tasks (0.25) and AlpacaEval (0.5), suggesting task-specific tuning that slightly undercuts the "broadly applicable" framing.
+- **The connection between \(p^\alpha\) and RL posttraining remains correlational.** The paper motivates power sampling by the hypothesis that RL sharpens the base distribution, but never tests whether GRPO's output distribution actually resembles \(p^\alpha\) beyond the likelihood histogram in Figure 4. Both methods producing higher-likelihood samples is consistent with many sharpening mechanisms. This does not invalidate the empirical results but means the conceptual narrative remains suggestive.
 
 ### Trivial
-None.
+- **Algorithm 1, line 7 uses \(\pi_k\) instead of \(\pi_{k+1}\) in the acceptance ratio.** The candidate sequences are of length \((k+1)B\) but the target distribution referenced is \(\pi_k\) (defined for length \(kB\)). This is almost certainly a pseudocode typo and should be corrected.
+- **No limitations section.** The paper makes strong claims without a dedicated discussion of limitations (white-box access requirement, sensitivity to hyperparameters, computational cost).
 
 ## Nice-to-Haves
-- Ablation on α (currently fixed at 4.0; what about 2.0 or 8.0?).
-- Ablation separating proposal temperature from target α to isolate where gains come from.
-- Compute cost analysis in wall-clock time or GPU-hours, and comparison to amortized GRPO training cost.
-- Characterize the compute-performance tradeoff as a function of N_MCMC to turn a missing detail into an informative scaling curve.
+- A compute-matched baseline (best-of-\(N\) or majority voting at equal token budget) would directly answer whether power sampling extracts more reasoning per unit of compute than simply drawing more samples.
+- A controlled synthetic experiment (e.g., a token environment where critical-window tokens are known) to provide causal evidence for the mechanism claimed in Observation 1.
+- Reporting wall-clock time alongside accuracy for all experiments.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed, treat them with caution.
 
-- **Harsh Critic: "Related Works misses relevant work on inference-time compute scaling (e.g., Snell et al. 2024, Brown et al. 2024)."** Removed per rule: do not mention missing related works without external confirmation.
-- **Harsh Critic: "The abstract's claim that 'does not require a verifier' is misleading since the method requires white-box access to compute likelihoods."** The distinction between an external verifier/reward model and the model's own likelihood is genuine and standard. The claim is accurate; the harsh critic's objection conflates two different forms of model access. Moved this nuance into the main review implicitly under the compute-cost point rather than as a standalone weakness.
-- **Strength Finder: generic framing of "training-free method achieving results" was merged into the more specific strength about Qwen2.5 results.** No content removed, just consolidated.
+- **"Irreducibility argument is misleading" (from Harsh Critic):** The harsh critic claims resampling can only modify tokens within the current block. However, Algorithm 1 line 5 samples \(m \in \{1, \dots, (k+1)B\}\) uniformly, which includes the full prefix — resampling can start from position 1 within each block's MCMC phase. The prefix is only frozen *between* blocks (line 10). The irreducibility argument in the paper is therefore technically correct for each sub-chain. Removed.
+- **"Distribution-sharpening narrative is correlational, not causal" rated as fatal:** Demoted to Minor with softening, as the paper uses sharpening as motivation (citing prior work) and makes the empirical claim that power sampling achieves RL-like results — which Table 1 supports regardless of mechanism. The correlational nature does not invalidate the empirical contribution. The harsh critic's framing as a fatal/critical issue was disproportionate.
 
 ## Novel Insights
-The paper's decomposition of the power distribution conditional into "sum of exponents" vs. low-temperature's "exponent of sums" is genuinely novel and pedagogically effective. It crystallizes why standard temperature scaling cannot capture the behavior of p^α — because p^α accounts for entire future-path quality at each token decision, while low-temperature sampling greedily averages future likelihoods before exponentiating. This framing connects naturally to the critical windows / pivotal tokens literature and provides a clean theoretical justification for MCMC-based sampling in reasoning, independent of the empirical results.
+The paper's core insight — that sampling from \(p^\alpha\) via MCMC can recover RL-like single-shot performance while maintaining base-model diversity — is genuinely novel and challenges assumptions about where reasoning capabilities reside. The pass@k analysis (Figure 5) showing that power sampling achieves GRPO-level single-shot accuracy while preserving the base model's asymptotic multi-shot performance is a compelling finding that suggests a new axis for inference-time compute scaling. The Proposition 1 distinction between "sum of exponents" and "exponent of sums" provides a clean theoretical lens that could inform future work on inference-time sampling strategies.
 
 ## Suggestions
-- **Report N_MCMC explicitly.** This is the single most important fix — it turns a reproducibility gap into an informative parameter.
-- **Add a compute-matched best-of-N (or majority-vote) baseline.** This would isolate whether the MCMC structure matters beyond raw compute expenditure and is the critical missing experiment for establishing the method's contribution.
-- **Either replace Phi-3.5-mini-instruct with a genuine base model or clearly acknowledge its instruct-model status and fix the broken GRPO baseline.** The Qwen2.5 results alone would still make a credible paper if strengthened with the above.
-- **Add basic MCMC diagnostics** (acceptance rates, log-likelihood traces) to give readers confidence in convergence.
-- **Add confidence intervals** for main results, at minimum via bootstrap over the test set.
+- Report \(N_{\text{MCMC}}\) explicitly for all experiments and add a compute-matched baseline (e.g., best-of-\(N\) from the base model at equal total token budget). This is the single most important addition.
+- Add a brief sensitivity analysis for \(\alpha\), \(B\), and \(N_{\text{MCMC}}\) — even a coarse grid would help readers assess robustness.
+- Fix the Algorithm 1 line 7 typo (\(\pi_k \to \pi_{k+1}\)) and add a short limitations paragraph.
+- Consider treating the Phi-3.5 results as supplementary given the problematic GRPO baseline, and foregrounding the Qwen2.5 results which are clean and convincing.
 
----
+## Score and Decision
 
-## Calibration Anchor Comparison
+**Calibration anchors used:**
 
-| Anchor | Avg Score | Round | Comparison |
+| Anchor Paper | Avg Score | Round | Comparison |
 |---|---|---|---|
-| sdpVfWOUQA (MCTS Planning) | 3.00 | R1 | Current paper is substantially stronger — more novel method, better results |
-| pXIbcRPxWR (Supervised CoT) | 2.50 | R1 | Current paper is substantially stronger |
-| BjZP3fTlVg (LLM Deployment w/ Risk) | 3.00 | R1 | Different topic; current paper stronger |
-| t15cWqydys (Decoding-Free Selection) | 3.00 | R1 | Different topic; current paper stronger |
-| VNckp7JEHn (Inference Scaling Laws) | 5.75 | R1/R2 | Comparable novelty; current paper has bolder claims but weaker empirical rigor |
-| 0xUEBQV54B (Large Language Monkeys) | 5.00 | R1 | Current paper has more methodological novelty and broader evaluation |
-| 3OyaXFQuDl (Compute-Optimal Sampling) | 7.00 | R1/R2 | Current paper is below — less complete empirical analysis, different focus (training vs. inference) |
-| Ze4aPP0tIn (Twisted SMC) | 6.60 | R1 | Closest comparator; current paper is training-free (advantage) but has empirical gaps (disadvantage); slightly below |
-| xoXn62FzD0 (SMC for Controlled Gen) | 8.00 | R1 | Current paper clearly below — less developed method, weaker evaluation |
-| Ouj6p4ca60 (GFlowNets for LLMs) | 5.50 | R2 | Current paper stronger — more focused, clearer contribution, better benchmark results |
-| 6qUUgw9bAZ (Adaptive Compute Allocation) | 6.50 | R2 | Current paper slightly below — bolder claims but less complete experimental rigor |
-| Dl6nkKKvlX (LLM Ensemble Diversity) | 6.25 | R2 | Current paper comparable in contribution level |
-| 7xCSK9BLPy (MBR Decoding) | 7.33 | R2 | Current paper clearly below — MBR is a stronger, cleaner paper |
+| Large Language Monkeys (0xUEBQV54B) | 5.00 | R1 | Our paper is stronger: novel algorithm, theory, broader benchmarks |
+| Inference-Aware Fine-Tuning (77gQUdQhE7) | 5.67 | R2 | Our paper is clearly stronger: 3 models vs 1, 4 benchmarks vs 1, training-free |
+| Inference Scaling Laws (VNckp7JEHn) | 5.75 | R1/R2 | Our paper somewhat stronger: novel algorithm, broader benchmarks, pass@k analysis |
+| COrAL (0JjsZC0w8x) | 5.75 | R2 | Different topic; our paper has broader evaluation |
+| Conformal Language Modeling (pzUhfQ74c5) | 6.25 | R2 | Different topic with formal guarantees; less directly comparable |
+| Mutual Reasoning (6aHUmotXaw) | 6.25 | R2 | Different approach (MCTS); our paper has cleaner theory |
+| Twisted SMC (Ze4aPP0tIn) | 6.60 | R2 | Closest comparator. Both use MC for reasoning, both have compute opacity. Our paper has broader benchmarks and cleaner theory, but N_MCMC gap is a more specific reproducibility issue. Slightly below. |
+| Smaller, Weaker, Yet Better (3OyaXFQuDl) | 7.00 | R1/R2 | Our paper is weaker: this paper has rigorous compute-matched design |
+| SMC for Controlled Generation (xoXn62FzD0) | 8.00 | R1 | Our paper is clearly weaker: less rigorous methodology, reproducibility gap |
 
-**Round 1 bracket**: 5.0–7.5. **Round 2 narrowed**: 5.5–6.5. The paper is better than the 5.5 GFlowNets anchor (more focused, clearer results) and the 5.75 inference scaling laws anchor (more novel method), but weaker than the 6.5 adaptive compute allocation anchor (less complete empirical evidence) and the 6.6 Twisted SMC anchor (training-free advantage offset by empirical gaps). **Final score: 6.0.**
+**Round 1 Bracket:** 5.5–7.0  
+**Round 2 Narrowing:** The paper sits between Inference Scaling Laws (5.75) and Twisted SMC (6.60), closer to the latter in contribution quality but held back by the unreported \(N_{\text{MCMC}}\) and missing compute-matched baseline. The core idea and results are stronger than the 5.0–5.75 cluster but the reproducibility gap prevents the paper from reaching the 7.0 tier.
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

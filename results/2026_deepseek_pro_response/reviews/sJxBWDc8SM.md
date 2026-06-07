@@ -1,88 +1,95 @@
-Now let me also read the most topically relevant anchor — Zoology — which I already have. Let me finalize the comparison.
-
-Here's my calibration summary across all rounds:
-
-**Round 1 anchors (bracketing):**
-- Mamba Neural Operator (3.00) — clearly weaker
-- Zoology (6.33) — directly related prior work; introduced MQAR, did pretraining, proposed hybrids
-- Small-scale proxies for Transformer instabilities (8.00) — clearly stronger; has formal metrics, multi-intervention study, real-data experiments
-
-**Round 2 anchors (narrowing):**
-- Mamba paper (6.25) — original architecture paper; wider contribution (new arch + pretraining) but messier eval
-- Transformers Learn Low Sensitivity (6.75) — analysis paper; broader scope, theoretical results, but overclaiming similar to current paper
-- State Space Models Provably Comparable (5.75) — theory paper; narrower scope
-
-**Comparison to current paper:** The paper under review is a well-executed corrective/refinement paper. It convincingly demonstrates that prior SSM-vs-Transformer expressivity conclusions were confounded by LR sensitivity (Figures 1-2), has a clean two-way conv1d ablation (Table 2), and validates findings across two tasks. It is narrower than Zoology (no pretraining, no real language, no architectural proposals) but has cleaner causal ablations. It is weaker than the 8.0 paper (no formal metrics, single optimizer, synthetic-only). The paper lands between Zoology (6.33) and the Mamba paper (6.25) — slightly below Zoology due to narrower scope and some overclaiming, but with cleaner experiments.
-
-**Final score: 6.0**
-
----
+Now I have a clear picture. Let me finalize the review with the calibrated score.
 
 ## Summary
-This paper investigates whether the performance gap between Transformers and modern SSMs (Mamba, Hyena) on associative recall and copying tasks stems from expressivity limitations or optimization difficulties. Through extensive learning-rate grid searches, the authors show that SSMs succeed only within a narrow LR window while Transformers are robust across orders of magnitude—and that prior work's LR grids missed this window, confounding expressivity conclusions. The paper also demonstrates opposing width-vs-depth scaling preferences, isolates the 1D convolution as the key component enabling single-layer SSM performance, and identifies DeltaNet as an SSM variant that avoids the brittleness.
+
+This paper investigates optimization stability differences between Transformers and modern recurrent models (Mamba, Hyena, DeltaNet) on two synthetic benchmarks: multi-query associative recall (MQAR) and copying. Through extensive experiments (~3,000 runs), the authors demonstrate that SSMs exhibit a critically narrow window of viable learning rates compared to Transformers, that SSMs favor width scaling while Transformers require depth, and that the 1D convolution is the key architectural component enabling single-layer SSMs to solve recall while 1-layer Transformers cannot. The central thesis is that optimization instability, rather than fundamental expressivity limitations, is the primary differentiator between these architectures on these benchmarks.
 
 ## Strengths
-- **Conv1d ablation is clean and mechanistic**: Table 2 provides a symmetric two-way ablation—removing the 1D conv from 1-layer Mamba drops accuracy from 99% to 2% (matching 1-layer Attention), while adding conv1d to 1-layer Attention raises it from 2% to 99%. This isolates a specific architectural component responsible for the single-layer performance gap and is the paper's most original insight.
-- **LR sensitivity as a confounder is concretely demonstrated**: Figure 1 overlays the LR grid from Arora et al. (2023) onto the paper's finer sweep, showing those values fall outside the narrow SSM success window. Figure 2 then shows that with proper tuning, Mamba solves MQAR at sequence length 512 with model dimension as low as 128—directly challenging prior expressivity claims that required hidden size ≈ sequence length.
-- **Cross-task validation on copying**: The LR instability finding replicates on the copying task (Figure 5, Table 1), showing the phenomenon is not MQAR-specific and strengthening the generalizability claim.
-- **Honest treatment of DeltaNet as a counterexample**: Rather than glossing over DeltaNet's Transformer-like robustness, the paper highlights it (Figure 7) and offers a mechanistic hypothesis (Householder-based mixing avoids the vanishing-gradient-inducing decay in Mamba/Mamba2's A_k matrices), providing a constructive path forward.
+
+- **Extensive and rigorous LR grid search across two benchmarks:** Figure 1, Figure 5, and Figure 7 convincingly demonstrate that Mamba and Hyena achieve high accuracy only within sharply peaked learning-rate windows, while Transformers maintain near-perfect accuracy across orders of magnitude. The experiments use 5 seeds with reported error bands and directly overlay the prior LR grid from Arora et al. (2023) to show how standard tuning would miss the viable region entirely. This is the paper's strongest and most persuasive contribution.
+
+- **Clean causal ablation isolating the 1D convolution:** Table 2 provides a tight four-way comparison: 1-layer Attention fails at ~2% accuracy; adding a 1D convolution to QKV projections enables 99% performance; removing the convolution from 1-layer Mamba collapses it to the same ~2% failure; while removing gating or using bare S6+MLP preserves performance (~98%). This directly demonstrates that the convolution — not the recurrent state update itself — is the critical element for single-layer expressivity.
+
+- **Cross-task validation of width-vs-depth scaling:** Table 1 on the copying task shows that a wide, shallow Mamba (12 layers × 1408 width) achieves 100% while a deep, narrow Mamba (24 layers × 1024 width) with the same parameter count achieves only 16%. This cleanly demonstrates that fair architectural comparisons must scale SSMs by width, not depth.
+
+- **Identification of DeltaNet as a stability path:** Figure 7 shows DeltaNet achieving Transformer-level LR robustness on MQAR, unlike Mamba and Mamba2 whose performance remains narrowly peaked. The connection to Householder-matrix-based mixing, while hypothesized rather than tested, provides a plausible mechanistic direction for future work.
+
+- **Novel observation of loss-bump dynamics in 1-layer Transformers:** Figure 6 documents a characteristic loss bump during 1-layer Transformer training — a phenomenon previously associated exclusively with induction-head circuit formation in multi-layer models (Olsson et al., 2022). The finding that this bump occurs without accuracy improvement in the 1-layer case is genuinely new, though the accompanying claims about Mamba's dynamics need reconciliation (see below).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **Thesis framing overreaches relative to evidence**: The paper's headline claim (line 39) is that "Transformers differ from SSMs not in terms of expressive power but mainly because of their optimization dynamics." However, Section 7 explicitly states that "Mamba demonstrates greater expressivity" in the 1-layer setting (line 197), and the paper's own ablation shows this expressivity difference is real—it just reduces to a specific component (conv1d). The paper partially acknowledges this tension (lines 31-32: "while fundamental expressivity issues exist between such model classes"), but the central thesis as stated is stronger than the evidence supports. The paper actually demonstrates that optimization is a *major confounder* in prior expressivity claims, not that expressivity differences are absent. This overstatement weakens an otherwise well-supported contribution. The discussion section (line 235: "not just in their theoretical expressivity, but in their fundamental learnability") uses more measured language that better reflects the evidence.
+
+- **Internal contradiction in Section 6 about Mamba's training dynamics:** The paper makes inconsistent claims about whether Mamba exhibits smooth or bumpy training dynamics. The Figure 6 caption (line 182) states that Mamba and Hyena "both exhibit smooth learning dynamics." The contributions bullet (line 45) says "recurrent models show smoother training dynamics in most setups, with no clear evidence for the formation of induction heads." The abstract (line 9) says Mamba's dynamics "do not resemble the formation of induction heads." However, the body text (lines 188-190) explicitly states that "the dynamic of Mamba is mixed" and reports "a significant loss bump." The Discussion (line 235) further says "Mamba displays similar behavior" — i.e., similar to the Transformer's induction-head-like dynamics. These accounts cannot all be true simultaneously. Since the induction-head dynamics claim is one of the paper's four listed contributions, this inconsistency undermines the reliability of Section 6. The actual Mamba training curves need to be presented accurately and the claims about them made internally consistent.
 
 ### Minor
-- **Induction-head interpretation in Section 6 is speculative**: The paper observes a loss bump in 1-layer Transformer training and labels it as "resembling the formation of an induction head circuit" (line 188), hypothesizing that the model "attempts to form induction heads." The Background section (lines 71-73) correctly describes induction heads as requiring two layers working together. The paper provides no mechanistic evidence—no attention-pattern analysis, no prefix-matching probes, no circuit-level investigation—to support the link between the observed loss bump and induction-head dynamics. The observation itself is interesting; the induction-head framing is an untested interpretative layer.
-- **Single-optimizer evaluation limits the "loss landscape" framing**: The paper's claim about "a fundamental mismatch in the loss landscape" (line 9) is tested exclusively under Adam (mentioned only in line 193). Whether the narrow-LR-window phenomenon is specific to Adam's preconditioning or reflects a deeper architectural property is untested. The DeltaNet result (Figure 7) already hints the issue may be parameterization-specific rather than architecture-class-wide. A single alternative optimizer would substantially strengthen or usefully qualify the landscape-geometry interpretation.
-- **No quantitative metric for LR-window width**: The paper relies entirely on visual inspection of line plots (Figures 1, 5, 7) to argue that SSM windows are "narrow." A simple metric—e.g., the LR range for which accuracy exceeds 90% of peak—would make the comparison quantitative and enable architecture-to-architecture comparisons.
-- **Width-vs-depth scaling narrative lacks demonstrated causal link to LR sensitivity**: The paper claims that "brittle optimization has a direct impact on scaling, causing SSMs to favor width over depth" (line 9), but no experiment establishes a causal connection between LR sensitivity and the width-vs-depth preference. The two phenomena are observed in the same models but their relationship is not tested.
-- **DeltaNet hypothesis remains untested**: The paper hypothesizes (line 221-222) that DeltaNet's stability comes from its Householder-based mixing avoiding the vanishing gradients in Mamba's exponential decay. This is a testable claim that could have been verified by modifying Mamba's A-matrix parameterization.
+
+- **Central thesis stated too categorically:** Line 39 claims Transformers and SSMs differ "not in terms of expressive power but mainly because of their optimization dynamics." This framing is slightly stronger than the evidence supports and conflicts with the paper's own acknowledgment (line 31) that "fundamental expressivity issues exist." The evidence actually supports a more precise claim: when architectural elements are aligned (both with or both without convolutions), the core sequence mixers have comparable expressivity on these tasks, and the primary remaining differentiator is optimization stability. The overstatement is mild and fixable.
+
+- **DeltaNet stability hypothesis is untested:** Section 7 hypothesizes that DeltaNet's improved stability stems from Householder-matrix-based mixing that avoids vanishing gradients, unlike Mamba/Mamba2's decay-rate-based A_k matrices. While the paper correctly flags this as a hypothesis ("We hypothesize," line 222), it is offered without any ablation or controlled comparison that isolates this mechanism. Given the paper's focus on optimization dynamics, a causal test would strengthen the contribution.
+
+- **Abstract "random guessing" claim is imprecise:** The abstract states that 1-layer Transformer performance "does not exceed random guessing," but Table 2 reports 2% accuracy. For an MQAR task with ~8,000 vocabulary tokens, 2% is well above random (~0.01%). The body text (line 145) more accurately states the model recalls "on average one key-value pair." This imprecision in the abstract should be corrected.
+
+- **Accuracy metric not defined in main body:** The paper does not specify how accuracy is computed for MQAR (per-query token? exact match of all queries?). Given how central accuracy is to every figure and table, a one-sentence clarification in the main text is warranted.
 
 ### Trivial
-- The learning rate used for the dynamics plots in Figure 6 is not explicitly stated—readers must infer that each model was run at its optimal LR. Given the paper's thesis is about LR sensitivity, this detail should be explicit.
-- The paper would benefit from explicitly quantifying what "narrow" means for the LR window (e.g., "Mamba's viable LR range spans approximately 0.3 orders of magnitude vs. >3 for Attention").
+
+None attributable to the authors. The parser-generated figure descriptions contain artifacts that do not reflect the actual paper.
 
 ## Nice-to-Haves
-- Testing whether the LR instability persists under alternative optimizers (e.g., SGD with momentum) would strengthen or usefully qualify the "loss landscape" interpretation.
-- Mechanistic analysis of what the 1D convolution actually provides (effective receptive field expansion? positional information?) would deepen the conv1d ablation finding.
-- Extending the dynamics analysis beyond synthetic benchmarks to a small-scale language modeling task would strengthen generalizability claims.
+
+- Testing whether the narrow-LR-window phenomenon is specific to Adam or generalizes across optimizers (e.g., AdamW, SGD with momentum) would strengthen the claim that this is an architectural property rather than an optimizer interaction.
+- Providing attention-pattern visualizations for the 1-layer Transformer's loss-bump phase would add mechanistic evidence to the induction-head interpretation.
+- Ablating Mamba's decay parameter to test whether reducing vanishing-gradient effects broadens the LR window would transform the DeltaNet hypothesis into an empirical finding.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
 
-- **Harsh critic's claim about central thesis being "internally inconsistent" as fatal**: The paper acknowledges "fundamental expressivity issues exist" (lines 31-32) and uses "mainly" as a qualifier. The thesis is somewhat overstated but not self-contradictory. Demoted from fatal to major with qualification.
-- **Harsh critic's claim about the 12-layer Mamba not being shown fixable by width alone**: Table 1 directly shows Mamba 12-layer, 1408 width, 150M params → 100% accuracy, directly contradicting this criticism. The critic misread the table.
-- **Harsh critic's "no optimizer/schedule details in main text"**: The paper states all details are in Appendix A.2 and code is released. The parser stripped the appendix. This is a reproducibility concern that would be resolved by the full submission.
-- **Strength Finder's "induction-head-like dynamics" as a strength**: This observation is speculative (see Minor weakness above) and cannot be listed as both a strength and a weakness. The paper's evidence for induction-head dynamics is thin.
-- **Strength Finder's "scale of empirical rigor (3000+ runs, 20000 GPU hours)"**: Compute volume is not a scientific contribution. The methodological rigor (5 seeds, error bars) is appropriately captured in other strengths.
-- **Generic "important problem" framing**: Removed as non-specific to this paper.
+These points are flagged to be removed, treat them with caution:
+
+- **HC claimed the central thesis overshoots the evidence (Critical Issue #2):** The HC argued Table 2 demonstrates an "expressivity gap" undermining the thesis. This misreads the evidence. Table 2 actually *supports* the thesis: Mamba without convolution gets the same 2% as Attention, and Attention with convolution gets 99%. The paper's point is precisely that when you control for convolution, expressivity is equivalent and the remaining gap is optimization. Removed the HC's fatal characterization; kept only the minor concern about phrasing precision.
+
+- **HC flagged Figure 3/4 parser descriptions as paper inconsistencies:** The parser-generated descriptions (lines 119-122, 132-134) conflict with the paper's own captions. These are parser artifacts, not paper errors. Removed.
+
+- **HC demanded optimizer/scheduler ablations:** The HC suggested testing other optimizers beyond Adam. This is scope creep — Adam is standard, and the contribution does not depend on optimizer invariance. Moved to Nice-to-Haves.
+
+- **HC claimed DeltaNet hypothesis is "presented as an explanatory conclusion":** The paper explicitly says "We hypothesize" (line 222). The HC's characterization is factually incorrect. Kept the legitimate concern (untested hypothesis) as a Minor weakness but removed the claim about misrepresentation.
+
+- **SF generic strengths about "important problem" / "interesting question":** These are not evidence-backed and were removed.
 
 ## Novel Insights
-The most genuinely novel and well-supported insight is the two-way conv1d ablation (Table 2): it establishes that the 1-layer expressivity difference between Mamba and Transformers on MQAR reduces entirely to the presence of a 1D convolution, not to any fundamental property of the SSM recurrence. This is a crisp, falsifiable finding that cleanly separates architectural choices from mechanism-class claims—and the paper's follow-up showing that the S6 mixer alone (without gating, in a Transformer-style block) still achieves 98% accuracy reinforces that the recurrence itself is expressive enough. The secondary insight that LR sensitivity can completely invert conclusions about what a model "can" learn is well-demonstrated but less novel given prior work on hyperparameter sensitivity in deep learning.
+
+The paper's most genuinely novel insight is that the 1D convolution — a seemingly minor architectural detail — is the decisive factor enabling single-layer sequence models to solve associative recall, rather than any property of the recurrent state update or the attention mechanism itself. When convolution is held constant (both models have it, or both lack it), a 1-layer Mamba and a 1-layer Transformer perform nearly identically in terms of expressivity. The remaining gap is entirely about optimization: SSMs are far more brittle to learning rate choice. This reframes the SSM-vs-Transformer debate from an expressivity question to an optimization question in a clean, causally-grounded way.
 
 ## Suggestions
-- Tighten the central thesis to "optimization dynamics are a major and underappreciated confounder in SSM-vs-Transformer expressivity comparisons" rather than claiming expressivity differences don't matter. The evidence supports the confounder framing; the current wording overreaches.
-- Either ground the induction-head interpretation with attention-pattern analysis or reduce it to a descriptive observation about loss-curve shapes.
-- Add a simple quantitative LR-window metric (e.g., log10(LR_max/LR_min) at 90% of peak accuracy) to Figures 1, 5, and 7 to replace purely visual comparison.
-- Test the DeltaNet hypothesis by modifying Mamba's A-parameterization—this would convert an untested interpretation into an actionable design principle.
 
-### Calibration Anchors Compared
+- Resolve the Section 6 contradiction by presenting Mamba's actual training curves honestly — determine whether the loss bump is present or not, at what configurations it appears, and make the caption, body text, abstract, and contributions bullet mutually consistent. This is the highest-priority fix.
+- Soften the thesis statement on line 39 to match the precise claim the evidence supports (e.g., "when architectural elements are aligned, Transformers and SSMs differ primarily in optimization dynamics rather than expressivity").
+- Add a one-sentence definition of the accuracy metric in the main body.
+- Either test the DeltaNet Householder hypothesis with a targeted ablation or more explicitly mark it as an open question for future work.
+
+## Score and Decision
+
+**Round 1 bracket:** 6.0–7.5. The paper is clearly above the 5.25–5.75 theoretical SSM-vs-Transformer papers that lack empirical validation, but below the 8.0 papers (PdaPky8MUn "Never Train from Scratch" and d8w0pmvXbZ "Small-scale proxies") which have cleaner execution, broader validation, and no internal contradictions.
+
+**Round 2 narrowing:** Within the bracket, the paper most closely compares to Zoology (LY3ukUANko, 6.33) — the paper it directly builds on and critiques — and sZJNkorXMk (6.67), an SSM initialization analysis with theory and limited empirics. Our paper is empirically more rigorous than Zoology (proper LR grid search vs. the original's sparse grid) but narrower in scope (no language modeling validation, no theoretical bounds). It is comparable in quality to sZJNkorXMk (6.67) but trades theoretical depth for stronger empirical evidence. The internal contradiction in Section 6 is a real but fixable flaw that prevents a higher score.
+
+**Anchor comparison table:**
 
 | Anchor | Avg Score | Round | Comparison |
 |--------|-----------|-------|------------|
-| Mamba Neural Operator (VtP7CamOR5) | 3.00 | R1 (weak) | Much weaker; lacks empirical depth |
-| Zoology (LY3ukUANko) | 6.33 | R1 (mid) | Most direct comparison; broader scope (pretraining, theory, proposals) but current paper has cleaner ablations |
-| Small-scale proxies (d8w0pmvXbZ) | 8.00 | R1 (strong) | Clearly stronger; formal metrics, multiple interventions, real data |
-| Mamba paper (AL1fq05o7H) | 6.25 | R2 | Original architecture paper; wider contribution but messier evaluation |
-| Transformers Learn Low Sensitivity (4ikjWBs3tE) | 6.75 | R2 | Similar analysis paper; broader scope, theoretical results |
-| State Space Models Provably Comparable (QFgbJOYJSE) | 5.75 | R2 | Theory paper; narrower scope |
+| QFgbJOYJSE (SSMs Provably Comparable) | 5.75 | R1 | Theoretical only, almost no empirical validation — our paper is clearly stronger |
+| LY3ukUANko (Zoology) | 6.33 | R2 | Direct predecessor; our paper refines its methodology with more rigorous LR tuning — comparable quality |
+| AL1fq05oH (Mamba original) | 6.25 | R2 | Foundational architecture; our paper is more incremental but more rigorous empirically — comparable |
+| sZJNkorXMk (Autocorrelation Matters) | 6.67 | R2 | SSM initialization theory + limited empirics; our paper has stronger empirics but no theory — comparable |
+| qtTIP5Gjc5 (Demystifying Token Dynamics) | 7.50 | R2 | Theory + practical refinements + real-world validation — clearly stronger |
+| PdaPky8MUn (Never Train from Scratch) | 8.00 | R1 | Cleaner execution, broader benchmarks, no internal contradictions — clearly stronger |
+| d8w0pmvXbZ (Small-scale proxies) | 8.00 | R1 | Deeper analysis, practical takeaways, cleaner presentation — clearly stronger |
 
-**Round 1 bracket:** 5.5–7.5  
-**Round 2 narrowing:** The current paper is comparable to but slightly below Zoology (6.33) — narrower scope but cleaner experiments. It is clearly below the 6.75+ papers.
+**Final score: 6.5.** The paper makes a genuine and well-supported contribution, with the LR instability finding standing on its own as important work. The internal contradiction in Section 6 is the main concern — fixable but significant enough to prevent a higher score.
 
-MY FINAL SCORE: <score>6.0</score>
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,99 +1,79 @@
-Now I have all the anchor comparisons I need. Let me write the final review.
-
----
+Now I have a clear picture. Let me finalize the review with the calibrated score.
 
 ## Summary
-
-This paper conducts the first systematic study of how reasoning data — varying in scale, diversity, and quality — should be allocated across the LLM training pipeline (pretraining vs. SFT). Through a fully-crossed experimental design training 8B models from scratch for 1T tokens (4 pretraining conditions × 3 SFT conditions = 12 models, plus RL on a subset), the authors discover an asymmetric principle: diversity and scale of reasoning data matter most during pretraining, while data quality dominates during SFT. They further show that front-loading reasoning into pretraining creates a durable advantage SFT cannot replicate, that high-quality pretraining data can have latent effects revealed only after alignment, and that blindly scaling SFT data volume can actively harm reasoning.
+This paper conducts a large-scale empirical study of how reasoning data—varying in diversity, quality, and scale—should be allocated across the pretraining and SFT stages of LLM training. The authors pretrain four 8B-parameter models from scratch for 1T tokens with different reasoning-data injections, systematically cross them with multiple SFT datasets (12 SFT models total), and run RL on two models. The core claim is an "asymmetric principle": diversity and scale matter most during pretraining, while quality dominates in SFT.
 
 ## Strengths
-
-- **Fully-crossed experimental design with clean hypothesis tests**: The paper trains 12 models (4 pretraining × 3 SFT conditions) from scratch, enabling causal attribution. The "catch-up" hypothesis test (Table 4) is particularly clean: doubling SFT epochs for the baseline (M_base + SFT_SHQ at 2× epochs, score 34.01) still fails to match the weakest reasoning-pretrained model (M_SHQ + SFT_SHQ at 37.33), directly demonstrating that SFT cannot substitute for a reasoning-rich pretraining foundation.
-
-- **The asymmetric principle is demonstrated with separable within-phase evidence**: Table 1 isolates the diversity advantage during pretraining (M_LDQ at 64.09 vs M_SHQ at 54.98), while Table 5 isolates the quality advantage during SFT (M_res + SFT_SHQ at 44.99 vs M_res + SFT_LDQ at 31.54). The reversal — diversity dominates early, quality dominates late — emerges from the data rather than being assumed, and provides an actionable heuristic for data allocation.
-
-- **Harmful SFT scaling is demonstrated convincingly**: Table 8 shows that doubling mixed-quality SFT data yields no average improvement (32.84 → 32.99) while specifically harming math by −4.92 points. Meanwhile, adding a small fraction (0.4%) of high-quality samples produces consistent gains. This provides clear evidence that SFT scaling without quality control is counterproductive.
-
-- **The latent effects finding is a genuinely novel empirical observation**: M_LMQ and M_LDQ are nearly tied at pretraining (64.07 vs 64.09 in Table 1), yet after identical SFT with D_SHQ, M_LMQ opens a +4.25 point lead (50.95 vs 46.70 in Table 4). Demonstrating that pretraining data choices can have effects invisible at the pretraining checkpoint but revealed after alignment is an interesting finding.
-
-- **Reasoning ratio sensitivity analysis demonstrates robustness**: Tables 6–7 vary the pretraining reasoning ratio from 10% to 40%, showing monotonic improvement and confirming that the main results at 20% are not artifacts of a specific hyperparameter choice.
-
-- **Broad cross-domain evaluation**: The evaluation spans math (GSM8K, MATH-500, AIME24/25), science (MMLU, MMLU-Pro, GPQA-Diamond), code (HumanEval, MBPP, LiveCodeBench), and instruction-following (IFEval), strengthening the generality of findings.
+- **Fully-crossed experimental design at meaningful scale.** Four 8B models pretrained from scratch for 1T tokens, then systematically crossed with multiple SFT datasets (12 models total). This design enables cleaner attribution of performance differences to when and what kind of reasoning data was introduced than prior work.
+- **Clean refutation of the catch-up hypothesis.** Table 4 shows M_base + SFT_SHQ with 2× epochs (34.01) still falls below even the weakest reasoning-pretrained model M_SHQ + SFT_SHQ (37.33). This directly tests whether more SFT can compensate for a weak pretraining foundation and provides unambiguous evidence that it cannot.
+- **Empirically documented phase-dependent crossover.** At pretraining, M_LDQ (diverse) substantially outperforms M_SHQ (high-quality but narrow): 64.09 vs 54.98. At SFT, the pattern inverts: M_res+SFT_SHQ (44.99) dramatically outperforms M_res+SFT_LDQ (31.54). The inversion of which data property matters most between phases is a genuinely novel, actionable insight.
+- **Compounding RL returns demonstrate practical significance.** Table 3 shows M_LMQ+SFT_SHQ+RL achieves a ~19-point lead over M_base+SFT_SHQ+RL on average, with a 39-point gain on AIME competition math. The gap widens at each training stage, showing that early reasoning injection creates compounding rather than diminishing returns.
+- **SFT scaling ablation shows counterintuitive harm from naive scaling.** Table 8 demonstrates that doubling mixed-quality SFT data yields negligible average improvement (+0.15%) while harming math by 4.92%, whereas adding 0.4% high-quality data improves performance. This operationalizes the asymmetric principle into a concrete data-allocation heuristic.
+- **Comprehensive multi-domain evaluation.** Evaluations span math (GSM8K, MATH-500, AIME24/25), science (MMLU, MMLU-Pro, GPQA-Diamond), code (HumanEval, MBPP, LiveCodeBench), general reasoning (ARC, HellaSwag, WinoGrande, RACE), and instruction-following (IFEval), reducing risk of domain-specific artifacts.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **The central "diversity > quality in pretraining" comparison conflates dataset size/repetition with data properties.** The paper compares M_LDQ (pretrained on D_LDQ: 268M diverse, mixed-quality samples) against M_SHQ (pretrained on D_SHQ: 1.2M high-quality samples), both with an 80B reasoning-token budget. This means D_SHQ must be repeated ~60–70× (depending on average sample length) while D_LDQ is seen roughly once. The paper acknowledges repetition (line 93: "When a reasoning dataset is small, it is repeated so that the model still observes the same total volume of reasoning tokens") but never discusses how extreme repetition of a small dataset during pretraining may cause memorization and degradation that confounds the diversity-vs-quality interpretation. M_SHQ's underperformance may reflect overfitting from repetition rather than an intrinsic disadvantage of high-quality data during pretraining. The SFT-stage results (Table 5), where the repetition factor is lower (~4× for D_SHQ), partially mitigate this concern, but the pretraining claim — one of the paper's most prominent findings — rests on a comparison where dataset size and repetition are entangled with the quality/diversity axis.
-
-- **The RL evaluation is too narrow to support the headline claim.** Only 2 of the 12 SFT models are evaluated through RL: M_LMQ + SFT_SHQ and M_base + SFT_SHQ (Table 3). The +18.74% gap is attributed broadly to "front-loading reasoning data into pretraining," but M_LMQ is the union of D_LDQ and D_SHQ — it is the maximal-data condition. Without evaluating M_LDQ + SFT_SHQ + RL and M_SHQ + SFT_SHQ + RL, the paper cannot distinguish whether the RL advantage is driven by reasoning pretraining per se or by the specific composition and scale of M_LMQ's data. This matters because the "19% gain" (rounded from 18.74%) is the paper's most prominently featured number (abstract, introduction, conclusion).
+- **Abstract headline numbers are inconsistent with body results.** The abstract claims "11% average gain" from diversity and "15% average gain" from quality. The body reports a 9.09% gain from diversity (M_LDQ vs. M_SHQ at pretraining, line 211) and the closest traceable comparison for the quality claim yields 13.45% (M_res+SFT_SHQ vs. M_res+SFT_LDQ in Table 5). The 19% figure is approximately traceable to Table 3 but the body text itself states "18.57% lead" (line 193) while the table values compute to 18.74. Three of the four central quantitative claims in the abstract cannot be reliably located in the reported tables at their stated values. This undermines confidence in the paper's precision and makes it difficult for a reader to verify headline claims.
+- **The diversity-vs-quality causal attribution is confounded with dataset scale and domain composition.** The central claim that "diversity drives pretraining" rests on comparing D_SHQ (1.2M samples, 71% math, high quality) against D_LDQ (268M samples, 56% math, mixed quality). These datasets differ simultaneously on size, quality, domain composition, and diversity. The token budget is controlled (80B reasoning tokens), but the unique sample diversity differs by two orders of magnitude. The paper cannot disentangle whether the observed pretraining advantage is driven by diversity per se, by the vastly larger number of unique examples, or by the different domain composition. Similarly, the claim that "quality dominates SFT" compares datasets that differ in size (1.2M vs. 268M samples) as well as quality—small curated datasets are known to work better for SFT regardless of quality. The qualitative direction of the findings may be correct, but the paper's specific causal language ("diversity drives pretraining," "quality governs SFT") outruns what the experimental design can cleanly isolate.
 
 ### Minor
-
-- **No variance estimates are reported despite multiple evaluation runs.** The evaluation protocol describes 16 runs for AIME and 4 runs for other benchmarks (line 148), but no standard deviations, confidence intervals, or statistical tests appear in any table. Several claimed effects involve differences of 4–5% (e.g., the +4.25% latent effect, the −4.92% math drop from doubling SFT data), where variance estimates would help assess robustness. Reporting the already-computed standard deviations would cost nothing.
-
-- **The "latent effect" interpretation has plausible alternatives.** The paper attributes the +4.25% post-SFT gain of M_LMQ over M_LDQ to a "latent" mechanism where SFT unlocks pretraining benefits (line 215–216). An alternative explanation is that the 1.2M additional high-quality samples in M_LMQ directly improve the model, but the base-model evaluation benchmarks lack sensitivity to detect this improvement — no "unlocking" required. The paper would benefit from acknowledging this alternative.
+- **Only two models are taken through the full RL pipeline.** Table 3 compares only M_LMQ+SFT_SHQ+RL and M_base+SFT_SHQ+RL. Given that the paper trains 4 base models and 12 SFT variants, running only 2 through RL leaves the headline compounding-returns finding resting on a single pairwise comparison. We cannot assess whether the RL advantage generalizes across pretraining conditions.
+- **No variance estimates are reported.** The paper reports only point estimates despite averaging 4–16 runs per benchmark. Standard deviations or confidence intervals are absent. This makes it difficult to assess whether smaller-magnitude claimed effects (e.g., the 0.15% gain from ALF scaling in Table 8) are reliable or within sampling noise.
+- **Alternative explanation for the "latent effect" is not addressed.** The paper presents M_LMQ surpassing M_LDQ by 4.25% after SFT (Table 4) as a "latent effect." A simpler explanation is that M_LMQ was exposed to D_SHQ during pretraining in addition to D_LDQ, meaning it saw the same high-quality distribution twice (once in PT, once in SFT), while M_LDQ saw it only during SFT. The paper does not rule out this confound.
+- **D_ALF construction uses a weak proxy for reasoning complexity.** Filtering D_LDQ for answers >4096 tokens as a proxy for reasoning complexity conflates reasoning depth with verbosity and domain artifacts. The paper does not acknowledge this limitation.
+- **"Front-loading" framing is somewhat misleading.** Reasoning data is introduced only in the final 400B of a 1T-token run (40% of training, at 20% mix). Functionally this is late-pretraining injection, closer to mid-training than to pretraining from initialization.
+- **Overfitting claim is tested only on reasoning benchmarks.** The paper claims to refute the "overfitting hypothesis" but evaluates only reasoning benchmarks. To genuinely test for overfitting, general-purpose benchmarks should be included to check whether reasoning data degrades non-reasoning capabilities.
 
 ### Trivial
-
-- Some numeric claims in the abstract are loosely characterized relative to specific tables. The "15% average gain with high quality data" is not cleanly pinned to a single comparison (it approximately matches M_res + SFT_SHQ vs M_base + SFT_SHQ at +15.07%, but this is the joint effect of pretraining and SFT, not SFT data quality alone as the phrasing suggests).
-
-- The optimization framing (Eqs. 1–2) is acknowledged conceptually but the paper runs a grid of experiments rather than solving an optimization problem. This is stylistic rather than substantive.
+- The body text states an "18.57% lead" (line 193) while the Table 3 values compute to an 18.74 difference—a minor internal inconsistency that should be reconciled.
+- Per-benchmark breakdowns for several tables are deferred to a stripped appendix, making some body-text claims unverifiable in the provided manuscript.
 
 ## Nice-to-Haves
-
-- A control experiment repeating a subset of D_LDQ to the same degree as D_SHQ would isolate the repetition confound from the diversity/quality axis, substantially strengthening the central claim.
-- Expanding the RL evaluation to include M_LDQ + SFT_SHQ + RL and M_SHQ + SFT_SHQ + RL would allow cleaner attribution of the RL gain.
-- A limitations section acknowledging the single-model-scale (8B), the repetition confound, and the narrow RL evaluation would improve transparency.
-- Per-dataset token counts (rather than just sample counts) would let readers compute exact repetition factors.
+- A size-matched subset control (e.g., 1.2M random samples from D_LDQ) compared against D_SHQ during pretraining would isolate the diversity/quality trade-off by holding unique-sample count constant.
+- Running at least one additional model pair through RL (e.g., M_LDQ+SFT_SHQ) would test whether the RL compounding effect generalizes beyond the best-case M_LMQ configuration.
+- Explicitly acknowledging the confounds between diversity, quality, scale, and domain composition as limitations and softening causal language accordingly would strengthen the paper's credibility.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution.
 
-These points are flagged to be removed; treat them with caution.
-
-- **Harsh Critic: "The improvement on science is minimal in prior work but large here (line 183) relies on comparing M_res+SFT vs M_base+SFT on SCIENCE_SFT AVG, but SCIENCE_SFT AVG includes GPQA-Diamond which was not evaluated at the base-model stage."** REMOVED — The comparison is between two models both evaluated at the SFT stage on the same benchmark set (which includes GPQA), so both are evaluated identically. There is no confound.
-
-- **Harsh Critic: "The optimization framing (Eqs. 1–2) is largely decorative."** REMOVED as a standalone major criticism — this is a stylistic preference, not a methodological flaw. Moved to Trivial.
-
-- **Harsh Critic: "The paper claims it 'refutes the overfitting hypothesis' (line 36) which is an overstatement."** REMOVED as a substantive criticism — the paper provides reasonable evidence against overfitting (GPR_PT AVG is essentially flat across models in Table 1). The word "refutes" may be strong but this is a wording nitpick that does not affect the paper's contribution.
-
-- **Harsh Critic: "The description of D_ALF* ... is somewhat opaque."** REMOVED — D_ALF* is described as D_ALF augmented with D_SHQ, and the Table 8 comparison is sufficiently clear for the ablation's purpose.
-
-- **Strength Finder: "This paper addressed an important problem."** REMOVED — generic and applies to most papers. Not a concrete, verifiable strength.
-
-- **Harsh Critic: missing related works, appendix content, formatting, typos** — All REMOVED per hard rules (missing related works cannot be verified; appendix is stripped by parser; formatting/typos are parser artifacts).
+- **"First systematic study" overstates novelty (from Harsh Critic):** The paper does conduct a more systematic comparison than prior mid-training work at larger scale. Whether it is literally "first" is a framing judgment call, not a verifiable error. Removed as a subjective framing critique.
+- **"M_LDQ's math advantage despite lower math proportion is puzzling and deserves explanation" (from Harsh Critic):** This is an observation, not a weakness. The pattern could be explained by the diversity of math data in D_LDQ outweighing proportion differences. Removed.
+- **M_res aggregation obscures condition-specific effects (from Harsh Critic):** The paper provides per-model breakdowns in many tables. Using M_res as a summary statistic is a standard presentation choice. Removed.
+- **Missing related works (from various reviewers):** Per instructions, removed since we cannot verify their existence.
+- **Grammar/typo/formatting nitpicks (from various):** Per instructions, removed as parser artifacts.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The asymmetric principle (diversity for pretraining, quality for SFT) is the paper's most distinctive takeaway and is supported by within-phase comparisons. The latent-effects finding is also novel, though the interpretation warrants caution as noted in Minor weakness 2.
+The asymmetric principle—that the optimal data property for reasoning data injection inverts between pretraining (diversity/scale) and SFT (quality)—is a genuinely novel empirical finding with practical implications for training pipeline design. While the causal attribution to specific data properties (diversity vs. quality) is confounded by dataset scale and domain composition, the phase-dependent crossover pattern itself is clearly documented and constitutes an actionable insight not previously reported at this scale. The accompanying finding that naive SFT scaling with mixed-quality data can actively harm reasoning (Table 8) provides a concrete, counterintuitive operationalization of this principle.
 
 ## Suggestions
+- Trace every headline number in the abstract to a specific table, row, and computation. Adjust the 11% and 15% figures to match what the body actually reports (9% from diversity, 13% from quality), or specify the exact aggregation method if the numbers come from a different computation.
+- Add an explicit limitations paragraph acknowledging that diversity, quality, scale, and domain composition are confounded in the D_SHQ vs. D_LDQ comparison, and soften causal language throughout.
+- Report standard deviations for the multi-run evaluations (AIME at 16 runs, others at 4 runs).
+- Address the alternative explanation for the latent effect (M_LMQ seeing D_SHQ twice) either by acknowledging the confound or providing evidence that rules it out.
 
-- The highest-impact revision would be to explicitly discuss the repetition confound and temper the "diversity > quality in pretraining" claim. Even without new experiments, acknowledging that the comparison conflates dataset size/repetition with quality would substantially improve intellectual honesty. Reporting per-dataset token counts would let readers assess the confound themselves.
-- Report standard deviations across the already-computed evaluation runs. This costs nothing and addresses the most common methodological concern.
-- For the RL section, either expand the evaluation to additional models or narrow the claim to "M_LMQ (the maximal-data condition) shows compounding RL gains" rather than the broader "front-loading reasoning data" framing.
+---
 
-## Score and Decision
+## Score Calibration
 
-**Round-1 bracket:** Between 5.0 and 7.5, based on comparisons with "Amuro and Char" (4.20, Reject) below and "At Which Training Stage Does Code Data Help LLMs Reasoning?" (7.25, Accept) above.
+**Round 1 anchors (bracketing):**
+- GtpubstM1D (5.71): Studies problem-solving data in CPT vs. SFT for math reasoning. Accept. Our paper is at larger scale (8B from scratch), has a more systematic cross-design, includes RL, and covers more domains. Our paper is stronger.
+- KIPJKST4gw (7.25): Studies code data at pretraining vs. instruction-tuning. Accept. Our paper is at larger scale and more systematic, but KIPJKST4gw has cleaner, more modest claims with better-controlled comparisons. Our paper's headline number issues and confounded attribution pull it below this anchor.
+- 1hQKHHUsMx (6.75): Studies pretraining data influence on reasoning via influence functions. Accept. Different methodology; our paper is more practically oriented but has the headline-number and confound issues.
+- ciJO0f8u35 (5.25): Scaling math reasoning with SFT. Reject. Our paper is clearly stronger on scale, scope, and design.
+- 07yvxWDSla (8.00): Synthetic continued pretraining. Accept. Narrower scope but cleaner methodology. Our paper is clearly below this anchor.
 
-**Round-2 narrowing:** Compared against "Advancing Mathematical Reasoning" (5.71), "MIND" (6.00), and "What Kind of Pretraining Data" (6.75). The paper is clearly stronger than the 5.71 and 6.00 anchors in experimental rigor and contribution breadth, and comparable to but slightly below the 6.75 anchor given the two major weaknesses. The most similar paper — "At Which Training Stage Does Code Data Help LLMs Reasoning?" (7.25) — has a comparable research question structure; our paper exceeds it in model scale and experimental control, but the repetition confound and narrow RL evaluation pull it below the 7.25 level.
+**Round 1 bracket: 5.5–7.5**
 
-**Anchor summary:**
+**Round 2 anchors (narrowing):**
+- oqsQbn4XfT (5.80): Synthetic data diversity in pretraining/SFT. Reject. Our paper is stronger: real data, larger scale (8B vs 350M–1.4B), practical pipeline.
+- 3OyaXFQuDl (7.00): Compute-optimal sampling for reasoning. Accept. Sharper contribution with cleaner evidence. Our paper has broader scope but less clean causal claims and the headline-number issue.
+- oI5tZaWkF9 (7.50): Data weighting for synthetic data. Accept. Different focus. Our paper is below this.
 
-| Anchor | Score | Round | Comparison |
-|--------|-------|-------|------------|
-| Amuro and Char | 4.20 | R1 | Our paper substantially stronger in scale, design, and contribution |
-| At Which Training Stage (Code) | 7.25 | R1 | Most similar; our paper has better control/scale but the repetition confound makes it slightly weaker |
-| Advancing Math Reasoning | 5.71 | R2 | Our paper cleaner and more novel |
-| MIND | 6.00 | R2 | Our paper more comprehensive |
-| What Kind of Pretraining Data | 6.75 | R2 | Comparable quality; ours more empirical, theirs more mechanistic |
-
-**Final score:** 6.5 — a clear accept. The paper makes a genuine contribution with a substantial experimental investment and novel, actionable findings. The two major weaknesses (repetition confound, narrow RL evaluation) are real but do not invalidate the core contributions; they are addressable limitations that affect the strength of specific claims rather than the paper's overall value.
+**Final placement: 6.5.** The paper is clearly stronger than the 5.25–5.80 range (ciJO0f8u35 and oqsQbn4XfT) due to its scale, systematic design, and novel asymmetric principle. It is somewhat below the 7.00–7.25 range (3OyaXFQuDl and KIPJKST4gw) due to untraceable headline numbers and confounded causal attribution. It lands near 1hQKHHUsMx (6.75) and GtpubstM1D (5.71), but closer to the upper end given the impressive scale and compounding RL results. The two major weaknesses (inflated headline numbers, confounded diversity/quality attribution) prevent it from reaching the 7+ tier where cleaner papers sit, but the genuine empirical contributions keep it above the reject boundary.
 
 MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

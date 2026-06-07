@@ -1,71 +1,109 @@
-Now I have a clear picture. Let me compare our paper against the key anchors:
+Now I have a clear picture. Let me finalize the review.
 
-- **IowRyVs862 (6.00, Rejected)**: Stability-based bounds with improved convergence rates. Our paper has a broader, more novel framework but the empirical validation is weaker in some respects. Comparable.
-- **2GwMazl9ND (6.25, Accepted)**: Stability bounds for adversarial training. Our paper has a more general framework. Slightly stronger theoretically, comparable empirically.
-- **GWSIo2MzuH (6.50, Accepted)**: IT generalization bounds using loss entropy. Similar to ours in that both make IT-related quantities more computable. Its experiments are more thorough than ours. Our theory is comparably novel, but empirical weaknesses pull us slightly below.
-- **hiHZVUIYik (7.33, Accepted)**: Path-norm toolkit — clearly stronger than our paper in both theory breadth and practical applicability.
+**Bracket:** Round 1 placed the paper between ~5.5-7.0 (above the 5.50-5.75 rejected info-theoretic papers, below the 8.0 strong accepts). Round 2 narrowed to 6.0-6.5 range:
 
-Our paper sits between 6.0 and 6.5. Given the empirical validation issues (optimistic β_n estimation, ADAM/SGD mismatch, Massart-bound looseness), I place it at **6.0** — comparable to IowRyVs862 (6.00) in overall quality, but with a more novel theoretical contribution offset by weaker empirical validation.
+- **IowRyVs862 (6.00, Reject):** Stability bounds paper with sharper O(1/n²) rates but limited technical novelty and restrictive assumptions. The paper under review has substantially more novel theory (random set stability framework vs. applying existing techniques to gradients) and broader scope.
+- **GWSIo2MzuH (6.50, Accept):** Info-theoretic bounds via loss entropy. Well-executed with extensive experiments but relies on discrete loss assumption and has test-loss-on-RHS issues. The paper under review has more ambitious theory but weaker empirical validation.
 
----
+The paper under review is between these: stronger theory than IowRyVs862 (6.00) but weaker experiments than GWSIo2MzuH (6.50). I'll score it at **6.0**.
 
 ## Summary
-This paper introduces "random set stability," a framework for deriving worst-case generalization bounds over data-dependent random sets (such as optimization trajectories) that replaces intractable mutual information (IT) terms with a computable stability parameter β_n. The central technical device, Assumption 3.1, extends hypothesis set stability to account for algorithmic randomness, and Lemma 3.4 bounds the expected worst-case generalization error as the sum of a Rademacher complexity term and a stability penalty. The framework is applied to produce IT-free versions of prior topological/fractal generalization bounds (Birdal et al. 2021; Andreeva et al. 2024), and experiments on ViT/CIFAR-100 and GraphSAGE/MNISTSuperpixels estimate the bounds and examine correlations between topological complexity and generalization.
+This paper introduces "random set stability," a new stability notion for data-dependent random sets produced by stochastic optimization algorithms, and uses it to derive worst-case generalization bounds that replace intractable mutual information (IT) terms with an empirically estimable stability parameter β_n. The core theoretical result (Lemma 3.4) decomposes expected worst-case generalization error into a Rademacher complexity term plus J·β_n, elegantly recovering both classical algorithmic stability and Rademacher complexity bounds as special cases. Theorems 4.3 and 4.4 provide the first IT-free versions of prior topological generalization bounds, and experiments on ViT/CIFAR-100 and GraphSAGE/MNISTSuperpixels estimate the bounds to be non-vacuous.
 
 ## Strengths
-- **Elimination of intractable IT terms from topological generalization bounds**: Theorems 4.3 and 4.4 directly replace the mutual information term that appears in all prior fractal/topological bounds with the stability parameter β_n^{1/3}, producing the first fully computable topological generalization bounds in this line of work. This is a genuine conceptual advance over prior work.
-- **Clean recovery of classical results as limiting cases**: Corollary 3.5 (J=1) recovers classical algorithmic-stability bounds, and Corollary 3.6 (J=n, β_n=0) recovers standard Rademacher complexity bounds for fixed hypothesis sets. This demonstrates the framework is a proper generalization of established theory rather than an ad hoc construction.
-- **The stability assumption is provably satisfiable**: Lemma 3.2 shows that uniform argument stability of each iterate implies random set stability of the full trajectory, and Corollary 3.3 instantiates this for projected SGD under standard smoothness/Lipschitz conditions, connecting the framework to the well-studied stability literature of Hardt et al. (2016). This prevents the framework from being vacuously true.
-- **Empirical estimation of the bound on realistic architectures**: Table 1 reports estimated bounds for ViT and GraphSAGE across four (η, b) configurations. The estimated β_n values vary meaningfully with hyperparameters (e.g., ViT β_n drops from 4.72×10^{-4} at η=10^{-4} to 2.16×10^{-4} at η=10^{-5}), and smaller β_n consistently tracks smaller generalization gaps, supporting the theoretical coupling between stability and generalization.
-- **Suggestive empirical evidence for the theory-predicted coupling between stability and topological complexity**: Figures 2 and 3 show that the slope of E^1(W_{S,U}) regressed against the generalization gap increases with sample size n, consistent with Theorem 4.4's prediction that the multiplicative interaction between stability and topological complexity matters. Pearson correlations for ViT are strong (r=0.84–0.98 across n).
+- **Novel stability framework fills a genuine gap:** The paper correctly identifies that Foster et al. (2019)'s hypothesis set stability does not account for algorithmic randomness U, making it inapplicable to the random sets produced by stochastic optimizers. The random set stability notion (Assumption 3.1), built on data-dependent selections (Definition 3.1), explicitly handles this — a genuine conceptual advance backed by clear technical formalism.
+
+- **Elegant unification via Lemma 3.4:** The decomposition E[sup_w G_S(w)] ≤ 2E[Rad_{S̃_J}(W_{S,U})] + 2Jβ_n with tunable J is the paper's most compelling contribution. Corollaries 3.5 (J=1 recovers classical stability bounds) and 3.6 (J=n recovers classical Rademacher bounds) convincingly demonstrate the framework is not ad hoc but subsumes two major paradigms.
+
+- **IT-free topological bounds are a substantive theoretical contribution:** Theorems 4.3 and 4.4 replace the intractable mutual information terms pervasive in prior work (Şimşekli et al. 2020, Birdal et al. 2021, Andreeva et al. 2024) with the stability parameter β_n. The paper is honest about the trade-off (slower O(n^{-1/3}) rate vs. computability and boundedness).
+
+- **Bridge from classical stability (Lemma 3.2, Corollary 3.3):** The paper shows the framework is not vacuous by proving that uniform argument stability of individual SGD iterates implies random set stability of the full trajectory, with concrete β_n bounds for projected SGD.
+
+- **Empirical bounds are non-vacuous:** Table 1 shows estimated bounds remain below 100% across all hyperparameter settings for both ViT and GraphSAGE, and the bounds adapt to model performance — smaller generalization gaps correspond to smaller β_n and smaller bounds.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **The empirical estimation of β_n does not verify Assumption 3.1 as stated**: Assumption 3.1 requires that for *any* data-dependent selection ω, there exists a mapping ω' such that the expected loss deviation is bounded by β_n J. The empirical procedure (i) checks only one specific ω (the argmax of the generalization gap), not all possible selections, and (ii) uses min over w' instead of the specific ω' mapping required by the assumption, making the estimate a lower bound on the true β_n. The paper acknowledges the third issue (supremum approximated by 500 held-out points) but does not discuss these first two, which are more fundamental. Since the framework rests on Assumption 3.1 and the empirical section is the primary evidence that it holds in practice for deep learning, this substantially weakens the validation narrative.
+
+- **Theory-experiment gap in loss function, optimizer, and bound computation:** The experiments use 0-1 loss (Table 1) and ADAM (line 241), while the topological bounds (Theorems 4.3, 4.4) require Lipschitz continuity (Assumption 4.1) and the only concrete stability guarantee (Corollary 3.3) is for projected SGD with step-size decay. More critically, the experiments replace the Rademacher complexity term with Massart's lemma (2√(2 log(T)/J)) rather than computing the actual topological bounds from Theorem 4.4 — despite having already computed E^1 and PMag. This means the paper's central claim of providing "the first fully computable topological bounds" is not directly validated in the experimental section.
+
+- **β_n estimation does not fully operationalize the definition:** Assumption 3.1 requires that for *all* data-dependent selections ω, there exists a single ω' with bounded expected loss difference. The empirical procedure (line 254) estimates max_w min_w' sup_{z∈Z} |ℓ(w,z) − ℓ(w',z)| over a finite held-out set of size 500. This (a) tests only one selection rather than all ω; (b) uses a finite surrogate for Z; and (c) the min_w' operation can choose a different w' for each w, rather than verifying the existence of a single ω' that works uniformly. The authors acknowledge the optimism from finite Z but do not discuss the more subtle quantifier mismatch.
 
 ### Minor
-- **Mismatch between theoretical satisfiability proof and experimental optimizer**: Corollary 3.3 proves random set stability for projected SGD, but all experiments use ADAM. The paper does not address whether ADAM satisfies Assumption 3.1 or provide a heuristic argument. While the experiments estimate β_n directly rather than deriving it from theory, the paper claims to "demonstrate [random set stability] holds for practically used algorithms" — this is proven only for SGD, not ADAM.
-- **The reported bounds are very loose, and two of eight configurations are vacuous**: Table 1 reports bounds of 47%–105% on 0-1 loss for a 100-class problem where actual gaps are 5–13%. Two configurations (104.43%, 105.24%) exceed 100%, making them formally vacuous. The looseness is partially consistent with prior work in this literature, but the paper's framing of these as "meaningful guarantees" overstates the case.
-- **The bound estimation uses a further upper bound (Massart's lemma) rather than the actual bound**: The empirical bound replaces the Rademacher complexity with 2√(2 log(T)/J) via Massart's lemma, the loosest possible RC bound for a set of T points. The reported numbers are therefore estimates of an upper bound on the theoretical bound, not estimates of the bound itself (Equation 8), making it unclear what exactly the table measures relative to the theory.
-- **The empirical correlation analysis is indirect relative to the theory's prediction**: Theorem 4.4 predicts a multiplicative relationship between β_n^{1/3} and √(log E^α). The experiments show only the slope of E^1 vs. generalization gap changing with n, rather than computing and plotting β_n^{1/3} × √(log E^1) against the gap. The GraphSAGE correlations at large n are weak (r=0.37 at n=5000, r=0.28 at n=10000), questioning the robustness of the relationship.
+
+- **Technical subtlety in Lemma 3.2:** The construction maps ω(W_{S,U}, S) = w_k to ω'(W_{S',U}, w_k) = w_k', but ω' receives only the set W_{S',U} and the point w_k — it does not receive the iteration index k. If iterates are not all distinct, ω' cannot recover k from w_k alone. This is likely fixable but needs resolution.
+
+- **η inconsistency:** Line 245 states η ∈ {10^{-6}, 10^{-5}} but Table 1 reports results for η ∈ {10^{-4}, 10^{-5}}. One of these is incorrect.
+
+- **Interpretation of Figures 2-3 overstates the link to Theorem 4.4:** The paper argues increasing regression slopes with n support Theorem 4.4, but Theorem 4.4 involves √(log(1 + K_{n,α}E^α)), not E^1 directly. The qualitative trend is still suggestive but the quantitative connection is overstated.
+
+- **Post-hoc explanation for decreasing correlations:** The declining Pearson correlations at large n (e.g., r=0.28 for GraphSAGE at n=10000) are attributed to "difficulty in reaching local minima" without evidence.
+
+- **Narrow training regime:** Experiments use models fine-tuned from a pretrained checkpoint for 500 or 5000 iterations. Training from scratch — the setting implicitly assumed by the theory — is not tested.
+
+- **No quantitative analysis of the β_n^{1/3} vs. IT-term trade-off:** The paper acknowledges the slower rate (line 231) but provides no analysis of when the trade-off is favorable. A simple case study would help readers understand the practical regime where IT-free bounds are preferable.
 
 ### Trivial
-- The paper claims the framework provides "fully computable" bounds, but computing β_n requires retraining with replaced samples and the topological quantities carry significant computational cost. A brief caveat on practical cost would improve accuracy.
+
+- Corollary 3.3 has a typo: the exponent (G+1)/(G+1) simplifies to 1, which is almost certainly meant to be cG/(cG+1) or similar.
 
 ## Nice-to-Haves
-- Running experiments with SGD (matching Corollary 3.3) would align the theoretical satisfiability proof with the empirical evaluation.
-- Computing a Monte Carlo estimate of the actual Rademacher complexity rather than using Massart's lemma would produce tighter bounds and more faithfully test the theory.
-- Directly testing the multiplicative prediction β_n^{1/3} × √(log E^α) against the generalization gap would be a more convincing validation of Theorem 4.4.
-- The fine-tuning protocol (starting from convergence) may produce trajectories with limited exploration; testing from-scratch training would strengthen the claim of practical relevance.
+- High-probability extensions of the bounds (paper currently only provides expectation bounds)
+- Discussion of when Assumption 3.1 fails, to help practitioners assess applicability
+- Experiments training from scratch rather than from a pretrained checkpoint
+- Direct estimation of the bound from Theorem 4.4 (using computed E^1, PMag, and estimated L_{S,U} and β_n)
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
-- **Harsh Critic point about (G+1)/(G+1) simplification in Corollary 3.3**: This is clearly a PDF parser artifact — the original LaTeX expression was mangled during extraction. The critic acknowledges it is a formatting issue. Removed.
-- **Harsh Critic point framing the ADAM/SGD mismatch as "structural" and fatal**: While the mismatch exists, the experiments estimate β_n directly from data rather than deriving it from Corollary 3.3, so it does not invalidate the empirical results. Correctly demoted to Minor.
-- **Strength Finder claim that "bounds remain below 100% in all settings"**: Factually incorrect — two configurations in Table 1 exceed 100% (104.43%, 105.24%). Corrected in the review.
-- **Strength Finder's "Empirical tightness evaluation" as an unqualified strength**: The bounds are 5–20× looser than actual gaps, so "tightness" overstates the case. Kept as a qualified strength with appropriate caveats.
-- **Harsh Critic note about "Missing Parts" suggesting discussion of ADAM stability**: The Harsh Critic suggested the paper discuss whether Assumption 3.1 is plausible for adaptive optimizers. This is a reasonable suggestion kept as a weakness, but the framing as a "missing" essential component was overblown since the empirical section estimates β_n directly.
+These points are flagged to be removed, treat them with caution:
+
+- **Harsh Critic claim of "structural/fatal" loss mismatch:** REMOVED as fatal because (a) Lemma 3.4, which underpins the empirical bound estimation, does not require Lipschitz continuity — it only requires Assumption 3.1; (b) the paper argues on line 195-196 that for finite W_{S,U}, Assumption 4.1 is automatically satisfied with some finite L_{S,U}; (c) the experiments use Lemma 3.4 + Massart rather than Theorems 4.3/4.4 directly. The legitimate concern about L_{S,U} being large for 0-1 loss is retained as a Major weakness regarding the gap between the claimed topological bounds and empirical validation.
+
+- **Harsh Critic claim of Lemma 3.2 identifiability as structural:** DEMOTED to Minor. The issue is real but the Harsh Critic acknowledges it is "likely fixable," and the proof is in the stripped appendix so the gap cannot be confirmed as actual.
+
+- **Strength Finder's "empirical validation of predicted stability-complexity coupling":** PARTIALLY RETAINED. The correlation patterns are interesting but the interpretation issues (conflating E^1 with log E^1, post-hoc explanations) prevent this from being a clean strength.
+
+- **Strength Finder's "weaker Lipschitz requirement":** REMOVED as a standalone strength because it is a technical detail rather than a core contribution, though the point about Assumption 4.1 being local rather than global is noted correctly.
+
+- **Harsh Critic's "β_n^{1/3} rate slower than O(n^{-1/2})":** RETAINED as Minor (lack of quantitative trade-off analysis). The paper already acknowledges this (line 231) so it is not a hidden flaw, but the absence of analysis weakens the contribution.
 
 ## Novel Insights
-The key conceptual insight — replacing IT terms in topological generalization bounds with a stability parameter that can be empirically estimated — is novel and well-motivated. The interpolation role of J between classical stability (J=1) and classical Rademacher bounds (J=n) is an elegant structural observation that could inform future work. The observation that the framework only needs local Lipschitz continuity (Assumption 4.1, with a data-and-algorithm-dependent constant L_{S,U}) rather than a global Lipschitz assumption is a meaningful relaxation for practical settings that has not been exploited in prior topological bounds work.
+None beyond the paper's own contributions. The random set stability framework and Lemma 3.4's interpolation property are genuinely novel; the reviews do not surface additional insights beyond confirming these contributions.
 
 ## Suggestions
-- Clarify in the empirical section that β_n is estimated directly from data rather than derived from Corollary 3.3, and that ADAM is a practical choice — the theoretical satisfiability proof for SGD serves to show the assumption is not vacuous, while the empirical estimation tests whether the resulting bounds are meaningful for a practical optimizer.
-- Add a discussion of the limitations of the empirical β_n estimation procedure, specifically the use of a single ω and the min-approximation for ω', beyond the already-acknowledged supremum approximation issue.
-- Report the bound for the actual theoretical expression (with proper Rademacher complexity estimation) alongside the Massart-based estimate to give readers a clearer picture of what the theory actually predicts.
+- Compute the actual bound from Theorem 4.4 using the already-computed E^1, PMag, estimated L_{S,U}, and estimated β_n. This would directly validate the paper's main theoretical result rather than the Massart proxy.
+- Either re-derive the topological bounds for a Lipschitz surrogate loss and run experiments with that loss, or explicitly discuss why 0-1 loss is a valid practical choice despite the theoretical Lipschitz requirement.
+- Resolve the η inconsistency between the experimental design text (line 245) and Table 1.
+- Clarify how the empirical β_n estimation relates to the "for all ω" quantifier in Assumption 3.1, and discuss whether testing the worst-case selection is sufficient.
 
-## Anchor Comparison
-- **IowRyVs862 (6.00, Rejected)**: Stability and sharper risk bounds. Similar level of theoretical contribution in the stability space, but our paper has a more novel framework and better experiments.
-- **2GwMazl9ND (6.25, Accepted)**: Stability-based bounds for adversarial training. Our paper's framework is more general; both have some empirical limitations. Our paper is comparable.
-- **FAY6ORIvn5 (5.25, Rejected)**: Persistent homology generalization on graphs. Our paper is clearly stronger — broader framework, more realistic experiments.
-- **FE7PY7e4tr (5.25, Rejected)**: Manifold topology and network expressivity. Our paper is stronger — less restrictive assumptions, more practical validation.
-- **DZxU0q2S11 (5.75, Rejected)**: Topology-dependent bounds on network widths. Our paper is stronger — cleaner framework, more realistic experiments.
-- **GWSIo2MzuH (6.50, Accepted)**: IT generalization bounds via loss entropy. Comparable novelty in making IT-related bounds more computable. Their experiments are more thorough; our theory is comparably strong. Our paper is slightly below due to empirical validation concerns.
-- **hiHZVUIYik (7.33, Accepted)**: Path-norm toolkit. Clearly stronger in both theory breadth and practical applicability.
+## Score and Decision
+
+### Calibration anchors used:
+
+| Anchor | Score | Round | Comparison |
+|--------|-------|-------|------------|
+| 0aTIvSJ83I (Agnostic SAM) | 3.00 | R1 | Paper under review is substantially stronger — has genuine theoretical novelty |
+| l2odw7OiNw (Batch Size SGD) | 2.50 | R1 | Paper under review is much stronger |
+| cya3eEczAx (AProx) | 1.67 | R1 | Not comparable — different topic entirely |
+| KNQJtoPZmz (Simplicity Bias) | 3.00 | R1 | Paper under review has more rigorous theory |
+| 2NwHLAffZZ (Weak Correlations) | 2.33 | R1 | Paper under review is much stronger |
+| Piod76RSrx (Slicing MI Bounds) | 5.50 | R1 | Paper under review has more novel theory (new framework vs. applying existing theorems) |
+| wTtDgucL7h (Two Facets SDE) | 5.75 | R1 | Paper under review has cleaner framework, better empirical validation |
+| GWSIo2MzuH (Loss Entropy PAC) | 6.50 | R1 | Comparable theoretical novelty but paper under review has weaker empirical validation |
+| MF7ljU8xcf (LLM Generalization) | 6.00 | R1 | Different topic, hard to compare directly |
+| NGB6YNnO5o (VAE/Diffusion) | 6.25 | R1 | Different topic |
+| IowRyVs862 (Stability Sharper Bounds) | 6.00 | R2 | Paper under review has more novel theory but weaker experiments |
+| GY1fKFXG5i (Non-Vacuous LLM) | 6.60 | R2 | Different topic — LLM-focused compression bounds |
+| eQggPqESBr (Simplicity Bias 2-Layer) | 5.50 | R2 | Paper under review is stronger theoretically |
+| IQdlPvj4dX (Local Complexity ReLU) | 5.80 | R2 | Paper under review has broader scope |
+| UvpuGrd6ey (Compositionality DNN) | 6.25 | R2 | Different topic |
+
+**Round 1 bracket:** Paper sits between 5.5 and 7.0 (above the 5.50-5.75 rejected info-theoretic/simplicity papers, below the 8.0 strong accepts).
+
+**Round 2 narrowing:** The most comparable anchors are IowRyVs862 (6.00) and GWSIo2MzuH (6.50). The paper under review has a more novel and elegant theoretical framework than IowRyVs862 but weaker empirical validation than GWSIo2MzuH. The empirical gaps (Massart proxy instead of topological bounds, 0-1 loss + ADAM mismatch with theory, β_n estimation mismatch) are real but not fatal. The paper lands at **6.0**: a solid theoretical contribution with empirical validation that needs strengthening to fully support its strongest claims.
 
 MY FINAL SCORE: <score>6.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

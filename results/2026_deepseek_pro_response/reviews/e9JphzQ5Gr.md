@@ -1,22 +1,34 @@
-Now I have strong comparisons. Let me reason about the final score:
+Now I have a clear calibration picture. Let me compile the final review.
 
-- **SemiCLIP (5.80):** CaPT is clearly stronger — more thorough ablations, ImageNet experiments, extreme-label results, better novel insights. 
-- **SemiReward (6.00):** CaPT is stronger — SemiReward lacks ImageNet experiments, has marginal gains on some tasks, and its reward model design is less well-justified than CaPT's ablations.
-- **SeLaVPR (7.25):** CaPT is somewhat weaker. SeLaVPR has leaderboard-topping results (#1 on MSLS), cleaner execution, and fewer loose ends. CaPT's STL-10 anomaly and decorative theorem pull it below this tier.
+**Round 1 bracket:** CaPT sits above SemiCLIP (5.80) and below the 8.00 analysis papers — plausible range **5.5–7.5**.
 
-CaPT sits between 6.0 and 7.0, closer to 6.5. The STL-10 undiscussed anomaly is a genuine gap but addressable; the one-label-per-class results and thorough ablations are genuinely strong.
+**Round 2 narrowing:** 
+- SemiReward (6.00): CaPT is clearly stronger.
+- CLIP Synergy (6.25): CaPT is stronger — more dramatic gains, better ablation.
+- Demystifying CLIP Data (6.75): Comparable strength level, but CaPT has the pre-training confound and disconnected theory bringing it slightly below.
+- CLIPSelf (7.00): CLIPSelf is a cleaner contribution — simple, well-executed, well-ablated. CaPT has more dramatic gains but the pre-training confound, disconnected theory, and missing methodological details place it slightly below.
 
-Now let me write the final review.
+**Final score: 6.5 — Accept.**
+
+---
 
 ## Summary
-This paper proposes CaPT, a framework that integrates CLIP into semi-supervised learning (SSL) through asymmetric-modalities co-training. A fully fine-tuned unimodal ViT and an adapter-tuned multimodal CLIP exchange supervision via entropy-weighted co-pseudo labels. The paper also provides a theoretical bound (Theorem 1.1) showing that pseudo-label error depends on labeled-data quantity and quality. CaPT achieves strong results across multiple benchmarks, notably a 21.38% improvement over the next-best SSL method on CIFAR-100 in the one-label-per-class regime.
+
+This paper identifies that SSL methods are inherently label-dependent — their ability to exploit unlabeled data degrades when labeled data is scarce or low-quality. To address this, the authors propose CaPT, an asymmetric-modalities co-training framework that integrates CLIP as a "prior teacher" into SSL. CaPT jointly trains a fully fine-tuned unimodal network (UPM) and an adapter-tuned CLIP (MPM), using entropy-weighted co-pseudo labels to exchange supervision between them. The method achieves substantial gains over existing SSL methods, particularly in extreme low-label regimes (e.g., +21.38% on CIFAR-100 at 1 label/class).
 
 ## Strengths
-- **Dramatic gains in extreme low-label regimes (Table 3):** CaPT achieves 82.51% on CIFAR-100 with only one labeled sample per class, compared to 61.13% (FreeMatch) and 60.49% (RegMixMatch). Existing SSL methods collapse by ~17–20 points when labels drop from 2/class to 1/class, while CaPT degrades only modestly. This directly demonstrates that CLIP's prior knowledge decouples unlabeled-data utilization from labeled-data dependency.
-- **Thorough and informative ablation study (Table 6):** Each design choice is ablated — adapter-only (−16.40%), no debiasing (−3.80% on CIFAR-100, −12.73% on EuroSAT), unidirectional flow (−0.88%), only UPM (−6.23%), only MPM (−16.51%), no feature augmentation (−0.57%), equal weights (−0.87%). The ablations cleanly isolate contributions of full fine-tuning capacity, bidirectional co-training, adapter-based debiasing, and entropy-weighted fusion.
-- **Efficiency-aware design with empirical validation (Table 4):** CaPT uses 5,050 MiB memory and 0.1044 sec/iteration vs. RegMixMatch's 6,578 MiB and 0.1484 sec/iter, while achieving higher accuracy (84.83% vs. 80.74%). The feature-level Mixup design (§3.2.2) deliberately avoids re-encoding high-resolution images through CLIP's frozen encoder, making efficiency a direct consequence of architectural choices.
-- **Broad and diverse evaluation:** Results span 10 datasets — USB (CIFAR-100, STL-10, EuroSAT; Table 1), ImageNet (Table 2), and 6 fine-grained benchmarks (Table 5) — covering standard SSL, large-scale, and domain-shifted regimes.
-- **Adapter-tuning effectively mitigates CLIP's biased prior (Figure 5):** On EuroSAT, zero-shot CLIP shows highly skewed class proportions while adapter-tuned CLIP produces a substantially more uniform distribution, validating the design choice.
+
+- **Strong and consistent empirical gains in low-label regimes (Tables 1-3):** CaPT substantially outperforms all baselines across USB benchmarks, ImageNet, and extreme one-label-per-class settings. The gains are largest where label scarcity is worst (e.g., +9.33% on ImageNet at 10 labels/class, +21.38% on CIFAR-100 at 1 label/class), directly validating the central claim that CLIP's prior mitigates SSL's label dependency.
+
+- **Well-designed ablation study (Table 6):** Every design choice is isolated and tested. The full CaPT is compared against six stripped variants. Every removal hurts performance with magnitudes consistent with claimed roles. The "only MPM" result (68.32%) being below "only UPM" (78.60%) demonstrates that CLIP's raw prior is insufficient without the co-training framework — the framework genuinely adds value.
+
+- **Efficiency-preserving design with feature-augmented consistency regularization (Section 3.2.2, Table 4):** Instead of running CLIP's frozen but heavy encoder twice, the method performs Mixup in feature space. Table 4 quantifies the payoff: CaPT requires only 8% more memory and 11% more time than FreeMatch while delivering +6.23% accuracy, and is simultaneously faster and leaner than RegMixMatch despite outperforming it.
+
+- **Honest reporting of failure case (Table 5, FGVCAircraft):** CaPT underperforms on FGVCAircraft (50.12% vs. FreeMatch's 51.43% at 5 labels/class), and the authors explicitly acknowledge this as a limitation (line 307). This strengthens credibility for the claims where the method does work.
+
+- **Broad evaluation across diverse datasets:** Tested on 10 datasets spanning standard SSL benchmarks, large-scale ImageNet, six fine-grained datasets with significant domain shift, and extreme one-label-per-class settings.
+
+- **Adapter-tuning effectively mitigates CLIP's class-preference bias (Figure 5):** On EuroSAT, frozen CLIP exhibits a highly skewed class distribution, while adapter-tuned CLIP produces a substantially more uniform distribution, validating the rationale for training adapters.
 
 ## Weaknesses
 
@@ -24,69 +36,63 @@ This paper proposes CaPT, a framework that integrates CLIP into semi-supervised 
 None.
 
 ### Major
-- **STL-10 results contradict the paper's narrative and are undiscussed.** On STL-10, adapter-tuned CLIP alone achieves 96.86% (4 labels/class) and 97.15% (10 labels/class), while zero-shot CLIP achieves 97.18%. CaPT scores 96.07% and 96.34% — lower than both CLIP-only variants reported in the same table. The paper states CaPT "leads in all 6 commonly used evaluation settings" (line 210), which holds only against the 12 SSL baselines but not against the CLIP variants in the table. The paper never acknowledges or analyzes why co-training degrades performance relative to CLIP alone on STL-10. Given that CaPT's core claim is that integrating CLIP into SSL is beneficial, this negative result demands analysis: does CLIP's near-perfect zero-shot performance (97.18%) leave no room for improvement, or does the co-training mechanism introduce harmful noise? Note that CaPT still substantially improves over the best SSL baseline (RegMixMatch: 89.89%→96.07%), so the framework does help — but the failure to discuss the CLIP-only comparison is a gap.
+- **Pre-training data scale not fully controlled in comparisons with SSL baselines.** CaPT's MPM uses CLIP (ViT-B/32 pre-trained on 400M image-text pairs from WIT), while the UPM and all SSL baselines use ImageNet-pre-trained or MAE-pre-trained ViTs. The headline gains reflect both (a) access to a larger pre-training corpus and (b) the proposed co-training framework. Table 6 partially addresses this — "only MPM" (68.32%) underperforms "only UPM" (78.60%), showing CLIP alone is not sufficient and the framework matters. However, a direct baseline that initializes the UPM ViT with CLIP's visual encoder weights and runs standard FreeMatch would cleanly isolate how much of the gain comes from CLIP's representations versus the co-training mechanism. The fine-grained dataset results (Table 5) partially mitigate corpus-overlap concerns but do not address the pre-training scale confound.
 
 ### Minor
-- **Theorem 1.1 is decorative rather than functional.** The theorem bounds the pseudo-label error of a nearest-prototype classifier under a Gaussian mixture model, formalizing that worse labeled data → worse pseudo-labels. However, it shares almost no structure with the actual CaPT method (neural networks, CLIP embeddings, co-training, entropy-weighted fusion). The paper never refers back to the theorem when designing or justifying any CaPT component. For a method paper, a theoretical result that neither informs the design nor is empirically validated should either be connected to the method (e.g., arguing CLIP reduces the effective bias term) or moved to an appendix.
-- **The asymmetric-modalities claim is not directly tested.** The paper argues that co-training a multimodal CLIP with a unimodal ViT breaks the "pattern-homogeneity bottleneck" (Figure 3). However, CLS (Yao et al., 2022) — the most directly comparable co-training method — is never included as a baseline. There is no experiment comparing CaPT against a variant that applies the same framework but replaces CLIP with a second unimodal ViT. Without this, the paper cannot cleanly attribute gains to modality asymmetry rather than CLIP's pre-training advantage.
-- **DebiasPL, the most directly comparable CLIP-integration method, is not empirically compared.** The paper discusses DebiasPL conceptually (Figure 2c) but never reports its results on any benchmark. Including this comparison would contextualize CaPT's advantage over prior CLIP-SSL integration approaches.
+- **Supervised loss on labeled data not explicitly specified in the method section.** Standard SSL methods apply cross-entropy on labeled samples alongside the unsupervised consistency loss. Section 3 describes the co-pseudo label mechanism for unlabeled data thoroughly but does not state what loss is applied to the few labeled examples in UPM, MPM, or both. This affects reproducibility.
+
+- **Theorem 1.1 is purely motivational and disconnected from the method.** The theorem bounds pseudo-label error for a nearest-prototype classifier under a Gaussian mixture model, showing that label scarcity and low quality degrade pseudo-labels. While this cleanly motivates the problem, it does not analyze CaPT's co-training dynamics, does not characterize the effect of adding a pre-trained multimodal model, and does not produce insights that guided the method's design. The paper should not lean on this as a major theoretical contribution.
+
+- **Co-pseudo label formulation (Eq. 13) lacks justification.** Combining one-hot pseudo-labels with scalar weights produces a target vector with at most two non-zero entries. The paper does not discuss why this is preferable to alternatives like mixing the soft probability distributions from both modules, which would preserve richer uncertainty information.
+
+- **The title's "Breaking the Label Dependency" framing is imprecise.** CaPT substitutes scarce task-specific human labels with CLIP's web-supervision from 400M image-text pairs. The paper itself uses more measured language in several places ("mitigate the label dependency," line 305; "reducing SSL's label dependency," line 77) which is more accurate. This is a presentation imprecision rather than a methodological flaw.
 
 ### Trivial
-- The thresholding mechanism for pseudo-label retention (lines 196–197) is described in prose without specifying the numerical threshold used.
-- The entropy-weight dynamics are asserted ("CLIP dominates early, unimodal takes over later," line 163) but not empirically tracked — a simple plot of Γ^a, Γ^b over training would validate this claim.
+None.
 
 ## Nice-to-Haves
-- Track and plot the entropy weights Γ^a, Γ^b over training to empirically validate the "CLIP dominates early, unimodal takes over later" dynamic. This could also help explain the STL-10 anomaly.
-- Add a CLS baseline or a CaPT variant with two unimodal ViTs to isolate the contribution of asymmetric modalities from CLIP's pre-training.
-- Analyze the STL-10 anomaly and characterize conditions under which CaPT is beneficial vs. when CLIP alone suffices.
-- Connect Theorem 1.1 to the method or demote it to an appendix.
+- A breakdown of computational cost (time/memory) attributable to UPM vs. MPM separately would help practitioners understand the trade-off.
+- The paper could discuss whether the adaptive thresholding from FreeMatch (which CaPT inherits, line 206) could be further tuned specifically for the asymmetric-modalities setting.
 
 ## Removed Points
 These points are flagged to be removed, treat them with caution.
 
-- **Harsh Critic: "Comparison fairness — information asymmetry between CaPT and SSL baselines."** REMOVED. The paper explicitly reports zero-shot CLIP and adapter-tuned CLIP results in Table 1 alongside SSL baselines, so readers can compute the delta themselves. The "only UPM" ablation (FreeMatch under CaPT's setup: 78.60% vs. full CaPT 84.83%) directly quantifies the framework gain separate from CLIP's pre-training. The paper's explicit goal is integrating CLIP into SSL, so using CLIP is the contribution, not a confound.
-- **Harsh Critic: "Line 27 overstates the evidence."** REMOVED as a presentational nitpick. Figure 1c supports that SSL "struggles to benefit" — the gain is substantially reduced, which is consistent with the paper's framing.
-- **Harsh Critic: "ImageNet baselines — SoftMatch and SequenceMatch absent."** REMOVED. The ImageNet experiments use a different backbone (MAE-pretrained ViT-B) and protocol from USB; including the most prominent baselines (FixMatch, FlexMatch, FreeMatch, RegMixMatch) is reasonable for large-scale experiments.
-- **Harsh Critic: "MAE-pretrained ViT-B vs. ImageNet-supervised ViTs."** REMOVED. The paper explicitly states the backbone (line 214) and follows the same protocol as RegMixMatch. This is transparent.
-- **Harsh Critic: "Feature-level Mixup vs. input-level strong augmentation comparison missing."** REMOVED as a nitpick. The efficiency argument for feature-level Mixup is well-motivated by the frozen CLIP encoder constraint; a detailed comparison would be nice-to-have but not a weakness.
-- **Strength Finder: "Theorem 1.1 as a core strength."** DEMOTED. The theorem formalizes the motivation but doesn't guide the method. Now listed as a minor weakness.
-- **Strength Finder: The Flowers102 result needing analysis.** Moved to Nice-to-Haves — the 33-point gain is remarkable but not analyzing it is not a weakness per se, just a missed opportunity.
+- **Harsh Critic: "Appendix references central to claims cannot be verified."** REMOVED — the parser strips appendices from all papers; they exist in the original submission.
+- **Harsh Critic: "'Breaking label dependency' is a structural problem affecting contribution understanding."** PARTIALLY REMOVED — the substantive point about framing precision is retained as a Minor weakness, but the claim that this is structural/overclaiming is downgraded. The paper provides clear evidence that CaPT reduces dependency on task-specific labeled data via CLIP's prior, and uses measured language alongside the bold title.
+- **Strength Finder: "Theoretical framing of SSL's label-dependency bottleneck as a core strength."** WEAKENED — the theory is clean but purely motivational; retained as context in the Novel Insights section rather than as a standalone strength.
+- **Harsh Critic: "Co-pseudo label formulation is two-hot only — unclear why this form."** RETAINED as Minor — verified against Eq. 13.
+- **Strength Finder: generic "important problem" claims.** REMOVED as per filtering rules.
 
 ## Novel Insights
-The paper's most genuinely novel insight is the identification that SSL's label dependency manifests as a coupling effect: as labeled data becomes scarcer or lower-quality, SSL becomes *more* dependent on that limited supervision rather than on the abundant unlabeled data. The complementary insight — that CLIP's zero-shot prior can serve as a "catalyst" to break this coupling by providing an independent source of pseudo-label quality — is well-motivated and demonstrated through the extreme-label experiments. The CaPT framework operationalizes this through a specific set of design choices (adapter-tuning for efficiency, entropy-weighted fusion for adaptive supervision, bidirectional flow for mutual learning) that are individually sensible and collectively well-ablated.
+The asymmetric-modalities design insight — that co-training a vision model with a vision-language model avoids the pattern-homogeneity bottleneck that plagues co-training of two vision models — is genuinely interesting and well-supported by the attention-map analysis (Figure 3). This goes beyond the straightforward "add CLIP to SSL" idea and provides a principled rationale for why cross-modal co-training works better than same-modality co-training. The finding that CLIP alone (adapter-tuned, 68.32%) underperforms a standard SSL baseline (FreeMatch, 78.60%) while the co-training framework achieves 84.83% is a crisp demonstration that the framework — not just the prior — drives the gains.
 
 ## Suggestions
-- Analyze and discuss the STL-10 result where CLIP alone outperforms CaPT. Characterize when co-training helps vs. when CLIP's zero-shot performance already saturates the task. This would strengthen the paper significantly.
-- Add a CLS baseline or a CaPT variant with two unimodal ViTs to isolate the asymmetric-modalities contribution and directly test the paper's most novel conceptual claim.
-- Either connect Theorem 1.1 to the CaPT design (e.g., arguing CLIP's prior reduces the effective bias term B) or move it to an appendix.
-- Plot the entropy weights Γ^a, Γ^b over training to validate the adaptive-weighting dynamic.
+- Add the CLIP-initialized unimodal baseline (initialize UPM ViT with CLIP visual encoder weights, run standard FreeMatch) to isolate the contribution of the co-training framework from CLIP's pre-training scale.
+- Explicitly state the supervised loss on labeled data in the method section.
+- Consider a brief discussion or ablation comparing the current co-pseudo label formulation (Eq. 13) against mixing soft probability distributions, or justify the design choice.
+- Reconsider the title phrasing — "Mitigating the Label Dependency" would be more accurate than "Breaking the Label Dependency" while still capturing the contribution.
 
-## Calibration Anchors
+## Calibration Report
 
-All anchor papers retrieved across rounds:
+### Round 1 (Bracketing)
+| Anchor | Score | Comparison to CaPT |
+|---|---|---|
+| Weak-to-Strong CLIP (3.33) | 3.33 | CaPT is vastly stronger — comprehensive evaluation, systematic ablation, dramatic gains |
+| CLIPSelector + MixFix | 4.50 | CaPT is substantially stronger — more competitive results, better ablation |
+| SemiCLIP | 5.80 | Most similar anchor; CaPT is clearly stronger — larger gains, better ablation, efficiency analysis |
+| Modality Gap analysis | 8.00 | Different type (analysis paper); CaPT does not reach this level of rigor |
 
-| Path | Avg Score | Round | Comparison |
-|------|-----------|-------|------------|
-| HfJxXbXlYJ (LLM2CLIP) | 3.00 | R1 | Much weaker — rejected for limited novelty and weak baselines |
-| FwkYeLovHk (Weak-to-Strong CLIP) | 3.33 | R1 | Much weaker — narrow contribution, limited evaluation |
-| j1FLTvgyAh (Multi-Vision Multi-Prompt) | 2.50 | R1 | Much weaker — minor CLIP variant |
-| hgayrNSbri (Retrieval Augmented Captioning) | 3.40 | R1 | Different domain, weaker contribution |
-| 97D725GJtQ (SemiCLIP) | 5.80 | R1, R2 | CaPT is stronger — more thorough ablations, ImageNet results, extreme-label performance |
-| 1rgMkDWfYV (CLIPSelector/MixFix) | 4.50 | R1 | CaPT is clearly stronger — better results, cleaner framework |
-| xrazpGhJ10 (SemCLIP) | 5.50 | R1 | Different focus (retrieval stability), CaPT has broader evaluation |
-| baNW94qdsU (LIST) | 4.00 | R1 | Weaker — limited novelty, incremental |
-| 3i13Gev2hV (HyCoCLIP) | 8.00 | R1 | CaPT is weaker — HyCoCLIP has stronger conceptual novelty, cleaner execution |
-| uAFHCZRmXk (Modality Gap Analysis) | 8.00 | R1 | Different paper type (analysis), CaPT is weaker |
-| WyEdX2R4er (Visual Data-Type) | 8.00 | R1 | Different domain, CaPT is weaker |
-| 5Ca9sSzuDp (Interpreting CLIP) | 8.00 | R1 | Different paper type, CaPT is weaker |
-| yD2JMeKumt (DOTA) | 6.00 | R2 | Different domain (test-time adaptation), comparable quality |
-| dnqPvUjyRI (SemiReward) | 6.00 | R2 | CaPT is stronger — has ImageNet results, more dramatic gains, better ablations |
-| TVg6hlfsKa (SeLaVPR) | 7.25 | R2 | CaPT is weaker — SeLaVPR has leaderboard-topping results, cleaner execution, fewer loose ends |
-| WPsnH6875d (Re-Evaluating SSL) | 6.00 | R2 | Different focus (safe SSL analysis), comparable quality |
+**Round 1 bracket: 5.5–7.5**
 
-**Round 1 bracket:** 6.0–7.5  
-**Round 2 narrowing:** CaPT is clearly above SemiCLIP (5.80) and SemiReward (6.00), but below SeLaVPR (7.25). The narrowest plausible range is 6.0–7.0.  
-**Final placement:** 6.5. CaPT's extreme-label results and thorough ablations are genuinely strong, placing it above the 6.0 tier. However, the undiscussed STL-10 anomaly (where CLIP alone beats CaPT) and the decorative theorem prevent it from reaching the 7.0+ tier where cleaner, more insight-driven papers sit.
+### Round 2 (Narrowing)
+| Anchor | Score | Comparison to CaPT |
+|---|---|---|
+| SemiReward | 6.00 | CaPT is clearly stronger |
+| CLIP Synergy | 6.25 | CaPT is stronger — more dramatic gains, better ablation |
+| Demystifying CLIP Data | 6.75 | Comparable strength; CaPT slightly below due to pre-training confound and disconnected theory |
+| CLIPSelf | 7.00 | CLIPSelf is cleaner; CaPT slightly below due to pre-training confound, missing methodological details |
+
+**Final score: 6.5**
 
 MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

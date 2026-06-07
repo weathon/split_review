@@ -1,34 +1,25 @@
-Now I have a clear picture. Let me write the final review.
+Now I have a clear picture from both rounds. Let me compile the final review and score.
 
-**Calibration summary across all rounds:**
+**Bracket assessment (Round 1)**: ESS-Flow sits clearly above OC-Flow (6.50, which had experimental validity concerns) and the training-free guidance paper (4.00, significant issues). It's below Shortcut Models (8.00, broader contribution with comprehensive experiments). Initial bracket: **6.5–8.0**.
 
-| Anchor | Score | Round | Comparison |
-|--------|-------|-------|------------|
-| DoDNJdDntB (Flow Matching + Simulator Feedback) | 4.20 | R1 | ESS-Flow is clearly stronger — cleaner method, better evaluation, genuine novelty |
-| F6SaYwJ3eV (Langevin in noise space) | 3.60 | R1 | ESS-Flow clearly stronger — gradient-free vs gradient-based, broader evaluation |
-| YOKnEkIuoi (Conditional VDM) | 5.80 | R2 | ESS-Flow stronger — more novel core insight, broader domains, theoretical backing |
-| 1YO4EE3SPB (Variational inverse problems) | 5.50 | R2 | ESS-Flow stronger — more elegant method, scientific domains vs image-only |
-| uxVBbSlKQ4 (Flow Matching + GP Priors) | 6.75 | R2 | Comparable — TSFlow has broader evaluation (8 datasets), ESS-Flow has more elegant core insight and is gradient-free |
-| T4sMzjy7fO (CryoFM) | 6.50 | R2 | Comparable — both have strong scientific applications, flow-based methods |
-| zMPHKOmQNb (Discrete Walk-Jump) | 8.00 | R1 | ESS-Flow clearly weaker — dWJS has wet-lab validation, novel metrics, broader contribution |
-| 6EUtjXAvmj (Midpoint Guidance PS) | 8.00 | R1 | ESS-Flow weaker — MGPS has more thorough evaluation, polished presentation |
+**Narrowing (Round 2)**: 
+- vs. SCLD (6.50): ESS-Flow is cleaner, with fewer contribution-novelty concerns and better-executed experiments
+- vs. Reverse Diffusion MC (7.00): ESS-Flow has much stronger empirical validation (two real domains vs. 2D toy examples)
+- vs. MGPS (8.00): Comparable elegance of core insight, but MGPS has more extensive experiments across more domains
 
-**Round 1 bracket:** 5.5 – 7.5
-**Round 2 narrowing:** The paper sits between YOKnEkIuoi (5.80) and uxVBbSlKQ4 (6.75), closer to the top. It's more novel than YOKnEkIuoi but has more evaluation gaps than uxVBbSlKQ4. Final score: **6.5**.
+ESS-Flow is stronger than the 7.0 anchor (rdMC had 2D-only experiments) but not quite at the 8.0 level (MGPS/Shortcut Models have broader experiments). The core contribution is genuinely elegant, empirical results show large margins, and all weaknesses are minor and addressable. **Final score: 7.5**.
 
 ---
 
 ## Summary
-ESS-Flow presents a training-free, gradient-free method for controlled generation with flow-based generative models. The key insight is a Jacobian cancellation (Eq. 3): by expressing both prior and posterior in the source space, the determinant terms cancel, reducing inference to sampling from a Gaussian prior with a pullback potential — precisely the setting where Elliptical Slice Sampling (ESS) excels. The method is demonstrated on materials design with target properties (using FlowMM) and protein structure prediction from sparse inter-residue distances (using Chroma), outperforming gradient-based and optimization-based baselines.
+ESS-Flow proposes a training-free, gradient-free method for controlled generation with flow-based models. The key insight is performing elliptical slice sampling (ESS) directly in the source space: the prior becomes a standard Gaussian (ideal for ESS) and the Jacobian of the transport map cancels when expressing both prior and posterior in source space (Equation 3). This eliminates all gradient and Jacobian computations, requiring only forward passes. The method is evaluated on materials design with target properties and protein structure prediction from sparse inter-residue distances, significantly outperforming D-Flow, PnP-Flow, DAPS, and ADP-3D.
 
 ## Strengths
-- **Elegant Jacobian cancellation (Eq. 3) enabling gradient-free source-space inference.** By computing π(z) ∝ g(T_θ(z)) p(z), the Jacobian terms cancel, giving a Gaussian prior with a pullback potential. This is the mathematical justification for applying ESS and cleanly distinguishes ESS-Flow from gradient-based source-space methods (D-Flow, HMC-in-source) that still require backpropagation through the ODE solver.
-- **Space group experiment (Section 5.1) directly validates the gradient-free claim.** Using a binary indicator potential from the non-differentiable external program spglib, ESS-Flow achieves 92.3% target space group accuracy vs. 2.5% from the unconditional prior. Gradient-based baselines are literally inapplicable to this task, making this the strongest evidence for the method's core value proposition.
-- **Protein experiment (Section 5.2) demonstrates a meaningful Bayesian advantage over optimization-based methods.** While ADP-3D and DAPS achieve lower L² distance to observations (3.43 and 11.79 vs. ESS-Flow's 37.02), their clash counts are catastrophic (731 and 483 vs. 24.8) and ELBO values are poor (−5.68 and −8.07 vs. 8.89). ESS-Flow's explicit prior enforcement via MCMC preserves structural realism.
-- **Geometric convergence guarantee (Proposition 1)** adapted from Natarovskii et al. (2021) provides theoretical backing with concrete conditions under which the chain converges geometrically fast.
-- **Honest reporting of multi-fidelity failures.** Effective sample sizes of 0.1% and 1.0% for band gap and stability tasks are transparently reported and attributed to disproportionate importance weights.
-- **Comprehensive S.U.N.T. evaluation (Table 3)** goes beyond raw property error to assess stability, uniqueness, novelty, and threshold rates, showing ESS-Flow achieves the best combined rates across all tasks.
-- **Toy example (Figure 2) effectively illustrates a failure mode of gradient-based methods.** D-Flow samples become trapped in disconnected manifold components while ESS-Flow's gradient-free elliptical proposals can jump between modes.
+- **Elegant core insight (Jacobian cancellation)**: The change-of-variables derivation in Equation (3) — $\pi(z) \propto g(T_\theta(z)) p(z)$ — shows the intractable Jacobian cancels exactly. This transforms a problem requiring expensive backpropagation through the ODE solver into one needing only forward passes, and simultaneously reduces the prior to a standard Gaussian where ESS is known to work well. This is the paper's primary technical contribution and is genuinely clever.
+- **Large-margin empirical superiority on materials (Table 2)**: ESS-Flow achieves MAE of 8.99 for bulk modulus vs. PnP-Flow's 49.93 and DAPS's 39.14; 10.53 for shear modulus vs. 75.48 and 84.33; 1.85 for band gap vs. 5.63 and 3.90. These are 4–5× improvements over the best competitor, representing qualitative differences in method capability.
+- **Compelling demonstration on a truly non-differentiable task (space group)**: The potential is a binary indicator $1[P_c = y]$ computed via an external, non-differentiable program. ESS-Flow generates 92.3% of samples with the target space group vs. 2.5% unconditionally (Section 5.1), and achieves 25.5% S.U.N.T. rate. No gradient-based competitor can even be evaluated on this task, providing clean evidence for the gradient-free claim.
+- **Revealing protein structure experiment (Table 4)**: ADP-3D and DAPS achieve better data fit ($d_y$ 3.43 and 11.79 vs. 37.02) but produce catastrophically unrealistic structures — 731 and 483 clashes vs. 25 for ESS-Flow, with ELBO values of -5.68/-8.07 vs. 8.89. This demonstrates that annealing-based methods sacrifice prior regularization for data fit, while ESS-Flow properly maintains the prior — a practically important finding beyond headline numbers.
+- **Theoretical convergence guarantee**: Proposition 1 adapts geometric convergence results from Natarovskii et al. (2021) to the ESS-Flow setting, providing a rigorous foundation that competing optimization-based methods (D-Flow, PnP-Flow, ADP-3D) lack.
 
 ## Weaknesses
 
@@ -36,37 +27,50 @@ ESS-Flow presents a training-free, gradient-free method for controlled generatio
 None.
 
 ### Major
-- **Missing MCMC sampling protocol and convergence diagnostics in the main body.** The paper reports means and standard deviations (Table 2), S.U.N.T. rates over 1000 samples (Table 3), and protein metrics over 10 samples (Table 4), but nowhere in the main body specifies: number of MCMC iterations, burn-in period, thinning, number of independent chains, or any convergence diagnostics (R-hat, trace plots, effective sample size). For a method whose core claim includes "asymptotically exact" sampling (citing Proposition 1 for geometric convergence), readers need evidence that the chains actually reached stationarity. Without this, the quantitative results in Tables 2–4 cannot be interpreted with full confidence as samples from the target distribution. This is addressable in rebuttal but is a significant gap in the current manuscript.
-
-### Minor
-- **Most materials experiments use differentiable surrogates, narrowing the evidence for the gradient-free claim.** The bulk modulus, shear modulus, band gap, and energy above hull experiments all use ALIGNN — an auto-differentiable neural network — explicitly "to enable comparison with gradient-based methods" (line 153). Only the space group experiment uses a truly non-differentiable potential. While the space group result is strong (92.3%), four of five materials tasks test a setting where gradients are available, leaving the "gradient-free where gradients are unavailable" motivation tested primarily on a single binary-indicator task.
-- **Protein experiment is limited to one protein with 10 samples per method.** The results in Table 4 are suggestive but with n=10 on a single protein (PDB: 7r5b, 147 residues), the experiment cannot support general claims about the method's behavior on protein inverse problems. The paper would benefit from either expanding this or framing it more cautiously.
-- **Uniqueness-diversity trade-off not discussed.** Table 3 reveals that ESS-Flow's uniqueness rates are lower than DAPS on bulk modulus (46.1 vs. 80.8) and shear modulus (30.5 vs. 74.6). This trade-off — better targeting at the cost of sample diversity — is inherent to the prior-preserving nature of ESS-Flow and merits explicit discussion.
-- **Proposition 1 conditions may not hold for the space group binary indicator.** The convergence result assumes the pullback potential is bounded away from 0 and ∞ on compact sets, which the binary indicator 1[P_c = y] violates (it is discontinuous and zero on most of the space). The paper acknowledges a related limitation (line 99: "excludes potentials that constrain the target distribution to a lower-dimensional manifold"), but does not explicitly note this disconnect for the space group experiment.
-
-### Trivial
 None.
 
+### Minor
+- **MCMC diagnostics not reported in the main paper**: Chain length, burn-in, thinning, acceptance rates, and mixing diagnostics are deferred to the appendix (line 183: "Hyperparameter details and the runtime costs of the methods are provided in the Appendix"). For a paper whose core contribution is an MCMC sampler, summarizing at minimum acceptance rates or effective sample sizes per chain in the main text would help readers assess chain quality without consulting supplementary materials.
+- **Protein experiment uses only 10 samples (Table 4)**: With standard deviations like RMSD_gt 13.55 ± 1.32, differences between methods may not be statistically robust. This is one of only two application domains, and the trade-off between data fidelity and structural realism is the paper's most distinctive qualitative finding.
+- **Multi-fidelity extension is weak on harder tasks**: The importance-weighting approach yields effective sample sizes of 0.1% and 1.0% for band gap and stability tasks (Section 5.1.1). The paper honestly acknowledges this and frames it as a proof of concept, but the empirical support is thin, limiting the contribution of Section 4.2.
+
+### Trivial
+- **Notation in Equation (4) is unclear**: $T_\delta^\Delta(z)$ is used to denote both the coarse and fine transport maps within the same equation, making the importance-weighting derivation confusing. Using distinct notation (e.g., $T^\Delta$ for coarse, $T^\delta$ for fine) would clarify the derivation.
+
 ## Nice-to-Haves
-- A task with a genuinely non-differentiable continuous potential (e.g., a simulation-based materials property predictor) would strengthen the core motivation.
-- MCMC protocol details (iterations, burn-in, convergence assessment) should be summarized in the main body.
-- Expanding the protein experiment to multiple structures would improve generalizability.
+- A brief discussion of expected trade-offs between ESS-Flow and gradient-based source-space methods (e.g., Wang et al. 2025 HMC) — under what conditions each would be preferable — would help readers understand the method's niche beyond "gradient-free."
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **Runtime/cost comparison missing from main body:** The paper defers this to the Appendix (line 183), which is stripped. Per instructions, weaknesses about missing appendix content are removed.
-- **Multi-fidelity section should be removed as underdeveloped:** The paper explicitly frames the multi-fidelity approach as a "proof of concept" (line 137) and honestly reports its failures. This is a subjective organizational preference, not a verifiable flaw.
-- **Asymmetry in atomic number handling favoring ESS-Flow:** The paper explicitly acknowledges the trade-off (line 153: "To enable comparison with gradient-based methods"), and the space group experiment avoids this confound entirely. The asymmetry is disclosed and the conclusions do not overclaim based on it.
-- **"Asymptotically exact" is potentially misleading:** All MCMC methods are asymptotically exact; this is standard terminology and the paper is clear about the MCMC framing.
-- **ODE discretization level Δ as an unacknowledged hyperparameter:** The paper addresses this in the multi-fidelity section (4.2) and the conclusion. This is a minor implementation detail, not a weakness.
+These points are flagged to be removed; treat them with caution.
+
+- *"Tension between gradient-free narrative and experimental design" (Harsh Critic)*: The paper explicitly addresses this — gradients may be unreliable (not just unavailable) in settings involving quantization (categorical atomic numbers, line 34: "quantization, such as molecular and material design with categorical atomic numbers, where gradients are not well-defined") or non-differentiable simulators (line 17). The space-group experiment directly demonstrates the gradient-free advantage. Outperforming gradient-based methods in differentiable settings is a strength, not a weakness.
+- *"No comparison to simple baselines like random search or basic Metropolis-Hastings" (Harsh Critic)*: Scope creep. The paper already compares against five state-of-the-art methods. The contribution is clear from these comparisons.
+- *"Guarantee of finite-time acceptance does not guarantee good mixing" (Harsh Critic Section-by-Section)*: The paper does not claim it does. The text accurately states what ESS guarantees (line 99) and Proposition 1 separately provides convergence guarantees under stated assumptions.
+- *Multi-fidelity as a "meaningful efficiency gain" (Strength Finder)*: Overstated given the 0.1% and 1.0% effective sample sizes on harder tasks. Demoted; the paper itself calls it a "proof of concept."
+- *"Practical multi-fidelity extension" as a major strength (Strength Finder)*: Removed. The empirical results are too weak to support this framing.
 
 ## Novel Insights
-The Jacobian cancellation (Eq. 3) is genuinely elegant and, combined with ESS, opens a clean new direction for gradient-free inference with flow-based models. The evaluation reveals an interesting and underexplored trade-off: prior-preserving MCMC methods like ESS-Flow achieve superior targeting (higher threshold rates) at the cost of reduced sample diversity (lower uniqueness rates). This trade-off between fidelity to the target and sample diversity is inherent to the prior-preserving approach and warrants further investigation.
+The protein structure experiment reveals a previously underexplored failure mode of annealing-based controlled generation methods: as noise levels are annealed, regularization from the pretrained generative model diminishes, producing samples that fit observations well but are structurally implausible (731 clashes for ADP-3D vs. 25 for ESS-Flow). This trade-off between data fidelity and prior preservation — demonstrated via both clash counts and ELBO — is a practically important finding that goes beyond headline performance numbers.
 
 ## Suggestions
-- Include a summary of the MCMC sampling protocol in the main body: number of iterations, burn-in, number of chains, and at minimum a statement about how convergence was assessed.
-- Consider adding one task with a non-differentiable continuous potential (e.g., a simulation-based materials property predictor) to directly test the core motivation beyond the binary-indicator space group task.
-- Either expand the protein experiment to multiple structures or frame it more cautiously as an illustrative case study.
+- Summarize key MCMC diagnostics in the main paper: report chain length, burn-in, and at minimum acceptance rates for one representative task. This would substantially strengthen the empirical evidence for the sampler's practical viability.
+- Increase the protein experiment sample count to at least 30–50 and consider adding a Pareto-frontier plot showing RMSD vs. clash count across methods and samples.
+- Either strengthen the multi-fidelity section with delayed acceptance ESS (as the paper itself mentions in Section 4.2) or demote it from a main contribution to a discussion in the conclusion.
 
-MY FINAL SCORE: <score>6.5</score>
+---
+
+## Calibration Anchors
+
+| Anchor | Path | Avg Score | Round | Comparison |
+|---|---|---|---|---|
+| OC-Flow | 61ss5RA1MM | 6.50 | R1 | Topically closest. ESS-Flow has a cleaner contribution, stronger empirical margins, and fewer experimental validity concerns. ESS-Flow is clearly better. |
+| Training-free guidance | AC1QLOJK7l | 4.00 | R1 | Had significant notation, derivation, and novelty issues. ESS-Flow is substantially stronger. |
+| Shortcut Models | OlzB6LnXcS | 8.00 | R1 | Broader contribution (new model family), extensive ImageNet/CelebA experiments. ESS-Flow is somewhat below this. |
+| SCLD | dImD2sgy86 | 6.50 | R2 | Contribution novelty concerns; writing described as sloppy. ESS-Flow is cleaner and better-executed. |
+| Reverse Diffusion MC | kIPEyMSdFV | 7.00 | R2 | Limited to 2D experiments; missing literature. ESS-Flow has much stronger empirical validation. |
+| MGPS (Var. Diffusion Posterior Sampling) | 6EUtjXAvmj | 8.00 | R2 | Comparable elegance but more extensive experiments; uniform 8s. ESS-Flow is slightly below. |
+
+**Round 1 bracket**: 6.5–8.0. **Round 2 narrowing**: ESS-Flow is between rdMC (7.0) and MGPS (8.0), closer to the upper end due to a clean contribution with strong results and only minor weaknesses. **Final score**: 7.5.
+
+MY FINAL SCORE: <score>7.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

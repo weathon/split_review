@@ -1,22 +1,38 @@
-Now let me compile the final review with proper calibration. Let me summarize my anchor comparisons first:
+Now I have strong comparative anchors. Let me summarize my calibration:
 
-**Round 1 Bracketing**: BIRD-INTERACT falls between DialSim (5.00, clearly weaker) and Spider 2.0 (8.00, clearly stronger). Initial bracket: **5.5 - 7.5**.
+**Round 1 bracket: 6.0 - 7.5**
 
-**Round 2 Narrowing**: I compared against MINT (6.75), τ-bench (6.50), AgentBench (6.20). BIRD-INTERACT is most comparable to τ-bench — both are benchmarks with user simulators evaluating interactive AI systems. BIRD-INTERACT's function-driven simulator is a more principled solution to the simulator-fidelity problem than τ-bench's raw LLM simulator, but BIRD-INTERACT's single-run evaluation is weaker than τ-bench's pass^k multi-trial metric. These trade-offs roughly cancel out. BIRD-INTERACT is slightly below MINT (6.75) due to evaluation rigor, and roughly comparable to τ-bench (6.50).
+| Anchor | Score | Comparison |
+|--------|-------|------------|
+| Spider 2.0 | 8.00 | Cleaner, no notable weaknesses. BIRD-INTERACT is below this |
+| DialSim | 5.00 | Data contamination concerns, weaker methodology. BIRD-INTERACT well above |
+| DB-GPT-Hub | 3.75 | Limited novelty, integration work. BIRD-INTERACT well above |
 
-**Final score: 6.5**.
+**Round 2 narrowing:**
+
+| Anchor | Score | Comparison |
+|--------|-------|------------|
+| MINT | 6.75 | Multi-turn interaction benchmark, GPT-4 simulated feedback. Similar in spirit. BIRD-INTERACT has stronger simulator methodology, purpose-built tasks, human alignment validation. Comparable to slightly better |
+| ToolDial | 6.67 | Multi-turn dialogue dataset for tool-augmented LMs. BIRD-INTERACT has stronger methodology (real execution, principled construction) |
+| WildBench | 7.33 | Real user queries benchmark, different domain |
+
+BIRD-INTERACT has more novel contributions than MINT (function-driven simulator with USERSIM-GUARD validation, dual evaluation settings revealing model-mode interactions, ambiguity taxonomy, state-dependency) but also has more open presentation issues (ITS Law naming, memory grafting confound, single-run limitation, missing failure taxonomy). Overall, BIRD-INTERACT is comparable to slightly better than MINT (6.75) and well above ToolDial (6.67), but notably below Spider 2.0 (8.00).
+
+**Final score: 7.0**
+
+Now let me finalize the review with all the required elements.Now I have all the calibration data I need. Let me finalize the review.
 
 ---
 
 ## Summary
-BIRD-INTERACT is a benchmark for evaluating LLMs on dynamic, multi-turn text-to-SQL interactions. It contributes (1) a function-driven user simulator with two-stage symbolic gating that avoids ground-truth leakage, (2) two evaluation settings (protocol-guided c-Interact and agentic a-Interact), and (3) 900 tasks covering full CRUD operations with injected ambiguities and state-dependent follow-ups. Experiments on 7 frontier LLMs show all models struggle, with GPT-5 achieving only 8.67% end-to-end success in c-Interact and 17% in a-Interact.
+BIRD-INTERACT introduces a benchmark for interactive text-to-SQL evaluation featuring 900 tasks across two settings (conversational c-Interact and agentic a-Interact), a function-driven user simulator that constrains responses to prevent ground-truth leakage, and executable test cases spanning the full CRUD spectrum. The benchmark converts single-turn LIVESQLBENCH tasks into multi-turn interactive scenarios through principled ambiguity injection and state-dependent follow-up sub-tasks. Results across 7 frontier LLMs show that even the strongest models struggle (GPT-5 achieves only 8.67% end-to-end SR in c-Interact and 17% in a-Interact on the full set), and model rankings flip across settings, revealing that interaction mode is a decisive factor in performance.
 
 ## Strengths
-- **Function-driven user simulator design**: The two-stage symbolic gating (AMB/LOC/UNA) demonstrably reduces failure rate on unanswerable questions from 67.4% to 2.7% on USERSIM-GUARD, solving a concrete, well-documented problem (ground-truth leakage) in prior LLM-based simulators. This is the strongest technical contribution.
-- **Memory grafting experiment**: GPT-5 improves from 13.8% to 18.8–20.5% SR when its ambiguity-resolution history is replaced with that of stronger models (Qwen-3-Coder, O3-mini), cleanly isolating communication strategy as a bottleneck distinct from SQL generation capability. This is a clever and transferable experimental paradigm.
-- **Dual evaluation settings reveal model-specific interaction aptitudes**: GPT-5 ranks worst in c-Interact (14.50% SR) but best in a-Interact (29.17%), while Claude-Sonnet-4 shows the opposite pattern — a finding invisible under any single evaluation protocol and a meaningful empirical contribution.
-- **Systematic ambiguity injection taxonomy**: Three principled categories (superficial, knowledge with chain-breaking, environmental), each paired with a clarification source anchored to ground-truth SQL, ensuring ambiguous queries are unsolvable without interaction yet reconstructable once clarified.
-- **Benchmark scope and rigor**: Full CRUD coverage, state-dependent follow-up sub-tasks, executable test cases for functional correctness, and 12-expert annotator pipeline with ~93% inter-annotator agreement.
+- **Function-driven user simulator is a genuine methodological advance:** The two-stage design (LLM semantic parser → constrained symbolic action → controlled response) reduces inappropriate answer rates from 67.4% (baseline) to 2.7% on USERSIM-GUARD (Section 6, Figure 6). This directly addresses a known failure mode of LLM-based simulators leaking ground truth or hallucinating responses, and the human alignment study (Table 3, r=0.84, p=0.02) provides credible evidence that the simulator's behavior correlates with real human users.
+- **Dual evaluation settings reveal non-trivial model×mode interactions:** GPT-5 flips from worst in c-Interact (14.50% priority SR) to best in a-Interact (29.17% SR), while Claude-Sonnet-4 improves from 22.33% to 27.83% (Table 2). These rank instabilities validate that the two settings measure genuinely distinct capabilities and that a single evaluation protocol would miss model-specific interaction strengths.
+- **Principled ambiguity taxonomy with concrete operationalization:** The three-category taxonomy (superficial query ambiguities, knowledge ambiguities with chain breaking, environmental ambiguities) is operationalized through specific mechanisms — e.g., masking intermediate DAG nodes in the knowledge base to break inferential chains (Figure 2). The knowledge chain breaking design forces models to recognize missing dependencies rather than applying a single clarification strategy.
+- **State-dependency between sub-tasks is a genuinely novel feature:** Follow-up sub-tasks depend on modified database states or newly created objects from preceding queries. This is a non-trivial departure from prior multi-turn benchmarks (SParC, CoSQL) that present independent turns.
+- **Substantial benchmark scale with execution-grounded evaluation:** 900 total tasks, 191 distinct test cases, up to 11,796 dynamic interactions across the FULL set (Table 1). The execution-based evaluation (test cases rather than exact string match) provides functional correctness guarantees.
 
 ## Weaknesses
 
@@ -24,59 +40,73 @@ BIRD-INTERACT is a benchmark for evaluating LLMs on dynamic, multi-turn text-to-
 None.
 
 ### Major
-- **Single-run evaluation with no variance estimates** (Section 5). The paper explicitly states all experiments use single runs "due to cost." While the headline finding that all models struggle (none exceeds ~30%) is robust, the finer-grained claims about model rankings — e.g., the assertion that "Interaction Mode Emerged as the Decisive Factor" — rest on between-model differences (e.g., 14.50% vs. 18.50% on c-Interact priority questions) that could be unstable given path-dependent variation in the interactive setting. A benchmark paper making comparative claims should provide at minimum a small multi-run experiment on the LITE set or substantially qualify its model-ranking claims.
-
-- **Human-alignment correlation analysis is methodologically insufficient** (Section 6, Table 3). The paper reports Pearson correlations (r=0.84, p=0.02) between human and simulator success rates but does not specify the unit of observation. If computed across 7 system models (n=7), the degrees of freedom are extremely low, making p-values unreliable. If computed across 100 tasks with binary per-task SR, Pearson assumptions are violated. The methodology needs clarification and the statistical claims should be appropriately modest; Spearman rank correlation would be a more robust alternative.
+None.
 
 ### Minor
-- **"ITS Law" framing overstated** (Section 5.2). Only Claude-3.7-Sonnet exhibits monotonic improvement with patience in c-Interact; several models show flat or declining performance in a-Interact. The evidence supports a weaker claim that *some* models benefit from additional interaction in *some* settings, not a general "law."
-
-- **Memory grafting experiment lacks clarity on history selection**: The paper does not specify whether grafted histories are from successful clarification sequences only or from all sequences. If only successful ones, the experiment conflates communication quality with success status.
-
-- **State dependency claimed but not quantitatively analyzed**: The paper highlights state-dependent follow-up sub-tasks as a key contribution but provides no ablation comparing performance on state-dependent vs. state-independent follow-ups to quantify its impact on difficulty.
-
-- **Ambiguity type distribution unreported**: The paper does not report what fraction of tasks use each ambiguity type, making it hard to assess whether difficulty is driven primarily by one category (e.g., knowledge chain breaking vs. superficial ambiguities).
-
-- **c-Interact budget formula is annotator-aligned**: The budget τ_clar = m_amb + λ_pat ties the budget directly to annotator-defined ambiguity counts, implicitly favoring the annotators' expected interaction style without rewarding models that resolve ambiguities more efficiently.
-
-- **User simulator scope limitation not discussed**: The two-stage design constrains the simulator to pre-annotated clarifications; genuinely novel user follow-ups are outside its capability. This limitation should be explicitly acknowledged.
+- **Single-run evaluation limits result reliability:** The paper explicitly states "conducting single runs due to cost" (Section 5). While temperature=0 mitigates most non-determinism, some API providers exhibit residual non-determinism even at temperature=0, and close comparisons (e.g., Claude-Sonnet-3.7 at 18.00% vs. Deepseek-Chat-V3.1 at 18.50% in c-Interact overall SR) cannot be confidently interpreted as genuine differences. The paper acknowledges this limitation and the cost argument has merit, but for a benchmark whose primary value is providing reliable performance comparisons, this is a notable gap. Multi-run evaluation on at least the LITE set would substantially strengthen the contribution.
+- **"ITS Law" naming is an overclaim:** The paper defines "ITS Law" as "A model satisfies this law if, given enough interactive turns, its performance can match or even surpass that of the idealized single-turn task" (Section 5.2). The data in Figure 4 shows Claude-3.7-Sonnet clearly exhibiting this pattern in c-Interact, but the other three models show weaker or flat scaling, and the pattern largely disappears in a-Interact. The paper does not claim all models satisfy the law — it defines a criterion and shows one model meeting it — but the capitalized "Law" framing overstates the generality of the finding. Re-framing as an empirical observation would be more appropriate.
+- **Memory grafting experiment has a partial confound:** Section 5.2 grafts ambiguity-resolution histories from stronger models into GPT-5 before SQL generation, showing SR improvement from 13.8% to 18.8–20.5%. This demonstrates that GPT-5 can generate correct SQL given good clarifications, supporting the hypothesis that communication is the bottleneck. However, the experiment cannot fully disentangle whether GPT-5's original failure was due to asking poor questions (and receiving unhelpful responses) versus receiving adequate clarifications but then generating wrong SQL. The paper's conclusions ("a more effective communication schema is required") are appropriately measured, but the causal interpretation should be tempered slightly.
+- **No systematic failure taxonomy:** For a benchmark aiming to guide future research, the paper lacks a breakdown of why models fail. The action distribution analysis (60.87% submit+ask actions) and BI vs. DM comparison are starts, but there is no categorization into failure modes such as clarification failures, SQL generation errors, state-dependency issues, budget exhaustion, or debugging failures. This limits the benchmark's diagnostic value for researchers deciding where to focus improvement efforts.
+- **Patience scaling only on LITE with 4 models:** Figure 4 shows ITS results on LITE (not FULL) with only 4 of the 7 benchmarked models. The paper never demonstrates whether the model rankings in Table 2 are stable across patience levels — a concern given that Table 2 uses λ_pat=3 as default.
+- **LITE simplification and inter-annotator agreement are underspecified:** The paper states LITE has "simplified databases" without defining what simplification entails (fewer tables? cleaner data? shorter schemas?). Table 1 reports inter-annotator agreement of 93.33%/93.50% without specifying what metric this is measured on (ambiguity classification? SQL correctness? task validity?).
 
 ### Trivial
-- The "11,796 dynamic interactions" figure in the abstract is inconsistent with the per-task interaction counts in Table 1 (600 × 13.64 ≈ 8,184 for FULL set) and its derivation is never explained.
+- The c-Interact and a-Interact settings use fundamentally different budget formulations (turn-based vs. cost-based with action-specific costs), making Table 2's side-by-side placement potentially misleading for readers who might attempt direct cross-mode comparison. The paper correctly treats them as complementary, but the visual layout invites misinterpretation.
+- The abstract's claim that "each task features ambiguous and follow-up sub-tasks" could more precisely say "each task features an ambiguous initial priority sub-task and a follow-up sub-task," since the ambiguity is injected into the first sub-task, not distributed across both.
 
 ## Nice-to-Haves
-- A failure-mode taxonomy (e.g., wrong ambiguity identified, correct clarification but wrong SQL, state-dependency failure) would make the benchmark more actionable for method developers.
-- Deeper analysis connecting action distribution patterns to success rates (do models that explore more succeed more?).
-- Discussion of how the c-Interact sequential termination policy (failure on sub-task 1 terminates the session) may confound model comparisons.
+- Running models at least 3 times on the LITE set with different seeds and reporting mean ± std would substantially strengthen the benchmark's reliability claims.
+- A failure taxonomy categorizing a sample of failed trajectories (clarification failure, SQL generation failure, state-dependency failure, budget exhaustion, debugging failure) would dramatically increase the benchmark's diagnostic utility.
+- Experiments in a "free-mode" (no budget constraints) for a-Interact, which the paper mentions as future work, would help distinguish whether poor a-Interact performance stems from budget pressure or fundamental strategy limitations.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- **Criticism that single-run evaluation "undermines the reliability of all reported results"**: Softened. The headline finding of widespread model struggle is robust; only the fine-grained model-ranking claims are affected.
-- **Demand for multiple runs on the FULL set**: Impractical due to cost. Demoted to a targeted LITE-subset recommendation.
-- **"The paper does not connect action distributions to whether those preferences are adaptive"**: This is a request for additional analysis beyond the paper's stated scope, moved to Nice-to-Haves.
-- **"The related work discussion of MINT is not deep enough"**: A scope criticism about discussion depth, not a factual error. The paper does cite and position relative to MINT.
-- **Speculative concern about whether the 11,796 number reflects total possible interaction turns**: The critic was speculating; the real issue is simply an unexplained number, which is trivial.
+These points are flagged to be removed, treat them with caution.
+
+- **Harsh Critic: "simulator fundamentally operates with access to ground-truth SQL, clarifications are always precisely correct" as a weakness.** The function-driven design constraining what the simulator can reveal is a feature, not a bug — it prevents leakage while ensuring correctness. The paper acknowledges this design choice and validates against humans (Table 3). REMOVED because this is an explicit, intentional design decision, not a hidden flaw.
+
+- **Harsh Critic: "missing discussion of conversational recommendation or dialogue state tracking benchmarks."** REMOVED per instructions — I cannot verify the existence or relevance of unspecified related work.
+
+- **Harsh Critic: human alignment study "SR values being quite low, which could inflate correlation artificially."** Speculative and not grounded in the paper. Many models having low SR on hard tasks would typically deflate, not inflate, correlation coefficients. REMOVED as speculative.
+
+- **Harsh Critic: "the idealized performance baseline... is a fundamentally different, easier task, not a performance ceiling."** The paper explicitly calls this "idealized" and acknowledges it represents a scenario where "all necessary context is provided" — it is explicitly framed as an upper-bound reference, not an apples-to-apples comparison. REMOVED because the paper already addresses this framing.
+
+- **Strength Finder: memory grafting is a "clean causal manipulation."** The harsh critic identifies a genuine confound (included above as a minor weakness). REMOVED as overstated.
+
+- **Strength Finder: ITS shows "a reproducible empirical pattern."** Only one model (Claude-3.7-Sonnet) clearly exhibits the pattern in one setting. REMOVED as overstated; the actual finding is more nuanced.
+
+- **Harsh Critic: demand for train/val/test splits.** The benchmark is designed for zero-shot evaluation of LLMs, not for training. The absence of splits is consistent with how LLM benchmarks (BIRD, Spider) are structured. REMOVED.
+
+- **Harsh Critic: concern about "test case reuse (135 distinct test cases for 300 tasks)."** Without evidence that this causes false positives, this is speculative. REMOVED as speculative.
+
+- **Harsh Critic: notes about stripped appendices (C, E, F, H, J, N, O, P, R).** REMOVED per instructions — these are parser artifacts, not author errors.
+
+- **Strength Finder: "addressed an important problem" / "targeted an interesting question."** REMOVED as generic/superficial.
 
 ## Novel Insights
-The memory grafting experiment provides a genuinely transferable methodological contribution: it demonstrates how to isolate interaction strategy from core task capability by transplanting interaction histories across models. This paradigm could be applied to other interactive benchmarks beyond text-to-SQL.
+The most genuinely novel insight from this work is the demonstration that interaction mode acts as a decisive factor orthogonal to raw SQL generation capability: GPT-5, a state-of-the-art model, ranks worst in protocol-guided interaction (c-Interact) but best in open-ended agentic interaction (a-Interact). This pattern, combined with the memory grafting result showing GPT-5 can generate correct SQL given others' clarifications, suggests that current LLM evaluation in text-to-SQL systematically conflates communication strategy with generation capability — and that these are separable dimensions requiring distinct evaluation protocols. The function-driven simulator design, which dramatically reduces inappropriate responses (67.4% → 2.7%), also provides a template for how future interactive benchmarks can achieve controllability without sacrificing response diversity.
 
 ## Suggestions
-- Run 3-repeat experiments on the LITE set for 2–3 representative models to provide variance estimates that calibrate reader confidence in the FULL-set rankings.
-- Rename "ITS Law" to "ITS Phenomenon" and qualify the claim to specific model-setting pairs.
-- Clarify the human-alignment correlation methodology: specify the unit of observation, justify Pearson vs. Spearman, and report n explicitly.
-- Add a table reporting the distribution of ambiguity types across the task suite.
+- Re-frame the "ITS Law" as an empirical observation (e.g., "interaction scaling behavior") rather than a named law, and explicitly note which models exhibit it and in which settings.
+- Define what "simplified databases" means for the LITE set and specify the inter-annotator agreement metric.
+- Temper the memory grafting conclusions slightly: acknowledge that the experiment demonstrates GPT-5 can leverage good clarifications for SQL generation, but does not isolate whether GPT-5's own communication could have obtained equivalent clarifications.
 
-## Calibration Anchors
+## Score and Decision
 
-| Anchor | Path | Avg Score | Round | Comparison |
-|--------|------|-----------|-------|------------|
-| DialSim | W1x77vRucB | 5.00 | R1 | BIRD-INTERACT is clearly stronger — more principled methodology, better-validated simulator, domain-specific contribution |
-| AgentBench | zAdUB0aCTQ | 6.20 | R2 | Comparable; BIRD-INTERACT has more novel simulator design and memory grafting, AgentBench has broader coverage |
-| τ-bench | roNSXZpUDN | 6.50 | R1/R2 | Most similar anchor; both are benchmarks with user simulators for interactive evaluation. BIRD-INTERACT has a more principled simulator but weaker evaluation methodology. Roughly equivalent. |
-| MINT | jp3gWrMuIZ | 6.75 | R2 | Slightly stronger than BIRD-INTERACT on evaluation rigor (multi-model, multi-dataset, not single-run), but BIRD-INTERACT's function-driven simulator is more innovative than MINT's raw LLM feedback. |
-| Spider 2.0 | XmProj9cPs | 8.00 | R1 | Clearly stronger — more ambitious scope, real enterprise data, multiple SQL dialects, near-unanimous high scores. BIRD-INTERACT is notably below this level. |
+### Calibration Anchors Used
 
-**Round 1 bracket**: 5.5 – 7.5. **Round 2 narrowed to**: 6.0 – 6.5, leaning toward 6.5 based on closest comparison to τ-bench (6.50).
+| Round | Paper | Path | Score | Comparison |
+|-------|-------|------|-------|------------|
+| 1 | Spider 2.0 | XmProj9cPs.md | 8.00 | Cleaner benchmark, no notable weaknesses. BIRD-INTERACT is below this |
+| 1 | DialSim | W1x77vRucB.md | 5.00 | Data contamination concerns, weaker methodology. BIRD-INTERACT well above |
+| 1 | DB-GPT-Hub | NmILZXKcOi.md | 3.75 | Limited novelty, integration work. BIRD-INTERACT well above |
+| 2 | MINT | jp3gWrMuIZ.md | 6.75 | Multi-turn interaction benchmark with simulated feedback. Most comparable anchor. BIRD-INTERACT has stronger simulator methodology and purpose-built tasks, comparable overall |
+| 2 | ToolDial | J1J5eGJsKZ.md | 6.67 | Multi-turn TALM dataset. BIRD-INTERACT has stronger methodology (real execution, principled construction) |
+| 2 | WildBench | MKEHCx25xp.md | 7.33 | Real user queries benchmark, different domain |
 
-MY FINAL SCORE: <score>6.5</score>
+**Round 1 bracket:** 6.0 – 7.5  
+**Round 2 narrowed to:** 6.5 – 7.0  
+
+BIRD-INTERACT is comparable to MINT (6.75) — both are solid interactive benchmarks with real contributions and some minor issues. BIRD-INTERACT has stronger methodological contributions (function-driven simulator with 67.4→2.7% failure reduction, dual settings, ambiguity taxonomy, state-dependency) but also more open presentation issues (ITS naming, missing failure taxonomy, underspecified details). Overall, the paper lands at the upper end of this narrow range due to the scale and novelty of its contributions.
+
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

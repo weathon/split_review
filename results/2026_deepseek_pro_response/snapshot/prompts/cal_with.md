@@ -6,10 +6,12 @@ Before any `calibration_search` call, first finish filtering the Harsh Critic an
 
 ## Round 1 — Bracketing
 
-Make one `calibration_search` call with three queries that anchor each score band on a topic similar to the paper. Filters are strict: `low_score` is exclusive lower bound (avg > low_score) and `high_score` is exclusive upper bound (avg < high_score).
+Make one `calibration_search` call with a couple queries that anchor each score band on a topic similar to the paper. Filters are strict: `low_score` is exclusive lower bound (avg > low_score) and `high_score` is exclusive upper bound (avg < high_score).
 - "<topic>" with `high_score=3.5` (weak anchors)
 - "<topic>" with `low_score=3.5, high_score=7.5` (middle anchors)
 - "<topic>" with `low_score=7.5` (strong anchors)
+
+You should find MORE papers on the two end than middle and be careful to score a paper in the middle. 
 
 If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 

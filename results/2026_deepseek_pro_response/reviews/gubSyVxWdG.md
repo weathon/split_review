@@ -1,37 +1,31 @@
-Now I have enough calibration data to place the score. Let me finalize.
+Now I have a good sense of where this paper lands. Let me make the final calibration assessment.
 
-**Comparison summary:**
+**Round 1 bracket:** 5.5 - 7.5
 
-| Anchor | Score | Decision | How this paper compares |
-|--------|-------|----------|------------------------|
-| `aoW5Sm8Op8` (R1) | 2.33 | Reject | Much weaker — unserious benchmark paper |
-| `jFox1iMWUa` (R1) | 3.40 | Reject | Much weaker — poorly executed causal NN |
-| `glgvpS1dD1` (R1) | 4.50 | Reject | Weaker — incremental adversarial CATE, trivial theory |
-| `Q2bJ2qgcP1` (R1/R2) | 6.00 | Accept | Comparable — CATE benchmark with evaluation framework; our paper has deeper theory, better ablations, but weaker secondary contribution |
-| `TC9r8gsaoh` (R2) | 6.00 | Reject | Our paper is stronger — cleaner theory, more compelling ablation, but shares some overlap in concerns about nuisance robustness |
-| `oOGqJ6Z1sA` (R2) | 6.33 | Accept | Our paper is comparable or slightly better — similar theoretical depth, better experimental validation |
-| `1z3SOCwst9` (R2) | 6.50 | Accept | Slightly stronger — clean DP+CATE framework; our paper has a rougher secondary section |
-| `9vTAkJ9Tik` (R2) | 7.00 | Accept | Stronger — very clean doubly robust framework |
-| `S46Knicu56` (R2) | 7.33 | Accept | Clearly stronger — polished, well-executed |
-| `xByvdb3DCm` (R1) | 8.00 | Accept | Much stronger — clean, deep theoretical contribution |
+**Round 2 comparison:**
+- **TC9r8gsaoh (6.00)**: Our paper is stronger — more novel theoretical insight (loss design from moment conditions vs. adversarial DR weighting), cleaner experiments, better ablation. The TC9r8gsaoh paper was criticized for unclear advantages over existing DR-learners; our paper's advantage over Gao (2025) is clearly demonstrated in Table 2.
+- **BHFs80Jf5V (6.50)**: Comparable in quality. Both have solid theoretical contributions with some practical limitations. Our paper has more novel theory and better ablations; BHFs80Jf5V has a cleaner single-contribution focus. 
+- **QGGNvKaoIU (7.00)**: Slightly above our paper. Has comprehensive theory across multiple learners, clear motivation, good exposition. Our paper has a more creative core idea but a weaker, poorly-justified secondary contribution.
 
-**Round 1 bracket: 5.5–7.0**. Round 2 narrowed this: the paper sits between `TC9r8gsaoh` (6.00) and `oOGqJ6Z1sA` (6.33), comparable to `Q2bJ2qgcP1` (6.00) in overall quality but with stronger theory. The core evaluation framework is solid, but the secondary HTE estimation contribution has fairness issues and the "no sample splitting" claim is under-justified. Final score: **6.0**.
+**Final score: 6.5** — the evaluation framework contribution is genuinely novel and well-supported, but the HTE learning extension dilutes the paper and the unspecified candidate set for Table 1 is a gap that needs addressing.
 
----
+Now let me write the final review.Now let me write the final review.
 
 ## Summary
-
-This paper proposes a robust relative-error-based evaluation framework for HTE estimators that relaxes the requirement for consistent outcome regression models. Building on Gao (2025), the authors derive population moment conditions (Eq. 4) via a Taylor expansion and design a weighted least squares (WLS) loss plus a constrained optimization that enforce these conditions, embedded in a Dragonnet-style neural network. The theoretical contribution — achieving robustness to outcome model misspecification through loss design that enforces specific moment conditions — is elegant and well-executed. Experiments on IHDP, Twins, and Jobs demonstrate strong coverage and selection accuracy.
+This paper proposes a relative-error-based evaluation framework for heterogeneous treatment effect (HTE) estimators that is robust to misspecification of outcome regression models. The key insight is a Taylor expansion that reduces the robustness requirement to three moment conditions (Eq. 4), which the paper enforces through a novel weighted least squares loss for outcome models and a balance-regularizer-based constrained optimization for the propensity score, embedded in a Dragonnet-style neural architecture. Theorem 1 establishes √n-consistency and asymptotic normality under only correct propensity score specification. A secondary contribution aggregates pair-specific outcome models to produce a new HTE estimator. Experiments on IHDP and Twins demonstrate that the evaluation framework achieves nominal coverage and high selection accuracy, substantially outperforming Gao (2025) with standard nuisance estimators.
 
 ## Strengths
+- **Clean theoretical reduction to three moment conditions**: The Taylor expansion derivation (Section 4.1, lines 130-148) transforms the vague goal of "robustness to outcome model misspecification" into explicit, verifiable moment conditions (Eq. 4) that directly inform loss function design. This is a crisp, non-trivial theoretical insight.
 
-- **Clean theoretical derivation with tight theory-to-loss mapping.** The Taylor expansion argument (Section 4.1) deriving the sufficient moment conditions (Eq. 4) is the intellectual core of the paper. The WLS loss (line 154) is explicitly constructed so that its first-order conditions enforce the first condition in Eq. (4) — this tight connection between theory and loss design is elegant and distinctive.
+- **Novel loss functions that operationally enforce the required conditions**: The weighted least squares loss L_wls (line 154) is constructed so that its first-order conditions with respect to β₀ and β₁ directly enforce the first term of Eq. (4) even under outcome model misspecification. The balance regularizer L_const (lines 164-178) addresses the remaining two terms via a soft-constraint formulation inspired by SVMs. This is a genuine translation of theory into practice.
 
-- **Compelling ablation demonstrating L_const is essential.** Table 5 shows that removing L_const causes √ePEHE to explode from 0.638 to 3.495 and selection accuracy to collapse from 0.80 to 0.14 on IHDP. The L_wls + L_ce variant essentially replicates Gao (2025) with a TARNet nuisance estimator, and its catastrophic performance directly validates the problem this paper solves.
+- **Theorem 1 provides a concrete theoretical guarantee that relaxes prior work**: The √n-consistency and asymptotic normality result (line 196) requires only correct propensity score specification, relaxing Gao (2025)'s Condition 2 which requires consistency of all nuisance functions. This is a meaningful theoretical advance.
 
-- **Honest sensitivity analysis on the core assumption.** Table 6 tests sensitivity to propensity score misspecification — the one modeling assumption Theorem 1 relies on — by injecting Gaussian noise into the true propensity score. Coverage degrades from 0.96 to 0.80 in the worst case but remains reasonable, and the authors present this forthrightly.
+- **Strong empirical separation in the evaluation task (Table 2)**: The proposed method achieves drastically better selection accuracy than Gao's approach with standard nuisance estimators (80% vs. 44-48% on IHDP; 94% vs. 86-88% on Twins) while maintaining nominal coverage. This directly validates the core claim of producing practically useful confidence intervals.
 
-- **Practically well-motivated problem.** The argument that outcome models require extrapolation across treatment groups (trained on one group, applied to all) while propensity scores do not (trained on full dataset) makes the theoretical relaxation from "all nuisance models consistent" to "only propensity consistent" practically compelling rather than a mere technical refinement.
+- **Well-designed ablation study (Table 5)**: Removing L_const causes severe performance collapse (selection accuracy drops to 0.14 on Twins), while removing L_ce causes only moderate decline, cleanly isolating the constraint loss as the essential innovation.
+
+- **Sensitivity analysis shows reasonable robustness** (Tables 4, 6): Performance remains stable across λ₂ ∈ [0.5, 5], and injecting Gaussian noise into the propensity score degrades coverage only modestly.
 
 ## Weaknesses
 
@@ -40,53 +34,74 @@ None.
 
 ### Major
 
-- **HTE estimation comparison in Table 1 lacks specification and fairness justification.** The paper does not specify which candidate HTE estimators are used for the aggregation in Section 5. If the three candidates (TARNet, Causal Forest, X-Learner) from the relative-error experiments are used, the aggregation has access to information from multiple models while individual baselines use only one. More importantly, the neural network trains outcome models on the test set (using observed outcomes Y), while baseline HTE methods train only on the training set — creating an asymmetry in data access that is not discussed. The paper should clarify the setup and include comparisons against simple ensembling baselines (e.g., uniform averaging of the candidate τ̂_k estimates). This weakness does not invalidate the core evaluation-framework contribution but substantially weakens the HTE estimation claims in Section 5.
+- **The HTE learning method (Section 5) lacks theoretical grounding and the candidate set for Table 1 is unspecified**: The aggregation estimator τ̃(x) in Eq. (line 226) has no theoretical properties established — no consistency, convergence rate, or connection to the relative error framework. The paper acknowledges uniform averaging is suboptimal only in the conclusion. More critically, the paper does not specify which candidate estimators K are used to produce the "Ours" results in Table 1. Section 6.1 lists the HTE baselines but does not state whether these serve as the candidate pool for "Ours." If "Ours" uses the baselines as its candidate set, the comparison is an ensemble-over-baselines rather than a standalone method, making the comparison structurally asymmetric. This affects interpretability of the paper's second claimed contribution and must be clarified in rebuttal.
 
-- **The "no sample splitting" claim is asserted without adequate justification.** The paper states (line 214) that "the key derivation in Section 4.1, as well as the proofs of Theorem 1 and Proposition 2... are conducted using the full dataset without sample splitting" and presents this as an advantage over Gao (2025). However, the derivation uses population quantities and probability limits — it does not itself demonstrate that using the same data for nuisance estimation and evaluation avoids the overfitting concerns that motivate sample splitting / cross-fitting in the double-ML literature. A more careful argument or appropriate reference is needed.
+- **The HTE learning method distracts from the paper's core contribution**: The evaluation framework (Sections 4, 6.2 evaluation results, Table 2) is the paper's strongest contribution. Section 5 attempts to add an HTE estimation contribution without commensurate theoretical or experimental rigor, and the computational cost is quadratic in K. This weakens the paper's overall coherence.
 
 ### Minor
 
-- **Ablation does not isolate the WLS loss.** Table 5 compares L_wls+L_ce vs. L_wls+L_ce+L_const vs. L_wls+L_const, but does not compare against a standard MSE loss for the outcome heads (e.g., L_mse+L_ce+L_const). This would cleanly demonstrate whether the WLS construction specifically matters beyond the constraint loss.
+- **The robustness narrative overstates the practical asymmetry between propensity score and outcome models**: The paper argues (Section 3, line 98-99) that propensity score estimation "does not involve any model extrapolation" while outcome models do, making correct propensity score specification "mild." However, the theoretical guarantee still requires the propensity score model to be correctly specified — which can fail for reasons beyond extrapolation (e.g., missing interactions, nonlinearities). The sensitivity analysis (Table 6) only tests additive Gaussian noise, which probes estimation variance rather than structural misspecification. The theoretical result itself is valid, but the framing promises more than the evidence demonstrates.
 
-- **Soft-relaxation gap between theory and practice.** The theory requires exact satisfaction of the moment conditions in Eq. (4), but the implementation uses soft constraints (slack variables + penalty parameter ρ). The paper acknowledges this (line 180) and the empirical results suggest the approximation works well, but the degradation from exact to approximate satisfaction is not characterized theoretically.
+- **The soft relaxation gap between theory and practice is not formally addressed**: Theorem 1 assumes the conditions in Eq. (4) hold exactly, but the constrained optimization uses slack variables that only approximately enforce them. The paper appeals to Appendix F.4 for empirical evidence but provides no formal analysis of the gap (e.g., bounds on the error introduced by approximate constraint satisfaction).
+
+- **The dependence of L_wls on (τ̂₁ − τ̂₂) is under-discussed**: When the two estimators being compared are similar, the weights approach zero and the loss provides little signal. When the estimators are poor, the weights may encode noise. The paper does not analyze these regimes or their implications for stability of the nuisance parameter estimates.
+
+- **The no-sample-splitting claim needs more careful justification**: The paper claims (lines 28, 214) that the method does not require sample splitting, unlike Gao (2025). While the theoretical derivation does not use sample splitting, the semiparametric literature has broadly moved toward cross-fitting because achieving n^(-1/4) rates without it can be difficult with flexible learners. The paper's citation of Chernozhukov et al. (2018) and Semenova & Chernozhukov (2021) for the rate condition is slightly misleading since those works advocate cross-fitting. A more nuanced discussion is warranted.
 
 ### Trivial
-
-- The paper should explicitly state whether the outcome heads in the neural network are linear in Φ(X) (consistent with working model (2)) to make the theory-implementation connection clear. The treatment head is explicitly described as using sigmoid activation; the outcome heads should be specified similarly.
-
-- Table 3 layout is confusing — the "TARNet" row with time 2.0306s appears under the "# Candidate Est." column, making it unclear where this baseline comparison belongs.
-
-- Notation shift between Section 3 (where \bar{e} and \bar{μ}_a denote estimated nuisance functions) and Section 4 (where \bar denotes probability limits) causes momentary confusion.
+None.
 
 ## Nice-to-Haves
-
-- Extend the "randomly select a subset of pairs" suggestion (line 228) with experimental evaluation.
-- Develop adaptive weighting for the aggregation strategy (acknowledged by authors as future work).
-- Provide theoretical bounds on the degradation caused by soft-relaxation vs. exact constraint satisfaction.
+- A direct comparison against a Dragonnet baseline with standard losses (same architecture, different loss) would isolate the effect of the proposed loss functions from model capacity effects.
+- Adaptive weighting strategies for the aggregation estimator (already acknowledged as future work).
+- Structural misspecification scenarios (e.g., missing interaction terms) in the propensity score sensitivity analysis.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution.
 
-These points are flagged to be removed, treat them with caution:
+- *Harsh Critic's claim that Table 1 comparison is "structurally unfair" and "fatal"*: Removed as a fatal classification. The concern about unspecified candidate estimators is real but addressable — the paper may use a simple candidate set (e.g., the three evaluation estimators: TARNet, CForest, X-Learner) which would make the comparison valid. The issue is missing information, not a proven structural flaw. Retained as Major under the unspecified-candidate-set concern.
 
-- **Harsh Critic: "Structural gap between linear working-model theory and neural network implementation."** The paper explicitly defines working models (1) and (2) as linear in Φ(X). The neural network with linear outcome heads on the learned representation Φ(X) is consistent with these working models. The concern reduces to not explicitly stating the head architecture — see Trivial weakness above. Framing this as a "structural" or "fatal" flaw is significantly overstated.
+- *Harsh Critic's claim that the method description in the ablation (line 345) is "misleading"*: Removed. The paper states the L_wls + L_ce configuration "can be seen as a method of (Gao, 2025), where the proposed neural network degenerates to TARNet and serves as a conventional nuisance estimator to be used in Gao's structure." This is a reasonable ablation interpretation, not misleading.
 
-- **Harsh Critic: "Missing appendix content."** References to Appendix F.4, Appendix D, Appendix F.10 are parser artifacts — appendices exist in the original submission. Per hard rules, removed.
+- *Harsh Critic's claim about "catastrophic failure" of L_wls + L_ce on IHDP being "under-discussed"*: Partially removed. The paper does discuss this result and uses it to highlight the importance of L_const. The dramatic PEHE jump from 0.638 to 3.495 is noted but correctly attributed.
 
-- **Strength Finder: "No sample splitting required" as an unqualified strength.** The paper claims this but justification is insufficient (see Major weakness). Retained in strengths only with the caveat noted in weaknesses.
+- *Harsh Critic's claim that the theoretical narrative is "internally inconsistent"*: Removed as a major criticism. The paper's argument about extrapolation vs. full-dataset estimation is a practical motivation, not a theoretical inconsistency. Theorem 1's requirement of correct propensity score specification is mathematically valid regardless of the motivation's framing. Retained as Minor under the framing-overstatement concern.
 
-- **Harsh Critic: "The claim that \tilde{\delta} shares the same algebraic form... yet is fundamentally different is stated but not explained"** — the paper does imply the explanation (different nuisance parameter estimation via WLS + constraints vs. standard losses) and the point is more about presentation clarity than substance. Downgraded to trivial.
+- *Harsh Critic's section-by-section notes about formatting, architecture contribution, and presentation issues*: Removed — these are either parser artifacts or stylistic preferences.
 
-- **Harsh Critic: "The iterative balance-checking procedure is sensible but informal"** — this is presented as a practical suggestion, not a formal guarantee. Not a weakness worth listing.
+- *Strength Finder's claim about "no sample splitting" as an unqualified strength*: Demoted. The no-sample-splitting claim needs more careful justification and is retained as a Minor weakness.
+
+- *Strength Finder's generic praise of the "pairwise aggregation strategy" as "simple yet effective"*: Qualified. The strategy is noted but with the caveat about missing theoretical grounding.
 
 ## Novel Insights
-
-The paper's mechanism for decoupling outcome model consistency from estimator validity is genuinely novel: by constructing the WLS loss so that its first-order conditions enforce a specific population moment condition, the relative error estimator becomes robust to outcome model misspecification even though those models appear in the estimator's computation. This "loss-design-for-robustness" approach is distinct from standard doubly-robust methods that require at least one nuisance model to be consistent — here the outcome models can be fully inconsistent and the estimator still works, as long as the propensity model is correct and the WLS/constraint structure enforces the moment conditions.
+None beyond the paper's own contributions. The reduction of robustness to three moment conditions and the construction of loss functions that directly enforce them is the paper's novel insight, and it is reasonably well-executed.
 
 ## Suggestions
+- **Clarify the candidate set for Table 1**: Explicitly state which candidate estimators are used for the "Ours" HTE estimator. If the baselines serve as candidates, reposition the contribution as an ensemble method and compare against other ensemble approaches. If a different, simpler candidate set is used, state it clearly.
 
-- Restructure Section 5 as a secondary contribution rather than a co-equal one, and add a simple ensembling baseline (e.g., uniform average of candidate τ̂_k) for fair comparison in Table 1.
-- Add an ablation replacing L_wls with standard MSE (keeping L_ce and L_const) to isolate the specific contribution of the WLS design beyond the constraint loss.
-- Strengthen the "no sample splitting" argument with an explicit discussion or reference explaining why cross-fitting is not needed in this setting.
+- **Either provide theory for Section 5 or reduce its prominence**: The HTE learning method would benefit from at least a consistency result, or the paper could relegate it to a brief discussion / appendix and focus the main text on the evaluation framework, which is the stronger contribution.
 
-MY FINAL SCORE: <score>6.0</score>
+- **Add a formal analysis of the soft relaxation**: Either prove that approximate constraint satisfaction preserves the asymptotic properties with explicit error bounds, or acknowledge this as a limitation and hedge the theoretical claims accordingly.
+
+- **Deepen the propensity score misspecification analysis**: Add structural misspecification scenarios beyond additive Gaussian noise to directly support the paper's central robustness claim.
+
+## Score and Decision
+
+**Calibration anchors used:**
+
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| 5AJ8R4z5g0 (hidden confounders) | 3.25 | R1 | Our paper is clearly stronger — has cleaner theory, better experiments |
+| glgvpS1dD1 (robust HTE perturbation) | 4.50 | R1 | Our paper is stronger — more novel theoretical contribution, better experimental design |
+| TC9r8gsaoh (nuisance-robust weighting) | 6.00 | R1/R2 | Our paper is somewhat stronger — more novel loss design, clearer empirical advantages |
+| x2rZGCbRRd (post-treatment covariates) | 5.50 | R2 | Our paper is comparable or slightly stronger in theory |
+| BHFs80Jf5V (CI for ATE, multiple datasets) | 6.50 | R2 | Comparable quality; our paper has more novel theory, BHFs80Jf5V has a cleaner single-focus contribution |
+| QGGNvKaoIU (meta-learners HTE over time) | 7.00 | R2 | Slightly above our paper — more comprehensive theory, better exposition |
+
+**Round 1 bracket:** 5.5 – 7.5  
+**Round 2 narrowing:** The paper is stronger than the 6.00 anchor (TC9r8gsaoh) in theoretical novelty and empirical demonstration, comparable to the 6.50 anchor (BHFs80Jf5V), and slightly below the 7.00 anchor (QGGNvKaoIU) in overall polish and comprehensiveness of the theoretical contribution.
+
+The core evaluation framework contribution — the reduction of robustness to three moment conditions and the corresponding loss design — is genuinely novel and well-executed. The evaluation experiments (Table 2, Figures 1-2) convincingly demonstrate practical value. However, the HTE learning extension (Section 5) lacks theoretical grounding, the candidate set for Table 1 is unspecified, and several theoretical gaps (soft relaxation, no-sample-splitting justification) remain unaddressed. These weaken the paper but do not invalidate the core contribution.
+
+MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>
