@@ -12,17 +12,17 @@ export OPENAI_DEFAULT_MODEL="glm-5.1"
 export HARSH_MODEL="deepseek-v4-flash"
 export MERGER_MODEL="deepseek-v4-flash"
 export NEUTRAL_MODEL="deepseek-v4-flash"
-export SWEEP_NAME="${SWEEP_NAME:-2026_deepseek_train}"
+export SWEEP_NAME="${SWEEP_NAME:-2026_deepseek_train_balanced}"
 export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
 export MERGE_LOG="${SWEEP_NAME}/merge.log"
-export CONCURRENCY="${CONCURRENCY:-50}"
+export CONCURRENCY="${CONCURRENCY:-20}"
 export MAX_PAPERS="${MAX_PAPERS:-400}"
 export CALIBRATION_SET="deepreview"
 export PAPERS_DIR="${PAPERS_DIR:-/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_train/papers}"
 export REVIEWS_DIR="${SWEEP_NAME}/reviews"
 # Lock OpenRouter provider for the Strength Finder (deepseek only) so
 # routing variance does not leak into the comparison.
-export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-deepseek}"
+export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-"gmicloud/fp8"}"
 
 LOG_FILE="results/${MERGE_LOG}"
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -66,4 +66,4 @@ fi
 
 ollama serve &
 
-python code/main.py --n_samples 5000 --no_cal --include_cal_papers --seed $(cksum <<< '2343' | cut -f 1 -d ' ') --benchmark "$PAPERS_DIR/.."
+python code/main.py --n_samples 5000 --no_cal --include_cal_papers --seed $(cksum <<< '2343' | cut -f 1 -d ' ') --benchmark "$PAPERS_DIR/.." --balanced

@@ -1,92 +1,74 @@
-Now I have a clear calibration picture. Let me write the final consolidated review.
+Now I have sufficient calibration data. Let me write the final review.
 
 ## Summary
-
-O-Forge presents an LLM+CAS framework for proving asymptotic (≪) inequalities: a frontier LLM proposes a domain or series decomposition, and Mathematica's `Resolve` function verifies each piece via quantifier elimination. The paper is motivated by Tao's question about whether LLMs paired with verifiers can help with research-level analysis. Two case studies are presented — a 2-variable inequality (xy ≪ x log x + e^y) and a series estimate from Tao (S(h,m) ≪ 1+log(m²)) — along with qualitative observations from 40–50 additional easier problems.
+O-Forge couples a frontier LLM with Mathematica's `Resolve` function to prove asymptotic inequalities. The LLM proposes a domain decomposition, and `Resolve` axiomatically verifies each subdomain. The paper presents two case studies attributed to Terence Tao and mentions testing on 40–50 easier problems.
 
 ## Strengths
-
-- **Non-trivial decomposition for Tao's series estimate.** The paper identifies explicit breakpoints [h] and [hm] and regime-wise summand approximations ((d+1)/h², 1/d, h²m⁴/d⁶) that reduce a seemingly intractable estimate to manageable pieces. This is a genuine instance where decomposition strategy applies to a research-level inequality. (Section 3, Case Study 2)
-
-- **Principled architecture minimizing LLM-dependent steps.** The system prompts the LLM exactly once (for the decomposition) and delegates all verification to Mathematica, with the paper explicitly noting that "the accuracy of the LLM output is the bottleneck" and that one should minimize the number of bottlenecks (lines 169–173). This stands in contrast to approaches that rely on LLMs for full proof generation.
-
-- **Concrete documentation of backend limitations.** The paper identifies specific failure cases for alternative verification backends — e.g., Lean's `linarith` cannot handle nonlinear functions, Z3 cannot handle transcendentals, CVC5 and MetiTarski fail on the simple implication log x ≤ log y ⇒ exp(x) ≤ exp(y) — which motivates the choice of `Resolve` with documented evidence rather than assertion.
+- **Directly responds to a specific call from Terence Tao.** The paper targets a concrete, practitioner-identified need (MathOverflow 2024; blog 2025a) for AI tools that can propose domain decompositions for asymptotic estimates — a problem class that working mathematicians flag as genuinely useful and not adequately addressed by IMO/contest-math tools.
+- **Demonstrates that Mathematica's `Resolve` fills a real gap.** The paper provides a concrete head-to-head comparison: Lean's `linarith` cannot handle nonlinear functions; Z3 cannot handle transcendental functions; CVC5 and MetiTarski both fail on the trivial implication `log x ≤ log y ⇒ exp(x) ≤ exp(y)`. In contrast, `Resolve` can handle these — this is reproducible evidence that prior theorem-proving infrastructure is insufficient for this problem class.
+- **Single-LLM-prompt design is principled.** The system prompts the LLM exactly once (to propose the decomposition) and delegates all verification to the CAS, explicitly minimizing the LLM reliability bottleneck. This is a well-motivated architectural choice that differs from approaches interleaving LLM calls throughout the proof.
 
 ## Weaknesses
 
+### Fatal
+None. The approach is not invalidated; the core idea is coherent and the case studies demonstrate feasibility on specific problems.
+
 ### Major
+1. **Systematic evaluation is absent.** For a tool paper whose central claim is that a tool *works*, the paper provides no quantitative evaluation whatsoever. The "40–50 easier problems" are described via two toy examples (geometric series, p-series) and qualitative impressions ("k ≤ 4", "orderings are common"). No dataset is released, no success rate is reported, no failure cases are presented, no ablation is performed, and no baseline comparison exists. The two detailed case studies are illustrative but constitute only two data points. Every anchor paper retrieved in calibration that scored ≥3.25 had more evaluation than this paper — including papers that were ultimately rejected for other reasons.
 
-1. **Evaluation is far too thin to support the paper's strong claims.** The paper claims the framework is "remarkably effective" at research-level asymptotic inequalities, but the evidence consists of exactly two case studies (one a trivial undergraduate exercise admitting a two-line proof, the other interesting but with unclear LLM provenance) plus a mention of 40–50 "easier problems" with **zero quantitative results** — no success rate, no failure analysis, no problem-level breakdown, no comparisons to any baseline. A paper that frames itself as answering a question posed by Terry Tao and moving "beyond contest math towards research-level tools" cannot rest on qualitative anecdotes. This is not a matter of adding more experiments; the evaluation as written does not permit any of the headline claims.
+2. **Claims are dramatically disproportionate to the evidence.** The paper claims the tool is "remarkably effective," "useful for research-level mathematics," and "able to prove estimates that research mathematicians spend considerable time and effort proving on a regular basis." The evidence consists of two case studies (one a two-line inequality decomposable into two subdomains, the other described at a high level) plus qualitative impressions from 40–50 problems with no reported numbers. The inequality `xy ≪ x log x + e^y` is a textbook-style exercise; the series estimate is more interesting but its mechanical verification by `Resolve` is not convincingly shown. Claiming this constitutes "research-level mathematics" overstates what is demonstrated.
 
-2. **The LLM's contribution is unevaluated.** The paper's central novelty is using an LLM to propose the creative decomposition. Yet there are zero trials reported, no success rates, no ablations, no comparison across different LLMs, and no analysis of when the LLM succeeds or fails. The paper states that "frontier LLMs like Gemini and ChatGPT ... do a commendable job" (line 132) — this is a bare assertion. For all the paper shows, the decompositions could be hand-crafted by the authors. In a paper whose entire premise depends on the LLM performing a non-trivial reasoning task, this is a decisive evidential gap.
+3. **The series verification mechanism is not coherently explained.** Mathematica's `Resolve` performs quantifier elimination over the reals (real closed fields). Infinite series are not first-order expressible over the reals. The paper mentions "regime-wise simplification" (replacing the summand by its asymptote, e.g., `h² m⁴ / d⁶` for the tail) and then states "the sum of such approximations over their respective ranges can be trivially shown to be ≪ 1 + log m²." It is never clarified whether this tail bound is verified automatically by `Resolve`, computed analytically by Mathematica separately, or asserted by the authors. This is a critical gap: the paper's more interesting case study hinges on a step whose automated verification status is unclear.
 
-3. **Abstract-to-system mismatch.** The abstract promises an "In-Context Symbolic Feedback loop," but the described system involves no loop or feedback at all — the LLM is prompted once, and the CAS runs once. The paper even states "we only prompt the LLM once in the entire process" (line 173). This discrepancy between claimed and actual contribution undermines the paper's framing.
+4. **The technical contribution is thin.** The pipeline — "ask an LLM to propose a decomposition, then verify with a CAS" — is a straightforward combination of existing components with no algorithmic novelty, no training or fine-tuning, no theoretical analysis of when decompositions are sufficient, and no handling of cases where the LLM proposes an incorrect decomposition. The prompt template in Section 4 contains only empty placeholder dashes, making the LLM component non-reproducible from the paper alone. This level of contribution does not meet the bar for a top-tier venue.
 
 ### Minor
-
-1. **Absent critical baseline.** The most important ablation — whether `Resolve` succeeds on the *undecomposed* inequality — is not reported. If `Resolve` often succeeds without decomposition, the entire motivation collapses; if it rarely does, that is the paper's most important result. The paper asserts that without simplification `Resolve` "falters" (Section 5) but provides no data or concrete examples.
-
-2. **Limited baseline comparison.** The comparison with SMT solvers (Z3, CVC5, MetiTarski) is conducted on a single trivial lemma (log x ≤ log y ⇒ exp(x) ≤ exp(y)), not on the actual inequalities O-Forge targets. While this demonstrates a genuine limitation, it does not establish that those tools would fail on the full target problems.
-
-3. **Prompt template shown as empty XML tags.** Lines 199–224 display the structured prompt template with only dashes for content. This is a transparency and reproducibility issue — the prompt design is an important part of the system.
+- **No baselines or ablations.** There is no comparison to using `Resolve` directly without LLM-proposed decomposition, to random decomposition proposals, to Tao's own Lean-based tool, or to alternative decomposition strategies. Without these, it is impossible to determine what value the LLM component adds.
+- **The "40–50 easier problems" are not characterized.** Beyond two trivial examples, no information is given about difficulty distribution, problem sources, or what fraction the tool solved correctly.
+- **The series decomposition is described as standard knowledge** ("a rigorous training in analysis may inform the reader that the natural breaking points are..."), making it unclear whether the LLM contributed anything non-trivial to the second case study.
 
 ### Trivial
-
-- No specific LLM versions, temperature settings, or number of trials are reported.
+None.
 
 ## Nice-to-Haves
-
-- A comparison against heuristic/random decomposition strategies would strengthen the case that the LLM's "creativity" matters.
-- Discussion of what happens when the C-grid search (1 to 10⁴) is insufficient.
+- Release the 40–50 problem suite as a benchmark for future work.
+- Report LLM decomposition proposal success rate over multiple trials and LLM variants.
+- Compare against using `Resolve` directly without any decomposition.
 
 ## Removed Points
-
-These points from the inputs were removed with justification:
-
-- **"No screenshots, log output, Mathematica transcripts"** — presentation nitpick, not a substantive weakness.
-- **"The system is just one LLM call + one CAS call, not a novel framework"** — this restates the architecture; the paper does not claim complex engineering novelty, only that the coupling is effective.
-- **"Which specific LLM version?"** — the paper generically mentions Gemini and ChatGPT; this is a minor transparency issue already covered in the Trivial section.
-- **"LLM vs random/heuristic decomposition ablation"** — moved to Nice-to-Haves; not a required weakness for acceptance.
-- **Various formatting/style nitpicks** — removed per hard rules (parser artifacts, not author errors).
-- **"Missing related works"** — removed per rules (cannot verify external sources).
-- **Strength about "systematic comparison of verification backends"** — downgraded because the comparison is on a single trivial lemma; kept as a weaker version in Strengths.
+- Criticisms about `Resolve` being closed-source and not producing proof objects — the paper explicitly acknowledges this in Section 7 (Limitations) and argues that the trade-off is acceptable because no other tool can handle the problem class.
+- Criticisms about "no evidence the LLM proposed the decomposition" — the paper states that frontier LLMs are used for this purpose; while detailed output records would strengthen the paper, the critic's assertion that no evidence exists goes too far.
+- Formatting/presentation nitpicks that are parser artifacts.
+- Criticisms about missing related works or unreleased tools — these reflect reviewer knowledge gaps, not author errors, per the hard rules.
 
 ## Novel Insights
-
 None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. **Add a systematic evaluation** with a curated benchmark of asymptotic inequalities (≥20 problems spanning multiple difficulty levels), reporting success rates, failure modes, and — crucially — the success rate of `Resolve` on the undecomposed problems as a baseline. Without this, the paper's central claim is unsupported.
-
-2. **Evaluate the LLM component separately:** report decomposition proposal success rates across multiple runs, multiple LLMs, and multiple trials per problem. Show failures.
-
-3. **Either implement the "In-Context Symbolic Feedback loop"** promised in the abstract or remove the claim and align the framing with what the system actually does (one-shot LLM proposal + CAS verification).
-
-4. **Include the actual prompt content** rather than empty XML tags.
-
-## Calibration Anchors
-
-All anchors retrieved from the human-review corpus (`/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/`):
-
-**Round 1 — Bracketing:**
-- `FiyS0ecSm0.md` (Proving Olympiad Inequalities..., avg 6.75, Accept) — Systematic 161-problem evaluation with Lean integration; far stronger than O-Forge.
-- `lJdgUUcLaA.md` (AlphaIntegrator, avg 4.75, Reject) — Had trained model, dataset, and quantitative results; O-Forge's evaluation is weaker.
-- `V5tdi14ple.md` (Don't Trust: Verify, avg 6.25, Accept) — Comprehensive evaluation across multiple benchmarks; much stronger than O-Forge.
-- `JzFLBOFMZ2.md` (ILS-CSL, avg 3.20, Reject) — Different topic but similar evidence strength.
-- `m2nmp8P5in.md` (LLM-SR, avg 8.00, Accept) — Strong evaluation; not comparable in rigor.
-
-**Round 2 — Narrowing:**
-- `EXaKfdsw04.md` (StepProof, avg 3.25, Reject) — Limited evaluation, marginal improvements; O-Forge's idea is more novel but evaluation similarly thin → O-Forge slightly stronger.
-- `mb2rHLcKN5.md` (SubgoalXL, avg 3.75, Reject) — Strong quantitative results but novelty concerns; O-Forge comparable in quality.
-- `cSHBZ4U9eO.md` (Divide-and-Conquer Prompting, avg 5.00, Reject) — Had systematic experiments supporting claims; O-Forge's evaluation is weaker → O-Forge below this anchor.
-- `evDSvZBFRP.md` (Formally Verifying LLMs, avg 4.00, Reject) — Comparable in overall rigor and assessment.
-
-**Round 1 bracket:** Between weak anchors (≤ 3.5) and middle anchors (3.5–7.5), specifically in the 3.5–5.0 subrange.
-
-**Narrowing:** O-Forge is above StepProof (3.25) due to more novel idea and the Tao series connection, comparable to SubgoalXL (3.75), below AlphaIntegrator (4.75) and Divide-and-Conquer Prompting (5.00) because both had more systematic evaluation. The paper lands at **4.0**.
+1. **Run a systematic experiment.** Take a suite of ~50 asymptotic inequalities of varying difficulty, measure (a) how often the LLM proposes a valid decomposition on the first attempt, (b) how the success rate varies with LLM choice and prompt design, (c) what fraction `Resolve` can verify without the LLM, and (d) failure cases and their characteristics. Report a table, not impressions.
+2. **Clarify the series verification pipeline.** Explain precisely how `Resolve` (or Mathematica more broadly) handles the infinite tail sum — is the tail bound computed analytically, approximated numerically, or does `Resolve` handle it natively? Without this clarification, the second case study is not reproducible.
+3. **Calibrate the claims to the evidence.** The framing around "research-level mathematics" and being "remarkably effective" should be replaced with precise statements about what was demonstrated and under what conditions.
 
 ## Score and Decision
 
-MY FINAL SCORE: <score>4.0</score>
+### Calibration Anchors
+
+**Round 1 (bracketing):**
+- *Weak band (<3.5):* LLM4Solver (3.40) — proposed LLM+evolutionary framework for CO solvers, rejected for limited novelty and insufficient comparison. O-Forge has thinner methodology and less evaluation, placing it below this anchor. StepProof (3.25) — step-by-step autoformalization, rejected for marginal improvements and flawed evaluation. O-Forge has comparable evaluation quality (both weak) but better motivation.
+- *Middle band (3.5–7.5):* AlphaIntegrator (4.75) — LLM+symbolic for integration, had trained model, synthetic dataset, quantitative results (83.3%→87.3%), still rejected. O-Forge is clearly weaker: no training, no dataset, no quantitative results. Proving Olympiad Inequalities/LIPS (6.75) — neuro-symbolic inequality prover, rigorous evaluation on 161 problems, baselines, ablations, formal Lean proofs, accepted. O-Forge is far weaker.
+- *Strong band (>7.5):* Not relevant for comparison.
+
+**Round 1 Bracket:** 2.5–4.0
+
+**Round 2 (narrowing within bracket):**
+- ChatSR (3.75) — conversational symbolic regression with LLMs, had evaluation on symbolic regression benchmarks. O-Forge has less evaluation.
+- "Common 7B Language Models Already Possess Strong Math Capabilities" (3.50) — had systematic evaluation on GSM8K/MATH. O-Forge has less evaluation but different contribution type.
+- StepProof (3.25) — had some quantitative results on GSM8K. O-Forge is comparable in evaluation weakness but has stronger motivation.
+- LLM4Solver (3.40) — had benchmarks and quantitative results. O-Forge has stronger motivation but weaker evaluation.
+
+**Final Score:** 3.0
+
+O-Forge is positioned at the lower end of the 2.5–4.0 bracket. It has a compelling motivation and responds to a specific call from Tao, which places it above papers with fundamental confusion (scores ≤2). However, the absence of systematic evaluation, the thin technical contribution, the overclaimed results, and the unclear series verification mechanism all weigh heavily against it. Among the anchors, AlphaIntegrator (4.75) had substantially more empirical substance and was still rejected. StepProof (3.25) had comparable evaluation poverty but more methodological depth. O-Forge's motivation and problem selection are its strongest cards, but a top-tier venue requires demonstrated effectiveness, not just a plausible idea.
+
+MY FINAL SCORE: <score>3.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

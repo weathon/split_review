@@ -1,61 +1,61 @@
-I have sufficient calibration data. Let me produce the final consolidated review.
-
 ## Summary
 
-TD-JEPA proposes a temporal-difference (TD) latent-predictive representation learning method for zero-shot unsupervised RL. It jointly trains state and task encoders, policy-conditioned predictors, and latent-space policies via a TD-based self-predictive loss that operates on off-policy, reward-free transitions — overcoming the on-policy and single-policy limitations of prior latent-predictive methods. Theoretically, it connects latent-predictive learning to successor-measure factorization under idealized assumptions. Empirically, it evaluates across 65 tasks in 13 datasets from ExoRL and OGBench, showing strong results particularly on pixel-based domains where it achieves an ~8% improvement over the next best method on DMC_RGB.
+TD-JEPA introduces a temporal-difference (TD) variant of latent-predictive representation learning for zero-shot reinforcement learning. The core contribution is replacing the Monte Carlo target (Eq. 5) with a TD target (Eq. 7/9), enabling off-policy, multi-policy, multi-step latent prediction from offline reward-free transitions. The method trains explicit state and task encoders, a policy-conditioned predictor, and latent-space policies, enabling zero-shot optimization for any reward in the span of learned features. The paper provides theoretical analysis (gradient-matching theorems, non-collapse guarantee, policy evaluation bound) and evaluates on 65 tasks across 13 datasets from ExoRL and OGBench.
 
 ## Strengths
 
-1. **Novel TD-based latent-predictive loss for multi-policy, off-policy zero-shot RL.** Prior latent-predictive methods were limited to one-step, single-policy, or on-policy settings. TD-JEPA's formulation (Eq. 7→9) enables training from any offline reward-free dataset with sampled actions, which the paper explicitly identifies as a limitation of prior work (lines 17–18, 88–92). This is a genuine algorithmic advance.
+1. **Novel and well-motivated formulation**: The shift from MC to TD latent-prediction (Eq. 7→9) extends latent-predictive learning beyond the one-step/on-policy limitations of prior work. The connection to the Bellman equation for successor features (lines 88–92) is a non-obvious insight that enables a genuine new capability — learning representations predictive of long-term dynamics across multiple policies from off-policy, offline one-step transitions.
 
-2. **Gradient-matching theorems connecting latent-prediction to successor-measure approximation.** Theorem 3 proves that, for fixed representations under tabular assumptions, the optimal predictors and gradients of the TD-JEPA loss match those of explicit forward/backward TD losses for the successor measure. Theorem 1 establishes the analogous result for the MC case. The paper correctly notes this "generaliz[es] and impl[ies] all previous guarantees" (line 157) for latent-predictive analyses, extending prior single-step/single-policy results to the multi-policy TD setting.
+2. **Gradient-matching theorems (Th. 1, 3) provide substantive theoretical grounding**: The paper proves that gradients of the latent-predictive losses w.r.t. the representations match those of explicit successor-measure approximation losses. This extends prior analyses (Tang et al., 2023; Voelcker et al., 2024) from single-policy one-step prediction to the multi-policy multi-step setting. The non-collapse guarantee (Th. 2) and policy evaluation bound (Th. 4) add further theoretical scaffolding.
 
-3. **Non-collapse guarantee for the doubly-latent-predictive TD setting.** Theorem 2 proves that under a continuous-time relaxation, covariance matrices remain constant over time, preventing collapse. The paper correctly identifies this is more complex than prior proofs (Tang et al., 2023) because the TD target is doubly latent-predictive.
+3. **Clear empirical advantage on pixel-based DMC**: Table 1 shows TD-JEPA achieves **628.8 ± 5.5** on DMC_RGB (avg over 4 domains), substantially outperforming the next-best baseline BYOL-γ* at 582.4 ± 9.8 — a gap of ~46 points. This addresses what the paper correctly identifies as "one of the most challenging settings for unsupervised RL so far" (line 36).
 
-4. **Comprehensive and rigorous empirical evaluation.** The paper evaluates on 65 tasks across 13 datasets (ExoRL + OGBench), 7 baselines, 2 observation modalities. On DMC_RGB, TD-JEPA achieves 628.8 ± 5.5 vs. next-best 582.4 ± 9.8 (BYOL-γ*), an ~8% improvement, with even larger margins on individual domains like walker (738.9 vs 648.3). The probability-of-improvement analysis (Fig. 2) provides rigorous bootstrap-based statistical comparison showing TD-JEPA is consistently among top performers across diverse settings, avoiding the narrow-specialization pattern of many baselines.
+4. **Comprehensive evaluation**: 65 tasks across 13 datasets, 7 baselines, two observation modalities (proprio/RGB), with probability-of-improvement analysis (Fig. 2), ablation studies (Fig. 3: prediction target, symmetric vs. asymmetric encoders), and fast-adaptation experiments (Fig. 4). The inclusion of representation learning methods (BYOL*, BYOL-γ*, ICVF*) adapted to the zero-shot framework is a strong design choice.
 
-5. **Frozen representations enable fast downstream adaptation.** Figure 4 shows that TD-JEPA's pre-trained state encoder, kept frozen during fine-tuning, often matches or exceeds training from scratch in sample efficiency, demonstrating additional practical value beyond zero-shot performance.
+5. **Fast adaptation results (Fig. 4)**: Frozen TD-JEPA state encoders enable rapid offline and online RL adaptation, often matching or exceeding training from scratch. This demonstrates a practical secondary benefit beyond zero-shot performance.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **BC regularization in OGBench is insufficiently documented.** Footnote 4 (line 249) states "We additionally apply BC regularization in OGBench based on Park et al. (2025b), as detailed in App. E.6" — but Appendix E is not visible in the submission. The core ambiguity is whether this regularization was applied uniformly to all methods or only to TD-JEPA. Given that OGBench uses low-coverage data where BC regularization likely helps significantly, this affects the interpretability of the OGBench results (Table 1). The paper states "each method is tuned over comparable hyperparameter grids and adopts the same architecture" (line 247), which suggests uniform treatment, but this should be explicitly clarified rather than relegated to a footnote referencing an inaccessible appendix.
-
-2. **Theory-practice gap is substantial and downstream claims are presented without sufficient hedging.** The theoretical analysis (Theorems 1–4) assumes orthonormal representations (A1), uniform state distribution (A2), symmetric transition matrices (A3), linear predictors, and a tabular setting. The paper acknowledges these assumptions (line 157) and notes they "can be relaxed" in the appendix. However, it then presents conclusions as though they apply more directly to the practical algorithm than warranted: "Both these quantities are indirectly optimized by TD-JEPA (Th. 1, 3), which is thus a sound approach for zero-shot policy evaluation" (line 190). In practice, none of A1–A3 hold for any deep-network instantiation, the orthonormality is only weakly regularized, and the predictors are nonlinear. The gap between what is proven and what is asserted about the practical algorithm needs to be more carefully delineated.
+1. **Theoretical assumptions limit the force of the results.** Theorems 1–4 rely on assumptions (A1)–(A3): orthonormal representations, a uniform state distribution, and symmetric transition matrices for all policies. A uniform state distribution is almost never satisfied in any RL setting of interest, and symmetric dynamics require reversibility. The paper correctly notes (line 157) that "they can be relaxed, at the price of more involved proofs," but the practical algorithm (Alg. 1) differs substantially from the idealized linear-tabular setting — it uses nonlinear function approximation, target networks, EMA updates, covariance regularization, and coupled predictor+encoder optimization. The gradient-matching argument is elegant but shows gradients match at the *optimal predictor for each loss*, not along the joint training trajectory of the practical algorithm. The theorems provide useful intuition, but their force as justification for the empirical success of the practical algorithm is limited. This gap is wider than the paper's tone conveys.
 
 ### Minor
 
-1. **BYOL-γ*, BYOL*, ICVF* are novel adaptations by the authors, not independently validated methods.** The paper is transparent about this (footnote 5, line 251), which is commendable. However, on DMC_RGB, the strongest competitor BYOL-γ* (582.4) is one such adaptation. The paper's claim of "matching or outperforming state-of-the-art baselines" remains supported by comparisons against established methods (FB at 456.2, RLDP at 525.7 on DMC_RGB), so this caveat does not undermine the core contribution, but it should temper the framing.
+2. **Empirical advantage is concentrated in DMC_RGB.** In the other three evaluation suites, results are competitive but mixed:
+   - **DMC proprio**: TD-JEPA 661.2 ± 8.3 vs FB 648.2 ± 4.1 (modest advantage, CIs overlap)
+   - **OGBench_RGB**: 41.34 ± 0.45 vs BYOL-γ* 41.58 ± 0.64 (statistically tied)
+   - **OGBench proprio**: 37.98 ± 0.77 vs FB 39.04 ± 0.66 (FB numerically higher)
+   The paper's "matches or outperforms" framing is accurate, but the abstract's emphasis on "especially in the challenging setting of zero-shot RL from pixels" is more cleanly supported for DMC_RGB than for OGBench_RGB (where TD-JEPA is tied with BYOL-γ*). The probability-of-improvement analysis (Fig. 2) correctly shows significance in RGB domains overall, but per-suite the advantage is uneven.
 
-2. **No analysis of failure cases or systematic limitations.** The paper identifies domains where TD-JEPA is not competitive (e.g., antmaze-ms RGB where TD-JEPA scores 84.4 vs RLDP's 90.6; cube-single proprioception where TD-JEPA scores 34.2 vs BYOL-γ*'s 79.4) but provides no discussion of patterns in these failures. What kinds of tasks or data distributions does TD-JEPA systematically struggle with?
+3. **No hyperparameter sensitivity analysis.** TD-JEPA has multiple interacting components (loss balancing, EMA rates, covariance regularization coefficients, latent dimensions d_φ and d_ψ). The paper does not report how robust results are to these choices, which would substantially increase confidence given the method's complexity (4+ networks trained simultaneously).
 
-3. **No computational cost comparison.** TD-JEPA trains four networks (φ, ψ, T_φ, T_ψ) plus policy π, which is more expensive than many baselines. Training time, wall-clock time, and parameter counts are not reported. This omission matters for practitioners.
-
-4. **No hyperparameter sensitivity discussion.** Given the multiple components (two encoders, two predictors, policy, regularization λ, target network update rates), a brief sensitivity statement would strengthen the paper.
+4. **BC regularization in OGBench mentioned but not discussed as potential confound.** Footnote 4 notes that BC regularization is applied in OGBench based on Park et al. (2025b). If BC regularization interacts differentially with representation quality (helping methods with better representations more), this could confound the OGBench results. A brief discussion of this possibility would strengthen the analysis.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- An empirical validation of the theoretical claims on a small tabular domain (e.g., measure actual successor measure approximation error ‖M^{π_z} − φT_zψ^⊤‖).
-- A brief discussion of which theoretical guarantees plausibly extend to the nonlinear case and which are fundamentally tied to the linear/tabular setting.
+- A cleaner ablation isolating the TD-vs-MC comparison (holding architecture and policy-conditioning constant, varying only the loss objective) would directly test the paper's central claim about off-policy TD being the source of improvement.
+- The paper would benefit from an analysis decomposing the DMC_RGB gain: how much comes from the improved state encoder vs. the TD loss vs. multi-step prediction.
+- Reporting per-task effect sizes would sharpen conclusions where CIs overlap across methods.
 
 ## Removed Points
 
-- **"Eq. 9 notation mismatch with Algorithm 1 (stop-gradient only on ψ(s'))"** — Removed as factually incorrect. Eq. 9 applies stop-gradient to both ψ(s') AND T_φ(...). The algorithm uses target networks, which is the standard practical instantiation. No inconsistency.
+These points are flagged to be removed; treat them with caution:
 
-- **"BYOL* baselines are unfair because authors controlled instantiation"** — Removed as overblown. The paper clearly separates established zero-shot methods from adapted representation-learning methods (footnote 5), and the empirical advantages hold against established methods alone.
-
-- **"Gradient matching doesn't guarantee same for nonlinear"** — Merged into Major #2 (theory-practice gap).
-
-- **"Theorem 2 only prevents future collapse, doesn't guarantee useful representations"** — This is technically true of any non-collapse result. The proof is a valid contribution; this limitation is inherent to the class of results.
-
-- **Missing related works, formatting nitpicks, and presentation issues** — Removed per instructions.
+- **Explicit state encoder as a comparison risk** (Harsh Critic): The paper explicitly states (footnote 6) that this protocol *improves* baseline performance (1.3× and 2.4× higher for pixel-based methods). This works in baselines' favor, not TD-JEPA's, and strengthens the evaluation rather than weakening it.
+- **Chicken-and-egg problem in actor loss**: The critic acknowledges this is common to all successor-feature methods, not specific to TD-JEPA. Not a meaningful weakness.
+- **Worst-case bound of Theorem 4**: Standard for theoretical bounds in this literature. Not a meaningful criticism.
+- **Baseline tuning budgets**: The paper states baselines were "tuned over comparable hyperparameter grids" — standard practice.
+- **Statistical rigor about overlapping CIs**: The paper already uses the standard boldfacing convention for overlapping CIs and provides probability-of-improvement analysis.
+- **Missing appendix content / missing proofs**: Parser strips these; they exist in the original submission.
 
 ## Novel Insights
 
@@ -63,32 +63,30 @@ None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Clarify in the main text (not just a footnote) whether BC regularization in OGBench was applied uniformly to all baselines or only to TD-JEPA.
-2. Add a brief paragraph discussing systematic failure patterns and limitations.
-3. Add a computational cost comparison table (training time, parameter counts).
-4. In Section 4, add a cautionary statement explicitly distinguishing which guarantees hold for the practical algorithm and which require the idealized setting.
+- In the camera-ready version, consider adding a targeted ablation that isolates the TD-vs-MC comparison (fix architecture and policy-conditioning, swap only the loss objective) on a subset of domains.
+- Report hyperparameter sensitivity for key parameters (EMA rate, latent dimensions, regularization coefficient).
+- Discuss the potential interaction of BC regularization with representation learning quality in OGBench.
 
 ## Score and Decision
 
-**Calibration anchors** (all papers from /home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/):
+**Calibration summary:**
 
-| Paper | Path | Avg Score | Round | Comparison |
-|---|---|---|---|---|
-| Proto Successor Measure | s9SVlWOcLt | 6.75 | R1 | Stronger theory, much weaker experiments. Rejected due to limited eval. TD-JEPA is more complete. |
-| Conservative World Models | X5qi6fnnw7 | 4.75 | R1 | Incremental contribution (CQL+FB). TD-JEPA is more novel with broader evaluation. |
-| Distributional Analogue to SR | OMwD6pGYB4 | 5.75 | R1 | Interesting theory but limited practical scope. TD-JEPA has stronger empirical validation. |
-| π2vec | o5Bqa4o5Mi | 5.25 | R1 | Narrower scope (policy evaluation only). TD-JEPA is more comprehensive. |
-| Bridging Self-Predictive RL | ms0VgzSGF2 | 6.75 | R2 | Unifying theory + some experiments. Comparable quality, different contribution type. |
-| Episodic Novelty Through TD | I7DeajDEx7 | 6.75 | R2 | Exploration-focused. TD-JEPA has more comprehensive evaluation. |
-| Actor-Critic Representations | tErHYBGlWc | 6.80 | R2 | Representation analysis paper. Comparable quality to TD-JEPA. |
-| Foundation Policies Memory | It4KL6XnPq | 3.00 | R1 | Significantly weaker; TD-JEPA far stronger. |
-| Unsupervised Cognition | eRAXvtP0gA | 2.50 | R1 | Not comparable; speculative approach. |
+| Anchor | Path | Avg Score | Round | Comparison |
+|--------|------|-----------|-------|------------|
+| Proto Successor Measure | s9SVlWOcLt.md | 6.75 | R1/R2 | Weaker experiments (2 envs vs 65), rejected; TD-JEPA is clearly stronger |
+| Conservative World Models | X5qi6fnnw7.md | 4.75 | R1 | Incremental contribution, rejected; TD-JEPA is substantially stronger |
+| π2vec: Policy Representation with SF | o5Bqa4o5Mi.md | 5.25 | R1 | OPE-focused, less ambitious; TD-JEPA is stronger |
+| Distributional Analogue to SR | OMwD6pGYB4.md | 5.75 | R2 | Narrower scope; TD-JEPA is stronger |
+| General-Purpose Model-Free RL (MR.Q) | R1hIXdST22.md | 7.50 | R2 | Comparable evaluation scope, similar theory-practice gap; TD-JEPA has cleaner baseline comparisons but MR.Q accepted at similar score |
+| Bridging State and History Reps | ms0VgzSGF2.md | 6.75 | R2 | Theory-focused, mixed reviews (3,8,8,8); TD-JEPA has stronger empirical contribution |
 
-**Round 1 bracket**: [6.0, 8.0]. The weak anchors (2.0–3.0) clearly fall below TD-JEPA. The middle anchors (4.75–6.75) span the range of zero-shot RL/representation learning papers. The strong anchors (>7.5) are not closely related.
+**Round 1 bracket**: [6.5, 8.5], based on clear superiority over the 4.75–6.75 anchors.
 
-**Round 2 narrowing**: Papers at 6.75–6.80 (Bridging Self-Predictive RL, Episodic Novelty, Actor-Critic Representations) are the closest comparators in quality and topic. TD-JEPA's empirical evaluation is more comprehensive than any of these (65 tasks, 13 datasets, 7 baselines). Its theoretical analysis, while cleaner than most, has a notable practice gap. The BC regularization ambiguity is a transparency issue that needs addressing.
+**Round 2 narrowing**: Comparing to the 7.50 MR.Q anchor (accepted with similar strengths and weaknesses — strong evaluation, theory with assumptions, hyperparameter concerns) and the 6.75 bridging paper (accepted but theory-focused with weaker experiments), TD-JEPA sits between them. It has stronger experiments than the 6.75 anchor and a cleaner contribution than the 7.50 anchor. 
 
-TD-JEPA sits above the 6.75 anchors: its empirical evaluation is more thorough than Bridging Self-Predictive RL, its contribution is more practical than the Distributional Analogue, and its scope is broader than π2vec. However, the theory-practice gap and BC regularization issue prevent it from reaching the 8.0 range. **Final score: 7.0.**
+**Final score: 7.0** — a strong paper with a genuine contribution (the TD latent-prediction formulation is novel, well-motivated, and supported by thorough experiments), but with meaningful limitations (concentrated empirical advantage, theory-practice gap wider than ideal) that prevent it from being in the top tier.
+
+**Decision: Accept**
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

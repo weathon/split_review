@@ -1,86 +1,108 @@
-Here is my final consolidated review:
+Now I have everything needed to write the final review and calibration.
+
+## Round 1 Bracket
+
+After comparing against the anchors in the three bands, I place the paper in the **6.5–7.5** range. It is clearly stronger than the TikZ-focused papers at 6.25 (Sketch2Diagram) and 6.50 (AutomaTikZ) — both of which were accepted — while not reaching the exceptional level of 8.0 papers.
+
+## Round 2 Narrowing
+
+Reading Text2Reward (7.00, Accept) and re-examining the TikZ anchors confirms the bracket. DaVinci has more genuine technical novelty (two-stage SFT+RL pipeline, vectorization-aware hybrid reward, code reordering) than the 6.25–6.50 TikZ papers, and its weaknesses (abstract framing, minor overclaims) are presentation issues rather than fundamental gaps. It is comparable in overall solidity to Text2Reward (7.00) but in a different sub-area.
+
+**Final score: 7.0 — Accept.**
 
 ---
 
 ## Summary
 
-This paper introduces DaVinci, a two-stage framework (SFT + GRPO-based RL) that parses rasterized scientific diagrams into executable TiKZ code. The contributions are threefold: (1) a curated 30K-pair dataset TiKZ30K with drawing-order normalization and comment injection as planning scaffolds; (2) a hybrid reward function that uses vectorized PDF representations (via PyMuPDF) to compute spatio-textual and geometric rewards without relying on OCR; (3) achieving a 97.60% compile rate (Pass@1) on the DATiKZv3 benchmark, substantially exceeding both open-source and proprietary baselines on this metric.
+DaVinci proposes a two-stage SFT+RL framework for parsing raster scientific diagrams into compilable TiKZ code. The key contributions are: (1) a curated dataset (TiKZ30K) with drawing-order normalization and comment-injection as data-level interventions for diagram parsing; (2) a hybrid reward function for GRPO that extracts text and geometric primitives from PDF vector representations, avoiding OCR errors; and (3) achieving a 97.60% compile rate from a 7B backbone, substantially surpassing all open-source models and several proprietary ones.
 
 ## Strengths
 
-1. **Near-perfect compile rate with clear attribution to RL post-training.** Table 1 shows DaVinci-7B achieves 97.60% Pass@1 vs DaVinci-SFT-7B at 84.50% — a 13.1-point absolute gain from the GRPO stage. This dominates all baselines including GPT-5-Default (72.88%), Claude-Sonnet-4 (84.87%), and Gemini-2.5-Pro-Thinking (69.93%). The gap is large and measured on a standardized test set.
+1. **Drawing order normalization as a novel data-level intervention.** The paper identifies that TiKZ code order is largely rendering-order-independent, creating training noise for autoregressive models (Section 3.2, Figure 2). The ablation (Table 4) shows reordering alone improves compile rate by **9.04%** (from 69.74% to 78.78%), with a further 5.72% from comment injection — a clean, controlled demonstration.
 
-2. **Data-side innovations (code reordering + comment injection) are cleanly validated.** Table 4 provides a controlled ablation: reordering alone raises Pass@1 from 69.74% to 78.78% (+9.04%), and adding comment annotations further raises it to 84.50% (+5.72%). This is causal evidence that the paper's key data-level contributions — drawing-order normalization and planning-scaffold comments — are effective and separately isolable. The 15-point total gain from data alone is the paper's strongest individual result.
+2. **Vectorized-representation-based rewards that bypass OCR.** The paper designs R_text and R_geom by extracting text and geometric primitives directly from PDF vectorized representations via PyMuPDF (Section 3.3, Eqs. 3–4). The ablation (Table 5) shows that adding R_text + R_geom improves textual reward from 37.23→42.28 and geometric reward from 41.44→44.10, with corresponding gains in image-level metrics (MSE 64.58→62.30). The two-step exact-then-vaguely matching with Hungarian algorithm (for geometry) is technically sound.
 
-3. **Vectorized-representation reward is a genuinely clever idea with supporting evidence.** Extracting text and geometric primitives from the compiled PDF (via PyMuPDF) rather than relying on OCR avoids error propagation from visual text recognition. Table 5 confirms that adding R_text + R_geom to the base image-level reward improves the task-specific textual reward (37.23 → 42.28), geometric reward (41.44 → 44.10), MSE (64.58 → 62.30), and SSIM (73.07 → 74.01).
+3. **Near-perfect compile rate (97.60% Pass@1) from a 7B model.** DaVinci-7B substantially surpasses Claude-Sonnet-4-Thinking (86.90%) and all other baselines on compile rate (Table 1). The human evaluation (Section 4.4) corroborates this: DaVinci-7B achieves p_best=0.47 vs. p_worst=0.11 in the non-proprietary group (Group 1, score 0.36), with strong inter-annotator agreement (split-half reliability ρ=0.72–0.79).
 
-4. **Human evaluation with sound methodology.** The Best-Worst Scaling setup uses six annotators with strong inter-annotator agreement (split-half reliability ρ = 0.72–0.79). DaVinci-7B achieves the top BWS score among non-proprietary models (μ = 0.365, p_best = 0.47) and outperforms GPT-5-Default and Claude-Sonnet-4-Thinking in the proprietary group.
+4. **Insightful analysis of code-level vs. image-level metrics.** The paper shows that after RL training, cBLEU drops (7.52→6.57) while all visual fidelity metrics improve (Section 4.3), demonstrating that syntactically diverse code can produce visually equivalent outputs. This justifies the design choice to optimize for image-level fidelity rather than code-level similarity.
 
-5. **Explicit temporal decontamination.** Training data is restricted to sources published by December 2023 with the test set containing data from January 2024 onward — a rigor detail often absent in this area.
+5. **Methodological care in dataset construction.** Training data is restricted to sources published by December 2023, strictly separated from the DATiKZ test set (January 2024 onward), preventing contamination. The approach to releasing diff files for non-redistributable data (Section "Data Release and License Information") demonstrates thoughtful reproducibility planning.
 
 ## Weaknesses
 
-### Major
+### Fatal
+None.
 
-None. The core claims are supported by evidence, and the methodology is sound.
+### Major
+None.
 
 ### Minor
 
-1. **"Error-free" extraction claim is overstated.** The paper repeatedly describes its text and geometric extraction from vectorized PDFs as "error-free" (lines 34, 40–41, 52, 122). In practice, PDF extraction via PyMuPDF depends on the correctness of the LaTeX rendering pipeline and can be lossy for math symbols encoded as glyphs without Unicode mappings, ligature handling, or non-standard font encodings. The paper's own matching algorithm (Section 3.3) uses Levenshtein distance with an adaptive threshold, suggesting that even in the vectorized pipeline, exact matching sometimes fails. The approach is a genuine improvement over OCR — and this should be the framing — but "error-free" is an over-commitment. This is a presentation issue, not a methodological flaw.
+1. **Abstract and conclusion overclaim on proprietary model comparisons.** The abstract claims DaVinci "surpasses leading proprietary models like GPT-5 and Claude-Sonnet-4" without mentioning that Gemini-2.5-Pro-Thinking outperforms DaVinci on DreamSim (88.20 vs. 84.83), SigLIP (95.59 vs. 93.93), SSIM (75.86 vs. 73.65), LPIPS (21.64 vs. 22.32), and in human evaluation (score 0.50 vs. -0.01). The main text discusses Gemini fairly (Section 4.3 acknowledges "Gemini-2.5-Pro presents better performance than DaVinci-7B regarding certain metrics"), but the abstract and conclusion present an incomplete picture. DaVinci's actual achievements — beating GPT-5/Claude decisively, near-perfect compile rate, doing so from a 7B model — are strong enough without selective framing. The paper would be more credible with a qualified claim.
 
-2. **Reward ablation shows mixed results on the headline perceptual metric.** In Table 5, DreamSim — arguably the most reliable perceptual metric used — decreases from 85.00 (Base: R_img + R_pass) to 84.75 (Base + R_text + R_geom). While other metrics improve and the task-specific textual/geometry rewards increase substantially, the best-performing DreamSim configuration is the simplest one. The paper should discuss this more candidly.
+2. **"Extraction-error-free" characterization is overstated.** The paper repeatedly (lines 34, 40, 52, 122–123) claims that PDF vector extraction is "error-free." While clearly superior to OCR for this task, PDF text extraction via PyMuPDF can still produce artifacts from font encoding issues, ligature handling, unusual LaTeX math rendering, or coordinate system mismatches. The approach should be characterized as "avoiding OCR-dependent errors" or "direct extraction from vector metadata" rather than claiming perfection. This does not weaken the contribution — the approach is well-motivated without the perfection claim.
 
-3. **No confidence intervals or significance tests for automatic metrics.** Table 1 presents all metrics as point estimates. Several comparisons are close (e.g., DaVinci-7B SigLIP = 93.93 vs GPT-5 SigLIP = 93.79; DaVinci-7B SSIM = 73.65 vs Claude-Sonnet-4 SSIM = 73.45), and without uncertainty quantification it is impossible to assess whether these differences are meaningful or within noise range.
+3. **Human evaluation results are more nuanced than the paper conveys.** In Group 2 (DaVinci vs. proprietary models, Table 3), DaVinci-7B scores **-0.01** (essentially neutral — chosen as worst about as often as best). The paper emphasizes p_best (0.20 vs. 0.13/0.10) and p_wort comparisons, which are directionally favorable, but does not prominently discuss the overall -0.01 score. The results do not invalidate the paper's claims, but the presentation should acknowledge this more directly. (The Group 1 result where DaVinci scores 0.36 against non-proprietary models is a clean and well-presented win.)
+
+4. **Reward ablation partly validates the reward itself.** The "Textual ↑" and "Geometry ↑" metrics in Table 5 are computed using the same vectorization pipeline that R_text and R_geom use during optimization — so the ablation partly shows that optimizing a reward increases the metric it targets, which is somewhat tautological. The image-level metrics (DreamSim, SigLIP, SSIM, MSE, LPIPS) provide independent signal and show modest but consistent improvements, partially mitigating this concern. A stronger validation would include an independent human assessment of text placement or geometric correctness.
+
+5. **No statistical uncertainty reported in Table 1.** The main results table reports no confidence intervals, standard deviations, or significance tests. For several metrics, differences between models are small (e.g., SSIM: Claude-Sonnet-4 73.45 vs. DaVinci-7B 73.65 vs. GLM-4.5V 73.87). Without measures of variability, the reader cannot assess whether these differences are meaningful. Bootstrapped confidence intervals would substantially strengthen the evaluation.
 
 ### Trivial
-
-None.
+- **Table 1 TED formatting error.** TED is ↓ (lower-is-better), yet Gemini (53.77) is bolded as "best" while GPT-5 (53.17, the actual lowest) is underlined as "second-best." The bold/underline annotations appear to be swapped for this column. (May be a parser artifact.)
 
 ## Nice-to-Haves
-
-- Reporting how non-compiling outputs are handled in image-level metric computation (e.g., setting DreamSim = 0 for non-compiling outputs would give a more complete picture).
-- Including compile rate or Pass@1 in the reward ablation (Table 5) to show whether the reward variants differ on this critical dimension.
-- Discussing the computational cost of the data processing pipeline (especially the reliance on Qwen3-Coder-480B for code reordering).
+- Stratified analysis by diagram type (flowcharts, graphs, plots, etc.) to assess whether DaVinci's advantages are broad or concentrated in certain visual categories.
+- Error analysis for the ~2.4% compile failures beyond the mentioned scatter-plot context-limit issue — what other failure modes exist?
+- Ablation using a weaker base model (e.g., 2B or 3B MLLM) to isolate whether gains come from the framework or the Qwen2.5-VL-7B backbone.
+- Reporting reward computation cost — the vectorization approach requires compiling TiKZ→PDF→PyMuPDF parsing; practitioners would benefit from knowing the overhead.
 
 ## Removed Points
+These points from the inputs were removed with justification:
 
-These points were flagged in the inputs but are removed after cross-checking against the paper:
-
-- **Harsh Critic #1 (proprietary model claim is not uniformly supported):** The paper's abstract and conclusion specifically say "surpasses leading proprietary models like GPT-5 and Claude-Sonnet-4" — it does not claim to surpass Gemini-2.5-Pro. The body text (Section 4.3) acknowledges Gemini's advantages on some metrics. The paper is selective about which models it claims to surpass, and for the named models, the claim is supported. Removed because the criticism misreads the actual claim.
-
-- **Strength Finder's generic strengths about problem importance:** Dropped per filtering rule — they lacked specific, verifiable content connected to the paper's evidence.
-
-- **Criticism about "no human evaluation of proprietary model group" or related framing:** The human evaluation results (Table 3) are presented and discussed; the paper acknowledges Gemini's superiority. This is not a hidden result.
+- **"Evaluation lacks rigor" / "baselines may not be fair" (Harsh Critic)** — No concrete anchor in the paper; general area sweep, not a specific identified problem.
+- **Speculative weakness about whether Gemini's compile rate issue is a prompt artifact** — No evidence in the paper; the paper already analyzes Gemini's compilation log failures.
+- **Missing related works** — Cannot be verified without external sources; do not mention.
+- **Reproducibility concerns about undisclosed hyperparameters** — Standard implementation details; training settings are provided in Appendix E.3.
+- **"The test set is small" (Harsh Critic's "Missing Parts")** — Following prior work (DetikZify, DATiKZ); the test set size is standard for this sub-area. Moved to Nice-to-Have.
+- **Pure formatting/style nitpicks** — Parser artifacts, not author errors.
+- **"The cBLEU observation raises a question about why report it" (Harsh Critic)** — Reporting a metric and then explaining why it is not the right target is good scientific practice, not a weakness.
+- **Strength Finder's generic strengths ("the paper addresses an important problem," "the paper targets an interesting question")** — Superficial; removed.
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The harsh critic's observation about the human evaluation asymmetry (Group 2 score -0.01) is worth noting but the paper already discloses the relevant data in Table 3.
 
 ## Suggestions
 
-1. Tone down the "error-free" language to "extraction without raster-based OCR" or "vector-native extraction" — the genuine advantage (avoiding OCR error propagation) is strong enough without overclaiming.
-2. Add bootstrap confidence intervals to Table 1, or at minimum report pass@k with variance across multiple seeds.
-3. Include Pass@1 in the reward ablation table (Table 5) — this is essential for disentangling whether the reward components affect correctness or only image quality.
-4. Qualify the "surpasses proprietary models" claim in the abstract to note that this holds for compile rate and several image metrics, while acknowledging that Gemini-2.5-Pro leads on others.
+1. **Revise abstract and conclusion** to accurately scope the comparison: "DaVinci surpasses GPT-5, Claude-Sonnet-4, and all open-source models, while being competitive with Gemini-2.5-Pro on complementary trade-offs (compile rate vs. visual fidelity)."
+2. **Replace "error-free"** with more precise language such as "avoiding OCR-dependent errors" or "direct extraction from vector metadata."
+3. **Discuss the Group 2 human evaluation** score (-0.01) more transparently in the main text alongside the p_best/p_worst comparisons.
+4. **Add confidence intervals** or bootstrap estimates to Table 1.
+5. **Report reward computation overhead** (compile + parse time per sample) to help practitioners assess practical cost.
 
-## Score and Decision
+## Calibration Anchors
 
-**Calibration anchors used across rounds:**
+| Path | Avg Score | Round | Comparison |
+|---|---|---|---|
+| `/home/.../N18Z2MkMEa.md` | 3.00 | 1 | Code generation with RL, but much weaker execution |
+| `/home/.../Q6HYM1EMu8.md` | 3.00 | 1 | LLM reward generation for robotic RL, far domain |
+| `/home/.../iTrd5xyHLP.md` | 3.40 | 1 | LLM + NAS, different sub-area, lower quality |
+| `/home/.../zEhTnQZB3D.md` | 2.33 | 1 | Continual RL with LLM, much weaker |
+| `/home/.../KvaDHPhhir.md` | 6.25 | 1,2 | Sketch2Diagram — TikZ paper, lower technical depth |
+| `/home/.../v3K5TVP8kZ.md` | 6.50 | 1,2 | AutomaTikZ — TikZ paper, lower technical depth |
+| `/home/.../pwlm6Po61I.md` | 5.67 | 1 | SVG-to-LLM paper, less rigorous |
+| `/home/.../lvDHfy169r.md` | 5.75 | 1 | LLM reward generation for RL, different domain |
+| `/home/.../m2nmp8P5in.md` | 8.00 | 1 | Scientific equation discovery via LLMs, not directly comparable |
+| `/home/.../OI3RoHoWAN.md` | 8.00 | 1 | Robotic simulation task generation, different domain |
+| `/home/.../HnhNRrLPwm.md` | 8.00 | 1 | MLLM benchmark paper, different domain |
+| `/home/.../xoXn62FzD0.md` | 8.00 | 1 | LLM controlled generation, different domain |
+| `/home/.../tUM39YTRxH.md` | 7.00 | 2 | Text2Reward — LLM reward design for RL, comparable quality |
+| `/home/.../IEduRUO55F.md` | 6.25 | 2 | Eureka — similar domain to Text2Reward, lower quality |
+| `/home/.../mw1PWNSWZP.md` | 7.33 | 2 | Code LLM instruction tuning, not multimodal |
+| `/home/.../jZsN9zo8Qi.md` | 6.50 | 2 | Interleaved image-text MLLM benchmark, different task |
+| `/home/.../JDiER86r8v.md` | 6.50 | 2 | MLLM anomaly detection benchmark, different task |
 
-| Paper | Path | Avg Score | Round | Comparison to DaVinci |
-|-------|------|-----------|-------|----------------------|
-| Sketch2Diagram | KvaDHPhhir | 6.25 | R2 | Same domain (TikZ generation). DaVinci has larger dataset, more baselines, RL post-training. Slightly stronger. |
-| FiSAO | cJQ1K2fjpD | 6.20 | R1 | Token-level rewards for VLM alignment. Similar rigor, DaVinci has cleaner ablations. Comparable. |
-| CraftRTL | 8KQzoD5XAr | 7.00 | R2 | Verilog code generation with data improvements. Cleaner execution, fewer framing issues. Slightly stronger. |
-| ScImage | ugyqNEOjoU | 5.33 | R2 | Scientific text-to-image benchmark. Less rigorous. DaVinci is clearly stronger. |
-| RL Hallucination | bO31lfEdos | 5.00 | R1 | RL for object hallucination. Less comprehensive. DaVinci is stronger. |
-| SVG-to-Text | pwlm6Po61I | 5.67 | R2 | SVG-based LLM visual understanding. Related area. DaVinci is more rigorous and better evaluated. |
+**Round 1 bracket**: 6.5–7.5. **Round 2 narrowing**: The paper is clearly stronger than the 6.25–6.50 TikZ papers (Sketch2Diagram, AutomaTikZ) on technical depth and evaluation rigor. It is comparable to Text2Reward (7.00) in overall solidity. The weaknesses are presentation-level, not foundational. **Final score: 7.0**.
 
-**Round 1 bracket:** 5.5–7.0. The paper is clearly above the low-scoring rejects (3–5) and below top-tier papers (7.5+).
-
-**Round 2 narrowing:** Comparing against Sketch2Diagram (6.25), CraftRTL (7.00), and FiSAO (6.20), DaVinci is best aligned with the 6–7 range. It is stronger than Sketch2Diagram on evaluation breadth and technical depth (RL adds more than data augmentation), comparable to FiSAO in overall contribution, and slightly below CraftRTL where the narrative is tighter and framing more precise. The paper's weaknesses (overstated "error-free" claim, modest reward ablation on DreamSim, no confidence intervals) are real but minor — they do not threaten the core contributions, which are solid.
-
-**Final score: 6.5**
-
-MY FINAL SCORE: <score>6.5</score>
+MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

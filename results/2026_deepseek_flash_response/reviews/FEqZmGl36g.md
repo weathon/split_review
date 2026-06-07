@@ -1,81 +1,98 @@
-Now let me write the final consolidated review.
+Now I have a clear picture. Let me finalize the review.
 
 ## Summary
-ESS-Flow introduces a training-free, gradient-free method for controlled generation with pretrained flow-based models. The core insight (Eq. 3) is that by expressing the posterior in the Gaussian source space, the Jacobian determinant of the transport map cancels exactly, enabling MCMC sampling using elliptical slice sampling (ESS) without any gradient or Jacobian computations. The method is demonstrated on materials design (targeting specific mechanical/electronic properties and space-group symmetry) and protein backbone structure prediction from sparse distance measurements.
+
+ESS-Flow applies Elliptical Slice Sampling (ESS) in the source space of flow-based generative models to perform training-free controlled generation without gradients. By exploiting Jacobian cancellation (Eq. 3), the method avoids backpropagation through the transport map, requiring only forward passes. The paper demonstrates the approach on materials property targeting (bulk/shear modulus, band gap, stability, space group) using FlowMM, and on protein backbone prediction using Chroma.
 
 ## Strengths
-- **Core technical insight is clean and correct**: Equation (3) shows the Jacobian determinant of \(T_\theta\) cancels when the posterior is expressed in the source space, yielding \(\pi(z) \propto g(T_\theta(z)) p(z)\). This is a principled derivation, clearly presented, that directly enables gradient-free MCMC requiring only forward passes through the generative model.
-- **Genuinely non-differentiable demonstration**: The space-group symmetry experiment (Section 5.1) uses a binary indicator potential computed via a non-differentiable external program — a setting where gradient-based methods (D-Flow, PnP-Flow) are fundamentally inapplicable. ESS-Flow achieves 92.3% of samples with the target space group vs. 2.5% from the unconditional prior, a concrete and unambiguous demonstration of the method's core value proposition.
-- **Large improvements on differentiable material properties**: Table 2 shows substantial reductions in mean absolute error across bulk modulus (8.99 vs. 39.14 GPa for DAPS), shear modulus (10.53 vs. 84.33 GPa), and band gap (1.85 vs. 3.90 eV), outperforming even DAPS which partially handles the discrete atomic-number structure.
-- **Explicit prior preservation**: In the protein experiment (Table 4), ESS-Flow produces far fewer atom clashes (24.8 vs. 731.3 for ADP-3D, 483.3 for DAPS) with ELBO values (8.89) close to unconditional samples (8.70), demonstrating faithful prior preservation — a property absent in competing methods that sacrifice structural realism for data fit.
+
+1. **Clean mathematical insight with practical payoff**: Equation 3 shows that the Jacobian determinant of the transport map cancels when the posterior is expressed in source space, yielding π(z) ∝ g(T_θ(z)) p(z). This enables gradient-free MCMC. The practical value is demonstrated on the space-group task (Table 3, 81.9% targeting rate vs 2.3% unconditional) where the potential is a binary indicator computed by a non-differentiable external program — a setting where gradient-based methods fundamentally cannot apply.
+
+2. **Strong materials property targeting results**: Table 2 shows ESS-Flow achieves 3–8× lower mean absolute errors than all baselines across three continuous property tasks: bulk modulus MAE of 8.99 GPa vs 39.14 (next-best DAPS), shear modulus MAE of 10.53 vs 84.33, band gap MAE of 1.85 eV vs 3.90. These are large, unambiguous improvements targeting 99th-percentile values. Table 3 confirms that ESS-Flow achieves the highest S.U.N.T. rates across all five material tasks.
+
+3. **Asymptotically exact sampling with convergence guarantees**: Proposition 1 states geometric convergence of the ESS-Flow Markov chain to the target measure in total variation distance. This is a theoretical guarantee that optimization-based alternatives (D-Flow, PnP-Flow, ADP-3D) lack — those methods provide point estimates without any convergence guarantee.
+
+4. **Honest reporting of limitations**: The paper clearly acknowledges when the multi-fidelity extension fails (0.1% ESS for band gap, 1.0% for stability), discusses the gradient-free method's limitations for overly-collapsed targets (Section 4), and explicitly notes that the protein prediction problem remains challenging for all methods.
 
 ## Weaknesses
 
 ### Major
-- **Protein experiment does not support the claimed "better trade-off"**: ESS-Flow's data fidelity is substantially worse than competitors: \(d_y = 37.02\) vs. ADP-3D's 3.43 and DAPS's 11.79; RMSD to ground truth = 13.55 vs. 11.45 and 11.41. The paper frames this as achieving a "better trade-off" between data fit and realism, but an order-of-magnitude worse data fidelity on the primary objective undermines this framing. The ground-truth structure itself has 0 clashes, so the claim that ESS-Flow produces "more realistic" structures is relative to methods that produce obviously broken structures — a low bar. The paper's own conclusion acknowledges this remains challenging, but the experiment does not provide clear evidence of practical value for this task.
-- **Asymmetric comparison on material properties**: D-Flow and PnP-Flow must use a continuous approximation for discrete atomic numbers (Eq. 5, softmax with \(\tau=0.1\)), while ESS-Flow evaluates the potential on the actual discrete output without any approximation. The paper acknowledges this ("Even with the continuous approximation... D-Flow fails to explore") but does not address the implication: the large reported improvements over these methods cannot be cleanly attributed to ESS-Flow's core algorithmic advantage. (This is partly mitigated by the DAPS comparison, which handles discreteness via Metropolis-Hastings and still underperforms ESS-Flow, but D-Flow and PnP-Flow are listed as key baselines.)
+
+1. **Missing comparison with the most directly relevant source-space baselines**. The Related Work (Section 3) identifies Wang et al. (2025) — HMC in source space — and Purohit et al. (2025) — Langevin MC in source space — as the methods most similar to ESS-Flow. These differ only in whether they require gradients. Neither is included as an experimental baseline. Since the paper's positioning is that ESS-Flow is competitive when gradients *are* available and uniquely applicable when they are *not*, the reader cannot quantify the accuracy/efficiency trade-off of going gradient-free. Wang et al. (2025) is described as concurrent, but the omission is still a gap in the experimental evaluation. This is an addressable weakness — adding these baselines (at least on the materials tasks) would substantially strengthen the paper.
+
+2. **Protein experiment lacks MCMC diagnostics and has limited interpretability**. Only 10 backbone structures are generated per method (Section 5.2). No chain diagnostics (effective sample size, R-hat, trace plots) are reported, making it impossible to assess whether ESS-Flow's chains have converged. The data fidelity (d_y=37.02) is substantially worse than ADP-3D (3.43) and DAPS (11.79), and the clash count (24.8) is higher than the unconditional prior (10.1) and D-Flow (14.8). The paper frames this as a "trade-off" between data fidelity and structural realism, which is valid against ADP-3D (731 clashes) and DAPS (483 clashes), but the evidence that ESS-Flow actually achieves better structural realism is weak — it is better than two catastrophically bad methods. Drawing conclusions from n=10 without convergence diagnostics undermines the protein claims.
 
 ### Minor
-- **Low sample diversity across material tasks**: ESS-Flow's U.N. (uniqueness/novelty) rates are consistently lower than competing methods — e.g., 46.1% vs. DAPS 80.8% (bulk modulus), 30.5% vs. DAPS 74.6% (shear modulus), 48.0% vs. D-Flow 69.7% (band gap). While targeting extreme 99th-percentile values explains some of this, the magnitude of the gap suggests limited diversity. Combined with the very low effective sample sizes in the multi-fidelity importance-weighting experiment (0.1% for band gap, 1.0% for stability), this raises concerns about MCMC mixing.
-- **Discontinuity from rounding atomic number encodings**: FlowMM outputs soft encodings that get rounded to discrete atomic numbers before potential evaluation. This creates a discontinuous pullback potential \(g \circ T_\theta\), breaking the continuity condition required for ESS's finite-time termination guarantee (Murray et al., 2010). The paper does not discuss whether this discontinuity is benign in practice or causes issues.
-- **Space-group experiment lacks non-trivial baselines**: Only unconditional and ESS-Flow are compared, with no gradient-free competitor (e.g., DAPS with its Metropolis-Hastings for discrete variables, or a random-search baseline). This is the cleanest demonstration of the gradient-free advantage but is shown in isolation.
-- **Multi-fidelity importance weighting collapses for some tasks**: The effective sample sizes of 0.1% (band gap) and 1.0% (stability) mean the approach as presented is not practically useful for these targets.
+
+1. **Multi-fidelity extension is presented as a contribution but fails on 2 of 4 tasks**. The effective sample sizes are 0.1% and 1.0% for band gap and stability (Section 5.1.1), meaning the importance weights are essentially degenerate. The paper is honest about this ("shortcoming") but listing it alongside working contributions overstates its significance. This would be better presented as a preliminary observation or future work direction.
+
+2. **Theoretical gap between Proposition 1 and the space-group experiment**. Proposition 1 requires the pullback potential to be "bounded away from 0 and ∞ on compact sets." The space-group task uses a binary indicator 1[P_c = y], which is exactly 0 almost everywhere. The paper acknowledges that ESS "excludes potentials constraining to lower-dimensional manifolds" (Section 4.1) but does not connect this to the space-group experiment. Whether the guarantee still applies should be discussed; if not, this should be stated explicitly.
 
 ### Trivial
-- None.
+
+- The contributions list claims "improved structural realism in proteins," but ESS-Flow's clash count (24.8) exceeds the unconditional prior (10.1). The claim is accurate only in comparison to ADP-3D and DAPS, which have catastrophic clash counts (731, 483), and the paper's own text describes this as a trade-off rather than an unambiguous improvement.
 
 ## Nice-to-Haves
-- A summary of wall-clock runtime and number of function evaluations in the main text would help readers assess practical trade-offs (the information is in the appendix per the paper's statement, but computational cost is a first-order concern for an MCMC method).
-- MCMC diagnostics summary (acceptance rate, autocorrelation time, effective sample size per ODE solve) in the main text would help assess mixing.
-- The geometric convergence guarantee (Proposition 1) cites an existing result without verifying its assumptions for the specific experimental problems; a brief discussion of whether these assumptions are plausibly satisfied would strengthen the theoretical framing.
+
+- Report wall-clock time and number of ODE solves per effective sample for ESS-Flow and all baselines in the main text (runtime is mentioned as appearing in the appendix).
+- Add ablation of the continuous approximation (τ=0.1) used for D-Flow and PnP-Flow on the discrete atomic number components, to quantify how much this handicaps those baselines.
+- For the protein experiment, run longer chains and report effective sample sizes. Even n=10 could be more informative with proper diagnostics.
 
 ## Removed Points
-- "No runtime or computational cost comparison appears in the main text" — removed because the appendix (which exists in the original submission) contains this information per the paper's explicit statement ("Hyperparameter details and the runtime costs of the methods are provided in the Appendix"). Parser artifact, not an author omission.
-- "D-Flow's bulk modulus error (205.88) is essentially identical to unconditional (209.39), meaning it is not conditioning at all" — describes a baseline's failure, not a weakness of ESS-Flow.
-- "The protein experiment modification of Chroma introduces an uncontrolled variable" — speculation without evidence that the modification degrades quality or that it affects ESS-Flow differently from other methods.
-- "Random seed and initialization dependence not discussed" — speculation without evidence of a problem; ESS-Flow initializes from the prior by design.
-- Speculative computational cost estimates ("3,000 ODE solves") not grounded in the paper's actual procedure.
-- Generic "method soundness" / "evaluation validity" concerns without concrete anchors in the paper.
+
+- **D-Flow baseline being non-functional**: The reviewer claimed D-Flow's performance at chance level raises questions about experimental setup. However, the paper explicitly discusses why D-Flow fails (management of discrete atomic numbers via continuous approximation; getting trapped in disconnected manifolds as shown in Figure 2). This is a genuine limitation of gradient-based methods that the paper highlights, not a setup flaw. The paper also notes DAPS avoids this by using MH for the discrete components, showing the comparison is nuanced but intentional.
+- **Protein experiment "undermines" the contribution**: The critic's claim that "ESS-Flow produces structures that are less realistic than the prior" and that "d_y = 37.02 implies the likelihood is effectively zero" are overstated. The unconditional prior has catastrophic data fit (d_y=80.21, RMSD_gt=16.98). ESS-Flow's clash count (24.8) is higher than unconditional (10.1) but dramatically lower than ADP-3D (731) and DAPS (483), supporting the paper's trade-off framing. The likelihood claim is speculative and not verifiable from reported numbers.
+- **Formatting/style nitpicks**: Removed per hard rules.
+- **Missing appendix content**: Removed per hard rules (the parser strips these).
+- **Missed related works**: Removed per hard rules (cannot confirm existence of unmentioned works).
+- **Strength Finder generic strengths**: Removed strengths about the paper addressing an "important problem" or being "clearly written" when not backed by specific evidence.
 
 ## Novel Insights
-The paper's core tension — prior preservation vs. conditioning strength — is both its strength and its limitation. ESS-Flow excels precisely when the prior covers the target well (materials with realistic property targets) and struggles when the target lies in a region the prior assigns low density (protein structure prediction from sparse distances). This is not a flaw in the method but an inherent property of source-space MCMC. The paper would benefit from experiments that systematically characterize where this trade-off is acceptable vs. where it breaks down, rather than claiming a "better trade-off" on a single protein benchmark where neither data fidelity nor prior preservation is clearly adequate.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Restructure the protein experiment**: Either reframe it as a clear demonstration of ESS-Flow's limitations (weak conditioning when the prior does not cover the target) or choose a task where the prior better covers the target distribution. The current framing of a "better trade-off" is not supported by the data.
-2. **Add baselines to the space-group experiment**: Include DAPS (with its Metropolis-Hastings for discrete variables) or another method that can handle non-differentiable potentials to make this the flagship head-to-head comparison.
-3. **Report MCMC diagnostics in the main text**: A brief summary of acceptance rates, autocorrelation times, or effective sample sizes per ODE solve would help readers assess whether the chain is mixing adequately.
-4. **Discuss the discontinuity issue**: Acknowledge that rounding atomic number encodings creates a discontinuous pullback potential and explain why this is (or is not) problematic for ESS convergence in practice.
+
+1. **Add Wang et al. (2025) HMC and Purohit et al. (2025) Langevin MC as baselines**, at least on the materials tasks. This directly addresses the most significant gap: without this comparison, the reader cannot evaluate the accuracy/efficiency trade-off of being gradient-free relative to gradient-based source-space methods. Since these are the closest competitors, this comparison is essential for the paper's positioning.
+
+2. **Strengthen the protein experiment**: Run longer chains with convergence diagnostics (ESS, trace plots), and either increase the sample count or provide uncertainty quantification that supports the claimed trade-off. If the experiment cannot be strengthened, consider reframing the protein claims more cautiously.
+
+3. **Relegate the multi-fidelity extension to "future work" or "preliminary investigation"** rather than listing it as a contribution. The honest negative results are valuable for the community, but a method that fails on half the tested tasks does not rise to the level of a stated contribution.
+
+4. **Explicitly discuss why ESS-Flow works for the space-group indicator potential** despite the "bounded away from 0" condition in Proposition 1. This would resolve an apparent theoretical tension.
+
+5. **Foreground the space-group experiment** as the paper's most compelling demonstration of ESS-Flow's unique value — a genuinely non-differentiable potential where gradient-based methods cannot be applied at all.
 
 ## Score and Decision
 
-**Calibration anchors used (all rounds):**
+### Calibration Anchors
 
+**Round 1 (Bracketing):**
 | Path | Avg Score | Round | Comparison |
 |------|-----------|-------|------------|
-| F6SaYwJ3eV ("Posterior sampling via Langevin dynamics based on generative priors") | 3.60 | R1 (low) | Much weaker experiments and novelty; ESS-Flow is clearly stronger |
-| 2o58Mbqkd2 ("The Superposition of Diffusion Models") | 3.25/7.33* | R1 (low) | Score spread too wide to be useful anchor |
-| LyJi5ugyJx ("Simplifying, Stabilizing and Scaling Continuous-time Consistency Models") | 2.38/9.20* | R1 (low) | Score spread too wide |
-| WxLwXyBJLw ("Flow Matching for One-Step Sampling") | 3.25 | R1 (low) | Different scope; weaker method |
-| kIPEyMSdFV ("Reverse Diffusion Monte Carlo") | 7.00 | R1 (mid) | Stronger theory but weaker experiments (2D toy examples only); ESS-Flow has stronger empirical validation |
-| oAMArMMQxb ("Sampling Multimodal Distributions with the Vanilla Score") | 6.25 | R1 (mid) | Theory paper with weak experiments; ESS-Flow has stronger real-world experiments |
-| BjG6McP5nA ("Improving Gradient-guided Nested Sampling") | 6.33 | R1 (mid) | Different method; comparable quality |
-| zMPHKOmQNb ("Protein Discovery with Discrete Walk-Jump Sampling") | 8.00 | R1 (high) | Significantly stronger, full-stack protein work |
-| 61ss5RA1MM ("Training Free Guided Flow-Matching with Optimal Control") | 6.50 | R2 | Closest anchor; comparable topic and experimental scope. That paper had baseline inconsistency issues flagged by reviewers. ESS-Flow's core contribution is cleaner but its protein experiment is weaker. ESS-Flow is slightly below this anchor. |
-| XsgHl54yO7 ("Unlocking Guidance for Discrete State-Space Diffusion and Flow Models") | 6.50 | R2 | Different discrete-state approach; comparable quality |
-| GK5ni7tIHp ("Training-free Guidance in Multi-modal Generative Flow for Inverse Molecular Design") | 6.25 | R2 | Similar scope (training-free guidance for molecular design). ESS-Flow's experiments are more diverse but have more structural issues. ESS-Flow is slightly below this anchor. |
-| 0QJPszYxpo ("Extended Flow Matching") | 5.00 | R2 | Rejected; less convincing methodology. ESS-Flow is above this. |
-| jZPqf2G9Sw ("Dynamics-Informed Protein Design with Structure Conditioning") | 5.50 | R2 | Comparable quality but different methodology |
-| PYDOCManeN ("Representation-space diffusion models for generating periodic materials") | 4.60 | R2 | Rejected; weaker results. ESS-Flow is above this. |
-| OzUNDnpQyd ("Structure Language Models for Protein Conformation Generation") | 7.00 | R2 | Stronger paper with better empirical validation |
-| hiciJQdmpw ("Dual Flows with Contrastive Guidance for Generating Highly Designable Proteins") | 4.75 | R2 | Rejected; weaker. ESS-Flow is above this. |
+| WxLwXyBJLw.md (Flow Matching for One-Step Sampling) | 3.25 | R1 | Weaker — unclear contribution, rejected |
+| SEvJfuCtPY.md (Phase-aware Training Schedule) | 3.00 | R1 | Weaker — limited scope, rejected |
+| 61ss5RA1MM.md (OC-Flow) | 6.50 | R1 | Comparable — both propose training-free guided flow methods; OC-Flow had theory-practice gap and questionable baseline results; ESS-Flow is cleaner but has narrower scope |
+| GK5ni7tIHp.md (TFG-Flow) | 6.25 | R1 | Comparable — similar domain (molecular design); ESS-Flow has clearer methodology and stronger results |
+| XsgHl54yO7.md (Discrete State-Space Guidance) | 6.50 | R1 | Comparable — accepted paper with guidance approach; ESS-Flow has more novel methodology |
+| 8ZJAdSVHS1.md (Conditional Prior for Flow Models) | 4.25 | R1 | Weaker — rejected; less compelling results |
+| OlzB6LnXcS.md (One Step Diffusion via Shortcut Models) | 8.00 | R1 | Stronger — breakthrough-level contribution |
+| 6EUtjXAvmj.md (Variational Diffusion Posterior Sampling) | 8.00 | R1 | Stronger — top-tier work |
 
-\* Some anchors had extreme score spreads; low-band query returned papers with wide variance.
+**Round 2 (Narrowing):**
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| 8ZJAdSVHS1.md (Conditional Prior for Flow Models) | 4.25 | R2 | Weaker — rejected; less compelling |
+| DoDNJdDntB.md (Flow Matching for Posterior Inference) | 4.20 | R2 | Weaker — rejected; limited results |
+| oLw4SH6r8h.md (Stochastic Sampling from Deterministic Flow Models) | 4.25 | R2 | Weaker — rejected; lacked novelty |
+| VMurwgAFWP.md (Designing Mechanical Meta-Materials) | 6.00 | R2 | Comparable — accepted; meta-material design paper with clarity issues that ESS-Flow surpasses |
+| CkozFajtKq.md (Flow Matching for Accelerated Simulation) | 6.33 | R2 | Comparable — rejected despite decent scores; ESS-Flow has stronger structure |
 
-**Round 1 bracket:** 4.5 – 6.5 (ESS-Flow is clearly above the 3.6 reject anchor but below the 7.0–8.0 strong accept anchors).
+**Round 1 bracket:** Plausible score range between 5.0 and 6.5.
 
-**Round 2 narrowing:** The closest topical anchors (OC-Flow at 6.50, TFG-Flow at 6.25) are both accepted papers with comparable types of issues (missing baselines, computational cost concerns, experimental gaps). ESS-Flow's core contribution is cleaner but its experimental validation is weaker in specific ways (protein experiment doesn't support its claim, asymmetric comparisons). The 5.00 and 4.60 anchors are rejected papers that ESS-Flow clearly exceeds.
+**Round 2 narrowing:** ESS-Flow is clearly stronger than the 4.0–4.5 anchors (rejects with limited contributions) and comparable to the 6.0–6.5 anchors (accepted papers with specific weaknesses). Compared to OC-Flow (6.50) and TFG-Flow (6.25), ESS-Flow has a cleaner methodology and more honestly reported results, but is held back by missing key baselines and a weak protein experiment. The anchoring at 6.0 (Mechanical Meta-Materials) is the closest fit — both have clear contributions but suffer from addressable weaknesses that prevent a higher score.
 
-**Final score:** 5.5. This paper has a well-motivated, principled core idea and demonstrates meaningful advantages on material property prediction. However, the protein experiment does not support the claimed trade-off, the asymmetric comparisons inflate the apparent improvements, and concerns about sample diversity and MCMC mixing are not adequately addressed. The contribution is real but the experimental case falls short of ICLR's bar.
+**Final score: 6.0** — The paper has a sound core idea, clear mathematical formulation, and strong materials results. However, the missing comparison with the most directly relevant baselines (source-space HMC and Langevin MC) and the weak MCMC diagnostics in the protein experiment prevent it from being a stronger paper. These are addressable in revision.
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

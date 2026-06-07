@@ -1,103 +1,83 @@
-Now I have sufficient calibration information. Let me compile the final review.
+## Summary
 
-**Initial bracket (Round 1):** The paper sits between 4.5 and 6.5. It's clearly stronger than "What do vision transformers learn?" (4.75, Reject) and "Towards scientific discovery with dictionary learning" (5.60, Reject) but weaker than "Vision Transformers Need Registers" (8.00, Accept) and "Sparse autoencoders reveal selective remapping" (6.50, Accept).
-
-**Narrowing (Round 2):** Comparing against the accepted 6.00 "A Simple Interpretable Transformer" and the accepted 6.50 "SAE remapping" papers: our paper has stronger empirical breadth (3 tasks, geometric diagnostics) but a problematic overclaim in MRH that those papers don't have. The 6.50 paper was accepted despite similar SAE-methodology limitations because it had a cleaner narrative without speculative framing. Our paper is most comparable to the 5.67 "Local vs distributed" paper (Reject) which was also hurt by framing issues. Score: **5.5**.
-
-Let me write the final review.
-
-## Summary of calibrations used
-
-**Round 1 anchors:**
-1. `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/wZiH43e5Ah.md` (3.00, weak) - concept-based interpretability; our paper is substantially stronger
-2. `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/fmWVPbRGC4.md` (5.67, middle) - "Local vs distributed representations"; similar framing issues, rejected
-3. `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/2dnO3LLiJ1.md` (8.00, strong) - "Vision Transformers Need Registers"; our paper is substantially weaker
-
-**Round 2 anchors:**
-4. `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/imT03YXlG2.md` (6.50, Accept) - SAE for CLIP; our paper has similar methodology but weaker framing
-5. `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/4aJg9e4nvF.md` (4.75, Reject) - ViT visualization; our paper is stronger empirically
-6. `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/bkdWThqE6q.md` (6.00, Accept) - Interpretable Transformer; comparable paper with cleaner scope
-
-Now writing the final review:## Summary
-
-This paper trains a stable sparse autoencoder on DINOv2-B to extract a 32,000-concept dictionary—one of the largest such interpretability resources for a vision foundation model. Using this dictionary, it studies how downstream tasks (classification, segmentation, depth estimation) recruit functionally specialized concept subsets, discovering "Elsewhere" concepts (object-dependent off-object signals) for classification, border concept subspaces for segmentation, and three monocular depth cue families for depth estimation. It then characterizes the statistics and geometry of these concepts, finding departures from a purely sparse near-orthogonal coding view. These findings motivate the Minkowski Representation Hypothesis (MRH): token activations lie in Minkowski sums of convex polytopes corresponding to attention heads, with concepts expressed as landmarks/regions rather than linear directions.
+This paper trains a stable sparse autoencoder (SAE) on DINOv2-B with 4 registers to extract a 32,000-atom concept dictionary, claimed as the largest interpretability demonstration for a vision foundation model. Using this dictionary, the authors analyze how downstream tasks (classification, segmentation, depth estimation) recruit concepts, revealing functional specialization including "Elsewhere" concepts for classification (conditional negation), border concepts for segmentation, and three families of monocular depth cues (projective, shadow-based, frequency transitions). The geometric characterization reveals departures from the idealized near-orthogonal structure assumed by the Linear Representation Hypothesis (LRH). Motivated by these departures, the paper proposes the *Minkowski Representation Hypothesis (MRH)* as a working hypothesis: token embeddings behave as Minkowski sums of convex regions around archetypal landmarks, with multi-head attention constructively realizing this structure (Proposition 1).
 
 ## Strengths
 
-- **Large-scale concept dictionary with stable reconstruction.** The paper trains a stable SAE on DINOv2-B producing 32,000 concept atoms with R² > 88% reconstruction fidelity (Section 2), providing an unprecedented-scale resource for analyzing DINOv2's internal representations. The SAE's convex-hull constraint on dictionary atoms is a principled methodological choice addressing reproducibility concerns in prior SAE work.
+1. **Scale of interpretability analysis**: The 32,000-atom SAE dictionary for DINOv2 is the largest such demonstration for a vision foundation model, with well-specified training details (c=32,000 atoms, k=8 active codes, R²>88% reconstruction, line 57). This concretely advances beyond prior SAE-based studies that were predominantly on language models or smaller-scale vision analyses.
 
-- **Empirical discovery of functionally specialized concept subsets.** The paper identifies three striking patterns: (1) "Elsewhere" concepts in classification that fire off-object but depend on the object's presence (Section 3, Figure 2); (2) border concepts forming coherent low-dimensional subspaces for segmentation (Figure 2, right; Figure 10); (3) three distinct monocular depth cue families (projective geometry, shadow-based, frequency transitions) for depth estimation (Section 3, Figure 3). These go beyond prior DINO interpretability work in granularity and specificity.
+2. **Novel discovery of "Elsewhere" concepts**: The identification of concepts that fire off-object yet depend on the object's presence, vanishing under causal masking (line 79, Figure 2), is a non-trivial finding about how DINOv2 supports classification. This goes beyond identifying simple object-part detectors and suggests a form of learned conditional negation.
 
-- **Quantitative diagnostics with principled baselines.** Section 4 provides concrete measurements against rigorous baselines: DD^T inner-product distribution compared to random and Grassmannian frames (using the TAAP algorithm), SVD spectrum analysis, Hoyer scores, and co-activation Gram analysis (Figure 4). The finding that the dictionary is more coherent than a Grassmannian optimum and that task-aligned subsets form low-dimensional subspaces is well-supported.
+3. **Systematic isolation of three monocular depth cue families**: The perturbation-based methodology (median blurring for shadows, edge-preserving smoothing for contours, high-pass filtering for projective geometry) to functionally decompose depth-supporting concepts into three families (Section 3, lines 83-93, Figure 3) is creative and links DINO's internal features to known visual neuroscience principles.
 
-- **Clean demonstration that token geometry is not reducible to position.** Section 5 shows via linear decoders and PCA that per-image token embeddings exhibit smooth, semantically aligned structure that persists after projecting out the positional subspace (Figure 25), ruling out a trivial positional explanation.
+4. **Rigorous geometric characterization with baselines**: The comparisons against both random and Grassmannian baselines (Figure 4) — heavier-tailed inner products, sharper singular-value decay, task-aligned anisotropy — provide quantitative evidence that DINO's concept space departs from the idealized sparse-coding view. The weak correlation between co-activation and geometric similarity (lines 97-107) is a genuinely interesting empirical finding.
+
+5. **Controlled ablation of positional confounding**: The analysis training linear decoders to predict token coordinates, isolating a positional subspace, and then showing that PCA structure persists after projecting it out (Section 5, lines 119-136, Figure 25) actively rules out the simplest confound for the observed token geometry.
+
+6. **Formal theoretical grounding for MRH**: Proposition 1 (lines 155-159) cleanly shows that multi-head attention (headwise convex combinations summed across heads) constructively realizes a Minkowski sum structure. Proposition 2 (lines 167-170) provides a useful non-identifiability result with practical implications for interpretability tool design.
 
 ## Weaknesses
 
 ### Major
 
-1. **MRH is overclaimed relative to its empirical support.** Proposition 1 shows multi-head attention constructively realizes MRH—each head outputs a convex combination and the sum is a Minkowski sum. The paper acknowledges this is "elementary" (line 161). The consequence is that criterion (i) of Definition 1 is guaranteed by the architecture for attention outputs, not an empirical discovery about DINOv2's representations. The three empirical tests supporting MRH (k-NN geodesics, Archetypal Analysis comparison, block structure in code Gram matrices) are described in a single paragraph and entirely deferred to the appendix (Figure 26), with no methodological detail in the main text. For a paper whose title, abstract, and central framing elevate MRH to a co-equal contribution, this level of support is insufficient. The paper would be stronger if MRH were presented as a speculative conceptual observation rather than a major theoretical contribution.
-
-2. **Observed departures from LRH may be confounded with SAE inductive biases.** The SAE uses specific design choices (BatchTopK with k=8, non-negativity, dictionary atoms constrained to the convex hull of activations). These jointly determine what dictionaries can be learned, and the paper does not ablate these choices. The comparison baselines (random, Grassmannian) are mathematically idealized—a Grassmannian frame is the optimal packing for a sparse overcomplete dictionary, so deviation from it under an L2 reconstruction loss with k=8 is unsurprising. Without ablations over k (e.g., k=4, k=16) or SAE variants, it is unclear whether observed geometric patterns reflect DINOv2's intrinsic representation geometry or the specific SAE's solution manifold.
-
-3. **Non-identifiability (Proposition 2) has implications for the paper's own concept dictionary that are not addressed.** The paper proves that Minkowski decompositions are non-unique from final activations alone. This implies that many equally valid factorizations of DINOv2's activations exist, yet the paper's entire analysis in Sections 3 and 4 depends on a particular factorization (the SAE's learned dictionary). The paper acknowledges this and suggests exploiting intermediate signals for future work, but does not discuss what makes the SAE's specific factorization informative rather than merely one of infinitely many. This is a self-referential concern that weakens the claim to have extracted "the" concepts DINOv2 uses.
+1. **The Minkowski Representation Hypothesis is over-represented relative to its evidentiary support.** While the paper honestly calls MRH a "working hypothesis" in the abstract and discussion, it appears in the paper's title, is listed as a core contribution (line 31), and is the declared destination of the paper's narrative arc. The main-text empirical evidence for MRH consists of three sentences (line 163) referencing three tests (k-NN geodesics, Archetypal Analysis vs. SAE reconstruction, block structure in code Gram matrices) — all pointing to appendix figures with no quantitative values reported in the main body. The theoretical connection (Proposition 1) is insightful, but the empirical validation is too thin for the prominence the hypothesis receives. This creates a mismatch between the paper's packaging and its evidentiary content. The paper's SAE dictionary and task analyses stand independently, but the MRH framing inflates the contribution beyond what is demonstrated.
 
 ### Minor
 
-4. **Causal interpretation of "Elsewhere" concepts is partially overstated in the main text.** The main text describes Elsewhere concepts as "indicating a conditional negation" (line 79), but the causal masking evidence is mentioned only in the Figure 2 caption ("evidence suggestive of a causal effect realizing conditional negation (another interpretation being distributed off-object evidence)"). The distinction between correlational and causal evidence should be clearer in the main text, with the alternative interpretation acknowledged in-line.
+2. **"Elsewhere" concept interpretation is qualitatively compelling but quantitatively thin.** The claim that Elsewhere concepts implement "conditional negation" with a "causal effect" (line 79: "they vanish if the object is removed, indicating a conditional negation") is based on a qualitative observation. No numerical comparison of activation magnitudes before/after masking, no sample size, and no statistical test are reported. The paper does acknowledge an alternative interpretation ("distributed off-object evidence") in a parenthetical in the figure caption, but the main text and abstract (line 9: "classification exploits 'Elsewhere' concepts that implement 'object negation'") present the stronger interpretation as settled. This would benefit from quantitative grounding — at minimum reporting mean activation differences and effect sizes across many images/classes.
 
-5. **R² > 88% reconstruction fidelity is reported without variance across runs or data subsamples.** For an interpretability tool whose utility depends on faithful reconstruction, some measure of stability (e.g., variance across seeds or train/test splits) would strengthen confidence.
+3. **No quantitative overlap measure for task-specific concept sets.** The paper states tasks recruit "different subsets" with "minimal overlap" (line 33) and quantifies that "classification draws from a broader span of the dictionary" (line 65), but no Jaccard similarity or similar metric between the top-k task-specific concept sets is reported. This leaves the "functional specialization" claim less precise than it could be.
+
+4. **Tension between SAE analysis and MRH is acknowledged but not grappled with in the empirical sections.** Proposition 2 shows that under MRH, the SAE decomposition of activation space is one of infinitely many possible factorizations — the concepts extracted are non-identifiable from final activations alone. The discussion (line 177) notes this, but the empirical sections do not address whether specific findings (e.g., Elsewhere concepts, depth cue families) could be artifacts of the SAE's particular factorization rather than genuinely reflecting DINOv2's internal computation.
 
 ### Trivial
 
-6. Several empirical observations that would strengthen the in-line argument are deferred to figures in the appendix (Figure 11 for task-specific subspace analysis; Figure 26 for MRH evidence). This makes quantitative support hard to evaluate from the main text alone.
+None.
 
 ## Nice-to-Haves
 
-- A controlled comparison to LRH representations (e.g., generating activations from a known LRH model and checking whether the same diagnostics produce false positives for "departures") would substantially strengthen the argument that observed patterns are specific to DINOv2.
-- Direct comparison of Archetypal Analysis (MRH-like) and SAE (LRH-like) on held-out reconstruction or interpretability would bridge the two halves of the paper more concretely.
-- Stating a clear falsification condition for MRH—what empirical observation would show MRH is wrong?—would strengthen it as a scientific hypothesis.
+- The depth perturbation analysis would benefit from a control condition (e.g., color jitter) that should not affect depth estimation, to confirm that observed clusterings reflect genuine depth cue specialization rather than sensitivity to different image distortion types.
+- Reporting confidence intervals or bootstrap estimates for the geometric comparisons against random and Grassmannian baselines would strengthen the statistical claims.
+- Including key numbers from the MRH empirical tests in the main text (e.g., "AA with ~10 archetypes achieves reconstruction R² of X% vs. SAE's Y%") would help readers assess the evidence without having to locate the appendix.
 
 ## Removed Points
 
-- **Criticism that MRH "is not a testable hypothesis" in full** — Weakened and retained in modified form. The critic's stronger claim that MRH is "definitional" is partially accurate for criterion (i), but criteria (ii) and (iii) of Definition 1 are empirically testable. The paper does attempt preliminary evidence for them (however insufficiently). The fully vacuous framing was removed.
-- **Criticism about the non-identifiability being "structural" and "undermining the entire concept-extraction enterprise"** — Weakened to a minor point because the paper explicitly acknowledges this limitation. Presenting a known limitation of one's approach is intellectual honesty, not a flaw. The critic's framing overstates the damage.
-- **Pure formatting/style nitpicks** (title wordplay criticism, generic presentation comments) — Removed per instructions.
-- **Criticisms about missing related works** — Removed per instructions (cannot be confirmed from external sources).
-- **Criticism about missing appendix details / proofs** — Removed per instructions (parser strips appendix sections from all papers).
-- **Stand-alone criticism about missing confidence intervals** — Removed per soft rules: single-run evaluation is standard for large-scale SAE training, though the R² variance point is retained as trivial.
-- **Strength Finder claims about "addressing an important problem" or generic writing quality** — Removed as generic/superficial.
+*These points were flagged by the reviews but removed after verification against the paper, with reasoning.*
+
+- **Task-alignment metric definition deferred to appendix (Harsh Critic)**: The paper transparently defers the metric to Appendix C.1 (line 63). The appendix is present in the original submission; the parser strips it. Per instructions, this criticism is removed.
+- **"No statistical significance for geometric comparisons" (Harsh Critic)**: The paper provides clear visual evidence against baselines (Figure 4) with appropriate methodology. While confidence intervals would strengthen the claims, the presentation as-is is standard for empirical analysis papers. Moved to Nice-to-Haves.
+- **Strength about MRH "empirical tests" (Strength Finder)**: The claim that "Empirical tests of MRH against data" is a core strength overstates what is demonstrated. The tests are preliminary and referenced only to appendix figures. This strength conflicts with verified weakness #1 and is removed.
 
 ## Novel Insights
 
-The harsh critic's observation that MRH is architecturally guaranteed for attention outputs (criterion (i) of Definition 1) is a genuinely insightful critique that goes beyond what the paper acknowledges—it suggests MRH is not a testable hypothesis about DINOv2 specifically, but a description of the transformer architecture that holds for any model. Combined with the non-identifiability result (Proposition 2), this creates a tension: if MRH is both architecturally guaranteed and non-identifiable from activations alone, its value as a framework for interpreting DINOv2's specific learned representations becomes unclear. The paper would benefit from engaging with this tension directly.
+The most interesting synthesis from the reviews is the structural tension between the paper's two main contributions. The SAE-based analysis operationalizes LRH and produces a concrete, visually interpretable dictionary. The MRH proposal, however, implies that such a decomposition is fundamentally non-identifiable (Proposition 2). The paper acknowledges this but does not engage with the practical consequence: could the specific findings about Elsewhere concepts, border concepts, and depth cue families be artifacts of the SAE's inductive biases rather than faithful reflections of DINOv2's computation? This tension, if developed, could point toward a more nuanced understanding of what SAE-based interpretability actually recovers — a theme that connects to ongoing debates in the mechanistic interpretability community.
 
 ## Suggestions
 
-1. Reframe the paper around the empirical findings (Sections 3-5) as the primary contribution, with MRH demoted to a speculative conceptual observation or discussion point. This would eliminate the mismatch between the strength of the evidence and the prominence of the theoretical claim.
-2. Add SAE ablations (varying k, varying sparsity targets) to demonstrate robustness of the observed geometric patterns against the specific SAE architecture.
-3. Move the MRH empirical evidence (Figure 26 analysis) into the main text with sufficient methodological detail, or acknowledge that this evidence is too preliminary to constitute a central contribution.
-4. Address the non-identifiability self-reference directly: if many factorizations are equally valid, what makes the SAE's specific factorization informative, and how should the community interpret dictionaries learned from activations alone?
-5. Clarify in the main text that the Elsewhere concept interpretation is predominantly correlational, with suggestive (not definitive) causal evidence.
+1. Strengthen the "Elsewhere" concept analysis with quantitative measurements: report mean activation on-object vs. off-object across N images and M classes, with and without causal masking, including effect sizes and variability across classes.
+2. Either (a) tone down the MRH's prominence in the title (e.g., "… and Toward Minkowski Geometry") and introduction, or (b) move key quantitative results from the appendix MRH tests into the main text to better match its billing.
+3. Report Jaccard similarity or another overlap metric between the top-k concept sets recruited by different tasks to sharpen the "functional specialization" claim.
+4. Add a brief discussion in Section 3 or 4 acknowledging that the non-identifiability result (Proposition 2) raises the possibility that specific SAE-discovered concepts reflect the factorization's inductive biases — and why the authors believe their findings are nonetheless robust.
 
 ## Score and Decision
 
-**Comparison anchors used for calibration:**
+**Calibration anchors used across rounds:**
 
-| Path | Avg Score | Round | Comparison |
-|------|-----------|-------|------------|
-| wZiH43e5Ah.md (Conceptualize Any Network) | 3.00 | R1 | Weaker: narrower scope, fewer findings |
-| fmWVPbRGC4.md (Local vs distributed) | 5.67 | R1 | Similar: both have framing issues that hurt an otherwise reasonable submission |
-| 2dnO3LLiJ1.md (ViTs Need Registers) | 8.00 | R1 | Stronger: cleaner narrative, fully-supported claims, more impactful |
-| imT03YXlG2.md (SAE remapping CLIP) | 6.50 | R2 | Comparable methodology but cleaner framing; our paper has broader empirical scope |
-| 4aJg9e4nvF.md (What do ViTs learn?) | 4.75 | R2 | Weaker: shallower analysis, less novel findings |
-| bkdWThqE6q.md (Interpretable Transformer) | 6.00 | R2 | Comparable: similar strengths/weaknesses balance but cleaner scope |
+| Anchor | Path | Avg Score | Round | Comparison |
+|--------|------|-----------|-------|------------|
+| Sparse Autoencoders Find Highly Interpretable Features in Language Models | F76bwRSLeK.md | 4.80 | R1 | Weaker than this paper: narrower scope (language models only), less comprehensive analysis |
+| What do vision transformers learn? A visual exploration | 4aJg9e4nvF.md | 4.75 | R2 | Weaker than this paper: less concrete findings, shallower methodology |
+| A Simple Interpretable Transformer for Fine-Grained Image Classification | bkdWThqE6q.md | 6.00 | R2 | Not directly comparable (method paper); comparable overall quality |
+| Task structure and nonlinearity jointly determine learned representational geometry | k9t8dQ30kU.md | 6.75 | R1/R2 | Slightly stronger: cleaner hypothesis-testing loop, though on simpler models |
+| The Representation Geometry of Features and Hierarchy in Large Language Models | bVTM2QKYuA.md | 6.75 | R2 | Slightly stronger: more rigorous theoretical development with formal definitions and theorems; empirical validation better matched to claims |
+| Geometric Inductive Biases of Deep Networks | cmXWYolrlo.md | 7.50 | R2 | Stronger: cleaner hypothesis with extensive theoretical and empirical development |
+| Interpreting CLIP's Image Representation via Text-Based Decomposition | 5Ca9sSzuDp.md | 8.00 | R1 | Stronger: well-executed analysis with practical applications, no major weaknesses |
 
-**Round 1 bracket:** The paper sits between 4.5 and 6.5 — clearly above the weakest anchors but below the strong ones.
+**Round 1 bracket:** [5.5, 7.5]. The paper is clearly above the weaker empirical interpretability papers (4.5–5.0) and below the top-tier hypothesis papers with cleaner claim-evidence alignment (7.5–8.0).
 
-**Round 2 narrowing:** Compared to the accepted 6.50 SAE-remapping paper, our paper has broader empirical contributions but a more problematic theoretical overclaim. Compared to the rejected 5.67 "Local vs distributed" paper, our paper has stronger empirical findings but similar framing issues. The MRH overclaim is the primary factor preventing a higher score.
+**Round 2 narrowing:** Compared against anchors at 6.0–7.5, the paper sits near the lower end of this range. Its empirical contributions (task analysis, geometric characterization) are solid, but the MRH-evidence gap creates a mismatch between packaging and content that papers at 6.75+ avoid.
 
-**Final score:** 5.5
+**Final score:** 6.0. The paper makes genuine contributions — the 32k-concept dictionary, the task-specific analyses (Elsewhere concepts, border concepts, depth cue families), and the geometric characterization are all novel and well-executed. Proposition 1 connecting attention to Minkowski sums is a genuine theoretical insight. However, the MRH is over-represented relative to its support, and the Elsewhere interpretation would benefit from quantitative grounding. These are fixable weaknesses in a paper whose core empirical contributions are real and valuable.
 
-MY FINAL SCORE: <score>5.5</score>
-MY FINAL DECISION: <decision>Reject</decision>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

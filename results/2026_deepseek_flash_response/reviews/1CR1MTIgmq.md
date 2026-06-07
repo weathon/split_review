@@ -1,97 +1,91 @@
-Now I have a clear picture. Let me write the final consolidated review.
-
 ## Summary
 
-This paper is a point-by-point rebuttal of Palazzo et al. (2024), a TPAMI response that raised concerns about Bharadwaj et al. (2023) and its underlying EEG dataset (Ahmed et al., 2021). The paper argues that eight specific claims in Palazzo et al. (2024) are unfounded, misleading, or false, using direct textual quotations from the cited works and one new experiment (frequency-domain supertrial analysis in Section 7). It does not propose a new method, release data, establish a benchmark, or advance a position grounded in synthesized evidence.
+This paper is a point-by-point rebuttal commentary responding to claims made in Palazzo et al. (2024) about temporal confounds in block-design EEG visual decoding studies. It identifies six specific claims it argues are unfounded, inaccurate, or false, supported by citations from the original papers and one new experiment (frequency-domain supertrial averaging). The paper's primary content is textual argumentation rather than a novel method, theory, dataset, or benchmark.
 
 ## Strengths
 
-- **New empirical analysis in Section 7 (Fig. 1, Table 1) directly refutes the high-frequency attenuation claim.** The paper performs a frequency-domain supertrial averaging (FFT → average magnitude & phase independently → inverse FFT) that demonstrably does not differentially attenuate high frequencies. Despite this, EEGChannelNet remains at chance while SVM, 1D CNN, EEGNet, and SyncNet achieve above-chance accuracy for various supertrial sizes, refuting Palazzo et al.'s claim that the supertrial method penalizes EEGChannelNet by suppressing high-frequency information.
+- **Factual correction on number of subjects (Section 6)**: The paper directly quotes Palazzo et al. (2024) claiming "EEG data collection on one subject only" and shows from Bharadwaj et al. (2023) that the supertrial analysis was applied to seven subjects total (one from Ahmed et al. + six from Li et al.). The correction is precise, well-cited, and definitively documents a factual inaccuracy.
 
-- **Textual evidence definitively refutes the "single subject" claim (Section 6).** The paper quotes Bharadwaj et al. (2023) verbatim showing results on six subjects from Li et al. (2021) in addition to one subject from Ahmed et al. (2021). This makes Palazzo et al.'s claim that "The dataset used by Bharadwaj et al. ... is the result of EEG data collection on one subject only" demonstrably false — a concrete, verifiable error.
+- **Precise dissection of the temporal confound analysis (Section 8, lines 246–260)**: The paper distinguishes two kinds of temporal confound discussed in Li et al. (2021) — within-run same-block vs. cross-run correlated-block — and shows that Palazzo et al. (2020b)'s BDB analysis only measures the weaker, cross-run variant. This is a well-articulated methodological point that directly undercuts the claim that the confound was "already addressed."
 
-- **Sharp terminological distinction on "confound" supported by evidence (Section 8).** The paper cites the APA definition of a confound and draws a logically clean distinction: the temporal confound in block designs *overestimates* classification accuracy (supported by Li et al., 2021, Tables 9 and 10), whereas concerns about interleaved designs would at worst *underestimate* accuracy. This is a conceptually precise rebuttal.
-
-- **Valid logical critique of the BDB analysis (Section 8).** The paper correctly identifies that Palazzo et al. (2020b)'s BDB analysis measures the weaker between-run temporal correlation rather than the stronger within-run correlation that drives the original results, and that the blank-screen intervals are too temporally distant from the stimuli to capture the relevant confound.
+- **New empirical evidence (Section 7, Table 1)**: The frequency-domain supertrial averaging experiment provides direct data relevant to the debate. Table 1 shows EEGChannelNet remains at chance while SVM, 1D CNN, EEGNet, and SyncNet are above chance for various supertrial sizes, consistent with the original Bharadwaj et al. (2023) findings.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+- **Fundamental venue mismatch**: This paper is a narrow, reactive commentary on a specific exchange between two research groups about EEG block-design confounds in visual decoding. It does not advance machine learning methods, theory, datasets, or benchmarks. Its primary content is textual rebuttal of claims in a single other paper. ICLR is a venue for novel machine learning contributions; a point-by-point refutation of claims in a TPAMI paper belongs in a specialized journal or as a formal Comment in a venue that publishes such formats. This is a structural issue that cannot be resolved through revision — the paper's entire framing and scope would need to be rewritten to make it appropriate for this venue.
 
 ### Major
 
-1. **The central claim of "debunking nearly one hundred published papers" is completely unsubstantiated.** The Ethics Statement (lines 301, 335–357) asserts "This work debunks nearly one hundred published papers" and lists ~95 citations. The paper provides no analysis of any of these papers — it does not examine their experimental protocols, demonstrate they suffer from the temporal confound, or show their conclusions are invalid. The only evidence presented in the paper concerns *one* paper (Palazzo et al., 2024) and one experiment on one subject's dataset. This is not a minor exaggeration; it is the paper's headline significance claim and it is entirely unsupported by the paper's content. This dramatically overstates the paper's contribution.
+- **Internal inconsistency between text and figure description in Section 7**: The text (line 152) claims frequency-domain averaging "does not attenuate higher-frequency components. In fact, it amplifies them." Yet the Figure 1 caption states "raw trials having the highest power and the 100 supertrial size having the lowest power." If supertrials have the lowest power across all frequencies, the paper does not clarify what "amplifies" means — whether in absolute terms (contradicted by the caption) or relative to time-domain averaging (not shown). No comparison between frequency-domain and time-domain averaging spectra is provided, so the core claim of Section 7 cannot be evaluated from the evidence presented.
 
-2. **Section 7's "amplifies" claim contradicts the paper's own figure.** The paper states (lines 151–152) that frequency-domain averaging "does not attenuate higher-frequency components. In fact, it amplifies them." Yet Figure 1's caption states: "All spectra show a general downward trend as frequency increases, with the raw trials having the highest power and the 100 supertrial size having the lowest power." The supertrial lines are below the raw trial line at *every frequency* — averaging reduces power everywhere, not amplifies it. The substantive point (frequency-domain averaging preserves relative spectral shape) is valid, but the "amplifies" claim is factually incorrect per the paper's own data and undermines credibility.
-
-3. **Table 1 lacks multiple comparison correction.** With 11 supertrial sizes × 8 methods = 88 statistical tests at p < 0.005, many "significant" results likely would not survive correction. For example, a Bonferroni correction would require p < 0.000057. This weakens the statistical foundation of the paper's only new experimental evidence.
+- **Sweeping claims in the Ethics Statement far exceed the paper's evidence**: The Ethics Statement asserts that "nearly one hundred published papers" (listing ~100 citations) "draw flawed conclusions based on the confounded dataset." The paper engages in detail with exactly one paper (Palazzo et al., 2024) and references results from Li et al. (2021), Ahmed et al. (2021), and Bharadwaj et al. (2023). It does not analyze any of the other ~100 listed papers individually. Regardless of whether this claim is true, the paper provides no evidence to support it for the vast majority of the papers listed.
 
 ### Minor
 
-4. **The paper is not self-contained.** A reader cannot evaluate the significance of any argument without reading Spampinato et al. (2017), Li et al. (2021), Ahmed et al. (2021), Bharadwaj et al. (2023), Palazzo et al. (2020b), and Palazzo et al. (2024). While some reliance on prior work is expected in a rebuttal, the paper provides no self-contained summary of what is at stake or why each factual correction matters beyond the narrow dispute.
+- **The one new experiment (Section 7) is under-described**: No variance or confidence intervals are reported in Table 1; no cross-validation details beyond a reference to Bharadwaj et al. (2023); no statistical comparison between frequency-domain and time-domain averaging; no justification for why averaging magnitude and phase separately would amplify (rather than preserve or attenuate) high frequencies. Given the "quantization noise" the paper itself notes for larger N (fewer test samples), variance information is particularly important.
 
-5. **The Ethics Statement employs accusatory and moralizing language** (lines 305–309: "churn out a plethora of flawed results without reviewers noticing"; lines 314–315: "bad money drives out the good money"; imputation of bad faith to an entire research community). This framing converts what could be a scientific argument about experimental design into a moral indictment that is not supported by the evidence the paper provides. Even if the underlying scientific concerns are valid, this tone is inappropriate for a scientific venue.
+- **One-sided tone without acknowledging legitimate concerns**: The paper characterizes every claim from Palazzo et al. as "unfounded," "inaccurate," "misleading," "false," or "invalid." For example, the substantive concern about whether within-subject EEG analysis generalizes to the broader population is a legitimate methodological issue, even if the specific factual claim about "one subject" was inaccurate. Acknowledging valid concerns would strengthen the paper's credibility.
 
 ### Trivial
-- The "amplifies" contradiction in Section 7 (listed above as major, but the presentation error itself is trivial to fix).
-- Minor notation issues and missing references are expected due to parser artifacts.
+
+None.
 
 ## Nice-to-Haves
 
-- The paper would benefit from framing itself as a position paper or reproducibility critique about experimental design standards in EEG-based object recognition, rather than a point-by-point rebuttal of one specific response.
-- The frequency-domain supertrial analysis should explicitly compare the spectral effects of frequency-domain vs. time-domain averaging to make the "no differential attenuation" point more clearly.
-- Dropping the unsubstantiated "debunking nearly 100 papers" claim entirely would make the paper more honest about its scope.
+- A direct side-by-side comparison of time-domain vs. frequency-domain averaging spectra would make Section 7's claims verifiable.
+- Variance estimates (e.g., standard deviations across cross-validation folds) for Table 1.
+- A reduced-scope Ethics Statement that matches the evidence actually presented in the paper.
 
 ## Removed Points
 
-- **"This paper is not a research paper and does not belong at ICLR" (from Harsh Critic):** Removed because the paper does contain new experimental analysis and makes substantive scientific arguments. ICLR has published critical analyses and position papers. The criticism is largely about scope/contribution level rather than venue fit per se, and is better expressed through the other weaknesses listed.
-
-- **"Self-containedness" and "missing appendix" criticisms:** Softened; some reliance on cited works is expected in a rebuttal, and the parser strips appendices from all papers.
-
-- **Generic criticism about unfair comparison with baselines:** The paper does not present a method that competes with baselines, so this does not apply.
-
-- **Strength Finder's generic strengths about "important problem":** Generic ("this paper addressed an important problem") — removed as non-specific.
+- Criticisms about "unfair comparison" with baselines — not applicable to a rebuttal paper.
+- Criticisms about "missing discussion of limitations of Ahmed et al. (2021)" — the paper addresses the single-subject limitation in lines 276–282.
+- Claim that the paper "does not analyze cross-subject variability" — it does, in Section 5.
+- The harsh critic's framing of Section 7 as "roughly one paragraph" — exaggerated; the section includes a full table and figure with detailed captions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface known tensions (rebuttal vs. research paper format, overclaiming scope) but do not add new analytical perspectives beyond what the paper itself provides.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Remove or drastically revise the claim about "debunking nearly one hundred published papers." If the paper is accepted, this claim is indefensible. Instead, state the paper's actual contribution: refuting specific counterarguments raised by Palazzo et al. (2024) and providing one new experiment that supports the original confound hypothesis.
+- Submit to a specialized neuroscience or methods journal (e.g., *Journal of Neuroscience Methods*, *NeuroImage*) where commentary/rebuttal formats are standard.
+- If pursuing publication, substantially reduce the scope of the Ethics Statement to match the evidence actually presented.
+- Add a direct comparison of frequency-domain vs. time-domain averaging spectra and clarify whether "amplifies" means absolute or relative.
+- Acknowledge at least one legitimate methodological concern from the paper being rebutted.
 
-2. Correct the "amplifies" claim in Section 7 to accurately describe what Figure 1 shows — that frequency-domain averaging preserves the relative spectral shape without differentially attenuating high frequencies, but does not amplify them.
+---
 
-3. Add a multiple comparison correction to Table 1 (e.g., Bonferroni or FDR) and report which results survive.
+## Calibration Anchors
 
-4. Tone down the Ethics Statement to focus on the scientific issues rather than imputing bad faith or using "bad money drives out good" rhetoric.
+### Round 1 — Bracketing
 
-5. Consider reframing the paper as a position piece or critique of experimental design standards rather than a rebuttal of one specific paper.
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| Grad-TopoCAM (FHQDCQFD8y) | 3.00 | R1 low | EEG interpretability paper, rejected for limited novelty. The current paper has a different flaw profile (venue mismatch vs. incremental method) but similar overall quality level for ICLR. |
+| FSL-MIC (PcE0yAGAGW) | 2.20 | R1 low | EEG classification paper, rejected. The current paper's arguments are stronger, but it also lacks the ML methodology contribution that even weak papers have. |
+| EEG-ImageNet (ejVuTFFkl6) | 4.25 | R1 mid | Dataset paper rejected partly for the same temporal confound issues the current paper discusses. Stronger than the current paper in having a concrete new dataset contribution. |
+| Decoding Natural Images (dhLIno8FmH) | 6.75 | R1 mid | **Accepted.** Proposes a novel self-supervised method with SOTA results. In a completely different league from the current paper. |
+| Brain Bandit (RWJX5F5I9g) | 8.00 | R1 high | **Accepted.** Strong theoretical and empirical neuroscience-ML contribution. Not comparable. |
+
+**Round-1 bracket: 2.0 – 4.5** (the paper is clearly below accepted-level papers in the 6.75+ range, but its individual arguments have more substance than the lowest scoring papers)
+
+### Round 2 — Narrowing
+
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| Is Memorization Necessary? (GbEmJmnQCz) | 4.40 | R2 | Closest analogue — a critique/rebuttal paper. However, it addresses a core ML question (memorization vs. generalization) with broader impact, more extensive new experiments (19 model configurations), and a balanced tone. The current paper is narrower, thinner in experiments, and overreaches in its Ethics Statement. |
+| Is Memorization Necessary? (lf8QQ2KMgv) | 3.75 | R2 | Same paper, slightly different review panel. A better comparison point: reviewers valued the critique but noted reproducibility issues and limited original contribution. The current paper is similar in form but narrower in scope and with thinner experiments. |
+| Mind's Eye (KO09K3rBSr) | 4.80 | R2 | EEG-image recognition paper, rejected. Has a proposed method (even if incremental) and extensive experiments. The current paper has neither a method nor extensive experiments. |
+| CALM (TY9mstpD02) | 3.50 | R2 | LLM-based critic automation. A different topic but similar score range — a paper with some merit but insufficient for ICLR. |
+
+**Final bracket:** The closest analogue is the Mem-orization critique papers at 3.75–4.40. The current paper is weaker in multiple dimensions: narrower scope (one paper in a niche subfield vs. a general ML question), thinner experiments (one table vs. extensive re-evaluations), and an overreaching Ethics Statement. The venue mismatch is also more severe (the Memorization critique at least addressed a core ML question). I place this paper below those anchors, at **3.0**.
 
 ---
 
 ## Score and Decision
-
-### Round 1 — Bracketing
-
-**Queries:** `"EEG classification confound rebuttal critique"` across three bands:
-- **Weak anchors (avg < 3.5):** scores 1.0–3.0 — EEG classification papers with fundamental issues, clearly below this paper's level.
-- **Middle anchors (3.5 < avg < 7.5):** scores 3.75–6.75 — includes "Is Memorization Actually Necessary for Generalization?" (3.75, Reject), "(Mis)Fitting Scaling Laws" (5.75, Accept), "Decoding Natural Images from EEG" (6.75, Accept).
-- **Strong anchors (avg > 7.5):** scores 8.0 — top-tier papers with strong empirical contributions, clearly above this paper.
-
-**Bracket:** 2.5 to 4.0. The paper is better than the weak anchors (1.0–3.0) but weaker than the "Memorization" rebuttal paper (3.75), which at least had properly executed experiments and did not overstate its claims.
-
-### Round 2 — Narrowing
-
-**Queries:** `"rebuttal critique negative result confound methodological error"` across bands (0–4.5) and (4.5–7.5).
-
-**Key anchor for comparison:**
-- **"Is Memorization Actually Necessary for Generalization?" (3.75, Reject):** This paper similarly rebuts claims in prior work by identifying methodological errors. However, that paper conducted concrete experiments with proper methodology (training models, measuring accuracy with corrections). The paper under review has *less* empirical content, overstates its claims ("debunks nearly 100 papers"), contains a factual contradiction in its own experimental section ("amplifies" vs. figure showing attenuation), and has statistical issues in Table 1. It is clearly weaker.
-
-**Final score: 3.0.** The paper makes some valid scientific points and contains one useful experiment, but is held back by: (1) an unsupported central claim that dramatically overstates its scope, (2) a factual error in its only experimental section that contradicts its own figure, (3) statistical issues in Table 1, and (4) an inappropriately toned ethics statement. A score of 3.0 reflects a weak paper with some merit that is nonetheless unsuitable for ICLR in its current form.
-
-**Decision: Reject**
 
 MY FINAL SCORE: <score>3.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

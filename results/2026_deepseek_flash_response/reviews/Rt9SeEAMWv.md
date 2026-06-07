@@ -1,18 +1,16 @@
-Now I have strong calibration. Let me write the final review.
-
----
-
 ## Summary
 
-This paper introduces "random set stability," a new notion of algorithmic stability for data-dependent random sets (e.g., optimization trajectories). Using this framework, the authors derive worst-case generalization bounds that replace the intractable mutual information terms present in prior topological/fractal bounds (Dupuis et al., 2023; Andreeva et al., 2024) with a stability parameter βₙ. The framework is shown to interpolate between classical stability bounds and fixed-hypothesis-set Rademacher complexity bounds. Experiments on ViT (CIFAR-100) and GraphSAGE (MNIST-Superpixels) estimate βₙ and show correlations between topological quantities and generalization.
+This paper introduces "random set stability," a new stability notion for data-dependent random sets (e.g., optimization trajectories from SGD), and uses it to derive worst-case generalization bounds that replace intractable mutual information (IT) terms from prior topological/fractal bounds (Simsekli et al., Birdal et al., Andreeva et al.) with a stability parameter β_n. The key theoretical results are Theorem 4.4, which bounds the worst-case generalization error in terms of β_n and topological quantities (E^α and PMag) without any IT terms, and Lemma 3.4, a general bound expressed as a trade-off between β_n and a Rademacher complexity term. Experiments estimate the bounds (using a Massart simplification) and examine correlations between topological complexity and generalization.
 
 ## Strengths
 
-- **Novel theoretical framework that eliminates intractable mutual information terms.** The notion of random set stability (Assumption 3.1) explicitly incorporates algorithmic randomness U, addressing a key limitation of Foster et al. (2019). Theorems 4.3 and 4.4 provide generalization bounds for data-dependent random sets that replace the computationally intractable mutual information terms in prior work (Andreeva et al., 2024; Dupuis et al., 2024) with βₙ, making the bounds in principle fully computable.
+- **First fully computable topological worst-case bounds without mutual information terms**: Theorem 4.4 (lines 221–228) provides bounds expressed purely in terms of β_n and empirically estimable topological quantities (E^α and PMag), with no IT term. This directly addresses a central limitation identified in prior work (Simsekli et al., Birdal et al., Andreeva et al., Dupuis et al.) and is a genuine theoretical advance.
 
-- **Elegant interpolation between classical regimes.** Lemma 3.2 connects random-set stability to standard uniform argument stability. The free parameter J in Lemma 3.4 interpolates between classical algorithmic stability bounds (J=1, recovering Bousquet & Elisseeff, 2002) and fixed-hypothesis-set Rademacher complexity bounds (J=n, βₙ=0, recovering Bartlett & Mendelson, 2002). Corollaries 3.5 and 3.6 formalize this, demonstrating that the framework is a genuine generalization rather than an ad-hoc construction.
+- **Unified framework interpolating between classical stability and Rademacher bounds**: Lemma 3.4 introduces a free parameter J such that J=1 recovers classical algorithmic stability bounds (Corollary 3.5) and J=n recovers fixed-hypothesis-set Rademacher complexity bounds (Corollary 3.6). This interpolation between two previously separate traditions (stability and uniform convergence) is conceptually clean and was absent in prior worst-case bounds on random sets.
 
-- **Theoretical derivation is structured and careful.** The paper lays out the technical machinery clearly: the definition of data-dependent selections (Definition 3.1), the stability assumption (Assumption 3.1), the Rademacher decomposition (Lemma 3.4), and the application to topological complexity measures. The deliberate trade-off between the slower rate (βₙ^{1/3} vs n^{-1/2}) and the removal of unbounded IT terms is explicitly discussed (Section 4.1).
+- **Systematic bridge from classical stability to random set stability**: Lemma 3.2 proves that uniform argument stability of individual iterates implies random set stability with a parameter that sums per-iterate stabilities. Corollary 3.3 applies this to projected SGD under standard Lipschitz/smoothness conditions, giving practitioners a concrete recipe for establishing the new stability notion.
+
+- **First empirical estimation of a worst-case bound for data-dependent random sets**: Table 1 provides numerical estimates of β_n, the worst-case generalization error G_S(W_{S,U}), and the resulting bound for ViT on CIFAR-100 and GraphSAGE on MNIST-Superpixels. Prior work (Dupuis et al., Andreeva et al.) could not fully estimate their bounds due to intractable IT terms, so even the simplified evaluation here represents an incremental step forward.
 
 ## Weaknesses
 
@@ -21,57 +19,76 @@ None.
 
 ### Major
 
-1. **The experiments do not test the paper's headline theoretical results (Theorems 4.3–4.4).** The empirical "order of the bounds" analysis (Table 1) uses a simplified bound 2√(2log(T)/J) + 2Jβₙ derived from Massart's lemma applied to Lemma 3.4—a bound that bypasses the topological complexity measures entirely. The topological quantities E^α and PMag appear only in correlation plots (Figures 2–3), which show correlation rather than validating the bound's functional form. Theorems 4.3–4.4—the paper's claimed main contribution of "IT-term-free topological bounds"—are never directly evaluated. The bound that is actually computed does not involve any of the topological quantities (E^α, PMag, upper box-counting dimension) that distinguish Theorems 4.3–4.4 from prior work, so the experiments do not demonstrate that the mutual-information-free topological bounds are computable, tight, or meaningful. The abstract's claim "we validate our theory" is not supported for the core topological bounds.
+1. **The experiments do not evaluate the paper's headline theoretical results (Theorem 4.4).** The main empirical evaluation (Table 1) bypasses the topological complexity measures (E^α, PMag) entirely. Instead, it uses Massart's lemma to bound the Rademacher complexity as 2√(2log(T)/J) + 2Jβ_n — a bound that depends only on iteration count T and the stability parameter β_n, with no dependence on the topological quantities that Theorem 4.4 is built around. The paper states this choice "to avoid the computationally costly evaluation of Lipschitz constants," but this sidesteps the entire point of the contribution: showing that the topological bounds are practically meaningful and computable. The correlation analysis in Figures 2-3 (E^¹ vs. generalization gap) provides indirect support consistent with Theorem 4.4, but it does **not** evaluate the bound itself — i.e., whether the right-hand side of the inequality in Theorem 4.4 holds, is tight, or provides useful numerical values. The claim that "our experimental results strongly support Theorem 4.4" (line 297) overstates what correlation evidence alone can establish. Without direct evaluation of the topological bounds, readers cannot judge whether the paper's central theoretical contribution is practically useful or vacuous.
 
-2. **Structural mismatch between theoretical assumptions and experimental setup.** The theoretical guarantees (Lemma 3.2, Corollary 3.3, Assumption 4.1) require Lipschitz loss functions and apply to projected SGD under convex-like smoothness conditions. The experiments use the 0-1 loss (Table 1: "We use the 0-1 loss"), which is not Lipschitz—it is piecewise constant with discontinuities at decision boundaries—and the ADAM optimizer, which has no known stability guarantees matching those in Corollary 3.3. The paper does not discuss this gap or justify why the theoretical bounds should be expected to hold in this setting. While some theory papers run experiments in settings beyond their assumptions, the paper frames these experiments as validating the theory ("we validate our theory" in the abstract), which is misleading without acknowledging the assumption violations.
+2. **The convergence rate is slow (O(n^{-1/3}) vs. O(n^{-1/2})), and the claimed trade-off could be better motivated.** When β_n = O(1/n), the bounds scale as O(n^{-1/3}) — strictly worse than the O(n^{-1/2}) rate from uniform convergence or standard algorithmic stability. The paper frames this as a "deliberate trade-off" justified by the claim that IT terms in prior work "can be intractable" and "potentially be infinite." While the paper cites prior work (Dupuis et al., 2024) for these claims, it does not demonstrate a concrete setting where the IT terms are actually infinite or where the O(n^{-1/3}) rate would be preferable to an O(n^{-1/2}) bound with IT terms. The practical implications are significant: the empirical results already show bounds ~10× the actual generalization error even with the simple Massart estimate; actual topological bounds (which would add Lipschitz constants and log-factors) would likely be looser still. The rate gap means these bounds may not provide meaningful guarantees at realistic sample sizes.
 
 ### Minor
 
-1. **The βₙ estimation is acknowledged as optimistic, with no conservative bound.** The estimation procedure (line 254) uses 500 held-out points to approximate the supremum over Z and replaces only 50 of n samples. The paper states this "necessarily leads to an optimistic estimation," but does not bound or quantify the bias. Since βₙ appears as a multiplicative factor in the bounds, an underestimate does not provide a reliable test of bound validity.
+1. **The β_n estimation is acknowledged as optimistic but unquantified.** The paper explicitly notes (line 254) that using 500 held-out points to approximate the supremum over Z "necessarily leads to an optimistic estimation of β_n." Since the reported bounds scale positively with β_n, the actual bounds could be substantially larger than reported. No sensitivity analysis is provided to indicate the magnitude of this optimism.
 
-2. **Correlation plots do not validate the specific functional form of Theorem 4.4.** The paper claims Figures 2–3 "strongly support Theorem 4.4" because the slope of E^1 vs. generalization gap increases with n. However, Theorem 4.4 gives an upper bound involving βₙ^{1/3}√log(1+K_{n,α}E^α), not a predicted slope. Positive correlation between E^1 and the generalization gap is consistent with the bound but does not validate its specific functional form or the multiplicative interaction with βₙ^{1/3}.
+2. **Correlation evidence for the topological bounds is mixed, especially at larger n.** While E^¹ correlates strongly with the generalization gap for ViT (r=0.98 at n=100), the correlations drop substantially for GraphSAGE at larger sample sizes (r=0.37 at n=5000, r=0.28 at n=10000, Figures 2-3). The paper offers a plausible explanation (harder to reach local minima for larger n), but the weak correlations at practically relevant n undermine the claim that topological complexity reliably captures generalization.
 
-3. **Expected bounds only, not high-probability.** The paper provides only expected generalization bounds (acknowledged in Limitations, line 307). Prior work (Dupuis et al., 2024; Andreeva et al., 2024) provides high-probability bounds (with the price of IT terms). The trade-off between removing IT terms and losing high-probability guarantees is a meaningful limitation for practitioners.
+3. **Corollary 3.3 contains notation that is unclear or potentially incorrect.** The expression reads β_n = (4LR/(n-1)) (L/(σR))^{1/G+1} Σ_{1≤k≤T} k^{(G+1)/(G+1)}. The exponent (1/G+1) is ambiguous (1/(G+1) or (1/G)+1?), and k^{(G+1)/(G+1)} = k, making the sum simply T(T+1)/2. The variable σ is not defined in the main text. This may be a formatting artifact from the appendix, but as presented it is confusing.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-- A direct comparison with prior IT-based bounds (even if only qualitative or on a small-scale problem) would help clarify whether the trade-off (slower rate, expectation-only) for removing IT terms is empirically favorable.
-- An experiment in a setting closer to the theoretical assumptions (e.g., SGD with a Lipschitz surrogate loss) would bridge the gap between theory and experiments.
+
+- Directly compute the topological bounds from Theorem 4.4 (or a simplified variant using estimated Lipschitz constants) on at least one experimental configuration. This would directly substantiate the central claim of "fully computable" topological bounds.
+- Add a sensitivity analysis for the β_n estimation (e.g., varying the number of held-out points) to quantify the optimism.
+- Include high-probability versions of the bounds or discuss whether such extensions are feasible within the framework.
 
 ## Removed Points
-- Claim that Corollary 3.3 contains an undefined σ: the appendix (stripped by the parser) likely defines this; cannot be verified from the available text. Removed.
-- Claim that the bound is "essentially independent of βₙ": Table 1 shows that varying βₙ from 2.16×10⁻⁴ to 4.72×10⁻⁴ produces bound changes from ~0.68 to ~1.04, so there is non-trivial dependence. Removed.
-- Formatting/presentation nitpicks about notation density: these are not substantive weaknesses.
-- Criticisms about missing comparisons with specific baselines that require computing intractable IT terms: these are not actionable.
-- "No comparison to prior bounds": the IT terms in prior bounds are intractable, so direct numerical comparison is infeasible by the paper's own premise. Removed as it misunderstands the paper's framing.
+
+These points were flagged during the filtering process and should be treated with skepticism rather than included as weaknesses:
+
+- **Critic's claim about the "first to fully estimate a bound" statement being inaccurate**: Removed. The paper's claim is about estimating *any* worst-case bound on data-dependent random sets (which prior work could not do due to IT terms), not specifically about topological bounds. The claim is defensible.
+- **Critic's claim that IT terms are "finite and well-defined" in cited settings**: Removed. The paper cites prior work (Dupuis et al., 2024) stating these terms are "computationally intractable and not well-understood"; the paper is not making an unsupported claim.
+- **Critic's concern about circular dependency between J and β_n**: Removed. Post-hoc optimization of free parameters in theoretical bounds is standard practice and well-understood in the community.
+- **Critic's concern about the independent sample for Rademacher complexity**: Removed. Ghost-sample symmetrization is a standard technique in learning theory, and the paper explicitly discusses this design choice.
+- **Pure formatting nitpicks and grammar issues**: Removed as parser artifacts.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+None beyond the paper's own contributions. The merged reviews surface a clear structural disconnect: the paper's theoretical engine (Theorem 4.4) generates bounds that depend on topological complexity measures, but the empirical evaluation falls back on a simpler bound that bypasses those measures. This is a genuine gap that the paper's own framing ("the first fully computable topological bounds") makes more stark.
 
 ## Suggestions
-- Either (a) evaluate Theorems 4.3–4.4 directly in a simplified setting where assumptions approximately hold (e.g., SGD with hinge loss on a linearly separable problem), or (b) reframe the current experiments as exploratory/supporting rather than "validating the theory," and clearly state that the simplified bound does not involve topological complexity.
-- Either derive a high-probability version of the bounds or explicitly discuss the difficulty of doing so under the random-set-stability framework.
 
----
+1. **Compute the topological bounds from Theorem 4.4 on at least one experimental configuration.** This is the single most impactful improvement: estimate L_{S,U} (or bound it), compute E^α(W_{S,U}) and/or PMag(W_{S,U}), and evaluate the actual right-hand side of the inequalities. Even if the resulting bounds are loose, reporting them honestly would give readers a clear picture of what the theory delivers in practice.
 
-### Calibration Report
+2. **Add sensitivity analysis for the β_n estimation** by varying the number of held-out points used to approximate the supremum over Z. This would quantify how much the reported bounds are affected by optimistic stability estimates.
+
+3. **Clarify the notation in Corollary 3.3** and ensure that all variables (especially σ) are defined in the main text.
+
+4. **Discuss whether high-probability extensions of the bounds are possible**, as the current expectation-only bounds are weaker than what is standard in learning theory.
+
+## Score and Decision
+
+### Calibration Anchors
 
 **Round 1 (Bracketing):**
-- Low band (score < 3.5): anchors at 2.33 ("Weak Correlations as the Underlying Principle..."), 3.00 ("Simplicity Bias in Overparameterized ML"), 3.00 ("Understanding the Connection between Low-Dimensional Representation and Generalization"). These papers have vague contributions or unsupported claims. Our paper's theoretical contribution is significantly stronger, so score > 3.5.
-- Middle band (3.5–7.5): anchors at 5.25 ("How well does Persistent Homology generalize on graphs?"), 5.67 ("Topological Expressive Power of ReLU Neural Networks"), 5.75 ("Data geometry and topology dependent bounds on network widths"). These papers have clear theoretical contributions but limitations in experiments or framing. Our paper is comparable.
-- High band (7.5+): anchors at 8.00 ("Tight Lower Bounds under Asymmetric High-Order Hölder Smoothness...", "On the Hölder Stability of Multiset and Graph Neural Networks"). These papers have tight, well-validated theory with no significant mismatches. Our paper is weaker.
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| neDGc4slhd.md (TDA on DNNs) | 2.86 | R1 Low | Weaker paper; empirical-only, no theoretical contribution |
+| KNQJtoPZmz.md (Simplicity Bias) | 3.00 | R1 Low | Weaker paper; less technically rigorous |
+| FAY6ORIvn5.md (PH generalization on graphs) | 5.25 | R1 Mid | Comparable; both have theory+experiments on TDA+generalization, similar scope/strength |
+| RFMdtKbff5.md (Tight Generalization Bounds) | 5.00 | R1 Mid | Comparable; theory-heavy with limited experiments |
+| Piod76RSrx.md (Slicing MI Bounds) | 5.50 | R1 Mid | Comparable; similar structure (theory bounds + empirical estimation), similar theory-experiment gap |
+| DZxU0q2S11.md (Data geometry topology bounds) | 5.75 | R1 Mid | Slightly stronger; better theory-experiment alignment |
+| P7KIGdgW8S.md (Hölder Stability of GNNs) | 8.00 | R1 High | Stronger; accepted, cleaner empirical validation |
+| fMTPkDEhLQ.md (Tight Lower Bounds) | 8.00 | R1 High | Stronger; accepted, mathematically rigorous |
 
 **Round 2 (Narrowing):**
-- Anchors at 5.00 ("Federated Learning, Lessons from Generalization Study", "Which Algorithms Have Tight Generalization Bounds?"), 5.25 ("Stability and Generalization in Free Adversarial Training"), 6.50 ("Rethinking Information-theoretic Generalization").
-- The 5.00 FL paper is the closest comparator: novel theoretical bounds tailored to a specific setting (FL), but with unrealistic assumptions and experiments that don't fully align with the theory—rejected. The 5.25 adversarial training paper similarly has theory-experiment gaps.
-- The 6.50 information-theoretic generalization paper is stronger: the theory is directly validated in experiments, with no mismatch between assumptions and experimental setup.
-- Our paper sits between 5.00 and 5.25: the theoretical contribution is genuine and novel, but the experimental validation has two significant gaps (simplified bound instead of topological bounds, theory-experiment mismatch) that the paper does not adequately address.
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| Piod76RSrx.md (Slicing MI Bounds) | 5.50 | R2 | Comparable; similar profile but our empirical disconnect is more severe → slightly weaker |
+| N5ID99rsUq.md (Stability in Free AT) | 5.25 | R2 | Comparable; similar structure, similar limitations |
+| wTtDgucL7h.md (Two Facets of SDE) | 5.75 | R2 | Slightly stronger; better theory-experiment alignment despite other flaws |
+| FAY6ORIvn5.md (PH generalization on graphs) | 5.25 | R2 | Comparable; similar scope |
 
-**Final score: 5.0**
-
-**Score and Decision**
+**Bracket:** Round 1 placed the paper between 4.5 and 6.0. Round 2 anchors clustered at 5.0–5.75, and the paper's theory is genuinely novel but the empirical disconnect is more severe than any of these anchors. The paper sits at the lower end of this range.
 
 MY FINAL SCORE: <score>5.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

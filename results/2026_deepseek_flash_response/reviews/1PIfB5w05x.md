@@ -1,92 +1,82 @@
-## Summary
+Now I have sufficient calibration data. Let me write the final review.
 
-This paper studies sparse support recovery when observations come from two sources with different noise levels (mixed-quality data). It provides: (i) information-theoretic sufficient conditions for recovery in agnostic and informed settings, defining a "Price of Quality" γ — the number of low-quality samples needed to replace one high-quality sample; and (ii) a LASSO phase transition in the agnostic setting showing the algorithmic threshold depends only on total sample size and average noise. The contrast reveals that the information-theoretic sufficient condition's exchange rate between high- and low-quality data is bounded (γ ≤ 2), while the LASSO threshold is entirely blind to the quality split.
+## Summary
+This paper studies sparse signal support recovery when observations come from two sources with different noise variances (σ₁² < σ₂²). It derives sufficient conditions for information-theoretic recovery in both agnostic and informed settings, defining a "Price of Quality" γ that quantifies how many low-quality samples replace one high-quality sample. Key findings: (1) in the agnostic setting γ < 2 under the sufficient condition; (2) in the informed setting γ can diverge; (3) the LASSO phase transition for heterogeneous noise depends only on total n and average noise variance, showing algorithmic robustness to data heterogeneity.
 
 ## Strengths
-
-1. **Price of Quality formalization with interpretable asymptotic regimes (Section 3.1–3.2, eqs 12–14, 18–21):** The paper defines γ as a closed-form function of σ₁², σ₂², s, and δ, then derives its behavior in three SNR regimes. The finding that γ ≤ 2 in the agnostic setting (eq. 14) and can become arbitrarily large in the informed setting (eq. 20: γ → +∞) is concrete, non-obvious, and practically interpretable — prior homogeneous-noise work could not speak to this trade-off.
-
-2. **LASSO threshold depends only on total sample size and average noise (Theorem 3, Section 4, eqs 26–28):** The paper proves that n_ALG = 2s log(p−s) + s + 1 is independent of σ₁² and σ₂², and the regularization condition (28) involves noise only through σ_avg² = (n₁σ₁² + n₂σ₂²)/n. The proof overcomes the failure of the classical Wishart argument (caused by Σ not being a scalar multiple of the identity) via QR decomposition and Haar measure arguments — a genuine technical advance over Wainwright (2009). The result includes both necessary and sufficient conditions, making it a sharp phase transition.
-
-3. **Systematic contrast between info-theoretic and algorithmic behavior (Section 5, paragraphs 2–3):** The paper synthesizes its two sets of results to show that the info-theoretic sufficient condition's Price of Quality depends on the noise quality split, while the LASSO threshold is entirely blind to it. This goes beyond reporting two separate results and places the findings in the broader context of robustness of algorithmic thresholds (citing Wang et al., Omidiran & Wainwright).
-
-4. **Explicit diagnosis of technical obstacles from heterogeneity (Remark 4.2, Section 4 proof sketch):** The paper identifies precisely why extending LASSO to the informed setting is nontrivial (the presence of Σ⁻¹ in the rescaled loss destroys the Wishart structure X_SᵀX_S ∼ 𝒲(I_s, n) needed for classical inverse-Wishart moment bounds) and explains how the QR+Haar argument circumvents the isotropic Gaussian failure in the agnostic case. This level of technical specificity is a strength.
+- **Price of Quality as an interpretable metric.** The paper derives closed-form expressions for γ (equations 12, 18) from the sufficient conditions, giving a concrete, interpretable number for the high/low-quality trade-off. The finding that γ < 2 in the agnostic setting but can diverge in the informed setting (equations 14, 20) is a non-trivial quantitative result that goes beyond any prior homogeneous-noise analysis.
+- **New technical machinery for the LASSO with heterogeneous noise.** Theorem 3 extends Wainwright (2009)'s LASSO phase transition to heterogeneous noise when Σ is no longer a scalar multiple of identity. The QR/Haar-measure technique (lines 304–308) to handle the loss of Wishart structure is a genuine methodological contribution, and showing the threshold depends only on σ_avg² is a clean result.
+- **Systematic regime analysis.** The paper analyzes γ across three distinct SNR regimes (high SNR, low-SNR₂/high-SNR₁, low SNR) for both agnostic and informed settings, yielding a nuanced picture that would be invisible from a single-regime analysis.
+- **Generalization to arbitrary noise covariance.** Remark 3.4 extends the sufficient conditions to any non-singular Σ (equations 22–23), showing the analysis is not tailored to the specific two-quality-levels model.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+- **Algebraic inconsistency in a central equation.** Equation (9) (Theorem 1) gives the coefficient of n₁ as log(1 + δ(2σ₂² − σ₁²)s/(2σ₂²)). However, equation (12) defines γ with 2σ₁⁴ in the denominator instead of 2σ₂². Equation (14) carries the same σ₁⁴, but its simplification to γ ≈ 2 − σ₁²/σ₂² is algebraically correct only if the denominator were 2σ₂² (the form from (9)). This means (12) and (14) contain a typesetting error (σ₁⁴ → 2σ₂²) in the paper's signature claim. While the mathematical content is preserved through the correct expression in (9), a reader cannot verify the central quantitative claim from (12) alone, and the headline result "one high-quality sample is never worth more than two low-quality samples" depends on the algebra going through with the correct form. This must be corrected.
+
+- **The "sharpness" claim for the informed threshold overreaches.** The conclusion (line 340) states "the informed information-theoretic threshold... [is] sharp." However, Theorem 2 only provides a sufficient condition; Remark 3.3 acknowledges that "establishing full necessity in the heterogeneous setting remains an interesting direction for future work." The "sharp convergence rate" (line 225) refers to the exponential decay rate of the error probability, not the sharpness of the threshold itself. Calling the threshold "sharp" conflates these two distinct notions and overstates what is proven.
+
+- **Price of Quality is a property of a sufficient condition, not an information-theoretic invariant.** The paper is transparent about this in Remark 3.2 and the qualifying phrase "for this sufficient condition to hold" appears throughout the text. However, the title "PRICE OF QUALITY" and the abstract's prominent framing — "one high-quality sample is never worth more than two low-quality samples" — do not carry this qualification prominently enough. A casual reader will interpret γ as a fundamental bound on the value of data quality, when in fact it is derived from a relaxed sufficient condition for a specific estimator (the homoscedastic MLE applied to heterogeneous data). The true information-theoretic Price of Quality could be different; the paper simply does not establish this.
 
 ### Minor
-
-1. **Equation (12) contains an internal inconsistency.** The Price of Quality γ in (12) has $2\sigma_1^4$ in the denominator of the numerator's log argument:  
-   $$\gamma := \frac{\log(1 + \delta(2\sigma_2^2 - \sigma_1^2)s/(2\sigma_1^4))}{\log(1 + \delta s/(2\sigma_2^2))},$$  
-   while the sufficient condition (9) from which γ is derived has $2\sigma_2^2$ in the corresponding position:  
-   $$n_1 \log\left(1 + \frac{\delta(2\sigma_2^2 - \sigma_1^2)s}{2\sigma_2^2}\right).$$  
-   The asymptotic expansion (14) is consistent with the $2\sigma_2^2$ version (yielding $2 - \sigma_1^2/\sigma_2^2$) but inconsistent with the $2\sigma_1^4$ version as written (which would give $(2\sigma_2^2 - \sigma_1^2)\sigma_2^2/\sigma_1^4$). The surrounding discussion clearly points to the intended expression with $2\sigma_2^2$, so this is a typo in a central displayed equation that should be corrected.
-
-2. **The "fundamental difference" framing overreaches (abstract, Section 5).** The abstract's final sentence claims the results "expose a fundamental difference between how the information-theoretic and algorithmic thresholds adapt to changes in data quality." However, the agnostic information-theoretic Price of Quality (γ ≤ 2) is derived from Theorem 1, which the paper acknowledges "is not expected to be information-theoretically sharp" (Remark 3.2) and is a sufficient condition, not a threshold. The γ ≤ 2 bound may be an artifact of the Chernoff relaxation. While the paper does include the qualifier "under our sufficient condition" in the body and conclusion, the abstract and the framing in Section 5 (paragraphs 2–3) use "information-theoretic threshold" language that could give readers the impression that a proven separation between two sharp thresholds has been established. What is actually established is a separation between a sufficient condition and a sharp phase transition.
-
-3. **The generalized sufficient condition (22) does not obviously specialize to (9).** Remark 3.4 states that (9) "extends to" (22) for general invertible Σ, but specializing (22) to the two-block-diagonal case yields a high-quality coefficient:
-   $$\log\left(1 + \frac{\delta(2\sigma_2^2 - \sigma_1^2)s}{2\sigma_2^4}\right),$$
-   which has $\sigma_2^4$ in the denominator, while (9) has $\sigma_2^2$. These differ by a factor of $\sigma_2^2$. The paper does not discuss this discrepancy or explain whether (22) is intended as a looser bound valid for arbitrary Σ while (9) is a tighter bound specific to the two-block-diagonal case.
+- **Theorem 3 requires n₁, n₂ = ω(s), which may not hold in the motivating scenario.** The practical setup motivating the paper (a few high-quality samples, many low-quality ones) could have n₁ as small as O(1). The requirement that both sample sizes grow faster than sparsity excludes this regime, but the paper does not discuss this limitation.
+- **The assumption n₂ > n₁ is stated (line 45) but never used in any theorem.** It is simply a modeling assumption in the problem setup. The theorems require only n₁, n₂ = ω(s) (for the LASSO result) or do not impose ordering on n₁ and n₂. The paper could either drop this assumption or explain its role.
+- **Conclusion overclaims for the LASSO threshold by omitting the comparison baseline.** The paper presents the LASSO threshold's independence from individual noise levels as "striking," but a brief comparison with what an optimal weighted estimator would achieve would sharpen the "robustness" claim.
 
 ### Trivial
-None.
+- None beyond the typographical issue noted above (which is major because it affects a central equation, not because it is a formatting problem).
 
 ## Nice-to-Haves
-- The paper could sharpen Theorem 1 by attempting to solve the cubic equation (37) mentioned in Remark 3.2, at least asymptotically, to see whether the tightened sufficient condition pushes γ closer to 1. This would either strengthen or qualify the "fundamental difference" claim.
-- The informed algorithmic setting (Remark 4.2) could include a brief discussion of what one might expect the Price of Quality to be there, even if rigorous proof is deferred.
+- **Empirical illustration would strengthen the paper.** While the paper is purely theoretical, even a simple synthetic-data simulation showing recovery probability as a function of (n₁, n₂) with the theoretical boundary overlaid would make the sufficient conditions more tangible and verify they are not vacuously loose. This is not required for a theory paper but would substantially improve persuasiveness.
+- **A direct comparison of the agnostic and informed thresholds** in a table or figure for the same (n₁, n₂, σ₁², σ₂²) would help readers understand the quantitative gap between the two settings.
+- **A discussion of what happens when n₁ = O(s)** (violating the ω(s) condition for the LASSO result) would clarify the practical scope of Theorem 3.
 
 ## Removed Points
-- **Criticism about missing simulations:** Removed — the paper is a pure theory paper; simulations are not required and the reviewer acknowledged this.
-- **Criticism about SNR₁/SNR₂ notation being ambiguous:** Removed — trivial notation/formulation nitpick that does not affect the paper's substance.
-- **Criticism about insufficient caveat on γ:** Removed — the paper already qualifies the ≤2 claim with "under our sufficient condition" in the abstract, body, and conclusion.
-- **Strength Finder's claim about generalization to arbitrary noise (Strength 4):** Moved with caution — the discrepancy between (22) and (9) identified in Weakness 3 undermines this claimed strength; the intent is clear but the inconsistency needs resolution.
-- **Strength Finder's generic strengths about "important problem," "interesting question" etc.:** Removed as generic/superficial and lacking specific evidence.
+These points were raised by reviewers or the strength finder but are removed after cross-checking:
+1. *Criticism that the Price of Quality is not information-theoretic / the paper does not qualify it.* **Removed** — the paper consistently qualifies γ with "for the sufficient condition to hold" (lines 77–78, 81, 191, 195). The framing concern is valid but is already a documented weakness above in a softened form.
+2. *Claim that the LASSO result is "conceptually unsurprising" / the paper overstates surprise.* **Removed** — this is a subjective opinion, not a factual error. The paper acknowledges the technical challenge (QR/Haar argument) and the result is non-obvious enough to warrant explicit derivation.
+3. *Criticism about missing related works.* **Removed** per instruction — cannot confirm without external sources.
+4. *Criticism about the n_INF threshold and exact vs almost-full recovery.* **Removed** — the critic acknowledges this is handled correctly; it is not a weakness.
+5. *Strength Finder's generic strengths (e.g., "the problem is important").* **Removed** — too generic to be useful.
+6. *The "Section-by-Section Notes" about equation (2) and SNR regime derivations.* **Removed** — these are clarifications and confirmations, not weaknesses.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews surface the algebraic inconsistency but do not identify structural issues the paper itself does not discuss.
 
 ## Suggestions
-1. Fix the inconsistency in equation (12) — the denominator $2\sigma_1^4$ should be $2\sigma_2^2$ to match (9) and to make the asymptotic expansion (14) follow correctly.
-2. In the abstract and Section 5, replace "information-theoretic threshold" with "information-theoretic sufficient condition" (or add an explicit qualifier) when discussing the agnostic Price of Quality, to avoid misleading readers into thinking the γ ≤ 2 bound is a proven information-theoretic limit rather than a property of a relaxed sufficient condition.
-3. Clarify the relationship between (9) and (22) in Remark 3.4: state explicitly whether (22) is a looser bound applicable to general Σ while (9) is a tighter bound for the two-block-diagonal case, and explain the origin of the $\sigma_{\max}^4$ term.
+1. **Fix the algebraic typo in equations (12) and (14).** Replace 2σ₁⁴ with 2σ₂² in both equations to match the form from (9). Verify all derived regime results (13–14) are consistent with the corrected expression.
+2. **Qualify "sharp" when describing the informed threshold.** Replace "the informed information-theoretic threshold ... is sharp" (line 340) with language that distinguishes "sharp convergence rate" from "sharp threshold," or acknowledge that necessity remains open.
+3. **Add a short empirical section** with a synthetic-data experiment validating that the sufficient conditions are not vacuously loose.
+4. **Discuss the n₁ = ω(s) requirement** and its implications for the motivating scenario where n₁ may be small.
+5. **Either use the assumption n₂ > n₁ in a theorem or remove it** from the problem setup to avoid misleading readers.
 
 ## Score and Decision
 
-**Calibration anchors used:**
-| Path | Avg Score | Round | Comparison |
-|------|-----------|-------|------------|
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/vQIVbfTMzf.md` | 3.25 | R1 (bracket <3.5) | Much weaker — had serious rigor and presentation issues |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/Zap3nZhRIQ.md` | 3.00 | R1 (bracket <3.5) | Much weaker — tangential topic with serious flaws |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/2NwHLAffZZ.md` | 2.33 | R1 (bracket <3.5) | Much weaker |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/ZDoaLbOFaP.md` | 3.00 | R1 (bracket <3.5) | Much weaker |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/Piod76RSrx.md` | 5.50 | R1 (bracket 3.5–7.5) | Weaker — generalization bounds with limited novelty |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/qZwtPEw2qN.md` | 6.80 | R1 (bracket 3.5–7.5) | Stronger — had extensive experiments alongside theory, accepted |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/sJAlw561AH.md` | 5.50 | R1 (bracket 3.5–7.5) | Weaker — mixed reviews, rejected |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/qcigbR1UYA.md` | 5.25 | R1 (bracket 3.5–7.5) | Weaker — strong assumption limits applicability, rejected |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/fMTPkDEhLQ.md` | 8.00 | R1 (bracket >7.5) | Stronger — tight lower bounds with deep technical analysis |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/5t57omGVMw.md` | 8.00 | R1 (bracket >7.5) | Stronger — different topic, stronger technical contribution |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/P7KIGdgW8S.md` | 8.00 | R1 (bracket >7.5) | Stronger — different topic |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/A3YUPeJTNR.md` | 8.00 | R1 (bracket >7.5) | Stronger — different topic |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/sIcPMMhl9W.md` | 5.80 | R2 (bracket 4.5–6.5) | Weaker — used non-rigorous approximations, rejected |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/gVVoZtiQlt.md` | 5.00 | R2 (bracket 4.5–6.5) | Weaker — same paper variant, rejected |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/f3jySJpEFT.md` | 6.33 | R2 (bracket 4.5–6.5) | Comparable — accepted, similar rigor but weaker framing, some practical concerns |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/uf5EAGmkrN.md` | 5.50 | R2 (bracket 4.5–6.5) | Weaker — rejected, less rigorous |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/GWSIo2MzuH.md` | 6.50 | R2 (bracket 6.0–8.0) | Slightly stronger — accepted, more extensive analysis but also notable technical concerns |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/0oWGVvC6oq.md` | 6.50 | R2 (bracket 6.0–8.0) | Comparable — accepted, different topic |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/eoTCKKOgIs.md` | 6.25 | R2 (bracket 6.0–8.0) | Comparable — accepted, strong theoretical claim but mixed confidence |
-| `/home/wg25r/split_review_opus_repro/datasets/deepreview_13k_calibration/Zh2iqiOtMt.md` | 6.50 | R2 (bracket 6.0–8.0) | Comparable — accepted, different topic |
+### Calibration Procedure
 
-**Round 1 bracket:** [5.5, 7.0] — the paper is clearly stronger than the 3.0–3.25 and 5.0–5.8 anchors (rejected with serious issues) and weaker than the 8.0 anchors.
+**Round 1 (Bracketing):** Three queries targeting weak (< 3.5), middle (3.5–7.5), and strong (> 7.5) score bands on topics related to sparse recovery theory and LASSO phase transitions.
 
-**Round 2 narrowing:** Compared to the 6.33 Lasso Bandit paper (accepted), the current paper has comparable rigor and arguably cleaner results. Compared to the 6.50 anchors (accepted), it is slightly less expansive but has fewer technical concerns. The typo in (12) and the framing overreach are genuine weaknesses that prevent a higher score.
+**Round 1 anchors (partial list):**
+- `2NwHLAffZZ.md` (2.33, Reject) — Weak paper on gradient-based learning; far below our paper.
+- `ZDoaLbOFaP.md` (3.00, Reject) — Sparse covariance neural networks; below our paper.
+- `Zap3nZhRIQ.md` (3.00, Reject) — Non-differentiability in NNs; below our paper.
+- `qZwtPEw2qN.md` (6.80, Accept) — "How Much is a Noisy Image Worth?" on data scaling for ambient diffusion. Tangentially related (noisy vs clean data value); stronger than our paper due to thorough experiments and clearer theory-to-practice link.
+- `qcigbR1UYA.md` (5.25, Reject) — Active binary testing bounds. Comparable theoretical depth but more incremental; similar quality to our paper.
+- `4xWQS2z77v.md` (8.00, Accept) — Loss landscape of regularized NNs via convex duality. Superior theoretical depth and completeness; above our paper.
+- `fMTPkDEhLQ.md` (8.00, Accept) — Tight lower bounds under Hölder smoothness. Exceptional theoretical contribution; above our paper.
 
-**Final score: 6.0** — The paper makes a genuine contribution with clean theoretical results and a nontrivial technical advance (Theorem 3 proof via QR+Haar). The weaknesses are real but bounded (a fixable typo, a framing issue, and a minor discrepancy in a generalization remark). The paper merits acceptance but would benefit from the corrections suggested above.
+**Round 1 bracket:** 4.5–6.5
 
-MY FINAL SCORE: <score>6.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+**Round 2 (Narrowing):** Two queries targeting the (3.5, 6.5) and (5.0, 7.5) bands.
+
+**Round 2 anchors:**
+- `sIcPMMhl9W.md` (5.80, Reject) — Phase transition in shuffled regression. Similar style (phase transition analysis, theoretical). Our paper has a clearer contribution but the algebraic typo makes it slightly weaker. **Our paper ≈ comparable or slightly below.**
+- `Jc0FssXh2R.md` (6.25, Accept) — Optimal criterion for feature learning in linear NNs. Clean theory with experiments. Our paper has more novel concept (Price of Quality) but the typo and lack of experiments make it weaker. **Our paper is below this anchor.**
+- `ghH6YYDs15.md` (4.67, Reject) — Sparse autoencoders and amortization gap. Less relevant and weaker contribution. **Our paper is above this anchor.**
+- `H8OOlBjhkU.md` (5.00, Reject) — Sparse optimization over restricted convex sets. Similar quality but our paper has more novel framing. **Our paper is slightly above.**
+
+### Final Determination
+The paper has a genuine theoretical contribution (Price of Quality, LASSO extension to heterogeneous noise) and is well-written. However, the algebraic typo in equations (12)/(14) — while almost certainly fixable — undermines the readability of the paper's central quantitative claim in its current form. The "sharpness" overclaim and the framing gap between the sufficient-condition-based γ and the paper's broader language further weaken the presentation. Compared to the round-2 anchors, the paper sits between the reject-level `sIcPMMhl9W.md` (5.80) and the accept-level `Jc0FssXh2R.md` (6.25), closer to the former due to the typo issue. With the typos fixed and the framing adjusted, the paper could be acceptable; in its current form it is marginal.
+
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>
