@@ -9,23 +9,23 @@ cd "$(dirname "$0")/.."
 
 export ANTHROPIC_API_KEY=""
 export OPENAI_DEFAULT_MODEL="glm-5.1"
-export HARSH_MODEL="xiaomi/mimo-v2.5-pro"
-export MERGER_MODEL="xiaomi/mimo-v2.5-pro"
-export NEUTRAL_MODEL="xiaomi/mimo-v2.5-pro"
-export SWEEP_NAME="${SWEEP_NAME:-2026_deepseek_mimo_response}"
+export HARSH_MODEL="claude_sdk:claude-sonnet-4-6"
+export MERGER_MODEL="claude_sdk:claude-sonnet-4-6"
+export NEUTRAL_MODEL="deepseek-v4-pro"
+export SWEEP_NAME="${SWEEP_NAME:-2026_sonnet_repro}"
 export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
 export MERGE_LOG="${SWEEP_NAME}/merge.log"
-export CONCURRENCY="${CONCURRENCY:-20}"
+export CONCURRENCY="${CONCURRENCY:-5}"
 export MAX_PAPERS="${MAX_PAPERS:-400}"
 export CALIBRATION_SET="deepreview"
 export PAPERS_DIR="${PAPERS_DIR:-$HOME/split_review/datasets/iclr2026_new/papers}"
 export REVIEWS_DIR="${SWEEP_NAME}/reviews"
 # Lock OpenRouter provider for the Strength Finder (deepseek only) so
 # routing variance does not leak into the comparison.
-export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-"xiaomi/fp8"}"
+export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-deepseek}"
 
 LOG_FILE="results/${MERGE_LOG}"
-mkdir -p "$(dirname "$LOG_FILE")" 
+mkdir -p "$(dirname "$LOG_FILE")"
 
 SNAPSHOT_DIR="results/${SWEEP_NAME}/snapshot"
 if [ -e "$SNAPSHOT_DIR" ]; then
@@ -34,7 +34,7 @@ if [ -e "$SNAPSHOT_DIR" ]; then
   else
     echo "ERROR: $SNAPSHOT_DIR already exists. Bump SWEEP_NAME, or rerun with BYPASS_SNAPSHOT=1 to keep the existing snapshot and continue." >&2
     exit 1
-  fi
+  fi 
 else
   mkdir -p "$SNAPSHOT_DIR"
   cp -r code prompts "$SNAPSHOT_DIR/"
