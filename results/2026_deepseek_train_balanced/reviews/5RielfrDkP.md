@@ -1,0 +1,58 @@
+Now I have all the verification I need. Let me write the final review.
+
+## Review of "Learning Adaptive Multiresolution Transforms via Meta-Framelet-based Graph Convolutional Network"
+
+## Summary
+This paper proposes MM-FGCN, a spectral GNN that learns an adaptive multiresolution graph transform via a parameterized family of tight framelet bases. The core idea is to represent the multiresolution transform using only 2(I-1) learnable scalars that define spline-based band-pass filters, with the structure theoretically guaranteed to produce tight framelets. A meta-learner network outputs graph-specific filter parameters, and the model is trained via a bilevel meta-learning procedure. Experiments on node classification (assortative/disassortative) and graph classification are reported.
+
+## Strengths
+- **Theoretical guarantee of tightness under a parsimonious parameterization**: Proposition 2 proves that if the first-level meta-filters satisfy a partition-of-unity condition on squared magnitudes and a recursive composition rule (Eq. 4), the resulting MMFS is provably tight, dense, and satisfies dilation/translation properties. This is a genuine advance over prior framelet methods (UFGConv, WFTG) that rely on fixed, handcrafted transforms — here the bases are learnable while still guaranteeing exact reconstruction via Φ_{MM}Φ_{MM}^⊤ x = x.
+- **Extreme parameter efficiency**: The meta-framelet generator is parameterized by only 2(I-1) scalars (Section 4.2), as opposed to a dense n × (R(I-1)n) transform matrix. This makes the adaptivity computationally practical rather than prohibitive, and the paper correctly identifies why naive learned transforms would be infeasible (lack of tightness guarantees, numerical instability, excessive parameters).
+- **Ablation cleanly isolates the source of improvement**: Table 3 compares the full MM-FGCN against variants with (a) handcrafted Haar/linear/quadratic framelet filters, and (b) trainable framelet transforms without meta-learning. The full model outperforms both, providing evidence that both the learnable filters and the bilevel training contribute to the gain. This is the strongest piece of empirical support in the paper.
+- **Large gains on disassortative graphs relative to the baselines included**: On Cornell, Texas, and Wisconsin (Table 1), MM-FGCN outperforms GCN by 34.7%, 25%, and 28.9% respectively. These are settings where fixed low-pass GNNs are known to fail, and the improvements are dramatic.
+
+## Weaknesses
+
+### Fatal
+None.
+
+### Major
+- **SOTA claim on disassortative node classification is unsupported due to missing critical baselines.** The paper claims "state-of-the-art performance compared to all baseline models on both assortative and disassortative datasets." However, several well-established methods specifically designed for heterophilic graphs are absent from the comparison: H2GCN (Zhu et al., NeurIPS 2020), GPR-GNN (Chien et al., ICLR 2020 — cited in Related Work but not used as a baseline), LINKX (Lim et al., ICLR 2021), and ACM-GCN (Luan et al., 2022). These are contemporary with or predate PyGNN (2023), which *is* included. These methods have reported strong results on precisely the disassortative datasets (Cornell, Texas, Wisconsin, Chameleon, Squirrel). Without comparing against them, the paper's central performance claim — that adaptive multiresolution transforms achieve SOTA on heterophilic graphs — is not adequately supported. This is the most significant weakness in the paper.
+- **Graph classification evaluation is too narrowly scoped to support the claimed superiority.** Table 2 compares MM-FGPool against pooling variants on a GCN backbone plus UFGConv variants. Missing are standard graph-level architectures such as GIN (Xu et al., ICLR 2019), DiffPool (Ying et al., NeurIPS 2018), and PNA (Corso et al., NeurIPS 2020). On ogbg-molhiv, a widely used benchmark with dozens of reported results, the paper reports against only five pooling baselines. The claim of "highest performance among all the baselines" is trivially true within this narrow set but does not demonstrate broad superiority. The paper should either expand the comparison or clearly scope the claim (e.g., "compared to pooling methods on a GCN backbone").
+- **Computational cost is entirely unaddressed.** The method constructs a transform matrix of size n × (R(I-1)n). Even with Chebyshev approximation, computing multiple band-pass-filtered representations per resolution level across multiple layers incurs significant overhead. The paper provides no runtime comparison, no memory usage comparison, and no scaling analysis with respect to n, R, or I. For a spectral method being proposed for practical use, this is a critical omission. The paper's parameter-efficiency argument (2(I-1) parameters) addresses only the cost of *storing* the transform, not the cost of *applying* it.
+
+### Minor
+- **"Per-instance adaptivity" framing conflates two distinct settings.** For graph classification, different test graphs receive different transforms — adaptivity is genuinely per-instance. For node classification on a single graph (Cora, Citeseer, Pubmed, etc.), the meta-learner sees the same graph at both training and test time; "adaptivity" here is per-dataset, not per-instance. The paper uses the same narrative for both settings without distinguishing them. This does not invalidate the method but overclaims what the node classification results demonstrate. The paper should clarify what adaptivity means in each setting and, for node classification, explain what the learned filters look like (e.g., visualize the learned frequency partitions for Cora vs. Texas).
+- **Meta-learning bilevel optimization is insufficiently motivated.** The training procedure (Algorithm 2) splits a single dataset's training data into "meta-training" and "standard training" subsets and performs bilevel optimization. This departs from the standard meta-learning paradigm (learning across tasks) without explanation of why this particular bilevel procedure should benefit adaptive filter learning. The ablation (Table 3, row d vs. full model) shows it helps empirically, but the paper provides no intuition or analysis for *why*. The connection to MAML (Finn et al., 2017) is invoked but the typical cross-task motivation does not apply to single-dataset bilevel optimization.
+- **Hyperparameter values are not reported.** The paper does not specify the values of R (number of resolution levels), I (filters per level), L (number of layers), α (spline construction hyperparameter), hidden dimensions, learning rates, optimizer, weight decay, or training epochs for any experiment. These are necessary for reproducibility.
+- **The tightness derivation from filter conditions to the frame condition in graph signal space is asserted without full justification.** Proposition 2 states that Σᵢ g_{1,i}^ω(λ)² = 1 and the recursive composition rule imply that the MMFS forms a tight frame (A=B=1). The paper connects this to the spectral filter construction but does not fully work through the derivation showing that the filter-domain condition implies the Parseval-type identity ‖x‖² = Σ |⟨φ_{riv}, x⟩|² for arbitrary graph signals. While the result is likely correct, the gap in exposition makes it harder to verify.
+
+### Trivial
+None.
+
+## Nice-to-Haves
+- For node classification, visualize the learned meta-framelet filters for different datasets (e.g., a disassortative vs. assortative graph) to show what the adaptivity learns.
+- Report training time per epoch and total parameter count (including Wₗ, Θₗ) compared to baselines, and discuss how the forward pass scales with n, R, and I.
+- Include a limitations section acknowledging known issues with spectral graph methods (e.g., eigenvector localization, sensitivity to graph topology changes).
+
+## Removed Points
+These points were raised by reviewers but removed after verification:
+
+- **Translation operator localization issue**: The claim that the spectral translation operator "has been noted to produce poor localization for irregular graphs" is a general limitation of spectral graph signal processing, not a weakness specific to this paper. The paper uses the standard definition from the literature. Removed as not a valid paper-specific criticism.
+- **"The paper overclaims what the fixed framelet could capture"**: The harsh critic's suggestion that "a sufficiently expressive fixed framelet system could capture" the same information "with learned downstream weights" is speculative and unsupported. The paper's experiments show fixed framelets underperform learned ones (Table 3), contradicting this speculation. Removed as a strawman.
+- **GIN, DiffPool, PNA, Graph Transformers as missing graph classification baselines**: While I acknowledge the graph classification comparison is too narrow (see Major weakness), the specific list of missing methods from the Strength Finder's "Strengthening" section is treated as a suggestion rather than a verified failure. The main issue is the narrow scope, not the absence of any particular method. This is addressed in the Major weakness above.
+- **"Tables embedded as images preventing verification of specific numbers"**: This is a PDF extraction artifact, not an author error. Removed per hard rules.
+
+## Novel Insights
+The most interesting tension in this paper is between the clean theoretical framing and the messy empirical evaluation. The parameterization of tight framelets via 2(I-1) scalars is genuinely elegant — it transforms a constrained optimization over an n×N matrix into a simple spline parameterization where tightness is built in by construction rather than enforced through constraints. This is the kind of inductive bias that makes spectral GNN design principled. However, the paper then largely fails to leverage this theoretical clarity in its experiments: the adaptivity is framed as the headline contribution, but the comparison omits the most relevant baselines (heterophily-specific GNNs whose design motivation directly overlaps with the paper's). The disconnect between the theoretical strength of the contribution and the incompleteness of the validation is the defining issue of this paper.
+
+## Suggestions
+1. **Add the missing heterophily baselines**: H2GCN, GPR-GNN, LINKX, and ACM-GCN are essential for the disassortative node classification experiments. If MM-FGCN outperforms them, the paper's SOTA claim becomes credible. If it does not, the contribution must be reframed more modestly.
+2. **Expand the graph classification comparison** to include at least GIN and DiffPool (standard full-architecture baselines), or clearly state that the comparison is limited to pooling methods on a fixed GCN backbone.
+3. **Report computational benchmarks**: measure training time, inference time, and peak memory usage for a few representative graphs (e.g., Pubmed, ogbg-molhiv) against the strongest baselines.
+4. **Specify all hyperparameters** used in the experiments (R, I, L, α, hidden dimensions, learning rate, optimizer, weight decay, epochs).
+5. **Clarify the adaptivity narrative**: distinguish per-instance adaptivity (graph classification) from per-dataset adaptivity (node classification) and, for the latter, provide visualization or analysis of what the learned filters capture.
+
+## Score and Decision
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

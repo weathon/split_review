@@ -97,9 +97,6 @@ Evaluate the paper against its own community's standards.
 core contribution, the review should reflect that clearly. Do not soften the overall tone
 to appear balanced.
 
-## Important Remnder
-This is a paper submitted to the top conference, ICLR. You need to be critical and harsh, assess it as a top-tier venue standard instead of a homework assignment. Some papers might appear to be well written, pseudo-rigorous, but the content is nonsense. 
-
 ## Output Structure
 
 - List all reasonable weaknesses in the main review.

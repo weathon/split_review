@@ -1,17 +1,17 @@
-Now I'll produce the final consolidated review.
+Now I have all the information I need. Let me produce the final review.
 
 ## Summary
-This paper develops a Sequential Monte Carlo (SMC) framework for controlled LLM generation that targets a global product-of-experts distribution combining an LM prior with arbitrary syntactic and semantic constraints. The key algorithmic contribution is separating constraints into "efficient" potentials (used per-token via masking in the proposal) and general "inefficient" potentials (evaluated via importance weights), combined with resampling to focus computation on promising partial sequences. The method is evaluated on four challenging domains (Python code generation for data science, text-to-SQL, goal inference, and molecule synthesis) with systematic ablations.
+This paper develops a Sequential Monte Carlo (SMC) framework for controlled LLM generation under heterogeneous syntactic and semantic constraints. The key methodological innovation is partitioning constraints into "efficient potentials" (used in the proposal distribution via local product-of-experts) and "semantic potentials" (evaluated only during importance weighting and resampling), enabling integration of constraints that cannot be encoded as per-token logit masks. Experiments across four domains — Python code generation (DS-1000), text-to-SQL (Spider), goal inference (Planetarium), and molecule synthesis (GDB-17) — with systematic 7-method ablations show that the full SMC approach outperforms ablated baselines, and that performance ordering correlates with how closely each method approximates the global product-of-experts posterior.
 
 ## Strengths
 
-- **Systematic ablation isolating three algorithmic components across seven methods and four domains.** The experimental design (pLM → Locally-constrained → Grammar-only IS → Grammar-only SMC → Sample-Rerank → Full IS → Full SMC) lets the reader attribute gains to weight correction, semantic potentials, and resampling separately. Each component's contribution is assessed in Table 2 and the accompanying discussion. This is a clean and informative evaluation structure.
+- **Principled separation of efficient vs. semantic potentials, validated by systematic 7-method ablation across four domains.** The paper formally distinguishes Φ_eff (used in proposals, e.g., CFG constraints with tractable per-token normalization) from Φ\Φ_eff (evaluated only during weighting). The cumulative ablation (LM → Grammar-only → Grammar-only IS → Grammar-only SMC → Sample-Rerank → Full IS → Full SMC, lines 117–135) isolates the contribution of each component. Table 2 shows each added component produces measurable gains in at least some domains, and Full SMC ranks best or tied-best everywhere. This is a clean experimental design that directly tests the paper's central algorithmic claims.
 
-- **Integration of heterogeneous constraint types that prior locally-constrained decoding cannot handle.** The paper demonstrates that domain-specific semantic potentials — plan validation (VAL), test-case execution (DS-1000), column-alias checking (Spider), SMILES prefix validation (partialsmiles) — can be wrapped as non-differentiable, non-incremental potentials within the SMC framework. This goes beyond the grammar-only masking that dominates prior work (Shin et al., 2021; Scholak et al., 2021; Willard & Louf, 2023) and is concretely shown to improve accuracy.
+- **Weight correction empirically reduces the distribution distortion of locally constrained decoding.** The paper goes beyond stating the well-known theoretical gap between local and global product-of-experts and directly measures it. Figure 2 shows that methods with weight corrections (Full IS, Full SMC) have significantly lower estimated KL divergence to the global posterior than Sample-Rerank (which applies semantic potentials post-hoc without correcting for the local proposal). Table 3 shows positive Pearson correlations between particle weights and accuracy, confirming higher-weight particles are better-calibrated — a non-trivial empirical validation of the probabilistic framing.
 
-- **Empirical connection between posterior approximation quality and downstream performance.** Section 3.3 estimates the KL divergence between each method's distribution and the target global posterior (Figure 2), and the ordering of methods by KL divergence (Full SMC < Full IS < Sample-Rerank) matches their ordering by accuracy in Table 2. Table 3 further reports Pearson correlations between particle weights and accuracy scores. This provides evidence that the accuracy gains reflect better Bayesian inference rather than artifacts of a particular aggregation scheme.
+- **Resampling provides accuracy gains beyond importance sampling alone.** Full SMC vs. Full IS (Table 2) shows that adding adaptive resampling improves accuracy in three of four domains (all except text-to-SQL, where it does not hurt). This confirms that the sequential reallocation of computation to promising partial sequences has practical value beyond the weight correction already present in importance sampling.
 
-- **Multi-domain evaluation covering structurally diverse tasks.** The four domains (code generation, structured query generation, planning-goal inference, molecular generation) differ in their formal languages, constraint structures, and evaluation metrics. This breadth strengthens the claim that the SMC framework is general-purpose rather than tuned to a single application.
+- **Statement-level SMC steps for code generation.** The paper extends SMC beyond token-level steps to operate over semantically meaningful increments (Python statements), which improves particle alignment (lines 109–110). This is exploited in the DS-1000 experiments and represents a practical extension that addresses a real limitation of token-level SMC.
 
 ## Weaknesses
 
@@ -19,53 +19,51 @@ This paper develops a Sequential Monte Carlo (SMC) framework for controlled LLM 
 None.
 
 ### Major
-None.
+
+- **DS-1000 uses a fundamentally different setup (70B model, different compute, trivial CFG potential), weakening the cross-domain narrative.** DS-1000 uses Llama 3 70B with 4 H100 GPUs + 64 vCPUs, while the other three domains use Llama 3.1 8B with 1 A100 + 12 vCPUs (lines 136–137, 148). Furthermore, φ_CFG = 1 for DS-1000 — there is no grammar constraint — so the method here reduces to "sample from the base LM, then execute partial programs on test cases." The within-DS-1000 method comparisons are valid (all methods use the same 70B model), and the paper is transparent about the asymmetry. But the abstract and introduction frame results as a unified cross-domain demonstration, and the DS-1000 results are not directly comparable to the other domains in model scale, compute budget, or algorithm structure. A reader cannot tell how much of the DS-1000 gain comes from SMC vs. the 70B model's greater raw capability or the aggressive test-case validation signal. Running DS-1000 with Llama 3.1 8B (even with lower absolute scores) would substantially strengthen the cross-domain narrative.
 
 ### Minor
 
-1. **"Posterior-weighted accuracy" is not defined in the visible main text (Table 2, line 159).** For methods that produce a posterior distribution over particles (Full SMC, Full IS, Sample-Rerank), the natural interpretation is accuracy weighted by the normalized importance weights. For the base LM and locally-constrained decoding — which produce a single sample — it is unclear what weighting scheme is used (uniform? averaged over multiple runs?). The reader should not have to guess how the headline metric is computed for every baseline. Since the paper reports bootstrapped 95% confidence intervals, the procedure was clearly defined in the author's code, but it needs to be stated in the paper.
+- **The KL divergence analysis (Figure 2) rests on one instance per domain — too thin to support the central interpretive claim.** The paper selects "the instance with the median unique accuracy as a representative example" per domain (line 179). The claim that "generation quality is correlated with how well each method approximates the global product of experts" (line 199) and the method ordering in Figure 2 are supported by only 4 data points (one per domain), each with within-run error bars but no across-instance variability. Table 3 provides complementary evidence (correlations across all instances within a method), but the between-method comparison in Figure 2 needs more instances per domain to be convincing.
 
-2. **The KL divergence analysis in §3.3 is limited to one instance per domain** (the instance with median unique accuracy). While 100 runs per algorithm with t-tests provide statistical robustness for those specific instances, the paper's claim that "generation quality is correlated with how well each method approximates the global product of experts" would be stronger if demonstrated across multiple instances. The estimator used to compute the KL divergence is also not described in the main text. These are not fatal issues — the analysis is still informative as a diagnostic — but the evidence is thinner than the claim warrants.
+- **No empirical comparison to the prior SMC-for-LM methods that the paper distinguishes itself from.** The paper builds on Lew et al. (2023) and contrasts with Zhao et al. (2024) (lines 190–191). Grammar-only SMC is described as a "straightforward application of Lew et al. (2023)" (line 128), which partially addresses this. But the key innovation — Full SMC with semantic potentials and resampling — is not empirically compared to any variant of Zhao et al. (2024)'s learned-twist approach, nor to any published controlled generation system for Spider or DS-1000. The introduction claims the method offers a superior approach, but this is positionally asserted, not tested.
 
-3. **Different base LMs are used across domains without discussion of the confound.** Goal inference and molecule synthesis use Llama 3.1 8B, text-to-SQL uses Llama 3.1 8B-Instruct, and data science uses Llama 3 70B (a ~9× larger model). The paper does not acknowledge that the results in different domains are not comparable in any absolute sense due to these model-size and instruction-tuning differences. Each domain's within-domain comparisons are valid, but this should be noted.
-
-4. **No compute-performance trade-off is reported.** SMC with N=10 particles requires roughly 10× the LM forward passes of single-sample baselines. The accuracy gains in Table 2 are real, but the paper does not report wall-clock time, FLOPs, or inference cost. This information is important for practitioners deciding whether to adopt the method. (The appendix reportedly varies the number of particles, which is useful, but does not substitute for time/cost reporting.)
-
-5. **The grammar constraint in the DS-1000 domain is trivial (φ_CFG = 1),** making methods 2–4 (locally-constrained, Grammar-only IS, Grammar-only SMC) equivalent to the base LM for that domain. The paper is transparent about this (line 148), but does not explicitly note that the ablation results for DS-1000 therefore test only the semantic potential component, not the grammar+SMC combination. This limits what can be concluded from that domain about the grammar-related components.
-
-6. **No dedicated limitations discussion.** The paper does not address boundary conditions: (a) the method's dependence on the existence of informative semantic potentials, (b) domains where designing such potentials would be difficult or costly, (c) risk of particle diversity collapse with small N, or (d) when simpler baselines might be preferable.
+- **The main metric is posterior-weighted accuracy, which conflates generation quality with weight calibration.** Weighted accuracy is the right metric for evaluating posterior approximation quality. But it is not the metric practitioners typically care about (best-of-N, majority-vote, or single-sample accuracy). A method could have good weighted accuracy because the weights are well-calibrated even if no individual particle solves the task. Reporting unweighted accuracy alongside weighted accuracy would strengthen practical relevance.
 
 ### Trivial
-None.
+
+- **The "Further extensions" paragraph (lines 109–110) mentions stochastic approximations to expensive Φ_eff potentials, but this idea is never evaluated or used.** The statement-level SMC extension is used, but the stochastic approximation remains a dangling loose end.
 
 ## Nice-to-Haves
-- A compute-performance analysis (accuracy vs. wall-clock time or LM forward passes) would help assess whether the ≈10× cost of SMC is justified.
-- The line-level SMC extension mentioned in §2 (intermediate targets over Python statements) is an interesting idea; a dedicated experiment or discussion comparing token-level vs. line-level SMC would strengthen the paper.
-- A calibration analysis of particle weights (beyond the Pearson correlations in Table 3) — e.g., does a weight of 0.8 correspond to ~80% accuracy? — would strengthen the probabilistic claims in §3.3.
+
+- Report wall-clock time or token-generation cost for each method, especially for DS-1000 where partial program execution on test cases is expensive.
+- Track effective sample size trajectories or particle diversity (unique ancestors after resampling) to show how well the N=10 particle budget is used.
+- Move the N-ablation results (currently in Appendix A.2) into the main paper, or at minimum show that the key findings (e.g., "resampling improves performance") hold across different N values.
 
 ## Removed Points
-*These points were flagged by the reviewers but removed after verification against the paper. They are documented here for transparency.*
 
-- **"KL divergence from samples is notoriously difficult to estimate reliably"** (harsh critic): Generic concern, not a specific identified problem in the paper's methodology. The paper uses 100 runs per algorithm and reports t-test significance, which is standard practice.
-- **"The paper does not discuss simpler alternatives like beam search with scoring"**: The paper already evaluates 7 methods including multiple baselines; requesting additional baselines is scope creep.
-- **"The practical severity of local decoding distortion is not quantified"**: The paper addresses this explicitly in §3.2 (line 171): "the bias from locally constrained decoding may be less severe in these semantic parsing domains than has been observed in other domains."
-- **"How sensitive are results to the choice of few-shot examples?"**: Speculative concern without evidence that this is a problem.
-- **"The related work discussion is adequate but brief"** and **"The discussion is thin"**: Vague qualitative judgments without specific, actionable content.
-- **Formatting/style nitpicks**: Typos, whitespace, broken characters (these are PDF parser artifacts, not author errors).
-- **Missing appendix content criticisms**: The parser strips appendices; they exist in the original submission.
-- **Strength Finder's generic praise** ("addressed an important problem", "interesting question"): Removed as superficial.
+These were filtered from the inputs for the following reasons:
+
+- **"Convergence with respect to N is not demonstrated"** — The paper explicitly says "see App. A.2 for downstream accuracy results for a varying number of particles" (line 136). The parser strips appendices, which exist in the original submission. Speculating about absent appendix content is not valid criticism.
+- **"Semantic potential in molecular synthesis is actually syntactic/chemical validity"** — The paper's φ_sem for molecular synthesis checks SMILES validity, valences, and kekulization — these are domain-specific signals the paper categorizes as "semantic" in the sense they cannot be encoded as CFG constraints. This is a labeling preference, not a flaw.
+- **"Goal inference semantic potential only gives negative signal"** — This describes the domain's signal structure, not a weakness of the method. The paper transparently states what the potential does.
+- **Formatting/style nitpicks (figure placement, garbled characters, whitespace)** — These are parser artifacts from the PDF extraction, not present in the original submission.
+- **Strengths that were generic or unsupported** (e.g., "avoids costly contrastive fine-tuning" — claimed but not empirically demonstrated against the cited approach; "addressed an important problem" — generic).
 
 ## Novel Insights
-None beyond the paper's own contributions. The harsh critic and strength finder correctly identified the paper's main contributions (SMC-based integration of heterogeneous constraints, systematic multidomain ablation, empirical link between posterior approximation and accuracy) but did not surface genuinely novel observations that the paper itself does not already state.
+None beyond the paper's own contributions. The reviews did not surface a genuinely novel perspective that the paper itself does not articulate.
 
 ## Suggestions
-1. **Define "posterior-weighted accuracy" explicitly** in the main text, specifying how it is computed for each baseline method (especially pLM and locally-constrained decoding, which produce single samples).
-2. **Add a limitations paragraph** covering: dependence on informative semantic potentials, the DS-1000 grammar triviality, the cross-domain model-size confound, and compute costs.
-3. **Report wall-clock time or inference cost** for each method at N=10 particles.
-4. **Expand the KL analysis** to at least a handful of instances per domain (or describe the estimator more precisely in the main text).
-5. **Note the model-size confound** when describing the experimental setup in §3.1.
+
+1. **Run DS-1000 with Llama 3.1 8B** to provide an apples-to-apples comparison across domains. If infeasible, clearly qualify the cross-domain narrative to acknowledge the asymmetry in model scale, compute, and algorithm structure.
+2. **Expand the KL divergence analysis** to cover at least 5–10 instances per domain with error bars across instances, not just across runs on one instance.
+3. **Report unweighted accuracy (best-of-N, top-weighted-particle)** alongside posterior-weighted accuracy in Table 2.
+4. **Add an empirical comparison to Zhao et al. (2024)** on at least one domain, or explicitly reframe the paper's positioning from "superior approach" to "complementary approach using static/dynamic analysis instead of learned twists."
+5. **Remove or operationalize** the dangling stochastic approximation mention in "Further extensions."
 
 ## Score and Decision
+Score: 7.0  
+Decision: Accept
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

@@ -1,0 +1,68 @@
+## Summary
+
+This paper proposes two algorithms operating on RAPTOR-style recursive-abstractive trees: **adRAP**, an incremental update method intended to avoid full tree recomputation when documents are added to or removed from a dynamic dataset, and **postQFRAP**, a post-retrieval layer that builds a query-focused hierarchical tree over retrieved chunks and summarizes the top layer to produce a refined context. Both are evaluated on three QA datasets (MultiHop, QASPER, QuALITY) using LLM-based metrics. The paper addresses a genuine problem and the algorithmic designs have merit, but critical evidential gaps undermine the central claims.
+
+## Strengths
+
+- **Principled incremental GMM update.** The adaptive GMM formulation (Section 4.3, Algorithm 2) provides a sound mathematical derivation of incremental parameter updates that provably match the batch recomputation, with runtime complexity independent of the total number of points *n*. This is a technically clean foundation for avoiding full RAPTOR recomputation in dynamic settings.
+
+- **Black-box post-retrieval compatibility.** postQFRAP is designed as a layer that can sit on top of any retrieval algorithm without modifying the underlying retriever. The paper validates this by applying it to naïve RAG and comparing against re-ranking and one-shot summarization baselines (Section 5.4), demonstrating practical plug-and-play utility.
+
+- **Mitigation of position bias in head-to-head evaluation.** The head-to-head comparisons (Section 6.2, lines 334–336) repeat each evaluation with swapped answer positions and declare a winner only if the same answer wins both trials. This is a stronger methodological choice than many papers in the space and is explicitly motivated by known concerns (citing Zheng et al., 2024).
+
+## Weaknesses
+
+### Major
+
+- **No efficiency measurements for adRAP despite it being the central claim.** The paper states that adRAP "avoids full re-computation, preserving retrieval performance while significantly reducing computational overhead" (line 31), that it "efficiently" maintains the tree structure (line 7), and that its update is "efficient, as its time is independent of *n*" (line 194). Yet the entire experimental section contains **zero measurements of runtime, wall-clock time, number of LLM calls, number of summary regenerations, memory usage, or any other computational cost**. A method whose primary stated advantage over an existing method (RAPTOR) is computational efficiency, evaluated without any efficiency data, cannot substantiate its contribution. The quality results for adRAP are also mixed (comparable to or worse than RAPTOR depending on dataset and metric), so the absence of cost data makes it impossible to assess whether the approximation is worth the trade-off. This is not a missing ablation — it is the absence of evidence for the paper's core claim.
+
+- **adRAP evaluated on a single batch addition, not on genuinely dynamic data.** The experimental protocol (Section 5.4) builds a full tree on 70% of a static dataset and adds the remaining 30% incrementally. This is a one-shot batch operation, not a dynamic setting with repeated additions over time, mixed addition/deletion workloads, or evaluation of how quality degrades as incremental updates accumulate. The paper claims support for deletions (line 245–246) but never tests them. The title, abstract, and introduction frame the contribution around "dynamic datasets," but the experiments test only a single static-to-approximation scenario. 
+
+### Minor
+
+- **All evaluation metrics are LLM-as-judge with no human validation; "Human Coherence Rating" is misleadingly named.** Every quantitative result — "answered questions," "context relevance," "Human Coherence Rating," and all four head-to-head dimensions — relies entirely on LLM-based evaluation without any correlation analysis against human judgments or human annotation. The "Human Coherence Rating" metric (line 330) is explicitly described as prompting an LLM to assess whether an answer is coherent, not as a human rating. The paper does claim three experimental repetitions with standard errors (line 362), which is good practice, but the fundamental reliance on unvalidated proxy measures weakens the strength of the conclusions drawn from the results.
+
+- **The "query-focused" summarization mechanism is not specified.** The term appears throughout the postQFRAP description (lines 264, 279, 280, 290, 398) but the paper never describes what this means operationally. How is the query incorporated into the summarization prompt? What instructions are given to the LLM? The prompt is absent from the paper. This is a concrete reproducibility gap: another researcher cannot implement postQFRAP based on the description provided, and the "query-focused" distinction is what differentiates postQFRAP from the postRAP ablation.
+
+- **MultiHop dataset construction may bias toward tree-based methods.** The MultiHop questions (lines 306–308) are generated by an LLM from chunks and summaries sampled from a RAPTOR tree built over the dataset. Evaluating tree-based methods (RAPTOR, adRAP, postQFRAP) on questions derived from hierarchical/summarized content creates a potential confound: the test distribution may systematically favor tree-structured representations over flat retrieval. This is not acknowledged as a limitation.
+
+- **No comparison against RECOMP or other learned compression methods.** The paper cites RECOMP (Xu et al. 2023) in line 295 as a possible abstractive compressor but does not include it as a baseline. Since postQFRAP is explicitly a post-retrieval compression/refinement method, comparison against existing learned compression methods would substantially strengthen the evaluation. The re-ranking baseline (cross-encoder) is reasonable but relatively weak for establishing state-of-the-art positioning.
+
+- **No numerical result tables.** All quantitative results are presented only in figures (Figures 4–9), making precise cross-method comparison difficult and reducing the paper's utility as a reference. While figures are acceptable, the absence of any numerical values in tables or text limits the precision of the claims made.
+
+### Trivial
+
+None.
+
+## Nice-to-Haves
+
+- Including RECOMP or other learned compression baselines for postQFRAP would ground the results in the existing post-retrieval compression literature.
+- An ablation quantifying how much the "query-focused" mechanism contributes over standard summarization (beyond the postRAP comparison, which removes the entire tree structure along with the query focus).
+
+## Removed Points
+
+These points were flagged in the reviews but are removed with justification below. Treat them with caution if referenced.
+
+- *Self-enhancement bias from using same model for generation and evaluation.* The critic speculates that gpt-4o-mini is used for both summarization and evaluation, but the paper is not explicit about which model does the evaluation, and self-enhancement bias is not a proven fact — it is a plausible concern that should be noted but not inflated into a confirmed weakness. Removed.
+- *"The claim that postQFRAP mitigates context window size and information loss conflates two distinct problems."* This is an overly nitpicky distinction; postQFRAP produces bounded summaries from many chunks, which genuinely addresses both issues. Removed as nitpick.
+- *"The paper does not acknowledge the lack of efficiency measurements as a limitation."* While true, limitations sections describe methodological shortcomings, not missing experiments. Removed as off-target.
+- *"Hyperparameter τ_n and τ_c are not justified."* These are standard algorithmic thresholds described in context; the paper specifies them in the experimental setup. Removed.
+- *Various formatting/style nits.* Removed per instructions.
+- *Strength Finder's generic strengths ("addressed an important problem," "timely topic").* These are superficial and lack concrete evidence anchors. Removed.
+
+## Novel Insights
+
+The most interesting observation that emerges from across the reviews is the structural tension between the two contributions: adRAP requires storing UMAP models and maintaining per-document cluster assignments, making it memory-heavy and architecturally invasive, while postQFRAP is designed as a lightweight black-box layer at inference time. The paper pitches them as alternatives for different use cases, but the reviews collectively suggest that postQFRAP's contribution is more defensible (it can be evaluated on its own terms without missing efficiency data) while adRAP's central claim remains unsupported. This asymmetry is not explicitly surfaced by the paper but becomes clear when the two halves are examined separately against their stated goals.
+
+## Suggestions
+
+1. **Add efficiency measurements for adRAP before resubmission.** The minimum viable evidence is: (a) wall-clock time for adRAP's incremental update vs. full RAPTOR recomputation, (b) number of summary regenerations triggered, and (c) how these scale with batch size and number of incremental steps. Without this, the paper cannot support its primary claim about adRAP.
+2. **Specify the query-focused summarization prompt.** PostQFRAP depends critically on this mechanism; it must be described for reproducibility. Even one paragraph explaining how the query conditions the summarization process would suffice.
+3. **Add at least one human evaluation or validation of the LLM-as-judge metrics.** Showing correlation with a small human-annotated sample would substantially strengthen the evaluation. Alternatively, include harder baselines (RECOMP, more sophisticated re-rankers).
+4. **Acknowledge the MultiHop dataset construction bias as a limitation** and, if possible, validate on an independently-constructed set of questions.
+5. **Include numerical values** (tables in the appendix or supplement) so readers can make precise comparisons.
+
+## Score and Decision
+
+MY FINAL SCORE: <score>4.0</score>
+MY FINAL DECISION: <decision>Reject</decision>
