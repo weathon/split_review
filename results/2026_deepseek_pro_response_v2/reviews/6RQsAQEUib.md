@@ -1,0 +1,1 @@
+Now let me read some of these anchors to calibrate. Let me start with the middle-range anchors to

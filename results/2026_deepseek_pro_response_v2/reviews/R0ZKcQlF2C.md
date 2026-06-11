@@ -1,0 +1,1 @@
+Let me now carefully read through the paper and cross-check the harsh critic's claims against the actual text. Let

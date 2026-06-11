@@ -1,0 +1,1 @@
+Good. I now have anchors across all three bands. Let me read a couple from each to calibrate. From the weak band (3.5-) I have DB-GPT-Hub (3.75) and TrustSQL (4.00). From the strong band (7.5+) I have Spider 2.0 (8.00) and MMQA (8.00). Let me read a
