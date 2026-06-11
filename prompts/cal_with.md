@@ -7,11 +7,11 @@ Before any `calibration_search` call, first finish filtering the Harsh Critic an
 ## Round 1 — Bracketing
 
 Make one `calibration_search` call with a couple queries that anchor each score band on a topic similar to the paper. Filters are strict: `low_score` is exclusive lower bound (avg > low_score) and `high_score` is exclusive upper bound (avg < high_score).
-- "<topic>" with `high_score=2.5` (strong reject anchors) ~4 papers
-- "<topic>" with `low_score=2.5, high_score=4.5` (weak anchors) ~4 papers
-- "<topic>" with `low_score=4.5, high_score=6.1` (middle anchors) ~2 papers
-- "<topic>" with `low_score=6.0, high_score=7.5` (middle anchors) ~2 papers
-- "<topic>" with `low_score=7.5` (strong anchors) ~2 papers
+- "<topic>" with `high_score=2.5` (strong reject anchors) ~3 papers
+- "<topic>" with `low_score=2.5, high_score=4.5` (weak anchors) ~3 papers
+- "<topic>" with `low_score=4.5, high_score=6.1` (middle anchors) ~3 papers
+- "<topic>" with `low_score=6.0, high_score=7.5` (middle anchors) ~3 papers
+- "<topic>" with `low_score=7.5` (strong anchors) ~3 papers
 
 The strong reject paper is used as a matching template: what kind of papers will be strong rejected. If current paper match, strong reject it. 
 
@@ -23,7 +23,7 @@ Use `read_file` on a small number of anchors (typically 1–2 per band) to inspe
 
 Make a second `calibration_search` call to pull more anchors *inside* your round-1 bracket. Use 2–3 queries with `low_score` and `high_score` tuned to your bracket (remember: both bounds are exclusive — avg > low_score and avg < high_score). For example, if round 1 placed the paper between 5 and 7, query for anchors in `(4.5, 6)` and `(6, 7.5)` on the most topically relevant aspects of the paper. The goal is to find anchors that sit close to where you think the paper lands, so the comparison is sharper than "this paper is between the weak anchor at 3 and the strong anchor at 8." Since this narrows the search pool, you can use a more lax search term.
 
-Hint: you usually over estimate the paper's quality for low quality papers and under estimate quality for high papers. Thus, artificially lower your bracket for 1-2 points for papers lower than 5 and raise the bracket for 1-2 points for paper >5. and widen it for 1-2 points if it sits in middle. 
+&& Hint: you usually over estimate the paper's quality for low quality papers and under estimate quality for high papers. Thus, artificially lower your bracket for 1-2 points for papers lower than 5 and raise the bracket for 1-2 points for paper >5. and widen it for 1-2 points if it sits in middle. 
 
 Read 2–4 of these new anchors in full with `read_file`. Compare the paper against each and ask: is this paper better, similar, or worse than this specific anchor? Use those comparisons to set the score.
 
@@ -46,3 +46,4 @@ Read 2–4 of these new anchors in full with `read_file`. Compare the paper agai
 
 When reporting your score, list every anchor paper retrieved across all rounds (not just the ones you read in full). For each anchor give the path, its avg human score, the round it came from, and one sentence on how it compares to the paper under review. State the round-1 bracket explicitly, then explain how round 2 (and 3, if used) narrowed it to the final score.
 
+Piror: You usually over estimate score, keep that in mind and act accordingly. 
