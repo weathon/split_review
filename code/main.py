@@ -391,7 +391,7 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
         extractor_resp = await custom_client.chat.completions.create(
             model="deepseek/deepseek-v4-flash",
             messages=[
-                {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text."},
+                {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text. If you cannot see a score, return -100! If you cannot see a decision, return N/A! You should NOT guess the score."}, # could this be the cause? random numbers getting parsed as scores? And that is the change? Why removed! Good thing I checked the review content to be empty. 
                 {"role": "user", "content": merged_review},
             ],
             extra_body={"reasoning": {"enabled": False}},
