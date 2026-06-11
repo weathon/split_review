@@ -574,7 +574,7 @@ async def run_benchmark(data_dir: str, n_samples: int = 10, seed: int = 42, bala
     else:
         samples = random.Random(seed).sample(available, min(n_samples, len(available)))
         print(f"Random sample: {len(samples)} papers")
-    samples = samples[:int(os.environ.get("MAX_PAPERS", len(samples)))]  # allow limiting number of papers via env var but keep order
+    samples = samples[int(os.environ.get("OFFSET", 0)):int(os.environ.get("MAX_PAPERS", len(samples)))]  # allow limiting number of papers via env var but keep order
 
     # Mutually exclude test-vs-calibration: rather than dropping calibration
     # papers from the test pool, drop test-pool paper IDs from the calibration

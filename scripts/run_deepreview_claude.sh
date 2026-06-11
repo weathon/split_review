@@ -16,13 +16,14 @@ export SWEEP_NAME="${SWEEP_NAME:-2026_opus-4-7_v2}"
 export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
 export MERGE_LOG="${SWEEP_NAME}/merge.log"
 export CONCURRENCY="${CONCURRENCY:-2}"
+export OFFSET="${OFFSET:-0}"
 export MAX_PAPERS="${MAX_PAPERS:-200}"
 export CALIBRATION_SET="deepreview" 
 export PAPERS_DIR="${PAPERS_DIR:-$HOME/split_review/datasets/iclr2026_new/papers}"
 export REVIEWS_DIR="${SWEEP_NAME}/reviews"
 # Lock OpenRouter provider for the Strength Finder (deepseek only) so
 # routing variance does not leak into the comparison.
-export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-deepseek}"
+export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-"xiaomi/fp8"}"
 
 LOG_FILE="results/${MERGE_LOG}"
 mkdir -p "$(dirname "$LOG_FILE")"
