@@ -100,7 +100,9 @@ Use these bands (each with `n={ANCHORS_PER_BAND}`):
 
 ## Selection
 
-Inspect candidates using `read_file` (read snippets/full reviews as needed) and select the anchors that are genuinely topically comparable to the paper under review (same problem area, related method family, comparable claims surface, etc.). Drop retrieved papers that are not actually comparable — do not pad the set with topically-irrelevant papers.
+Inspect candidates using `read_file` (read snippets/full reviews as needed) and select the anchors that are genuinely topically comparable to the paper under review (same problem area, related method family, comparable claims surface, etc.). Prefer comparable anchors over irrelevant ones.
+
+You MUST keep at least one anchor from EVERY bin that returned candidates (a bin that returned "No files in that score range." is skipped). If a bin's candidates are all weakly comparable, still keep the single closest one so that bin is represented — every score band with anchors must contribute at least one anchor to the final set.
 
 Do NOT use the selected anchors to set your final review score — the final score is computed externally via pairwise comparison.
 
