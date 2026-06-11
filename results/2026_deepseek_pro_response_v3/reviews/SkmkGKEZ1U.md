@@ -1,36 +1,26 @@
-Now I have a clear picture. Let me finalize the review and score.
+Now I have enough data to finalize the score. Let me synthesize my findings.
 
-## Round 1 Bracketing
+**Round 1 bracket:** O-Forge falls clearly below StepProof (3.25) and COPRA (5.00), but above the most fundamentally flawed papers at ~2.0—placing it in the **2.0–3.5** range.
 
-Retrieved anchors:
-- **FiyS0ecSm0** (6.75): "Proving Olympiad Inequalities by Synergizing LLMs and Symbolic Reasoning" — Very similar topic (LLM+symbolic for inequalities). Has quantitative evaluation on 161 problems, multiple baselines, formal Lean verification. Our paper is clearly weaker due to lack of evaluation.
-- **lJdgUUcLaA** (4.75): "AlphaIntegrator" — LLM+symbolic for integration. Has systematic evaluation with numbers and baselines. Our paper is weaker.
-- **m2nmp8P5in** (8.00): "LLM-SR" — Strong paper with comprehensive evaluation. Far above ours.
+**Round 2 narrowing:** Comparing against v3DwQlyGbv (2.33—has quantitative evaluation but weak novelty) and StepProof (3.25—has proper evaluation with tables and baselines), O-Forge is closest to the ~2.0 papers because it has *zero* quantitative evaluation. It is stronger than NlY3XppPt3 (2.00, speculative new computational model) but weaker than v3DwQlyGbv (2.33, which at least reports benchmark numbers).
 
-**Round 1 bracket: 3.5–5.5**
+**Final score: 2.0** — the paper has a promising idea but fails to demonstrate it through any quantitative evaluation, contains a misleading abstract claim, and has a skeletal implementation section. It reads as an incomplete research contribution.
 
-## Round 2 Narrowing
+---
 
-Additional anchors within bracket:
-- **EXaKfdsw04** (3.25): "StepProof" — Poorly written, unclear methodology. Our paper is clearly better.
-- **mb2rHLcKN5** (3.75): "SubgoalXL" — Has quantitative evaluation but concerns about data leakage, limited novelty, inconsistent writing. Our paper has better writing and motivation but even weaker evaluation.
-- **aNf8VCQE0h** (5.00): "Almost Sure Reasoning" — LLM+solver with clear evaluation on benchmarks. Our paper is weaker.
-- **Zix86UbMGh** (4.50): "ProofNet" — Benchmark paper with quantitative results.
-- **mHx8JFURtn** (4.75): Not closely related.
-
-**Final score: 4.0** — between SubgoalXL (3.75) and AlphaIntegrator/Almost Sure Reasoning (4.75–5.00). The paper has a clear, well-motivated idea but its empirical contribution is essentially absent. It's better than StepProof (clearer writing, stronger motivation) and comparable to SubgoalXL in quality, but lacks the systematic evaluation that would push it to 4.75+.
+Here is the final review:
 
 ---
 
 ## Summary
-O-Forge couples a frontier LLM with Mathematica's `Resolve` function to automate proofs of asymptotic inequalities. The LLM proposes a domain decomposition (splitting the inequality's domain into subdomains where verification becomes tractable), and Mathematica's quantifier elimination verifies each piece. The paper targets research-level problems — particularly two case studies sourced from Terry Tao's work — and positions the tool as a practical research companion for working mathematicians.
+O-Forge presents a framework coupling frontier LLMs with Mathematica's `Resolve` function for proving asymptotic inequalities. The LLM proposes domain/series decompositions, and the CAS verifies each subdomain via quantifier elimination. The work is motivated by Terry Tao's explicit call for AI tools that can suggest domain decompositions for research-level asymptotic analysis. Two case studies drawn from Tao's published solutions are used as illustrative examples.
 
 ## Strengths
-- **Well-motivated problem decomposition paradigm**: The paper convincingly argues that the core difficulty in proving asymptotic inequalities is finding the right domain decomposition, not verifying individual pieces. Case Study 1 (lines 128–132) demonstrates this sharply: the split `y ≤ 2 log x` vs. `y > 2 log x` reduces a seemingly difficult inequality to two trivial lines that a CAS can handle. This cleanly motivates the LLM-for-decomposition, CAS-for-verification division of labor.
-- **Justified CAS choice with specific comparative evidence**: The paper provides concrete, falsifiable comparison points for choosing Mathematica's `Resolve` over alternatives. It reports that CVC5 and MetiTarski "were unable to complete the following proof: log x ≤ log y ⟹ exp(x) ≤ exp(y)" (lines 183–186), and notes that Lean tactics like `linarith` cannot handle transcendental functions (lines 179–181).
-- **Principled single-LLM-call architecture**: The deliberate choice to call the LLM only once (lines 163–171) — for decomposition proposal — and delegate all verification to Mathematica is defended by the observation that LLM accuracy is the bottleneck and minimizing bottlenecks is sound engineering.
-- **Practical finding about leading-term replacement**: The paper reports (lines 275–279) that regime-wise leading-term extraction is essential: without it, Mathematica attempts to find closed-form expressions in terms of gamma functions and fails. This is a non-obvious implementation detail that materially affects success rates.
-- **Honest treatment of the proof-object limitation**: The paper explicitly acknowledges (lines 311–313) that `Resolve` does not produce independently verifiable proof objects and that trust in closed-source software is involved. This self-awareness strengthens credibility.
+- **Well-motivated problem grounded in explicit community need:** The paper directly responds to Terry Tao's stated desideratum for AI tools that can propose domain decompositions for asymptotic inequalities (lines 35–37), giving the work a clear "research mathematician's companion" framing rather than a contrived benchmark task.
+- **Concrete justification for CAS choice:** The paper provides a specific, testable counterexample showing that CVC5 and MetiTarski both fail to prove `log x ≤ log y ⟹ exp(x) ≤ exp(y)`, while `Resolve` handles it (lines 184–186). This cleanly motivates the choice of Mathematica.
+- **Honest treatment of proof-object limitation:** The paper candidly acknowledges that `Resolve` does not emit externally verifiable proof certificates and that this introduces an element of trust in Wolfram's closed-source implementation (lines 191–193, 311–313).
+- **Clear design principle:** The paper explicitly identifies LLM accuracy as the bottleneck and deliberately minimizes LLM involvement to a single call per problem, delegating all verification to deterministic CAS (lines 169–173). This is a well-reasoned architectural choice.
+- **Practical accessibility:** A dedicated website (o-forge.com) accepts LaTeX-formatted conjectures without requiring command-line usage, addressing adoption barriers for non-programmer mathematicians.
 
 ## Weaknesses
 
@@ -38,69 +28,64 @@ O-Forge couples a frontier LLM with Mathematica's `Resolve` function to automate
 None.
 
 ### Major
-- **No quantitative evaluation.** Section 5 reports testing on "around 40-50 easier problems" but provides no success rates, no breakdown by problem type, no failure analysis, and no table of results. The three bullet-point observations are generic and qualitative (e.g., "a small number of decompositions (k ≤ 4) is sufficient"). For a tool paper whose central claim is that the system is "remarkably effective," this is anecdote, not evidence. The section needs actual data: how many problems succeeded, how often the LLM proposed a valid decomposition on the first attempt, what happened when verification failed, and how performance varies with problem complexity.
-- **The abstract's "In-Context Symbolic Feedback loop" does not exist in the described system.** The abstract promises a "loop" implying iterative refinement, but the paper states explicitly (lines 169–171): "we only prompt the LLM once in the entire process, and the rest of the proof completion is carried out by Mathematica." Figure 1 also shows a linear pipeline with no feedback. This mischaracterizes the contribution and is misleading to readers.
-- **Case studies do not demonstrate the tool working.** Both case studies (Sections 3.1 and 3.2) are presented as mathematical exposition — the authors explain the decomposition logic as a mathematician would, not as O-Forge produced it. There is no transcript showing what the LLM actually proposed, what Mathematica returned, or what the full O-Forge output looked like. The reader cannot distinguish between O-Forge successfully solving these problems and the authors describing the intended behavior.
-- **Implementation is critically underspecified.** The prompt templates (lines 199–222) are left with empty placeholders (`<guiding_principles>`, `<task>`, `<requirements_for_breakpoints>`, `<output_format>`). The Mathematica code snippet (lines 230–235) is fragmentary and incomprehensible in isolation. The specific frontier LLM is not identified (Gemini and ChatGPT are mentioned in passing at line 132 but never pinned down). The "regime-wise simplification" algorithm (Step 3) is described only at the highest conceptual level.
+- **Evaluation is essentially absent:** Section 5 ("Empirical Evaluation," lines 254–282) mentions testing on "around 40–50 easier problems" but provides zero quantitative results — no success rate, no failure rate, no breakdown by problem type, no table of results. The entire empirical content consists of three qualitative bullet-point observations. For a systems/tool paper, the absence of any quantitative evaluation means the paper's core claim — that the LLM+CAS framework is "remarkably effective" — is asserted rather than demonstrated. No baselines of any kind are provided.
+
+- **"In-Context Symbolic Feedback loop" is a misrepresentation:** The abstract (line 9) prominently advertises an "In-Context Symbolic Feedback loop," and refers again to "Using this loop." However, the system as described is strictly single-pass: the LLM proposes a decomposition once and the CAS verifies it (line 173: "prompt the LLM once in the entire process"). There is no feedback path from CAS verification results back to the LLM for iterative refinement. This misrepresents the system architecture.
+
+- **No evidence that the LLM actually proposed the claimed decompositions:** Both case studies (Section 3) describe decompositions already published by Tao (2024), but the paper never shows the LLM's raw output, the prompt that generated it, or any interaction trace. The reader cannot distinguish between the LLM autonomously proposing these decompositions and the authors hand-crafting them after knowing Tao's solutions. The paper's central thesis — that LLMs are good at this task — is supported only by the assertion that frontier LLMs "do a commendable job" (line 132).
+
+- **Implementation description is skeletal:** The prompt template (lines 199–224) consists of empty XML tags (`<guiding_principles> - </guiding_principles>`, etc.) with no actual prompt content. The Mathematica code (lines 229–236) is a fragment with ellipses. The paper's core mechanism — what the LLM is actually asked to do — cannot be understood or assessed from the paper alone.
 
 ### Minor
-- **No ablation or controlled comparison experiments.** The paper makes comparative claims (e.g., LLMs alone produce incorrect proofs, O-Forge fixes this) but never runs O-Forge against LLM-alone or CAS-alone on the same problems. The simplest ablation — feeding the whole inequality to `Resolve` without domain splitting — would directly quantify the value the LLM adds.
-- **The Riemann Hypothesis mention (line 17) as a motivating example sets unrealistic expectations.** The tool obviously cannot address RH, and linking it — even as an illustrative example — overpromises.
+- **Case studies are not novel demonstrations:** Both case studies (Section 3) walk through decompositions from Tao's 2024 MathOverflow post (cited at line 110). While useful as illustrations, they do not demonstrate the system solving problems where the answer was not already known.
+- **No ablation of the LLM component:** The paper never tests whether a simpler heuristic (e.g., grid-based domain splits, template-based decompositions) would perform comparably to the LLM. Without this, the paper cannot establish that the LLM specifically — as opposed to any decomposition strategy — accounts for the claimed benefit.
 
 ### Trivial
-- **AM-GM example (lines 29–33) is introduced as motivation but never returned to** as a problem the tool actually handles, leaving a loose thread.
+- **Unresolved authoring note:** Line 43 contains `(** describe the structure of the prompt**)`, an internal writing reminder that was not removed before submission.
 
 ## Nice-to-Haves
-- Add an actual evaluation table with success rates, failure modes, and problem complexity breakdowns on the 40–50 problem suite.
-- Replace or supplement the current case studies with verbatim transcripts showing the LLM's proposed decomposition and Mathematica's per-subdomain output.
-- Add a minimal ablation: run `Resolve` without domain splitting on the same problems to quantify what the LLM decomposition contributes.
-- Either implement a genuine feedback loop (LLM proposes → Resolve fails on some subdomains → LLM refines) or correct the abstract and introduction to reflect the actual single-pass architecture.
-- Specify which frontier LLM was used, show the actual prompt structure (not empty placeholders), and describe the regime-wise simplification algorithm.
+- The system would benefit from an actual feedback mechanism (as the abstract suggests) where failed CAS verifications are fed back to the LLM for decomposition refinement.
+- Reporting compute costs or latency per problem would help potential users assess practical utility.
+- A curated benchmark of asymptotic inequalities with known difficulty ratings would make evaluation reproducible and enable future comparisons.
 
 ## Removed Points
-These points were flagged but removed with justification:
-
-- **"No comparison to any baseline at all" (Harsh Critic)** — Partially inaccurate. The paper does provide qualitative comparisons against Z3, CVC5, MetiTarski, Lean tactics, and Tao's Lean-based tool in the "Choice of CAS" subsection (lines 175–193). The valid concern (no experimental head-to-head) is retained as a Minor weakness above.
-- **Evaluation described as "effectively empty" (Harsh Critic)** — Overstated. The section does contain concrete observations and descriptions of testing. The problem is lack of quantitative data, captured in the Major weakness above.
-- **Reproducibility concerns about release status of models/tools/datasets** — Per hard rules, all cited references, the anonymized repository, and the website (o-forge.com) are assumed to exist and to be available. Removed.
-- **Formatting/style nitpicks and typos** — Removed per hard rules; these are parser artifacts, not author errors.
+These points are flagged to be removed; treat them with caution.
+- **Harsh Critic claim that the evaluation absence is "fatal":** Retained as Major but not fatal — the paper does contain an evaluation section with some content, just severely inadequate. A fatal flaw requires unambiguous invalidation of core claims.
+- **Strength Finder claim that "Evaluation across 40–50 problems provides evidence of generality":** Removed — this "evaluation" contains no quantitative results and cannot serve as evidence.
+- **Harsh Critic speculation about whether randomized/template heuristics would match LLM performance:** Retained only as the ablation gap; the speculation about what the ablation *would* show is unsubstantiated.
+- **Harsh Critic concern about reproducibility/availability of models and tools:** Removed per hard rule — all cited tools (Mathematica, Gemini, ChatGPT) are assumed to exist and be available.
+- **Formatting/parser artifacts:** Removed per hard rule.
 
 ## Novel Insights
-Beyond the paper's own contributions, the review process surfaces an important tension: the paper's single-LLM-call design (which is architecturally sound and well-motivated) directly contradicts the abstract's claim of a "feedback loop." This suggests the authors recognize the value of iteration but haven't yet built it — or alternatively, that the abstract was written aspirationally. Resolving this inconsistency would strengthen the paper considerably.
+None beyond the paper's own contributions. The LLM+CAS coupling for asymptotic analysis is a natural extension of the AlphaGeometry paradigm, and the paper does not introduce a fundamentally new technical insight.
 
 ## Suggestions
-- Add a table reporting quantitative results on the 40–50 problem suite: success count, failure count, average number of decompositions, and breakdown by problem type. Even modest numbers with honest failure reporting would transform the evaluation from anecdotal to substantive.
-- Replace the current case study presentation with a "transcript" format: show the user's LaTeX input, the LLM's raw decomposition output, and Mathematica's per-subdomain True/False results. The reader needs to see the tool operating, not a human reconstruction of what it should do.
-- The simplest compelling ablation is to run `Resolve` on the full inequality without domain splitting and report how often it succeeds. This directly quantifies the LLM's contribution.
-- Correct the abstract: either implement iterative refinement and keep "feedback loop," or replace "In-Context Symbolic Feedback loop" with accurate language like "single-pass LLM+CAS pipeline."
+- **Build a proper evaluation:** Curate the 40–50 problems into a public benchmark, report per-problem success/failure with quantitative metrics, include at least one baseline (LLM-alone proof attempts), and ablate the LLM against a simpler decomposition heuristic (e.g., grid-based splits).
+- **Show the system working end-to-end:** Include the actual prompt, the actual LLM output, and the CAS verification result for at least the two case studies, so readers can verify the LLM genuinely proposed the claimed decompositions.
+- **Either implement a feedback loop or remove the claim:** The abstract's "In-Context Symbolic Feedback loop" should either be backed by an actual iterative refinement mechanism or replaced with accurate terminology (e.g., "pipeline" or "single-pass verification").
+- **Fill in the implementation section:** The prompt template and Mathematica code should contain actual content, not empty scaffolding.
+- **Resolve the authoring note on line 43.**
 
-## Anchor Comparison
+## Anchor Papers
+| Paper | Avg Score | Round | Comparison |
+|-------|-----------|-------|------------|
+| JNZ3Om6NPS (LLM limitations theory) | 2.00 | R1 | Different genre; O-Forge has a more concrete application but similarly weak substantiation |
+| v3DwQlyGbv (Paramanu-Ganita) | 2.33 | R1/R2 | Has quantitative benchmarks; O-Forge is weaker because it lacks any quantitative evaluation |
+| NlY3XppPt3 (Novel computational models) | 2.00 | R1/R2 | More speculative; O-Forge is more grounded but no stronger evidentially |
+| gpKEDj9Dgg (ASR healthcare) | 2.00 | R2 | Different domain; O-Forge's idea is more novel |
+| EXaKfdsw04 (StepProof) | 3.25 | R1/R2 | Has proper evaluation with tables and baselines; O-Forge is clearly weaker |
+| mb2rHLcKN5 (SubgoalXL) | 3.75 | R2 | Has proper evaluation on benchmarks; O-Forge is clearly weaker |
+| lxlMFlzZO9 (DS-Prover) | 3.75 | R2 | Has proper evaluation; O-Forge is clearly weaker |
+| sprjE7BTZR (Transformers as compilers) | 3.75 | R2 | Different genre; O-Forge is clearly weaker |
+| XCMbagV0No (COPRA) | 5.00 | R1 | Much stronger with proper evaluation, algorithmic contribution, and ablations |
+| V5tdi14ple (Don't Trust: Verify) | 6.25 | R1 | Much stronger with quantitative evaluation on established benchmarks |
+| 8xliOUg9EW (MUSTARD) | 7.33 | R1 | Much stronger; O-Forge is not in the same quality tier |
+| KIgaAqEFHW (miniCTX) | 8.00 | R1 | Much stronger; O-Forge is not in the same quality tier |
+| oYjPk8mqAV (Magnushammer) | 8.00 | R1 | Much stronger; O-Forge is not in the same quality tier |
+| Tn5B6Udq3E (Grade-school math reasoning) | 6.00 | R1 | Different subfield; O-Forge has far weaker evaluation |
+| cLTM1gc6Qm (Mockingbird) | 6.00* | R1 | Outlier score (10/3/5); O-Forge shares similar evaluation weakness |
 
-All anchors retrieved across rounds:
+**Bracket:** Round 1 placed O-Forge in 2.0–3.5. Round 2 narrowed to 2.0–2.5 via comparison with v3DwQlyGbv (2.33, has quantitative evaluation) and StepProof (3.25, has proper evaluation). **Final score: 2.0** — O-Forge falls below v3DwQlyGbv because, despite a more novel idea, it provides *zero* quantitative evidence for its central claim, includes a misleading architectural claim in the abstract, and has a skeletal implementation section.
 
-| Path | Score | Round | Comparison |
-|------|-------|-------|------------|
-| FiyS0ecSm0 | 6.75 | R1 (mid) | Very similar topic (LLM+symbolic for inequalities). Much stronger: quantitative eval on 161 problems, multiple baselines, formal verification. Our paper is clearly weaker. |
-| V5tdi14ple | 6.25 | R1 (mid) | LLM quantitative reasoning with autoformalization. Stronger evaluation. |
-| lJdgUUcLaA | 4.75 | R1 (mid) / R2 | AlphaIntegrator (LLM+symbolic for integration). Has systematic quantitative evaluation. Our paper is weaker. |
-| Q3YaCghZNt | 5.75 | R1 (mid) | Lemur: LLM for program verification. Stronger evaluation. |
-| aNf8VCQE0h | 5.00 | R2 | Almost Sure Reasoning: LLM+solver with benchmark evaluation. Our paper is weaker. |
-| Qyile3DctL | 5.00 | R2 | Collaborative verification. Stronger evaluation. |
-| Zix86UbMGh | 4.50 | R2 | ProofNet benchmark. Has quantitative results. Our paper is slightly weaker. |
-| mHx8JFURtn | 4.75 | R2 | Not closely related. |
-| mb2rHLcKN5 | 3.75 | R2 | SubgoalXL: has quantitative results but data leakage and writing concerns. Our paper has better writing, similarly weak evaluation. Comparable. |
-| EXaKfdsw04 | 3.25 | R2 | StepProof: poorly written, unclear. Our paper is clearly better. |
-| JNZ3Om6NPS | 2.00 | R1 (weak) | Not closely related (limitations paper). |
-| XTxdDEFR6D | 3.40 | R1 (weak) | LLM4Solver. Different domain. |
-| xFezgECSLa | 3.00 | R1 (weak) | LLM-based algorithms theory. Different domain. |
-| k243qi7S50 | 4.00 | R2 | Constraint satisfaction evaluation. Different domain. |
-| m2nmp8P5in | 8.00 | R1 (strong) | LLM-SR: scientific equation discovery. Far stronger. |
-| oYjPk8mqAV | 8.00 | R1 (strong) | Magnushammer: strong paper with comprehensive evaluation. Far above ours. |
-| KIgaAqEFHW | 8.00 | R1 (strong) | miniCTX: neural theorem proving. Far above ours. |
-| STUGfUz8ob | 7.60 | R1 (strong) | Transformer reasoning theory. Far above ours. |
-
-**Round 1 bracket:** 3.5–5.5.  
-**Round 2 narrowing:** The paper sits between SubgoalXL (3.75) and AlphaIntegrator/Almost Sure Reasoning (4.75–5.00). It has better conceptual clarity and writing than SubgoalXL but lacks the systematic quantitative evaluation present in AlphaIntegrator and Almost Sure Reasoning. **Final score: 4.0.**
-
-MY FINAL SCORE: <score>4.0</score>
+MY FINAL SCORE: <score>2.0</score>
 MY FINAL DECISION: <decision>Reject</decision>

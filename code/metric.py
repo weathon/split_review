@@ -825,14 +825,14 @@ def analyze_and_plot(path):
         print(f"    MAE:                 {b_mae:.4f}")
 
     print(f"\n  {'─'*45}")
-    print(f"  {'Paper ID':<20} {'Pred':>5} {'Rnd':>4} {'GT':>5} {'Human':<20} {'Match'}")
-    print(f"  {'─'*45}")
-    for _, row in df.iterrows():
-        r = round_to_scale(row["pred_score"])
-        human = [row[c] for c in gt_score_cols if pd.notna(row[c])]
-        h_str = ",".join(str(int(s)) for s in human)
-        m = "✓" if r in [int(s) for s in human] else "✗"
-        print(f"  {row['paper_id']:<20} {row['pred_score']:>5.1f} {r:>4} {row['gt_avg_score']:>5.2f} [{h_str}]{'':<{16-len(h_str)}} {m}")
+    # print(f"  {'Paper ID':<20} {'Pred':>5} {'Rnd':>4} {'GT':>5} {'Human':<20} {'Match'}")
+    # print(f"  {'─'*45}")
+    # for _, row in df.iterrows():
+    #     r = round_to_scale(row["pred_score"])
+    #     human = [row[c] for c in gt_score_cols if pd.notna(row[c])]
+    #     h_str = ",".join(str(int(s)) for s in human)
+    #     m = "✓" if r in [int(s) for s in human] else "✗"
+    #     print(f"  {row['paper_id']:<20} {row['pred_score']:>5.1f} {r:>4} {row['gt_avg_score']:>5.2f} [{h_str}]{'':<{16-len(h_str)}} {m}")
 
     # ── Plot ──
     colors = ["#e74c3c" if d.strip().lower() == "reject" else "#2ecc71" for d in df["gt_binary"]]
