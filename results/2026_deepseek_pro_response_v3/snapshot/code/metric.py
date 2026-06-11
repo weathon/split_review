@@ -858,9 +858,9 @@ def analyze_and_plot(path):
     ax.set_title("Raw Scores", fontsize=13)
     ax.set_xlim(mn, mx); ax.set_ylim(mn, mx); ax.set_aspect("equal")
     ax.grid(True, alpha=0.2)
-    # ax.text(0.05, 0.95, f"Spearman: {sp_raw:.3f} [{sp_raw_ci[0]:.3f}, {sp_raw_ci[1]:.3f}]\nPearson: {pe_raw:.3f} [{pe_raw_ci[0]:.3f}, {pe_raw_ci[1]:.3f}]\nSlope: {raw_regression['slope']:.3f} [{raw_regression['slope_ci'][0]:.3f}, {raw_regression['slope_ci'][1]:.3f}]\nMAE: {mae_raw:.3f} [{mae_raw_ci[0]:.3f}, {mae_raw_ci[1]:.3f}]\nBias: {bias_raw:+.3f}\nWithin 1 human std: {within_1std}/{len(df)} ({within_1std/len(df):.0%})\nn = {len(df)}",
-    #         transform=ax.transAxes, fontsize=10, va="top",
-    #         bbox=dict(boxstyle="round,pad=0.4", facecolor="wheat", alpha=0.8))
+    ax.text(0.05, 0.95, f"Spearman: {sp_raw:.3f} [{sp_raw_ci[0]:.3f}, {sp_raw_ci[1]:.3f}]\nPearson: {pe_raw:.3f} [{pe_raw_ci[0]:.3f}, {pe_raw_ci[1]:.3f}]\nSlope: {raw_regression['slope']:.3f} [{raw_regression['slope_ci'][0]:.3f}, {raw_regression['slope_ci'][1]:.3f}]\nMAE: {mae_raw:.3f} [{mae_raw_ci[0]:.3f}, {mae_raw_ci[1]:.3f}]\nBias: {bias_raw:+.3f}\nWithin 1 human std: {within_1std}/{len(df)} ({within_1std/len(df):.0%})\nn = {len(df)}",
+            transform=ax.transAxes, fontsize=10, va="top",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="wheat", alpha=0.8))
     ax.legend(handles=legend_dots, fontsize=9, loc="lower right")
 
     # Top-right: human one-vs-rest baseline scatter or ROC baseline if unavailable
@@ -887,17 +887,17 @@ def analyze_and_plot(path):
         ax2.set_title("Human One-vs-Rest Baseline", fontsize=13)
         ax2.set_xlim(mn2, mx2); ax2.set_ylim(mn2, mx2); ax2.set_aspect("equal")
         ax2.grid(True, alpha=0.2)
-        # ax2.text(
-        #     0.05, 0.95,
-        #     f"Spearman: {one_vs_rest['spearman']:.3f}\n"
-        #     f"Pearson: {one_vs_rest['pearson']:.3f}\n"
-        #     f"MAE: {one_vs_rest['mae']:.3f}\n"
-        #     f"Accept pairs: {sum(d == 'accept' for d in one_vs_rest['paper_decisions'])}\n"
-        #     f"Reject pairs: {sum(d == 'reject' for d in one_vs_rest['paper_decisions'])}\n"
-        #     f"{one_vs_rest['n_pairs']} held-out reviews",
-        #     transform=ax2.transAxes, fontsize=10, va="top",
-        #     bbox=dict(boxstyle="round,pad=0.4", facecolor="wheat", alpha=0.8)
-        # )
+        ax2.text(
+            0.05, 0.95,
+            f"Spearman: {one_vs_rest['spearman']:.3f}\n"
+            f"Pearson: {one_vs_rest['pearson']:.3f}\n"
+            f"MAE: {one_vs_rest['mae']:.3f}\n"
+            f"Accept pairs: {sum(d == 'accept' for d in one_vs_rest['paper_decisions'])}\n"
+            f"Reject pairs: {sum(d == 'reject' for d in one_vs_rest['paper_decisions'])}\n"
+            f"{one_vs_rest['n_pairs']} held-out reviews",
+            transform=ax2.transAxes, fontsize=10, va="top",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="wheat", alpha=0.8)
+        )
         ax2.legend(handles=legend_dots, fontsize=9, loc="lower right")
     else:
         ax2.axis("off")
@@ -962,17 +962,17 @@ def analyze_and_plot(path):
         ax5.set_title("Human Split-Half Correlation", fontsize=13)
         ax5.set_xlim(mn5, mx5); ax5.set_ylim(mn5, mx5); ax5.set_aspect("equal")
         ax5.grid(True, alpha=0.2)
-        # ax5.text(
-        #     0.05, 0.95,
-        #     f"Spearman: {split_half['spearman']:.3f}\n"
-        #     f"Pearson: {split_half['pearson']:.3f}\n"
-        #     f"MAE: {split_half['mae']:.3f}\n"
-        #     f"Accept pairs: {sum(d == 'accept' for d in split_half['paper_decisions'])}\n"
-        #     f"Reject pairs: {sum(d == 'reject' for d in split_half['paper_decisions'])}\n"
-        #     f"{split_half['n_pairs']} exact split pairs",
-        #     transform=ax5.transAxes, fontsize=10, va="top",
-        #     bbox=dict(boxstyle="round,pad=0.4", facecolor="wheat", alpha=0.8)
-        # )
+        ax5.text(
+            0.05, 0.95,
+            f"Spearman: {split_half['spearman']:.3f}\n"
+            f"Pearson: {split_half['pearson']:.3f}\n"
+            f"MAE: {split_half['mae']:.3f}\n"
+            f"Accept pairs: {sum(d == 'accept' for d in split_half['paper_decisions'])}\n"
+            f"Reject pairs: {sum(d == 'reject' for d in split_half['paper_decisions'])}\n"
+            f"{split_half['n_pairs']} exact split pairs",
+            transform=ax5.transAxes, fontsize=10, va="top",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="wheat", alpha=0.8)
+        )
         ax5.legend(handles=legend_dots, fontsize=9, loc="lower right")
     else:
         ax5.axis("off")

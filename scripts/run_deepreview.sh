@@ -22,7 +22,7 @@ export PAPERS_DIR="${PAPERS_DIR:-$HOME/split_review/datasets/iclr2026_new/papers
 export REVIEWS_DIR="${SWEEP_NAME}/reviews"
 # Lock OpenRouter provider for the Strength Finder (deepseek only) so
 # routing variance does not leak into the comparison.
-export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-"gmicloud/fp8"}"
+export OPENROUTER_PROVIDER="${OPENROUTER_PROVIDER:-"deepseek"}"
 
 LOG_FILE="results/${MERGE_LOG}"
 mkdir -p "$(dirname "$LOG_FILE")" 
