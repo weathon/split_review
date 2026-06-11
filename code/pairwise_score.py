@@ -82,26 +82,25 @@ BAND_EDGES = [(-1.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 8.0), (8.0, 11.0)]
 ANCHORS_PER_BAND = int(os.environ.get("ANCHORS_PER_BAND", 40))
 
 
-# ── Custom calibration instruction for 5-band bracketing-only retrieval ─
+# ── Custom calibration instruction for single-call binned retrieval ─
 
-CALIBRATION_INSTRUCTION_PAIRWISE = f"""Use `calibration_search` to bracket the paper against human-reviewed anchors across the full score range, then select the genuinely comparable anchors per band. The final score is computed externally via pairwise comparison against the anchors you SELECT — so the selected set must be topically comparable to the paper under review, not just papers that happen to fall in a score band.
+CALIBRATION_INSTRUCTION_PAIRWISE = f"""Use `calibration_search` ONCE to retrieve human-reviewed anchors across the full score range, then filter them down to the genuinely comparable ones. The final score is computed externally via pairwise comparison against the anchors you SELECT — so the selected set must be topically comparable to the paper under review, not just papers that happen to fall in a score band.
 
-## Retrieval (5 bracketing calls, one per band)
+## Retrieval (one call, binned across the score range)
 
-Make exactly 5 `calibration_search` calls — one per score band — each with `n={ANCHORS_PER_BAND}` and the score filter set for that band. Pick a query string per band that captures the paper's topic/method/contribution; you may use different queries per band if a different angle is more discriminating in that range.
+Make exactly ONE `calibration_search` call. Pass a batch of queries — one per score band — so the single call spans the full range. Pick a query string per band that captures the paper's topic/method/contribution; you may vary the query per band if a different angle is more discriminating in that range. Filters: `low_score` is an exclusive lower bound (avg > low_score) and `high_score` an exclusive upper bound (avg < high_score).
 
-Bands (use these exact bounds):
-- Band 1 (weak): low_score=-1, high_score=2, n={ANCHORS_PER_BAND}
-- Band 2: low_score=2, high_score=4, n={ANCHORS_PER_BAND}
-- Band 3 (middle): low_score=4, high_score=6, n={ANCHORS_PER_BAND}
-- Band 4: low_score=6, high_score=8, n={ANCHORS_PER_BAND}
-- Band 5 (strong): low_score=8, high_score=11, n={ANCHORS_PER_BAND}
+Use these bands (each with `n={ANCHORS_PER_BAND}`):
+- "<topic>" with high_score=1.5 (strong reject anchors)
+- "<topic>" with low_score=1.5, high_score=3.5
+- "<topic>" with low_score=3.5, high_score=5.5
+- "<topic>" with low_score=5.5, high_score=7.5
+- "<topic>" with low_score=7.5, high_score=8.5
+- "<topic>" with low_score=8.5
 
-Before any `calibration_search` call, finish filtering inputs into a draft review and call `draft_review` exactly once with that draft.
+## Selection
 
-## Selection (per band, up to 5)
-
-For each band, inspect candidates using `read_file` (read snippets/full reviews as needed) and select UP TO 5 anchors per band that are genuinely topically comparable to the paper under review (same problem area, related method family, comparable claims surface, etc.). If fewer than 5 candidates in a band are actually comparable, return fewer — do not pad with topically-irrelevant papers just to hit 5. If zero are comparable in a band, return zero for that band.
+Inspect candidates using `read_file` (read snippets/full reviews as needed) and select the anchors that are genuinely topically comparable to the paper under review (same problem area, related method family, comparable claims surface, etc.). Drop retrieved papers that are not actually comparable — do not pad the set with topically-irrelevant papers.
 
 Do NOT use the selected anchors to set your final review score — the final score is computed externally via pairwise comparison.
 
@@ -111,7 +110,7 @@ At the very end of your review (after the score line), include a section titled 
 
 <related>["paperidA", "paperidB", ...]</related>
 
-containing only the anchors you SELECTED across all 5 bands (use the file basename without the `.md` extension). De-duplicate the list."""
+containing only the anchors you SELECTED (use the file basename without the `.md` extension). De-duplicate the list."""
 
 
 # ── Agent setup ──────────────────────────────────────────────────────
@@ -169,12 +168,6 @@ def calibration_search(queries: list[CalibrationQuery]) -> str:
     return "\n\n".join(sections)
 
 
-@function_tool
-def draft_review(draft: str) -> str:
-    """Record the merger's post-filtering draft before calibration."""
-    return "draft recorded"
-
-
 if RESCORE_MODEL.startswith("claude_sdk:"):
     merger_agent = None
     SDK_MERGER_MODEL = RESCORE_MODEL[len("claude_sdk:"):]
@@ -184,7 +177,7 @@ else:
         name="Merger",
         instructions=load_merger_prompt_pairwise(),
         model=resolve_model(RESCORE_MODEL),
-        tools=[read_file, grep_file, calibration_search, draft_review],
+        tools=[read_file, grep_file, calibration_search],
         model_settings=MERGER_MODEL_SETTINGS,
     )
 
@@ -267,7 +260,6 @@ async def run_merger_pairwise_claude_sdk(paper_path_abs: str, cached_inputs: str
         allowed_tools=[
             "mcp__merger_fs__read_file",
             "mcp__merger_fs__grep_file",
-            "mcp__merger_fs__draft_review",
             "mcp__merger_fs__calibration_search",
         ],
         mcp_servers={"merger_fs": mcp_server},
