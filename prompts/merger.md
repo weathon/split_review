@@ -33,7 +33,7 @@ This includes phrasing like "not yet released," "does not correspond to currentl
 "cannot be independently verified," or any reproducibility concern rooted in doubting that
 a cited entity exists. These reflect reviewer knowledge gaps, not author errors.
 
-- REMOVE criticisms that are factually wrong or misunderstand the paper. For this one you have to verify it in paper carefully. 
+- REMOVE criticisms that are factually wrong or misunderstand the paper.
 
 - REMOVE "weaknesses" about unfair comparison with other methods if the asymmetry favors
 the baseline and not the author's method. This is intentionally asymmetric to prove a stronger point.
@@ -45,11 +45,17 @@ their existence and could be making things up.
 
 - REMOVE any criticism about typos, spelling, grammar, punctuation, capitalization, whitespace, line breaks, broken characters, garbled text, missing/extra symbols, or any other formatting artifact. These are parser errors, not author errors — the original submission does not have these issues.
 
+- REMOVE nitpicks about reproducibility such as undisclosed hyperparameters, trivial
+implementation details, or large artifacts impractical to include in a submission
+(e.g., complete training logs).
+
+- REMOVE strawman weaknesses that misunderstand the paper content or claiming something the paper already addressed
+
 - REMOVE weaknesses about missing appendix, missing proofs in appendix, or absent references. The parser strips those sections from all papers; they exist in the original submission.
 
-&& - The harsh reviewer will give weaknesses with grounded paragraph, verify those weaknesses against the paragraph to make sure the weakness is valid
+- The harsh reviewer will give weaknesses with grounded paragraph, verify those weaknesses against the paragraph to make sure the weakness is valid
 
-&& - Many of the harsh reviewer's weaknesses are real but minor (presentation, appendix-deferred proofs, precision nitpicks). Rank by severity, not count: score from the worst flaw that actually threatens the core claim.
+- Many of the harsh reviewer's weaknesses are real but minor (presentation, appendix-deferred proofs, precision nitpicks). Rank by severity, not count: score from the worst flaw that actually threatens the core claim.
 
 - Filter the Strength Finder's output. Drop strengths that are generic, superficial, or lack a specific citation or concrete content (examples: this paper addressed an important problem, this paper targeted a interesting question). Drop strengths that conflict with a verified weakness — when a strength and weakness disagree, the weakness wins. Move dropped strengths to Removed Points.
 
@@ -58,25 +64,22 @@ Remove strengths that are generic, strengths about whether the problem is import
 
 - FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simply "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions." However: a weakness only counts as fundamental if it is verifiable from the paper as written — not from speculation about a stripped appendix, missing supplementary, or assumed-but-unverified setup. Speculative-fatal claims (e.g., "if the normalization were X, the reported values would be impossible") should not trigger a score collapse; demote them to Major or Minor and proceed normally.
 
-&& - Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. A strong, well-supported contribution should be scored high — do not pull a clearly strong paper down to the middle out of caution. The same calibration discipline that demands low scores for fatally-flawed papers demands high scores for genuinely strong ones. 
+- Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. A strong, well-supported contribution should be scored high — do not pull a clearly strong paper down to the middle out of caution. The same calibration discipline that demands low scores for fatally-flawed papers demands high scores for genuinely strong ones. 
 
 - The human finder finds similar weaknesses from other papers, they might not be related to this paper, remove those that are not or barely related. 
 
 ## Soft Rules (apply judgment)
-- Reconsider or weaken criticisms that demand the paper address problems outside its stated scope. However, the request has to be fully outside the scope of the paper, and the bar for "out of scope" is high — only apply this when the criticism asks for something the paper never claimed to do.
-Examples of genuinely out of scope (weaken these): a paper proposing a new image classification architecture criticized for not evaluating on object detection; a theory paper criticized for lacking a deployment study.
+- WEAKEN criticisms that demand the paper address problems outside its stated scope.
+A paper about X should be evaluated on whether it does X well, not on whether it also does Y.
+If the paper explicitly scopes out a direction, criticizing its absence is scope creep.
+If doing Y would genuinely strengthen the paper, mention it as a nice-to-have.
 
-&& A paper about X should be evaluated on whether it does X well, not on whether it also does Y.
-&& If the paper explicitly scopes out a direction, criticizing its absence is scope creep.
-&& If doing Y would genuinely strengthen the paper, mention it as a nice-to-have. 
+- WEAKEN weaknesses that are generic or one-size-fits-all and do not harm the core claim.
+Examples: requesting a larger dataset when the current size is sufficient, adding more models
+when the model zoo is already adequate.
 
-- Reconsider weaknesses that are generic or one-size-fits-all and do not harm the core claim.
-Examples: requesting compute time analysis for a paper not focusing on efficiency (this applies to almost any papers), ask a paper to test on larger dataset or use larger models (You can always say this). Think about this: could this weakness apply to another random picked paper? If yes, reconsider (not remove completely) it.
-
-&& - Reconsider weaknesses the authors already address in the paper, even if imperfectly,
-
-- Reconsider the weaknesses that the authors already addressed in the paper. If the address is good, remove the weakness. If the author did not fully address it, keep it, but keep in mind the authors already addressed them. 
-
+- WEAKEN weaknesses the authors already address in the paper, even if imperfectly,
+as long as the addressal is reasonable.
 
 - MOVE TO NICE-TO-HAVE weaknesses that demand methodological practices not standard
 in the paper's field or setting. Examples: requesting confidence intervals for large-scale
@@ -85,10 +88,6 @@ an empirical systems paper, or requiring user studies for a purely algorithmic c
 Evaluate the paper against its own community's standards.
 
 - The "Strengthening the Paper on Its Own Terms" section should be considered as minor weakness or similar tier in nice-to-have and not ignored
-
-- WEAKEN nitpicks about reproducibility such as undisclosed hyperparameters, trivial
-implementation details, or large artifacts impractical to include in a submission
-(e.g., complete training logs).
 
 ## Keep Rules
 - KEEP criticisms that are factually correct AND substantive, even if only one reviewer raised them.
