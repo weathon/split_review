@@ -1,116 +1,133 @@
-Now I have enough data to calibrate my score. Let me assess the anchors:
+Good. The Round 2 anchors confirm my bracket. Let me finalize the review.
 
-**Round 1 Bracket:** Between 4.5 and 6.0 based on comparison with anchors from 4.00 (BCD, circular argument in main theorem), 5.00 (Grokking, very limited scope), 5.75 (Reevaluating Theory, novelty overlap with prior work), and 7.00 (Learning Dynamics, rigorous focused theory — clearly stronger than MGDL).
+**All anchors retrieved:**
 
-**Round 2 Narrowing:** Comparing with 4.75 (Large Learning Rates — practical but limited theory) confirms MGDL has stronger theoretical depth. Comparing with 5.75 (Reevaluating Theory) shows MGDL has more novel contributions but worse evaluation practices.
+| Round | Path | Avg Score | Relevance |
+|-------|------|-----------|-----------|
+| 1 | u1cQYxRI1H | 0.50 | Off-topic (diffusion lighting) |
+| 1 | Uj0h13lVrR | 1.00 | Off-topic (GFlowNets) |
+| 1 | nSDOkm0SKo | 1.00 | Off-topic (financial markets) |
+| 1 | gwZ90hFSL2 | 1.00 | Off-topic (humanoid robots) |
+| 1 | NbbsRnPBoS | 2.33 | Deep linear network convergence; rejected, narrower scope |
+| 1 | xi3sDtf8A0 | 3.00 | Layer-wise fine-tuning; rejected, similar staged training idea |
+| 1 | Zap3nZhRIQ | 3.00 | ReLU non-differentiability; rejected, directly relevant to theory gap |
+| 1 | xpmDc76RN2 | 2.33 | Operator network convergence; rejected |
+| 1 | zPaTnGjgpa | 4.20 | GD eigenvalue stability; rejected, very similar topic |
+| 1 | WL4BmXG7Pl | 5.00 | Spectral analysis of training; rejected |
+| 1 | TroV1cbgoG | 5.33 | Training dynamics theory; rejected |
+| 1 | OZZYqfplS3 | 4.00 | Convergence/stability guarantees; rejected |
+| 1 | PJjHILiQHC | 6.25 | Spectral dynamics of weights; rejected, broad empirical analysis |
+| 1 | J4Dvxv7WnG | 7.00 | Edge of stability dynamics; accepted, rigorous focused theory |
+| 1 | ZyXWIJ99nh | 6.25 | Catapults/SGD eigenvalues; rejected |
+| 1 | UMOlFJzLfL | 5.75 | SGD stability characterization; accepted |
+| 1 | 4xWQS2z77v | 8.00 | Convex duality for NNs; accepted, clean theory |
+| 1 | P7KIGdgW8S | 8.00 | Graph NN stability; accepted |
+| 1 | TTrzgEZt9s | 8.00 | Distributionally robust optimization; accepted |
+| 1 | 25kAzqzTrz | 8.00 | FixMatch generalization; accepted |
+| 2 | 59r0ntInvF | 4.67 | Image restoration training strategy; rejected |
+| 2 | 6Ey8mAuLiw | 5.25 | Multi-task representation learning; rejected |
+| 2 | hzxvMqYYMA | 5.75 | Image quality assessment theory; rejected |
+| 2 | n2RIkaf1S4 | 4.00 | Block coordinate descent for NNs; rejected |
+| 2 | 4hp2bVdaHU | 3.50 | Training monitoring; rejected |
+| 2 | ewZSzO6bts | 3.75 | Scaling laws; rejected |
+| 2 | RzV7QRowUl | 4.67 | Implicit deep learning; rejected |
 
-**Final score: 5.5.** The paper is clearly better than the 4.00-5.00 anchors (no fundamental theoretical flaws, broader experiments) but worse than the 5.75-7.00 range (theory-practice disconnect, missing test accuracy for classification). The eigenvalue analysis and image reconstruction are genuine strengths, but the incomplete classification evaluation and the gap between Theorem 3's scope and the experimental setup hold it back.
+**Round 1 bracket: 4.0–5.5.** The paper has broader experiments and more content than the 3.0–4.20 rejected papers, but has major evaluation gaps (no accuracy, unproven claims) that keep it below the 5.75–7.0 range where borderline-to-accepted papers sit.
 
-Now let me write the final review.
+**Round 2 narrowing: 4.0–5.0.** The 4.67 image restoration paper and 4.0 convergence paper confirm this range. Our paper is more ambitious than these but shares similar evaluation weaknesses.
 
----
+**Final score: 4.5.** The paper has genuine contributions (convexity theorem, eigenvalue analysis, time series results) that place it above weakly rejected papers, but the missing classification accuracy, unproven α_l claim, theory-experiment gap, and weak baselines prevent it from reaching the 5.5+ territory.
 
 ## Summary
-
-This paper provides theoretical and empirical analysis of Multi-Grade Deep Learning (MGDL), which decomposes end-to-end deep network training into sequential shallow "grades" trained on residuals. The contributions include convergence guarantees for GD applied to MGDL (Theorems 1–2), a proof that MGDL with single-layer ReLU grades decomposes into convex subproblems (Theorem 3), eigenvalue analysis of a linearized GD iteration showing MGDL maintains eigenvalues within (−1,1) for stability (Theorem 4), and experiments on image reconstruction, classification, and time series tasks.
+This paper analyzes Multi-Grade Deep Learning (MGDL), which trains deep networks in sequential stages, each optimizing a shallow sub-network on residuals. The authors provide convergence guarantees for GD on MGDL, prove that MGDL with single hidden-layer ReLU grades decomposes into convex subproblems (Theorem 3), present an eigenvalue-based stability analysis, and benchmark MGDL against SGDL across image regression, denoising, deblurring, CIFAR-10/100, and time series tasks with transformers.
 
 ## Strengths
-
-- **Eigenvalue analysis provides a concrete mechanistic explanation for MGDL's stability (Section 7, Figures 4–6).** By linearizing the GD iteration and monitoring eigenvalues of I−ηH during training, the paper demonstrates that SGDL's eigenvalues routinely fall below −1 (causing loss oscillations) while MGDL's stay within (−1,1). This is verified across synthetic regression, image regression/denoising, and CIFAR-10 tasks, giving direct empirical support to the theoretical convergence framework.
-
-- **Consistent and substantial PSNR improvements in image reconstruction (Tables 1–3).** MGDL achieves gains of 0.42–3.94 dB in image regression, 0.16–4.23 dB in denoising, and 0.85–2.84 dB in deblurring across six images and multiple noise/blur levels. These are clear, reproducible results on a well-understood evaluation protocol.
-
-- **Theorem 3 extends convexification from shallow to deep architectures via the multi-grade decomposition (Section 4).** The proof that MGDL with single hidden-layer ReLU grades reduces to a sequence of convex programs is a non-trivial extension of Pilanci & Ergen (2020). The constructive proof via activation partition regrouping is clean and self-contained.
-
-- **Learning rate robustness experiments validate Theorem 2's wider admissible range (Section 6, Figure 2).** MGDL maintains loss < 0.001 for η ∈ [0.01, 0.3] versus SGDL's [0.03, 0.08] in synthetic Setting 1, directly demonstrating practical robustness advantages.
-
-- **Extension to Multi-Grade Transformers with compelling time series results (Section 8).** MGT achieves test MSE of 1.8×10⁻² vs. 8.9×10⁻² for SGT on SPX data while requiring only 33% training time, demonstrating that the multi-grade principle generalizes beyond FC ReLU networks.
+- **Consistent empirical improvements across diverse tasks (Tables 1–5):** MGDL outperforms SGDL on every tested task: 0.42–3.94 dB PSNR on image regression (Table 1), 0.16–4.23 dB on denoising (Table 2), 0.85–2.84 dB on deblurring (Table 3), and ~16×/~5× better test MSE on synthetic/SPX time series (Tables 4–5). These span FCNs, CNNs, and transformers, providing evidence that the advantage is architecture- and task-agnostic.
+- **Learning rate robustness with concrete quantitative evidence (Section 6, Figure 2):** MGDL sustains loss < 0.001 for η ∈ [0.01, 0.3] while SGDL only achieves this for η ∈ [0.03, 0.08] (~15× wider range). For the high-frequency setting, SGDL diverges for η > 0.005 while MGDL remains stable for η ∈ [0.08, 0.3].
+- **Eigenvalue analysis providing mechanistic insight (Section 7, Figures 4–6):** The paper empirically verifies Theorem 4's sufficient condition — MGDL keeps eigenvalues of I − ηH within (−1, 1) while SGDL's violate this bound — across synthetic regression, image regression, denoising, and CIFAR-10, connecting linearized GD theory to observed dynamics.
+- **Multi-Grade Transformer results are compelling (Section 8, Tables 4–5):** MGT shows ~5× better test generalization on both synthetic and SPX financial time series while being 2–3.6× faster. The robustness to distribution shift on SPX (Figure 8) is a strong practical demonstration.
+- **Convex decomposition for ReLU grades (Theorem 3):** The proof that MGDL with single hidden-layer ReLU grades reduces to a sequence of convex programs (equations 7–8) is clean, following Pilanci & Ergen (2020) via activation-pattern partitioning.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
+- **No classification accuracy reported despite explicit claim to evaluate "accuracy" (line 223):** The paper states it evaluates "SGDL and MGDL in terms of both accuracy and training dynamics" on CIFAR-100, but no classification accuracy (top-1, top-5, or any accuracy metric) is ever reported. Only MSE training loss curves are shown (Figure 3). Lower MSE loss does not necessarily correspond to better classification accuracy. For CIFAR-10 (Section 7), only training loss and wall-clock time are reported. The paper also uses MSE loss instead of cross-entropy for classification, which is non-standard. Without accuracy numbers, the classification claims in the abstract, contributions list, and title ("outperforms") cannot be evaluated. The paper claims MGDL delivers "superior accuracy" (line 225) based solely on MSE loss values.
 
-- **No test accuracy reported for classification tasks despite explicit claims.** The paper states it is "evaluating SGDL and MGDL in terms of both accuracy and training dynamics" on CIFAR-100 (line 223) and claims MGDL "delivers superior accuracy" (line 225), but only training loss curves are shown (Figure 3). CIFAR-10 similarly reports only loss and wall-clock time (line 289). Lower training loss does not imply better classification accuracy, especially since MSE loss for classification can overfit without corresponding accuracy gains. The abstract's claim of results "on CIFAR-10 and CIFAR-100" is incomplete without this critical metric.
+- **Key theoretical claim α_l ≪ α is asserted without proof (line 112):** The claim that each grade's Hessian spectral norm is much smaller than the full network's (α_l ≪ α) is the linchpin of the learning-rate robustness argument — it explains why the admissible range (0, 2/α_l) is wider for MGDL. This is stated as an assertion with no bound, proof, or even informal justification. Even a bound showing α_l = O(α/D_l) would significantly strengthen the theoretical contribution.
 
-- **Theorem 3 (convexity) does not apply to any of the paper's experiments.** Theorem 3 requires single hidden-layer ReLU grades (lines 116, 124), but all experiments use multi-layer grades: image regression uses n_h=2 per grade (line 156), denoising uses n_h=3 (line 164), CIFAR-10 uses n_h=2 (line 289). The paper's most novel theoretical contribution has no experimental validation and no demonstrated practical relevance to any reported result.
+- **Gap between convexity result and experimental architectures (Theorem 3 vs. Section 5):** Theorem 3 proves convexity only when each grade is a single hidden-layer ReLU network, but the experimental architectures use multi-layer grades — e.g., (2, 1, 128, 2, 4) means 4 grades each with 2 hidden layers. The convexity result, the paper's most novel theoretical contribution, does not formally apply to any experiment. The paper's line 148 claim that it extends "convexification from shallow to deep architectures" is somewhat misleading: the extension is conceptual (running shallow convex problems sequentially) rather than a proof that the actual multi-layer grade training is convex.
 
-- **The key distinguishing claim α_l ≪ α is asserted without proof.** Line 112 states MGDL has a broader admissible learning rate range because "α_l ≪ α," but no formal bound relating the per-grade Hessian spectral norm α_l to the full network's α is provided. Theorems 1 and 2 are structurally identical convergence results — the only substantive distinction is this unproven claim. The eigenvalue experiments provide empirical support, but the theoretical contribution is weaker than presented.
-
-- **No control for parameter count or compute across competing methods.** SGDL trains one network while MGDL trains multiple grades sequentially, yet total parameter counts and FLOPs are never reported. For image regression, SGDL has n_h=8 hidden layers while MGDL has 4 grades × 2 layers, but the effective architecture differs due to MGDL's residual composition (equation 3). PSNR improvements could partly reflect capacity differences rather than training methodology differences.
+- **Weak baselines — comparison only against vanilla SGDL:** The comparison is exclusively between MGDL and plain deep networks trained with Adam. No comparison to ResNets or skip-connection architectures (which directly address vanishing/exploding gradients), layer-wise pre-training (a classical staged training approach), or standard image restoration baselines (BM3D is cited at Dabov et al. 2007 but not compared). SGDL's training instability could be substantially mitigated by residual connections or batch normalization — techniques standard for nearly a decade. Without these comparisons, it is unclear whether MGDL's advantages are genuine improvements or artifacts of comparing against an unnecessarily weak baseline.
 
 ### Minor
-
-- **MSE loss for CIFAR-100 classification is non-standard and unjustified.** Line 223 uses MSE rather than cross-entropy, which is known to be suboptimal for classification — it doesn't naturally handle the softmax probability simplex and can suffer from vanishing gradients for confident predictions. This choice is never discussed or justified, and without cross-entropy or test accuracy results, the classification contribution is unconvincing.
-
-- **Convergence theorems assume smooth activations but all experiments use ReLU.** Theorems 1–2 require σ to be twice continuously differentiable (lines 70, 104), while all experiments use ReLU. The paper acknowledges this implicitly in the eigenvalue discussion (line 257, "under ReLU") but never addresses how the smoothness assumption relates to practice. The compact convex set assumption (line 58) is also never verified experimentally.
-
-- **No error bars, variance, or number of runs reported.** All experimental results appear to be single runs, making it impossible to assess statistical significance of the reported improvements.
+- **Theory assumes twice-differentiable activation but all experiments use ReLU:** Theorems 1, 2, and 4 require σ to be "twice continuously differentiable" (lines 52, 70, 104, 255), but ReLU is not differentiable at 0. This is a common technical convenience in optimization theory, but the convergence guarantees do not formally apply to any experiment.
+- **Eigenvalue analysis uses reduced-width networks (Section 7):** The Hessian computation uses 48 hidden units instead of 128 (line 285: "shallow networks are used to enable Hessian computation"), and CIFAR-10 uses only 10,000 of 50,000 images with full-batch GD (line 289). Spectral properties of small networks may not transfer to larger benchmark settings.
+- **No variance or confidence intervals reported:** All experiments appear to be single runs. For experiments with stochastic elements (random initialization), this makes results harder to trust, particularly for the time series experiments where data splits could significantly affect outcomes.
+- **Different learning rates used for SGDL and MGDL (Section 6):** While fair for demonstrating robustness, it complicates interpretation: is MGDL better because of its structure, or because it was tuned to a better learning rate?
 
 ### Trivial
-
 None.
 
 ## Nice-to-Haves
-- Ablations on the number of grades L to show how MGDL performance varies with decomposition granularity.
-- Comparison with other training stabilization methods (learning rate warmup, cosine scheduling, batch normalization, skip connections) to isolate MGDL's contribution.
-- Runtime comparisons for image reconstruction and classification tasks (currently only time series reports wall-clock time).
-- Discussion of when MGDL might NOT help, e.g., when end-to-end training already converges well.
+- Report parameter counts and computational cost explicitly for all experiments.
+- Ablation on number of grades L — how does performance vary?
+- Compare against ResNets or at minimum acknowledge that skip connections address similar gradient issues.
+- Extend convexity analysis to multi-layer grades or more clearly scope its applicability.
 
 ## Removed Points
 These points are flagged to be removed, treat them with caution.
-- None.
+- "Architecture details in appendix" — The appendix is stripped from the parsed paper; this is not an author error.
+- "P_l grows exponentially" — This is a known limitation of the convex reformulation literature (Pilanci & Ergen 2020), not specific to this paper.
+- "Eigenvalue analysis is circular" — The harsh critic overstated this. The paper provides an empirical verification of a sufficient condition (Theorem 4), not a circular argument.
+- "Training/test split for image regression is unusual" — The one-quarter pixel split is a valid experimental choice for the image-as-function framing.
+- "Compact convex set assumption is strong" — This is a standard assumption in convergence analysis; the paper acknowledges it.
 
 ## Novel Insights
-
-The eigenvalue analysis is the paper's most genuinely novel insight: by linearizing the GD iteration and monitoring eigenvalues of I−ηH during training, the paper provides a concrete, mechanistic explanation for MGDL's stability advantage. SGDL's eigenvalues routinely fall below −1 (causing oscillations) while MGDL's stay within (−1,1). This spectral framework connects the theoretical convergence guarantees to observed training dynamics across multiple tasks and architectures, offering an interpretable lens that goes beyond empirical observation of faster convergence.
+The paper's most genuinely novel contribution is the combination of the convexity decomposition (Theorem 3) with the eigenvalue stability analysis (Section 7). The convexity result shows that for single-layer ReLU grades, the nonconvex optimization reduces to a sequence of convex programs — a structural guarantee. The eigenvalue analysis then provides a complementary dynamical lens: MGDL keeps the GD iteration matrix eigenvalues within (−1, 1), directly explaining the observed stability. Together, these offer both structural and dynamical explanations for MGDL's advantages.
 
 ## Suggestions
-- Report test accuracy for CIFAR-10 and CIFAR-100 with both MSE and cross-entropy losses.
-- Run at least one experiment with single-layer grades to demonstrate Theorem 3's convexity result in practice.
-- Report total parameter counts and FLOPs for all SGDL vs. MGDL comparisons.
-- Provide a formal bound or precise conditions under which α_l ≪ α, rather than asserting it.
+1. **Report top-1 classification accuracy for CIFAR-10 and CIFAR-100.** This is the single highest-leverage improvement — without it, the classification claims are unsupported.
+2. **Prove or bound α_l ≪ α.** Even showing α_l = O(α/D_l) would transform the key assertion into a theorem.
+3. **Add ResNet baselines.** At minimum, compare MGDL against a ResNet of comparable depth/parameters.
+4. **Clearly scope the convexity result.** Either restrict the convexity discussion to the single-hidden-layer-grade setting, or extend the theory to multi-layer grades.
+5. **Use cross-entropy loss for classification** in addition to or instead of MSE.
 
-## Calibration Report
+## Reporting
 
-**Anchors retrieved:**
+Anchors retrieved across all rounds:
 
-Round 1:
-| Path | Avg Score | Band | Comparison |
-|------|-----------|------|------------|
-| NbbsRnPBoS.md | 2.33 | Weak | Much weaker than MGDL — rejects on shallow theoretical analysis of depth in linear networks |
-| l2odw7OiNw.md | 2.50 | Weak | Much weaker — batch size/learning rate scheduling with narrow contribution |
-| Zap3nZhRIQ.md | 3.00 | Weak | Weaker — non-differentiability effects, limited scope |
-| xpmDc76RN2.md | 2.33 | Weak | Weaker — optimization of operator networks, narrow focus |
-| MY8SBpUece.md | 5.50 | Middle | Comparable — one-step feature learning theory, broader theoretical contribution but limited experiments |
-| n2RIkaf1S4.md | 4.00 | Middle | MGDL is stronger — BCD paper has circular argument in main theorem |
-| J4Dvxv7WnG.md | 7.00 | Middle | MGDL is weaker — deep matrix factorization EOS analysis is more rigorous and focused |
-| 7Cx05z4pUc.md | 5.00 | Middle | MGDL is comparable/slightly stronger — grokking paper has very limited scope |
-| 4xWQS2z77v.md | 8.00 | Strong | MGDL is much weaker — convex duality paper has deep, well-supported theory |
-| AoraWUmpLU.md | 8.00 | Strong | MGDL is much weaker — Neural ODE activation functions, rigorous theory |
-| TTrzgEZt9s.md | 8.00 | Strong | MGDL is much weaker — DRO with linear convergence, strong contribution |
-| fMTPkDEhLQ.md | 8.00 | Strong | MGDL is much weaker — tight lower bounds, highly novel |
+**Round 1 (20 anchors):**
+- u1cQYxRI1H (0.50), Uj0h13lVrR (1.00), nSDOkm0SKo (1.00), gwZ90hFSL2 (1.00) — off-topic, used for reject-end matching
+- NbbsRnPBoS (2.33) — deep linear network convergence, narrower scope than our paper
+- xi3sDtf8A0 (3.00) — layer-wise fine-tuning, similar staged training idea but less content
+- Zap3nZhRIQ (3.00) — ReLU non-differentiability, directly relevant to our theory gap
+- xpmDc76RN2 (2.33) — operator network convergence, narrower
+- OZZYqfplS3 (4.00) — convergence/stability guarantees, narrower
+- zPaTnGjgpa (4.20) — GD eigenvalue stability, very similar topic, rejected for similar reasons (overclaims, weak evidence)
+- WL4BmXG7Pl (5.00) — spectral analysis, broader empirical scope but lacked insights
+- TroV1cbgoG (5.33) — training dynamics theory, cleaner theory but narrower experiments
+- UMOlFJzLfL (5.75) — SGD stability characterization, accepted with precise theory
+- PJjHILiQHC (6.25) — spectral dynamics, broad empirical analysis lacking concrete insights, rejected
+- ZyXWIJ99nh (6.25) — catapults/eigenvalues, similar eigenvalue theme, rejected
+- J4Dvxv7WnG (7.00) — edge of stability dynamics, accepted with rigorous focused theory
+- 4xWQS2z77v (8.00) — convex duality for NNs, accepted, clean convex reformulation
+- P7KIGdgW8S (8.00), TTrzgEZt9s (8.00), 25kAzqzTrz (8.00) — accepted papers with different focus
 
-Round 2:
-| Path | Avg Score | Band | Comparison |
-|------|-----------|------|------------|
-| LNYL96VIsD.md | 4.75 | Narrow | MGDL is slightly stronger — PSS for LR stability is practical but has limited theory; MGDL has more theoretical depth |
-| KJYIgEteHX.md | 5.00 | Narrow | MGDL is stronger — MRI robustness paper is application-focused |
-| TSrhLq5hSA.md | 4.67 | Narrow | MGDL is stronger — computational imaging hidden property, narrow |
-| R9W6fFlr8W.md | 5.00 | Narrow | MGDL is comparable — primal-dual for image reconstruction, similarly mixed |
-| JslyktsKMY.md | 5.75 | Narrow | MGDL is comparable — theory gap paper has novelty overlap but cleaner evaluation |
-| 2xvisNIfdw.md | 5.67 | Narrow | MGDL is comparable — bilevel optimization, Accept but with mixed reviews |
-| awHTL3Hpto.md | 6.33 | Narrow | MGDL is weaker — ReLU expressivity under convex relaxations, stronger theory |
-| KP4xJQcG3H.md | 5.50 | Narrow | MGDL is comparable — Lagrangian proximal GD, similar contribution level |
+**Round 2 (7 anchors):**
+- 59r0ntInvF (4.67) — image restoration training strategy, similar scope and score
+- 6Ey8mAuLiw (5.25) — multi-task representation learning, theory+experiments
+- hzxvMqYYMA (5.75) — image quality assessment theory
+- n2RIkaf1S4 (4.00) — block coordinate descent convergence
+- 4hp2bVdaHU (3.50) — training monitoring
+- ewZSzO6bts (3.75) — scaling laws
+- RzV7QRowUl (4.67) — implicit deep learning
 
-**Round 1 bracket:** 4.5 – 6.0. MGDL is clearly stronger than the 4.00 BCD paper (no fundamental theoretical flaw) but weaker than the 7.00 EOS paper (more rigorous, focused contribution).
+**Round 1 bracket:** 4.0–5.5. Our paper has more content than the 3.0–4.20 papers but has major gaps (no accuracy, unproven claims) that keep it below 5.5+.
 
-**Round 2 narrowing:** 5.0 – 6.0. MGDL is stronger than the 4.75 PSS paper (more theoretical depth) and comparable to the 5.50–5.75 papers, but the theory-practice disconnect and missing classification metrics push it below the 6.33 paper.
+**Final calibration:** The 4.67 image restoration paper (59r0ntInvF) is a close comparator — similar training strategy + image restoration domain, rejected. The 4.20 eigenvalue stability paper (zPaTnGjgpa) is topically very close and rejected for overclaiming. Our paper is more comprehensive but shares similar issues. I place it at 4.5: above the narrow 3.0–4.0 papers, comparable to the 4.20–4.67 papers, but below the cleaner 5.0–5.75 rejected papers and well below the 7.0+ accepted ones.
 
-**Final score: 5.5** — The paper has genuine theoretical and empirical contributions (eigenvalue analysis, image reconstruction, learning rate robustness), but the incomplete classification evaluation, theory-practice gap (Theorem 3 not matching experiments), and the unproven key claim (α_l ≪ α) prevent it from being a strong contribution.
-
-MY FINAL SCORE: <score>5.5</score>
+MY FINAL SCORE: <score>4.5</score>
 MY FINAL DECISION: <decision>Reject</decision>

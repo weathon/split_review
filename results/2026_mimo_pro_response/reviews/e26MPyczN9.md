@@ -1,91 +1,82 @@
-Now I have enough anchors to calibrate. Let me finalize my assessment.
+Now I have sufficient calibration data. Let me finalize the review. My Round 1 bracket was 5.5-7.0. Round 2 anchors confirm this:
+- JlSyXwCEIQ (5.75, Reject): CodeIt for ARC — narrower scope, less conceptual contribution
+- QiUitwJDKI (5.75, Reject): InnateCoder — similar theme, rejected at 5.75
+- X1p0eNzTGH (5.67, Reject): Level sampling for ZSG — less focused analysis
+- 3w6xuXDOdY (6.50, Accept): Generalization gap in offline RL — comparable breadth, less conceptual depth
+- Kn7tWhuetn (6.80, Accept): Markov property of neural algorithmic reasoning — similar combo of theory + empirics
+- KC58bVmxyN (6.75, Accept): Cognitive model for abstract relations — memory-based reasoning
 
-**Round 1 bracket:** Based on the bracketing anchors, the paper sits between 5.5 and 7.5. It's clearly stronger than the 3.67 "Reclaiming the Source of Programmatic Policies" (topically identical but weaker — reviewers found its main result trivial and lacked novelty), and better than the 5.50–5.75 range papers (MORL generalization benchmark, TD/SL gap study) which had weaker conceptual contributions and more limited experiments.
+The paper under review is clearly stronger than the 5.5-5.75 papers (broader scope, formal framework, stronger evidence). It's comparable to 3w6xuXDOdY (6.50) but with a stronger conceptual contribution. It's comparable to Kn7tWhuetn (6.80) in combining theoretical and empirical arguments about algorithmic reasoning. The main differentiator from 6.80+ papers is the thin SparseMaze proof-of-concept and the TORCS conditioning issue.
 
-**Round 2 narrowing:** Comparing to the 6.50 "Generalization Gap in Offline RL" anchor (scores 8,6,6,6), which is also a multi-benchmark empirical study revealing an important finding. My paper has a cleaner conceptual framework (expressivity/discoverability), a theoretical argument with proof-of-concept, and more actionable findings (identifying specific confounds). I'd place it slightly above — around 6.5.
-
-The paper under review is stronger than the 5.50-5.75 anchors (which are accepted papers with 6,6,5,6 or similar profiles) because it has a more original conceptual contribution and cleaner experimental design. It's comparable to the 6.50 "Generalization Gap" paper, which was a straightforward empirical benchmarking paper, while this paper additionally contributes the expressivity/discoverability framework and the instance-scaling memory argument.
-
----
+**Narrowed bracket: 6.0-7.0, settling on 6.5.**
 
 ## Summary
-This paper re-evaluates three influential benchmarks (TORCS, Karel, Parking) comparing programmatic and neural policies for OOD generalization, demonstrating that much of the reported advantage stems from experimental confounds (reward function design, observation space choice) rather than intrinsic representational differences. It introduces an expressivity/discoverability framework and provides a theoretical argument plus proof-of-concept FUNSEARCH experiment showing that programmatic representations have an inherent advantage when solutions require instance-scaling memory.
+This paper revisits claims that programmatic policies generalize better OOD than neural policies in RL, re-evaluating three core benchmarks (TORCS, KAREL, PARKING) with controlled experimental designs. It shows that much of the reported gap arises from experimental confounds (reward function, observation design) rather than representational differences, proposes an expressivity/discoverability framework for analyzing when representations succeed, and argues that programmatic representations have a genuine advantage only when solutions require instance-scaling memory—supported by a proof-of-concept FUNSEARCH experiment synthesizing BFS.
 
 ## Strengths
-- **TORCS re-evaluation with causal evidence (Table 1):** Changing β from 1.0 to 0.5 in the reward function (Eq. 2) transforms neural policies from crashing on every OOD track to generalizing (76% success G-TRACK-1→G-TRACK-2, 69% to E-ROAD, 100% AALBORG→test tracks), directly demonstrating the reward confound.
-- **KAREL re-evaluation with simpler neural model (Table 2):** "PPO with a_{t-1}" — a simple feedforward network with last-action augmentation — achieves perfect generalization (1.00) on 4/5 tasks at 100×100, matching or surpassing LEAPS and outperforming both ConvNet and LSTM baselines. This is a clean, instructive result about the role of observation design.
-- **Expressivity/discoverability framework (Definitions 2–3):** Disentangling whether a policy space contains a generalizing solution from whether the search algorithm can find it is a genuinely useful conceptual contribution, consistently applied across all three benchmarks in Section 4.4.
-- **Information-theoretic argument for instance-scaling memory (Section 5):** The Ω(log|V|) lower bound for vertex indexing provides a concrete, correct argument for when fixed-capacity neural networks are provably insufficient, going beyond typical hand-waving about inductive bias.
-- **Honest reporting of mixed results:** The paper transparently reports that Parking is challenging for both representations, and that TORCS neural models need 30 seeds to get 13 that learn the training track. This transparency strengthens credibility.
+- **Striking KAREL re-evaluation (Table 2)**: PPO with $a_{t-1}$ (a simple feedforward network augmented with the last action) achieves perfect 1.00 return on 4/5 tasks at 100×100 scale, matching LEAPS, while prior ConvNet and LSTM baselines score 0.00. This cleanly demonstrates that observation design—not representational capacity—was the confound. The 30-seed evaluation is substantially more rigorous than the 5-seed evaluations in prior work.
+- **Compelling TORCS re-evaluation (Table 1)**: Reducing β from 1.0 to 0.5 in the reward function (Equation 2) causes neural DRL policies to generalize to OOD tracks where the original DRL crashes in all seeds, isolating the reward-function confound.
+- **Well-structured expressivity/discoverability framework (Definitions 2–3)**: Provides a principled analytical lens for analyzing when representations succeed, used throughout to reinterpret prior results (Section 6) and to motivate the memory-scaling argument in Section 5.
+- **Theoretically sound argument for instance-scaling memory**: Section 5 argues that exact pathfinding requires Ω(log|V|) bits per vertex and BFS maintains a frontier of Θ(|V|), providing a concrete characterization of when programmatic representations hold a genuine structural advantage over fixed-capacity neural networks.
+- **Honest PARKING treatment**: The paper candidly acknowledges that DQN wins on test success rate while PSM shows a smaller train-test gap, concluding PARKING is challenging for both representations rather than cherry-picking a favorable metric.
 
 ## Weaknesses
 
 ### Fatal
-None
+None.
 
 ### Major
-None
+- **TORCS generalization rates conditioned on successful learners**: DRL(β=0.5) trained 30 seeds on G-TRACK-1 but only 13 completed training. The reported generalization rates (76%, 69%) are conditioned on these 13. When conditioning on all 30 seeds, effective rates drop to ~33% and ~30%. Meanwhile, NDPS's 3/3 rate comes from seeds that all learned to train. The comparison conflates "NDPS reliably learns and generalizes" with "DRL sometimes learns, and when it does, often generalizes." Reporting unconditional rates alongside conditioned rates would give a fairer comparison of the full pipeline. The paper discloses this (Table 1 footnote), but the headline numbers may overstate DRL(β=0.5)'s practical generalization ability.
 
 ### Minor
-- **Abstract/introduction framing slightly overstates results:** The abstract claims neural policies "can match or exceed" programmatic ones, and the introduction states "neural policies generalized as well as programmatic ones" (line 15–16). In TORCS, NDPS generalizes in 3/3 seeds while neural models need 30 seeds to get 13 that learn the training track (43% training success rate), and only 76% of those generalize. In Parking, PSM's "Successful-on-100" test metric (0.06) exceeds DQN (0.00). The paper is transparent about these details in the results sections, but the high-level framing presents a cleaner narrative than the data fully supports. A more calibrated phrasing (e.g., "neural policies can generalize in these domains when confounds are addressed, though often less reliably") would strengthen credibility.
-- **Instance-scaling memory argument rests on a single proof-of-concept:** Section 5 provides a strong theoretical argument (Ω(log|V|) lower bound) but only one empirical demonstration — FUNSEARCH synthesizing BFS on SparseMaze. The gap between the broad claim about "navigation tasks such as pathfinding and domains with nested subproblems" and this single experiment is notable. At least one additional domain would significantly strengthen this core argument.
-- **Training pipeline adjustments alter training conditions in ways that go beyond "fixing confounds":** Changing the reward function in TORCS (β=1.0→0.5) and augmenting the observation space in KAREL with last action are presented as correcting experimental setup, but the reward function is part of the MDP specification (Eq. 1), and the augmented observation gives the neural agent different information than the original experiments used. The paper acknowledges the reward issue (line 209: "by changing β from 1.0 to 0.5 we are not changing the problem, but only how the agent learns to complete a given track"), but the distinction could be articulated more carefully — particularly since the KAREL DSL includes perception functions like `frontIsClear` but does not expose last action as a direct observation, making the comparison between the programmatic agent's observation set and a *different* observation set given to the neural agent.
+- **SparseMaze proof-of-concept is empirically thin**: The most novel forward-looking claim—that programmatic representations solve problems requiring instance-scaling memory—rests on FUNSEARCH synthesizing BFS in "three runs" on a "wall-sparse version of KAREL's Maze (Figure 7)." The paper provides no details about SparseMaze's construction, success rates across runs, generated code, or scaling behavior to larger maze sizes. While labeled a "proof-of-concept," this is the paper's most novel empirical contribution and deserves more detail to be convincing given the theoretical argument it supports.
 
 ### Trivial
-None
+None.
 
 ## Nice-to-Haves
-- Analyzing why HARVESTER remains unsolved (0.04 at 100×100 for PPO with a_{t-1}, Table 2) would enrich the discussion and help delineate boundaries of when discoverability adjustments suffice vs. when expressivity becomes the bottleneck.
-- Testing whether programmatic policies also improve with sparser observations would clarify whether the improvements are specific to the neural space or general to both.
-- A brief formal argument or reference showing the DSL spaces are provably subsets/supersets of neural network spaces (beyond the heuristic analogy in Section 5) would strengthen the expressivity equivalence claim.
+- Briefly analyze why HARVESTER is the hardest KAREL task at 100×100 scale (all methods essentially fail: LEAPS 0.00, PPO with $a_{t-1}$ 0.04), while at Small scale PPO with ConvNet dominates (0.90). This would enrich the expressivity/discoverability discussion.
+- Discuss what specifically makes PARKING challenging for both representations, beyond noting it is difficult.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
-- **Harsh critic's "boundary between training pipeline adjustment and problem modification":** Partially valid but the paper addresses this (line 209) and the position that reward shaping is a training mechanism rather than problem modification is reasonable in the RL community. Demoted from a standalone weakness to being folded into the minor weakness above.
-- **Missing related works:** Cannot verify existence of proposed missing references, removed per rules.
-- **Request for experiments on programmatic side with sparse observations:** Scope creep — the paper is about whether neural can match programmatic, not about improving programmatic policies.
-- **Formatting/style nitpicks:** Removed per rules.
+These points are flagged to be removed, treat them with caution:
+
+1. **Harsh critic's "HARVESTER gap undermines the paper's strongest claim"** — This is factually wrong. The critic claimed "On HARVESTER at 100×100, LEAPS achieves 0.45 while the best neural approach (PPO with $a_{t-1}$) achieves 0.04." Table 2 shows LEAPS at 100×100 HARVESTER is **0.00** (line 234), not 0.45. The 0.45 is the Small-scale value (line 233). At 100×100, PPO with $a_{t-1}$ (0.04) actually beats LEAPS (0.00). HARVESTER supports the paper's thesis, not undermines it.
+
+2. **Harsh critic's "PARKING framing is misleading"** — The paper explicitly states "looking at the test 'Success Rate' alone suggests that DQN is the winner" (line 267) and concludes PARKING is "challenging for both types of representation." The framing is balanced.
 
 ## Novel Insights
-The paper's most novel insight is the systematic identification of confounds in OOD generalization comparisons across three benchmarks: the TORCS speed-optimization confound (cautious reward functions enable generalization to tracks with sharp turns), the KAREL observation confound (partial observability + last action is a stronger inductive bias than full observability or LSTM complexity for grid-world tasks), and the Parking algorithm confound (DQN outperforms PPO/DDPG for this domain). The expressivity/discoverability framework provides a clean vocabulary for reasoning about these issues. The information-theoretic argument that Ω(log|V|) memory is necessary for vertex indexing, creating a provable expressivity gap between fixed-capacity neural networks and programmatic representations for pathfinding, is a genuinely useful theoretical contribution that helps delineate when programmatic representations have a principled advantage.
+The paper's most genuinely novel insight is the decomposition of representational advantage into expressivity and discoverability, combined with the identification of instance-scaling memory as the specific class of problems where neural representations fail on expressivity grounds (not just discoverability). This reframes the programmatic-vs-neural debate from "which representation is better" to "what computational requirements does the problem impose," offering a principled criterion for choosing representations.
 
 ## Suggestions
-- Calibrate the abstract and introduction language to match the nuance of the results sections: replace "match or exceed" with language acknowledging that neural generalization is often less reliable.
-- Add at least one additional empirical demonstration of the instance-scaling memory argument (e.g., FUNSEARCH on a graph with cycles where wall-following fails, or a nested-subproblem domain).
-- Expand the discussion of the HARVESTER failure case to help delineate when discoverability adjustments are sufficient vs. when expressivity becomes the bottleneck.
-- For the KAREL experiment, more explicitly acknowledge that augmenting the observation with a_{t-1} gives the neural agent a different observation set than the original DSL provides, rather than framing it purely as "fixing a confound."
+- Report unconditional TORCS generalization rates (fraction of all 30/15 seeds that generalize, counting non-learners as failures) alongside the conditioned rates in Table 1.
+- Expand the SparseMaze experiment: describe the maze construction, show the generated BFS code, present success rates across FUNSEARCH runs, and test on multiple maze sizes larger than training.
+- Add brief analysis of HARVESTER at both scales to enrich the expressivity/discoverability discussion.
 
-## Score and Decision
+## Calibration Report
 
-**Calibration anchors retrieved:**
+**Anchors retrieved across all rounds:**
 
-| Round | Path | Avg Score | Comparison |
-|-------|------|-----------|------------|
-| 1 | It4KL6XnPq (Foundation Policies with Memory) | 3.00 | Weaker — narrower scope, no conceptual framework |
-| 1 | fvTaoyH96Z (Non-Parameterized Randomization) | 2.33 | Weaker — limited contribution |
-| 1 | 5f0n5yi8qK (Video-prompt RL) | 3.40 | Weaker — less rigorous |
-| 1 | hCfhfwSfCg (LanGoal) | 2.00 | Weaker — limited scope |
-| 1 | fMzO6vcmhy (QORA) | 4.25 | Weaker — narrower generalization study |
-| 1 | 3w6xuXDOdY (Generalization Gap in Offline RL) | 6.50 | Comparable — similar empirical benchmarking scope but lacks conceptual framework |
-| 1 | NGVljI6HkR (Reclaiming Source of Programmatic Policies) | 3.67 | Weaker — topically identical but trivial main result per reviewers |
-| 1 | PH7ja3T0vN (Combinatorial Generalization) | 4.50 | Weaker — less actionable findings |
-| 1 | pISLZG7ktL (Data Scaling Laws) | 8.00 | Stronger — massive empirical study with real-world deployment |
-| 1 | agPpmEgf8C (Predictive Auxiliary Objectives) | 8.00 | Stronger — novel neuroscientific connections |
-| 1 | 9pW2J49flQ (DeepLTL) | 8.00 | Stronger — novel method with broad applicability |
-| 1 | DzGe40glxs (Emergent Planning) | 8.00 | Stronger — first mechanistic interpretability of planning |
-| 2 | tuEP424UQ5 (Generalization in MORL) | 5.75 | Weaker — benchmark contribution, limited theory |
-| 2 | X1p0eNzTGH (Level Sampling ZSG) | 5.67 | Weaker — narrower finding |
-| 2 | X6W5eqhzDx (Reachable Tasks) | 4.67 | Weaker — less impactful |
-| 2 | qg5JENs0N4 (TD/SL Gap) | 5.50 | Weaker — theory interesting but experiments limited |
-| 2 | Y1XkzMJpPd (OMNI-EPIC) | 6.75 | Comparable — different domain but similar impact level |
-| 2 | PR6RMsxuW7 (Planning + DRL) | 6.25 | Slightly weaker — narrower scope |
-| 2 | IEduRUO55F (Eureka) | 6.25 | Slightly weaker in conceptual novelty |
+| Paper | Avg Score | Round | Comparison |
+|-------|-----------|-------|------------|
+| NGVljI6HkR — "Reclaiming the Source of Programmatic Policies" | 3.67 | 1 | Narrower scope (KAREL only), less conceptual contribution; clearly weaker |
+| MpA6HMD7Wq — "Do Symbolic or Black-Box Representations Generalise Better" | 3.00 | 1 | Similar question but worse execution; clearly weaker |
+| lUWf41nR4v — "Addressing Long-Horizon Tasks" | 4.50 | 1 | Related but narrower; weaker |
+| It4KL6XnPq — "Foundation Policies with Memory" | 3.00 | 1 | Memory in RL policies, rejected; weaker |
+| fvTaoyH96Z — "Non-Parameterized Randomization for Generalization" | 2.33 | 1 | RL generalization, rejected; weaker |
+| 3w6xuXDOdY — "The Generalization Gap in Offline RL" | 6.50 | 1+2 | Comparable breadth (benchmark study), accepted; paper under review has stronger conceptual contribution |
+| tuEP424UQ5 — "On Generalization Within MORL" | 5.75 | 1+2 | Generalization in RL, accepted; paper under review is more thorough |
+| UfczlMudN6 — "GRAM" | 6.00 | 1 | Dynamics generalization in RL, rejected; paper under review has stronger evidence |
+| X1p0eNzTGH — "Level Sampling for ZSG" | 5.67 | 2 | Generalization in RL, rejected; paper under review is more focused |
+| oKglS1cFdb — "Feature Accompaniment" | 5.67 | 2 | OOD generalization, rejected; paper under review has clearer contributions |
+| JlSyXwCEIQ — "CodeIt" | 5.75 | 2 | Program synthesis, rejected; paper under review is broader |
+| QiUitwJDKI — "InnateCoder" | 5.75 | 2 | Programmatic options, rejected; paper under review has stronger empirical evaluation |
+| Kn7tWhuetn — "Markov Property of Neural Algorithmic Reasoning" | 6.80 | 2 | Algorithmic reasoning + theory, accepted; comparable in combining theory and empirics |
+| KC58bVmxyN — "Cognitive Model" | 6.75 | 2 | Memory-based reasoning, accepted; comparable contribution level |
+| Y1XkzMJpPd — "OMNI-EPIC" | 6.75 | 2 | Programmatic environment generation, accepted; different focus |
+| R6klub5OXr — "Extensive Analysis on RL Algorithm Design" | 5.25 | 2 | RL algorithm analysis, rejected; paper under review is stronger |
 
-**Round 1 bracket:** 5.5–7.5. The paper is clearly above the 3.67 topically-similar anchor and above the 5.5–5.75 accepted papers.
-
-**Round 2 narrowing:** Comparing against the 6.50 "Generalization Gap in Offline RL" anchor (which is also a multi-benchmark empirical study revealing important findings), my paper has a cleaner conceptual framework and a theoretical argument, placing it slightly above. Comparing against the 6.25–6.75 range, the paper is comparable or slightly stronger due to its conceptual contribution.
-
-**Final score:** 6.5. The paper makes genuine contributions — a clean conceptual framework, well-executed multi-benchmark re-evaluation with specific confound identification, and a correct theoretical argument — but is primarily a re-evaluation study rather than introducing new methods, and the instance-scaling memory argument rests on a single proof-of-concept. The framing slightly overstates the re-evaluation results, though the results sections are transparent.
+**Bracket and narrowing:** Round 1 bracketed at 5.5-7.0 based on the paper being clearly stronger than the 3.0-4.5 anchors and comparable to the 5.75-6.5 anchors. Round 2 confirmed the paper is stronger than the 5.5-5.75 rejected papers and comparable to 6.50-6.80 accepted papers. The SparseMaze proof-of-concept being thin and the TORCS conditioning issue prevent a score above 6.80, while the strong KAREL/TORCS re-evaluations, formal framework, and theoretical contribution keep it well above 6.0. Final score: **6.5**.
 
 MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>

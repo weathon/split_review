@@ -1,20 +1,31 @@
-Good — the additional anchors confirm the 7.0 calibration. Let me now write the final review.
+Now I have strong calibration data. Let me analyze the bracket:
+
+**Most relevant anchors:**
+- AutomaTikZ (v3K5TVP8kZ): avg 6.50, Accept — directly comparable, foundational TikZ generation
+- Sketch2Diagram (KvaDHPhhir): avg 6.25, Accept — TikZ from sketches
+- ScImage (ugyqNEOjoU): avg 5.33, Accept — scientific image generation benchmark
+- Chart Understanding (94LyPGDi0Y): avg 5.25, Reject — domain-specific MLLM with data engineering
+- Coarse-Tuning with RL (vLqkCvjHRD): avg 4.75, Reject — RL for code
+
+**Initial bracket:** DaVinci is clearly stronger than AutomaTikZ (6.50) — it adds RL post-training with a novel vectorized reward, achieves 97.6% compile rate (vs AutomaTikZ which just does SFT), has cleaner ablations, and includes human evaluation. But it's held back from the 8.0 tier (LLM-SR, GenSim, WizardMath) by the unresolved data contamination risk on DATiKZ_v3 and single-benchmark evaluation. **Bracket: 6.5–7.5, likely 7.0.**
+
+Now let me write the final review.
+
+---
 
 ## Summary
-
-DaVinci is a two-stage MLLM for scientific diagram parsing that combines SFT on a curated TikZ-30K dataset (featuring normalized drawing order and comment annotations) with GRPO-based RL using a hybrid reward function. The key technical novelty is a vectorized PDF-based reward extraction scheme that bypasses error-prone OCR for text and geometric matching. DaVinci-7B achieves a 97.60% compile rate and competitive image quality metrics on the DATiKZ v3 benchmark.
+This paper introduces DaVinci, a 7B-parameter MLLM for scientific diagram parsing (image → TikZ code), trained via a two-stage pipeline: SFT on a curated TiKZ-30K dataset (featuring code reordering and comment injection) followed by GRPO-based RL with a novel hybrid reward function. The key technical innovation is extracting text and geometric primitives from vectorized PDF representations using PyMuPDF for error-free reward signals, avoiding OCR errors. DaVinci-7B achieves a 97.6% compile rate on DATiKZ_v3, substantially outperforming proprietary models on this metric.
 
 ## Strengths
+- **Novel vectorized reward extraction (Equations 3–4, Algorithms 1–2):** The paper's strongest technical contribution is using PyMuPDF to extract text and geometric primitives directly from the PDF vectorized representation rather than error-prone OCR. The matching algorithms (exact-then-fuzzy with Levenshtein distance for text; Hungarian algorithm for geometric primitives) are well-specified. The ablation in Table 5 confirms incremental improvements: adding R_text and R_geom improves textual alignment (37.23% → 42.28%) and geometric alignment (41.44% → 44.10%) over image-only rewards.
 
-- **Novel vectorized reward construction with clear incremental validation**: The paper exploits TikZ's PDF output metadata to extract text and geometric primitives without OCR errors. Table 5 demonstrates that adding R_text improves textual alignment from 37.23→41.58 and adding R_geom further improves geometry from 41.58→44.10, while MSE drops from 64.58→62.30. This provides concrete evidence that vectorized rewards supply complementary signal to pixel-level metrics.
+- **Identification and validation of the drawing-order problem (Section 3.2, Table 4):** The paper identifies that arbitrary TikZ code ordering creates destructive training noise for autoregressive models, where similar visual layouts map to many permuted code sequences. Table 4 provides clean ablation evidence: reordering alone increases Pass@1 from 69.74% to 78.78% (+9.04%), and comment injection adds another +5.72%.
 
-- **Clean identification and validation of data quality features**: Table 4 provides a compelling ablation showing reordering alone improves compile rate by +9.04% (69.74→78.78%) and comment injection adds another +5.72% (78.78→84.50%) over the baseline (59.59%). The motivation—that noisy drawing order creates arbitrary code permutations for similar visual content—is well-explained.
+- **Strong compile rate with comprehensive evaluation:** DaVinci-7B achieves 97.60% compile rate vs. 86.90% for Claude-Sonnet-4-Thinking (the best proprietary model). Human evaluation (Tables 2–3) corroborates the automatic metrics, with inter-annotator SHR of 0.72–0.79. The observation that cBLEU drops after RL while all other metrics improve (Section 4.3) is a genuine insight.
 
-- **Strong compile rate after RL**: The jump from 84.50% (SFT) to 97.60% (RL) is a substantial and clearly demonstrated result, surpassing all baselines including proprietary models.
+- **Well-designed ablation studies:** Both the data ablation (Table 4) and reward ablation (Table 5) cleanly isolate individual component contributions, making it straightforward for future work to understand which design decisions matter.
 
-- **Rigorous human evaluation methodology**: Best-Worst Scaling with 6 evaluators, 100 items, and reported split-half reliability (ρ=0.72, ρ=0.79) across two comparison groups. DaVinci-7B outperforms GPT-5 and Claude-Sonnet-4 in Group 2 human evaluation (scores: -0.01 vs. -0.13 and -0.35).
-
-- **Insightful finding on code-level vs. visual similarity**: The observation that cBLEU decreases after RL while all visual metrics improve is a genuinely valuable contribution, demonstrating that strict code similarity is neither necessary nor desirable for diagram parsing quality.
+- **License-aware data release strategy:** The paper handles restrictive arXiv licenses by providing diff files and reproducible scripts, balancing legal compliance with reproducibility.
 
 ## Weaknesses
 
@@ -22,76 +33,74 @@ DaVinci is a two-stage MLLM for scientific diagram parsing that combines SFT on 
 None.
 
 ### Major
+- **Contamination risk between training data and DATiKZ_v3 test set:** The paper's temporal separation argument (line 70) explicitly targets DATiKZ_og ("includes data from January 2024 onward"), restricting training to pre-January 2024 sources. However, all evaluation is on DATiKZ_v3 (line 166: "542 visually complex and diverse graphics selected from the whole dataset"), and no temporal separation from DATiKZ_v3's test set is established. Since the training data is collected from the same underlying sources (TeX.SE, arXiv, GitHub) using the same methodology as the DATiKZ series, there is a concrete risk of test set leakage that the paper does not address. This is the highest-leverage fix: either demonstrate no overlap with DATiKZ_v3, or add evaluation on DATiKZ_og for which the separation argument holds.
 
-- **RL gains conflated with compile rate improvement**: When compilation fails, R_text, R_geom, and R_img all receive minimum values (Section 3.3: "if a generated TiKZ program fails to compile, we assign the minimum possible value to the other three reward components"). Since ~15.5% of samples fail after SFT, the RL signal for these samples is entirely driven by compilation success. The 13.1pp compile rate jump therefore likely inflates image metrics, as 13% more samples now produce any output at all. The paper does not decompose RL gains by compile-status subsets (already-compilable vs. newly-compilable), making it difficult to assess whether R_text and R_geom improve visual quality beyond simply driving compilation.
-
-- **Single-benchmark evaluation limits generalizability claims**: All experiments use only DATiKZ v3 (542 examples), sourced from the same pipeline as the training data (with temporal separation). No out-of-distribution or cross-domain evaluation is provided. This is particularly limiting given the paper's title claims "generalized" diagram parsing capability.
+- **Single-benchmark evaluation despite "generalized" claims:** All quantitative results (Tables 1–5) are exclusively on DATiKZ_v3. The title claims "Generalized Scientific Diagram Parsing," but no cross-benchmark evaluation is provided. Without evidence of generalization to other diagram types or benchmarks, it is unclear whether improvements reflect genuine capability or optimization for DATiKZ_v3's specific characteristics.
 
 ### Minor
+- **Selective framing of proprietary model comparisons:** The abstract claims DaVinci "surpasses leading proprietary models like GPT-5 and Claude-Sonnet-4" without qualifying the asymmetry (specialized fine-tuned 7B model vs. general-purpose zero-shot models). More substantively, Gemini-2.5-Pro-Thinking outperforms DaVinci-7B on DreamSim (88.20 vs 84.83), SigLIP (95.59 vs 93.93), SSIM (75.86 vs 73.65), and LPIPS (21.64 vs 22.32). The paper does acknowledge this in Section 4.3 ("Gemini-2.5-Pro presents better performance than DaVinci-7B regarding certain metrics such as DreamSim and LIPIIS"), but the abstract and conclusion overclaim.
 
-- **Reward ablation lacks subtractive conditions**: Table 5 only tests incremental additions (Base → Base+R_text → Base+R_text+R_geom). There is no R_geom alone, and no R_text+R_geom without R_img, making it impossible to determine whether the vectorized rewards provide signal independently of the DreamSim+MSE baseline or are largely redundant with them.
+- **Missing Pass@1 in reward ablation (Table 5):** The reward ablation reports image-level and text/geometry metrics but omits Pass@1 compile rate — the paper's headline metric and the one most directly affected by R_pass. Showing how each reward setting affects compilation would complete the picture.
 
-- **Prompt specification for proprietary baselines absent**: The paper does not describe what prompts or system instructions were used for GPT-5, Gemini-2.5-Pro, and Claude. Performance of these models on code generation tasks can vary significantly with prompt engineering, and the fairness of comparison depends on this.
-
-- **Framing of results somewhat overreaches**: While DaVinci does surpass GPT-5 and Claude-Sonnet-4 on most metrics (which is accurate per Table 1), Gemini-2.5-Pro clearly outperforms DaVinci-7B on DreamSim (88.20 vs. 84.83), SigLIP (95.59 vs. 93.93), SSIM (75.86 vs. 73.65), and human evaluation (0.50 vs. -0.01). The abstract's framing could more precisely acknowledge this gap rather than focusing exclusively on the models that were surpassed.
+### Trivial
+None.
 
 ## Nice-to-Haves
-
-- Decompose RL metrics for already-compilable vs. newly-compilable samples to clarify RL contribution beyond compilation.
-- Report RL training variance across multiple seeds.
-- Add at least one OOD benchmark for generalizability.
-- Show RL training curves for compile rate and DreamSim to assess convergence.
+- Add a brief limitations section discussing failure modes (e.g., dense scatter plots exceeding context limits, mentioned on line 206), generalizability beyond TiKZ, and the binary nature of R_pass.
+- Discuss whether the binary R_pass design creates problematic reward granularity for training dynamics.
+- Report confidence intervals or significance tests for human evaluation.
 
 ## Removed Points
+These points are flagged to be removed, treat them with caution.
 
-These points are flagged to be removed, treat them with caution:
-- Formatting artifacts from PDF parsing (parser issues, not author problems).
-- Criticisms about missing appendix content (stripped by parser — these exist in the original).
-- Harsh critic's point about PDF extraction not being truly "error-free" for edge cases (e.g., \node with embedded LaTeX math, custom macros). While theoretically valid, the paper provides concrete examples in Appendix E.4 of OCR failures vs. PDF extraction, and the empirical results validate the approach. This is a theoretical nitpick that doesn't undermine the demonstrated results.
+- **Quality scorer model family bias (Qwen-2.5-VL-32B for scoring, Qwen2.5-VL-7B for training):** The harsh critic raised this as a potential concern, but the impact is speculative and minor — quality scoring is a coarse 5-point filter, not a precision task.
+- **99.5% post-verification pass rate being too lenient:** The critic questioned whether verification is too lenient, but this is a non-issue — the reordering was done by a strong LLM (Qwen3-Coder-480B-A35B) and rendering consistency checks naturally have high pass rates for correct reordering.
+- **Missing related works:** Per hard rules, cannot verify existence of missing related works.
+- **Formatting/typo issues:** Per hard rules, parser artifacts, not author errors.
 
 ## Novel Insights
-
-The observation that cBLEU decreases after RL while all visual metrics improve is a genuinely novel finding for the code generation community. This demonstrates that visually equivalent TikZ representations are syntactically diverse, and that optimizing for code-level similarity can actually conflict with visual quality—an insight with implications beyond diagram parsing. The vectorized reward approach, exploiting TikZ's PDF metadata as an OCR-free alternative for extracting reward signals, is also a well-motivated contribution that could inform reward design for other code-to-visual-output tasks.
+The paper's most genuinely novel observations are: (1) that TikZ code ordering is arbitrary for rendering but destructive for autoregressive training — a domain-specific insight with clean ablation evidence; and (2) that vectorized PDF representations can provide extraction-error-free reward signals for RL, circumventing OCR limitations that plague prior diagram-level reward work. The finding that "high code similarity is not necessary" (cBLEU drops after RL while all other metrics improve) also offers useful guidance for the TiKZ generation community.
 
 ## Suggestions
+- Add DATiKZ_og evaluation or explicitly demonstrate no overlap between training data and DATiKZ_v3 test set. This is the single highest-leverage improvement.
+- Add Pass@1 to Table 5 to complete the reward ablation.
+- Soften the abstract/conclusion framing to be more balanced about where DaVinci leads and trails vs. proprietary models.
+- Add a brief limitations section.
 
-- Add a supplementary table decomposing RL gains by compile-status subsets (e.g., metrics on the subset that already compiled after SFT).
-- Include at least one additional evaluation benchmark (e.g., biology textbook diagrams or an out-of-distribution subset).
-- Calibrate abstract claims to specify which models are surpassed and acknowledge where gaps remain (especially Gemini).
-- Add subtractive reward ablations: R_geom alone, R_text+R_geom without R_img.
-- Describe the prompt template used for proprietary model baselines.
+## Calibration Report
 
-## Score and Decision
+### Anchors Retrieved
+| Anchor | Avg Score | Round | Comparison |
+|--------|-----------|-------|------------|
+| 8QTpYC4smR (Systematic Review of LLMs) | 1.00 | R1 | Irrelevant — survey paper, strong reject |
+| Uj0h13lVrR (KL Divergence GFlowNets) | 1.00 | R1 | Irrelevant — theoretical, strong reject |
+| 5kMwiMnUip (Jailbreaking LLMs) | 1.40 | R1 | Irrelevant — security paper |
+| gwZ90hFSL2 (Cross-Lingual Humanoid) | 1.00 | R1 | Irrelevant — strong reject |
+| N18Z2MkMEa (FALCON code RL) | 3.00 | R1 | Weaker — code RL without novel reward, rejected |
+| iTrd5xyHLP (LLMatic NAS) | 3.40 | R1 | Weaker — LLM for architecture search, rejected |
+| hrMNbdxcqL (G2T-LLM molecules) | 3.00 | R1 | Weaker — different domain, rejected |
+| Q6HYM1EMu8 (LARG2 RL rewards) | 3.00 | R1 | Weaker — automatic reward generation, rejected |
+| RIKIavmwqK (FigCaps-HF) | 3.75 | R1 | Weaker — figure captioning with RLHF, rejected |
+| 8Rad5LwSv2 (Physics Dance RL) | 4.75 | R1 | Weaker — different domain, rejected |
+| 94LyPGDi0Y (Chart Understanding) | 5.25 | R1 | Comparable — domain MLLM with data engineering, rejected |
+| vLqkCvjHRD (Coarse-Tuning RL) | 4.75 | R1 | Comparable — RL for code, rejected |
+| Pu3qMB9aKD (Text-to-Text Graph) | 4.50 | R1 | Less relevant — graph generation, rejected |
+| ugyqNEOjoU (ScImage) | 5.33 | R1 | Related — scientific image gen benchmark, accept |
+| wLzhEQq2hR (VLM Diagram Understanding) | 6.00 | R1 | Related — diagram comprehension, rejected |
+| dqyuCsBvn9 (Learning Diagrams) | 5.67 | R1 | Less relevant — training framework, accept |
+| KvaDHPhhir (Sketch2Diagram) | 6.25 | R1 | Highly comparable — TikZ from sketches, accept |
+| v3K5TVP8kZ (AutomaTikZ) | 6.50 | R1 | Most comparable — TikZ generation, accept |
+| 2IoFFexvuw (ORW-CFM-W2) | 6.00 | R1 | Less relevant — RL for flow matching, accept |
+| m2nmp8P5in (LLM-SR) | 8.00 | R1 | Stronger — broad-impact scientific discovery, accept |
+| OI3RoHoWAN (GenSim) | 8.00 | R1 | Stronger — broad-impact LLM for robotics, accept |
+| mMPMHWOdOy (WizardMath) | 8.00 | R1 | Stronger — broad-impact math reasoning, accept |
+| xoXn62FzD0 (SMC for LLMs) | 8.00 | R1 | Stronger — broad-impact constrained generation, accept |
+| 9pW2J49flQ (DeepLTL) | 8.00 | R1 | Stronger — broad-impact RL, accept |
 
-**Evaluation by axis:**
-- **Originality**: Moderate-high. The vectorized PDF-based reward extraction is a genuine contribution beyond pixel/OCR approaches. Drawing order normalization and comment injection are incremental ideas but cleanly validated.
-- **Importance**: Moderate-high. Scientific diagram parsing is a practical problem with real downstream utility. The RL-for-visual-code-generation angle is relevant to the community.
-- **Claims support**: Moderate. The claims about surpassing GPT-5 and Claude are supported by both automatic and human evaluation. The "generalized" claim is weakened by single-benchmark evaluation. The RL contribution is partially conflated with compile rate improvement.
-- **Experiments**: Moderate-high. Comprehensive baselines and metrics, good human evaluation, but limited to one benchmark and missing some ablation conditions.
-- **Clarity**: Good. Well-motivated and clearly described, with room for improvement on prompt specifications and RL decomposition.
-- **Value to community**: Good. Practical system with strong results, useful dataset contributions, and technical insights applicable to related tasks.
+### Bracket and Narrowing
+**Round 1 bracket: 6.5–7.5.** DaVinci is clearly a stronger contribution than AutomaTikZ (6.50) — it adds RL post-training with a genuinely novel vectorized reward, achieves 97.6% compile rate, has more thorough ablations, and includes human evaluation. However, it's held back from the 8.0 tier by the unresolved data contamination risk on DATiKZ_v3 and single-benchmark evaluation. The 8.0 papers (LLM-SR, GenSim, WizardMath) all have broader impact and no comparable evidentiary concerns.
 
-**Calibration anchors:**
-
-| Anchor | Score | Round | Comparison |
-|--------|-------|-------|------------|
-| AutomaTikZ (v3K5TVP8kZ) | 6.50 | R1 | DaVinci is stronger: RL post-training, vectorized rewards, more comprehensive evaluation, human eval |
-| Sketch2Diagram (KvaDHPhhir) | 6.25 | R1 | DaVinci is clearly stronger in every dimension |
-| ScImage (ugyqNEOjoU) | 5.33 | R1 | DaVinci is much stronger |
-| Chain-of-region (M6fYrICcQs) | 6.00 | R1 | DaVinci is stronger (more technical contribution, better evaluation) |
-| LLM-SR (m2nmp8P5in) | 8.00 | R1 | Higher impact but different domain; DaVinci not at this level |
-| Eureka (IEduRUO55F) | 6.25 | R2 | Different domain, DaVinci more domain-specific but comparable quality |
-| Text2Reward (tUM39YTRxH) | 7.00 | R2 | Comparable: both reward design papers with solid contributions and evaluation weaknesses |
-| Diffusion On Syntax Trees (wN3KaUXA5X) | 7.20 | R2 | Higher novelty but limited scope; DaVinci comparable in quality |
-| VLMaterial (wHebuIb6IH) | 7.50 | R2 | Better generalization evaluation; DaVinci slightly below due to single benchmark |
-| FiSAO (cJQ1K2fjpD) | 6.20 | R2 | Different domain |
-| ExeDec (oTRwljRgiv) | 7.00 | R2 | Both program synthesis with execution feedback; comparable quality |
-
-**Round-1 bracket:** 6.5–7.5 (clearly above AutomaTikZ at 6.50, comparable to 7.0–7.5 anchors).
-
-**Round-2 narrowing:** DaVinci is comparable to Text2Reward (7.00) and ExeDec (7.00) — both have reward design as core contribution with evaluation weaknesses. DaVinci is slightly below VLMaterial (7.50) due to single-benchmark limitation and overclaiming, and comparable to but slightly below Diffusion On Syntax Trees (7.20) which has higher novelty.
-
-**Final score: 7.0**
+**Final score: 7.0.** This places DaVinci clearly above AutomaTikZ (6.50) and Sketch2Diagram (6.25) while accounting for the two major weaknesses. The vectorized reward innovation and compile rate results are genuine advances for the TiKZ generation community, but the contamination risk and single-benchmark limitation prevent a higher score.
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

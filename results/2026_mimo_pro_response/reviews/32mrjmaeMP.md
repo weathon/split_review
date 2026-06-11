@@ -1,81 +1,111 @@
+Now I have sufficient calibration data. Let me synthesize my analysis.
+
+**Calibration Summary:**
+
+All retrieved anchors across both rounds:
+
+| Round | Path | Avg Score | Comparison |
+|-------|------|-----------|------------|
+| 1 | 5lUdTogEL3 (Clothing Re-ID) | 1.00 | Unrelated, weak paper |
+| 1 | nSDOkm0SKo (Financial NN) | 1.00 | Unrelated, weak paper |
+| 1 | u1cQYxRI1H (IC-Light) | 0.50 | Mis-scored, unrelated |
+| 1 | gwZ90hFSL2 (Chinese NLP robotics) | 1.00 | Unrelated, weak paper |
+| 1 | WM5G2NWSYC (Projected Subnetworks) | 2.00 | Weak related paper |
+| 1 | Tnd3dZxyEv (Knot Initialization) | 2.83 | Weak paper |
+| 1 | HCCkCjClO0 (Online Weight Approx.) | 3.00 | Weak continual learning |
+| 1 | OW5Gf4cse1 (Task Complexity) | 3.00 | Weak paper |
+| 1 | ogmzNfeRl7 (Gradient Correlations) | 5.33 | Rejected, some ideas |
+| 1 | gGpuhyjIlS (Learngene) | 4.50 | Rejected paper |
+| 1 | CCoa6XgO8F (One-Step Learning) | 3.80 | Rejected paper |
+| 1 | 6Ey8mAuLiw (Multitask Rep. Learning) | 5.25 | Rejected theory paper |
+| 1 | **1VwWi6zbxs (τJp paper)** | **6.00** | **Direct baseline — TAK is clearly superior (eliminates data req, matches/exceeds results)** |
+| 1 | **dj0TktJcVI (Attention-Only FT)** | **6.25** | **Direct baseline — TAK is more principled, better evaluated** |
+| 1 | yVGGtsOgc7 (Disentangling Reps) | 5.80 | Related but less practical |
+| 1 | u3dHl287oB (Task Similarity & Forgetting) | 5.67 | Related theory paper |
+| 1 | STUGfUz8ob (Transformers & Abstract Symbols) | 7.60 | Strong theory paper, different domain |
+| 1 | PdaPky8MUn (Never Train from Scratch) | 8.00 | High-impact, different topic |
+| 1 | uHLgDEgiS5 (Temporal Data Influence) | 8.00 | High-impact, different topic |
+| 1 | f4gF6AIHRy (DiSF for LLM Data) | 8.00 | High-impact, different topic |
+| 2 | q3ztjJRQuJ (Task Arithmetic Trust Region) | 5.75 | Rejected, related — TAK is stronger |
+| 2 | irPcM6X5FV (Submodule Linearity) | 6.00 | Accepted related work — TAK has more novel theory |
+| 2 | **OZVTqoli2N (2nd-Order Compositionality)** | **7.50** | **Most comparable high-quality anchor — similar topic (2nd-order + model merging), stronger theory but less comprehensive empirically** |
+| 2 | vRvVVb0NAz (Task Vector Provably Effective) | 7.50 | Strong theory on Transformers |
+| 2 | m50eKHCttz (Fantastic Gains) | 7.25 | Model knowledge transfer |
+| 2 | MY0qlcFcUg (Denoising Task Routing) | 7.33 | Diffusion MTL method |
+| 2 | puTxuiK2qO (AdaFisher) | 6.25 | KFAC-related optimizer — TAK has more novel application |
+| 2 | Q0TEVKV2cp (Debiasing Mini-Batch Quad.) | 6.75 | Second-order methods |
+| 2 | bI3fcTsKW4 (GeN) | 6.25 | Optimization paper |
+| 2 | NvbeD9Ttkx (FOSI) | 6.25 | Optimization paper |
+| 2 | g8sGBSQjYk (2nd-Order Parameterization) | 7.33 | KFAC optimization theory |
+| 2 | 8j9hz8DVi8 (CASPR) | 7.33 | Kronecker preconditioners |
+| 2 | ijbA5swmoK (2nd-Order Min-Max) | 7.50 | Second-order theory |
+
+**Bracketing analysis:**
+
+- **Round 1 bracket:** TAK is clearly above the 6.0-6.5 range of the closely related task arithmetic papers (τJp, Attention-Only FT). Both of those are direct baselines that TAK surpasses in principledness, datalessness, and evaluation breadth. TAK is below the 7.5-8.0 range of broad-impact theory papers (transformers reasoning, fair comparison, influence functions). Bracket: 6.5–7.5.
+
+- **Round 2 bracket:** The "Second-Order Perspective on Model Compositionality" paper (7.50) is the most topically comparable high-quality anchor. It shares the 2nd-order + model merging theme but has deeper formal theorems. TAK's empirical evaluation is more comprehensive (vision + language, addition + negation + unlearning, more ablations). TAK is slightly below this paper in theoretical depth but comparable in overall contribution. Narrowed bracket: 7.0–7.5.
+
+- **Final score: 7.0.** TAK is a well-executed, clearly above-average paper for its community. It has a clean intellectual contribution, eliminates a key practical limitation (data requirement), achieves SOTA results, and has comprehensive evaluation. Its weaknesses are minor. It's stronger than the accepted 6.0-6.25 papers in the same area but slightly below the 7.5 papers that have deeper formal theorems or broader impact. 7.0 seems right.
+
 ## Summary
-This paper proposes TAK (Task Arithmetic with KFAC regularization), a dataless regularizer for improving weight disentanglement in Task Arithmetic. The key insight is that under model linearization, the representation drift regularizer reduces to a quadratic form involving the Jacobian Gram matrix, which is an instance of the generalized Gauss-Newton (GGN) matrix. This enables the use of KFAC approximation to compute the regularizer without access to other tasks' data. The paper also proposes a constant-complexity Kronecker accumulation heuristic for multi-task settings. Experiments on CLIP ViT (B/32, B/16, L/14) and T5-base across vision and language benchmarks demonstrate state-of-the-art task addition and negation performance while being fully dataless.
+This paper proposes TAK (Task Arithmetic with KFAC regularization), a dataless regularizer for improving weight disentanglement in task arithmetic. The authors show that under model linearization, representation drift regularization reduces to a quadratic form involving the Jacobian Gramian, which is an instance of the generalized Gauss-Newton (GGN) matrix. By adopting KFAC to approximate this matrix, they obtain a practical, dataless regularizer with O(1) complexity in the number of tasks via a Kronecker-aggregation heuristic. Experiments span vision (8 Vision benchmark with CLIP ViT-B/32, B/16, L/14) and language (T5-base on 6 NLI tasks), covering task addition, negation, and unlearning.
 
 ## Strengths
-- **Novel conceptual bridge between representation drift regularization and curvature matrices (§3.1, Eq. 3):** The paper cleanly shows that under linearization, the representation drift regularizer is a quadratic form of the Jacobian Gramian, which corresponds to the GGN with squared-error criterion (§3.2). This is a non-obvious connection that enables importing well-established curvature approximation tools.
-
-- **Strong empirical results while being fully dataless (Tables 1 & 2):** TAK matches or exceeds τJp (which requires external task data) in the linearized regime across all three CLIP ViT variants (e.g., 86.0% vs 85.6% on ViT-B/32, 91.6% vs 91.1% on ViT-L/14). On task negation (Tab. 2), TAK outperforms τJp across all model scales (e.g., 3.4% vs 6.7% target accuracy on ViT-B/32), despite requiring no external data.
-
-- **Constant-complexity Kronecker accumulation is near-lossless (Eq. 8, Tab. 3):** The merging heuristic reduces per-task storage from O(T) to O(1). Tab. 3 shows this is empirically sound: accumulated TAK matches or exceeds naïve multi-task formulation for ViT-B/16 and T5-base, with only a small gap for ViT-B/32.
-
-- **Robustness to task-vector rescaling eliminates held-out tuning (Fig. 4a):** The α-sweep shows KFAC-regularized linearized FT maintains high accuracy across α ∈ [0, 2], unlike unregularized merging methods (TA, TSV, ISO, TIES) which exhibit sharp peaks and declines. This directly supports the claim that post-hoc tuning can be omitted.
-
-- **Task localization evidence (Fig. 5):** Histograms of ‖J_θ f(x, θ₀) τ_t‖²₂ show that with KFAC regularization, out-of-distribution normalcy scores are pushed toward zero while in-distribution scores remain informative — direct evidence of weight disentanglement.
-
-- **Comprehensive evaluation across modalities and regimes:** Results span vision (3 CLIP ViTs) and language (T5-base), both linearized and non-linear fine-tuning, task addition and negation, robustness analysis, computational cost analysis, KFAC estimation and compression studies.
+- **Clean mathematical derivation connecting representation drift to curvature approximation**: Section 3.1 (Eq. 3) shows that under linearization, the representation drift regularizer simplifies to a quadratic form of the Jacobian Gramian, and Section 3.2 demonstrates this is an instance of the GGN matrix. This chain of reasoning—representation drift → quadratic form → GGN → KFAC—is logically tight and non-trivial, enabling the principled reuse of well-established second-order optimization machinery for task arithmetic.
+- **Strong empirical results on task addition across multiple backbones, especially in the dataless setting**: Table 1 shows TAK achieves 85.8/88.3/91.6 absolute accuracy (α=1) on ViT-B/32, B/16, and L/14, matching or exceeding τJp (which requires access to external task data) while being fully dataless. This eliminates a key practical limitation of the main prior method.
+- **Best-in-class task negation performance while remaining dataless**: Table 2 shows TAK achieves the lowest target-task accuracy (strongest forgetting: 3.4/3.4/3.5 across ViTs) and highest control-task accuracy, outperforming even τJp which uses ImageNet data for regularization.
+- **Robustness to task vector rescaling eliminates validation-set dependency**: Table 1 shows TAK with α=1 performs within 0.2 points of the best-tuned α across all three ViTs in the linearized regime (e.g., 88.3 vs. 88.3 for ViT-B/16, 91.6 vs. 91.6 for ViT-L/14). Figure 4a corroborates this with a flat accuracy curve across α ∈ [0, 2].
+- **O(1) complexity Kronecker-accumulation with negligible performance cost**: Table 3 validates that the gap between O(T) naïve multi-task and O(1) accumulated regularization is marginal (e.g., ViT-B/16: 88.3 vs. 88.1 absolute accuracy, T5-base: 78.7 vs. 78.5). This makes the method practical for scaling to many tasks.
+- **Comprehensive evaluation and thorough ablations**: The paper evaluates across both modalities (vision and language), both training regimes (linearized and non-linear), and both task addition and negation. Additional analyses cover KFAC estimation efficiency (128 examples, 1 MC sample suffice), compression strategies (87% storage reduction with ~1 point loss), scheduling, memory overhead, and task-localization as an emergent property (Figure 5).
 
 ## Weaknesses
 
 ### Fatal
-None.
+None
 
 ### Major
-None.
+None
 
 ### Minor
-- **Non-linear regime extension rests on an empirical bridge (§4, line 227):** The theoretical derivation assumes model linearization (§3.1–3.3), but TAK is applied in the non-linear regime by pairing with Attention-Only Fine-Tuning, justified by the claim that this "implicitly induces kernel-like behavior." The paper honestly acknowledges that "our regularization is not theoretically exact in the non-linear regime," but provides no diagnostic (e.g., relative approximation error of the linearized model) to validate this bridge. The strong empirical results are compelling, but a quantitative bound on when the linear approximation breaks down would strengthen the argument — especially since the non-linear results actually drive the headline comparison with TaLoS.
-
-- **β hyperparameter treatment not visible in main text (Eq. 7, line 145):** The multi-task objective includes β controlling overall regularization strength. The paper specifies how λ_t is set (proportional to dataset size) but does not state in the main text how β is chosen. This matters for the "dataless" framing — if β requires cross-task validation, the claim needs qualification. (The appendix likely addresses this, but given its centrality to the paper's framing, main-text visibility would be beneficial.)
-
-- **TaLoS comparison uses numbers from the original paper (Tab. 1, footnote †):** The non-linear regime comparison with TaLoS uses numbers "taken from the original paper" (line 159), which may involve different training configurations. While common and likely unavoidable, this caveat deserves more prominence since TaLoS is a key competitor in the non-linear setting.
+- **Unexplained asymmetry in the Kronecker accumulation heuristic (Eq. 8)**: The merging approximation applies λ_t weights only to the A (input activation) factor but not the B (output gradient) factor: `Σ_{t≠t'} λ_t B_t^l ⊗ A_t^l ≈ (Σ_{t≠t'} B_t^l) ⊗ (Σ_{t≠t'} λ_t A_t^l)`. The paper labels this a "heuristic" and validates it empirically in Table 3, but does not discuss why this particular asymmetric form was chosen over alternatives such as weighting both factors or neither. Even a brief ablation comparing this form with symmetric alternatives would close the most notable gap in the paper's reasoning.
+- **T5 α=1 results deferred to appendix**: The paper's headline claim about "eliminating the need for held-out tuning" is a key practical contribution, supported with full evidence only for vision tasks (Table 1). For T5, the main text (Table 3a footnote) states "the results obtained with α = 1 are provided in the appendix," reporting only "Best α" results. Since the α-robustness claim is one of the paper's most practically significant results, presenting T5 α=1 results in the main text would strengthen the cross-domain robustness argument.
+- **Cross-paper TaLoS comparison in non-linear regime**: TaLoS numbers in Table 1 (non-linear regime, lines 180) are taken from the original paper († notation) rather than re-run under the authors' experimental setup. While the paper is transparent about this, differences in training configurations, seeds, or hyperparameter tuning protocols make direct comparison less controlled. Re-running TaLoS under the authors' pipeline, even for one backbone, would make the comparison unimpeachable.
 
 ### Trivial
-None.
+None
 
 ## Nice-to-Haves
-- A quantitative diagnostic for the linear approximation quality in the non-linear regime (e.g., measuring ‖f(x, θ₀+τ) − f_lin(x, θ₀+τ)‖ / ‖f(x, θ₀+τ)‖) would bound the empirical bridge.
-- Discussing the KFAC quadratic storage scaling more explicitly as a constraint on very large models, since experiments use relatively small models (ViT-B/16 ~86M, T5-base ~220M).
-- Reporting the actual difference between ∑ λ_t B_t ⊗ A_t and the merged approximation in Tab. 3 would deepen the analysis of the Kronecker heuristic.
+- A brief discussion of failure modes or limitations: when does the linearization assumption break down sufficiently to harm TAK? How does it behave when task vectors are very large (i.e., when fine-tuning diverges far from θ₀)?
+- A scalability experiment with a larger number of tasks (e.g., 20+) to strengthen the practical O(1) scalability argument beyond the theoretical guarantee and the current 8-task experiments.
 
 ## Removed Points
 These points are flagged to be removed, treat them with caution.
-- Strength about "extending to non-linear regime via attention-only FT": This is kept as a strength but qualified — the theoretical gap in the non-linear regime is acknowledged as a minor weakness. The paper is honest about this limitation.
-- The harsh critic's point about β not being discussed in the main text was partially retained as a minor weakness. The appendix likely covers this, and the paper's claim is "dataless w.r.t. other tasks' data," not "hyperparameter-free."
+- None removed. All identified weaknesses were verified against the paper and retained at their appropriate severity levels.
 
 ## Novel Insights
-The paper's central novel insight is that representation drift regularization in Task Arithmetic, under model linearization, reduces to a Jacobian Gram matrix quadratic form — which is an instance of the GGN matrix. This reframing is non-obvious and powerful: it transforms a data-dependent regularization problem into a well-studied curvature approximation problem, enabling the use of KFAC and eliminating the need for external task data. The constant-complexity Kronecker accumulation heuristic (Eq. 8) is a useful engineering contribution that reduces the multi-task storage burden, though the merging approximation is honestly labeled as a heuristic.
+The paper's genuinely novel intellectual contribution is the connection between representation drift regularization in task arithmetic and the generalized Gauss-Newton curvature matrix, enabling the transfer of well-established second-order optimization tools (specifically KFAC) to the task arithmetic setting. This connection is non-obvious and cleanly derived, and the practical consequence—a dataless, O(1)-complexity regularizer that matches or exceeds data-requiring methods—is a meaningful advance for modular model editing. Additionally, the emergent task-localization property (Figure 5), where KFAC regularization cleanly separates inlier from outlier distributions in Jacobian-norm space, provides both mechanistic insight into why the method works and suggests applications in OOD detection.
 
 ## Suggestions
-- Add a short paragraph or sentence in §3.4 or §4 stating how β is set (fixed, tuned on current task data, etc.) to preempt concerns about the dataless claim.
-- Provide a quantitative diagnostic for the linear approximation quality in the non-linear regime.
-- Add a sentence in §4 acknowledging that the TaLoS comparison uses numbers from the original paper with potentially different training configurations.
+- Add a brief ablation of the asymmetric weighting in Eq. 8, comparing with at least one symmetric alternative (e.g., both factors weighted by λ_t, or neither).
+- Move the T5 α=1 results from the appendix into the main text alongside the "Best α" results in Table 3a.
+- Consider re-running TaLoS under your own experimental setup for at least one backbone to strengthen the non-linear regime comparison.
 
-## Calibration Report
+**Calibration Report:**
 
-**Round 1 anchors (bracketing):**
-- `lNtio1tdbL.md` (ATM: Alternating Tuning and Merging) — avg 3.00, Round 1. Weak paper proposing iterative tuning-merging without strong theoretical or empirical contribution.
-- `XVHXVdoV11.md` (Collective Model Intelligence) — avg 3.40, Round 1. Weak paper on compatible specialization, limited experiments.
-- `1VwWi6zbxs.md` (τJp: Key Indicator for Weight Disentanglement) — avg 6.00, Round 1. Direct baseline — TAK matches/exceeds τJp results while being dataless.
-- `dj0TktJcVI.md` (Attention-Only FT for Weight Disentanglement) — avg 6.25, Round 1. Baseline method that TAK builds upon and improves with curvature regularization.
-- `irPcM6X5FV.md` (Submodule Linearity for Task Arithmetic) — avg 6.00, Round 1. Similar contribution space; TAK has cleaner theory and stronger results.
-- `Bq3fEAGXUL.md` (Realistic Evaluation of Model Merging) — avg 5.33, Round 1. Evaluation/benchmarking paper with limited novelty.
-- `vRvVVb0NAz.md` (When is Task Vector Provably Effective) — avg 7.50, Round 1. Stronger theoretical contribution (first generalization analysis), but less practical.
-- `dqMqAaw7Sq.md` (Mitigating Backdoor Effect for Model Merging) — avg 7.00, Round 1. Similar contribution level; TAK has cleaner theory.
-- `iynRvVVAmH.md` (Parameter-Efficient Multi-Task Model Fusion) — avg 7.00, Round 1. Similar contribution level; TAK has broader evaluation.
-- `g8sGBSQjYk.md` (Second-Order Optimization Parameterization) — avg 7.33, Round 1. More focused on optimization theory.
-- `puTxuiK2qO.md` (AdaFisher) — avg 6.25, Round 1. Second-order optimizer paper.
-- `8j9hz8DVi8.md` (CASPR) — avg 7.33, Round 1. Optimization preconditioner paper.
-- `NvbeD9Ttkx.md` (FOSI) — avg 6.25, Round 1. Hybrid first/second-order optimizer.
-- `q3ztjJRQuJ.md` (Task Arithmetic in Trust Region) — avg 5.75, Round 1. Model merging paper with limited novelty.
+**Round 1 (wide bracketing):** Retrieved 20 papers across 6 score bands. Most topically relevant anchors:
+- τJp paper (avg 6.0): Direct baseline, same task arithmetic domain. TAK clearly surpasses it by eliminating the data requirement while matching/exceeding results.
+- Attention-Only FT (avg 6.25): Another direct baseline. TAK is more theoretically principled and better evaluated.
+- Papers in 7.5-8.0 band (Transformers & Abstract Symbols at 7.6, Never Train from Scratch at 8.0, etc.) are strong but on different topics with broader intellectual impact.
+- **Initial bracket: 6.5–7.5.**
 
-**Round 1 bracket:** Between 6.5 and 7.5. TAK is clearly stronger than the 6.0–6.5 anchors (τJp, Attention-Only FT, Submodule Linearity) because it subsumes their contributions while adding a novel theoretical framework and being dataless.
+**Round 2 (narrowing):** Retrieved 12 papers. Most relevant:
+- "Second-Order Perspective on Model Compositionality" (avg 7.50): Most topically comparable high-quality anchor — shares 2nd-order + model merging themes, has deeper formal theorems but less comprehensive empirical evaluation than TAK.
+- Other 7.0-7.5 papers (Fantastic Gains 7.25, CASPR 7.33, Task Vector Provably Effective 7.50) provide context for the upper end.
+- KFAC-related optimization papers (AdaFisher 6.25, FOSI 6.25) in the lower band confirm TAK's novel application of KFAC is well above routine optimization work.
+- **Narrowed bracket: 7.0–7.5.**
 
-**Round 2 anchors (narrowing):**
-- `dqMqAaw7Sq.md` (DAM) — avg 7.00, Round 2. TAK has a cleaner theoretical contribution and more comprehensive evaluation.
-- `iynRvVVAmH.md` (L-LoRA) — avg 7.00, Round 2. TAK has a stronger theoretical contribution and broader evaluation.
-- `vRvVVb0NAz.md` (Task Vector Provably Effective) — avg 7.50, Round 2. This paper provides first theoretical characterization of task vectors on nonlinear Transformers — a more fundamental contribution. TAK is more practically oriented with stronger empirical evaluation.
-
-**Round 2 narrowing:** The paper sits between 7.0 and 7.5. Compared to the 7.0 anchors (DAM, L-LoRA), TAK has a cleaner theoretical contribution and more comprehensive evaluation. Compared to the 7.50 anchor (Task Vector Provably Effective), TAK has a more practical contribution but less fundamental theoretical advance. I position TAK at 7.0, at the upper end of the 7.0 anchors, slightly below the 7.50 theoretical paper.
+**Final score rationale:** 7.0. TAK is a well-executed paper with a clean intellectual contribution (representation drift → GGN → KFAC bridge), eliminates a key practical limitation of the prior art (datalessness), achieves SOTA results across multiple settings, and has comprehensive evaluation with thorough ablations. Its only weaknesses are minor (unexplained Eq. 8 asymmetry, T5 α=1 deferral, cross-paper TaLoS comparison). It is clearly above the 6.0-6.25 range of the directly related task arithmetic papers but sits below the 7.5 papers that have deeper formal theorems or broader theoretical impact.
 
 MY FINAL SCORE: <score>7.0</score>
-MY FINAL DECISION: <decision>Accept</decision>
+MY FINAL DECISION: Accept

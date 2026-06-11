@@ -1,79 +1,87 @@
-Now I have enough data to calibrate. Let me compile the final review.
+Now I have a clear picture. Let me write the final review with calibration.
 
-**Round 1 bracket: 6.5–8.0.** Spider 2.0 (avg 8.0) is the closest text-to-SQL benchmark anchor; τ-bench (avg 6.50) is the closest interactive user-simulation benchmark anchor.
+**Round 1 bracket:** Based on my comparisons, I bracket BIRD-INTERACT between 6.5 and 7.5.
 
-**Round 2 anchor comparisons:**
-- τ-bench (avg 6.50): BIRD-INTERACT has a more sophisticated simulator with human validation, more tasks, deeper analysis → clearly better than τ-bench.
-- CHASE-SQL (avg 6.25): A method paper, not directly comparable; BIRD-INTERACT as a benchmark is a more substantial contribution.
-- Spider 2.0 (avg 8.0): Comparable scope and impact, but Spider 2.0 reviewers found no major weaknesses while BIRD-INTERACT has the single-run limitation.
-- WildBench/LiveBench (avg 7.33): General LLM benchmarks at 7.33; BIRD-INTERACT is more domain-specific but has comparable rigor and novelty.
+Key comparisons:
+- Stronger than τ-bench (6.50): More comprehensive, better validated simulator, deeper analysis
+- Comparable to MINT (6.75) but with stronger analytical contributions and some weaknesses (ITS overclaiming)
+- Not quite Spider 2.0 level (8.00) which had no significant weaknesses
 
-**Narrowed bracket: 7.0–7.5.** BIRD-INTERACT is clearly stronger than τ-bench (6.50) due to superior simulator validation, deeper analysis, and dual evaluation settings, but has a legitimate limitation (single runs) that the strongest anchors (Spider 2.0, all 8s) did not face. Score: **7.0**.
+**Final score: 7.0**
 
 ---
 
 ## Summary
-BIRD-INTERACT is a benchmark for evaluating LLMs on interactive text-to-SQL tasks, comprising 900 tasks with full CRUD coverage, a novel function-driven user simulator with empirical validation against human users, and two complementary evaluation settings (c-Interact for protocol-guided dialogue and a-Interact for autonomous agent planning). The benchmark reveals that even frontier models struggle: GPT-5 achieves only 8.67% end-to-end success rate in c-Interact and 17.00% in a-Interact on the full task suite.
+BIRD-INTERACT is a benchmark for evaluating interactive text-to-SQL systems that converts static LIVESQLBENCH tasks into dynamic multi-turn scenarios through ambiguity injection and follow-up sub-task generation. It features a two-stage function-driven user simulator (with AMB/LOC/UNA action taxonomy) to prevent ground-truth leakage, and two evaluation modes—c-Interact (protocol-guided) and a-Interact (autonomous agentic planning)—tested on 7 frontier LLMs across 900 tasks spanning full CRUD operations.
 
 ## Strengths
-- **Function-driven user simulator with strong dual validation.** The two-stage simulator (Section 3.3) maps clarification requests to symbolic actions (AMB/LOC/UNA) before generating responses, concretely addressing ground-truth leakage in conventional simulators. USERSIM-GUARD evaluation (Figure 6) shows failure rates on unanswerable questions drop from 67.4% to 2.7%, and Table 3 shows 0.84 Pearson correlation (p=0.02) with human users vs. 0.61 (p=0.14) for baselines.
-- **Two complementary evaluation settings reveal distinct model capabilities.** Table 2 shows GPT-5 ranks worst in c-Interact (14.50% SR) but best in a-Interact (29.17% SR), while Gemini-2.5-Pro shows the reverse pattern (25.00% vs. 20.33%). This divergence demonstrates the settings capture meaningfully different competencies.
-- **Full CRUD coverage with state-dependent follow-up sub-tasks.** Unlike prior SELECT-only benchmarks, BIRD-INTERACT covers the full CRUD spectrum. Follow-up SR is consistently much lower than priority SR (Table 2), confirming state dependency is genuinely challenging.
-- **Memory grafting experiment isolates communication as a distinct bottleneck.** GPT-5's SR improves from 13.8% to 20.5% when grafted with O3-Mini's interaction histories (Figure 5), uniquely enabled by the interactive evaluation design.
-- **Interaction Test-time Scaling (ITS) analysis.** Figure 4 shows Claude-3.7-Sonnet exhibits monotonic performance gains with additional interaction opportunities, providing actionable evidence that interaction capability is a tractable avenue for improvement.
+- **Function-driven user simulator with strong empirical validation**: The two-stage simulator maps model questions to constrained symbolic actions (AMB, LOC, UNA) before generating responses, addressing ground-truth leakage in conventional simulators. Figure 6 shows UNA question failure rates drop from 67.4% (baselines) to 2.7% (proposed). Table 3 shows human-alignment correlation of 0.84 (p=0.02) for the function-driven simulator vs. 0.61 (p=0.14) for baselines. This is a genuine methodological contribution beyond benchmark release.
+- **Memory grafting experiment reveals communication vs. generation separation**: Section 5.2 and Figure 5 show that GPT-5's poor c-Interact performance (14.50% SR, worst among models) stems from communication deficiency rather than SQL generation weakness. When grafted with ambiguity-resolution histories from Qwen-3-Coder or O3-Mini, GPT-5's SR improves from 13.8% to 18.8% and 20.5% respectively. This diagnostic experiment cleanly separates interaction strategy from core generation ability.
+- **Dual evaluation settings reveal divergent model rankings**: Table 2 demonstrates that GPT-5 ranks worst in c-Interact (14.50% SR) but best in a-Interact (29.17% SR), while Gemini-2.5-Pro shows the reverse pattern. This divergence validates that the two settings probe genuinely different capabilities and that no single evaluation mode suffices.
+- **State-dependent follow-up sub-tasks with full CRUD coverage**: Section 3.2 introduces follow-up sub-tasks requiring reasoning over modified database states from preceding queries (e.g., newly created tables), distinguishing this from prior benchmarks that present static conversation transcripts. Table 1 shows 900 tasks with 93.3–93.5% inter-annotator agreement spanning the full CRUD spectrum across BI and DM domains.
 
 ## Weaknesses
 
 ### Fatal
-None
+None.
 
 ### Major
-- **Single experimental runs with no variance reporting.** The paper acknowledges "conducting single runs due to cost" (line 163). Model differences in some Table 2 cells are small (e.g., GPT-5 14.50% vs. Claude-Sonnet-3.7 18.00% in c-Interact priority SR) and could vary with different seeds. The memory grafting differences (13.8% → 18.8% and 13.8% → 20.5%) are also reported as single-point estimates. While cost-justified, this limits confidence in fine-grained model rankings.
+- **ITS claims overstated relative to evidence**: The abstract (line 36) claims "performance improves monotonically with additional interaction opportunities across multiple models." However, Figure 4's own description (line 181) states that in a-Interact mode, performance "remains relatively flat or slightly decreases" with increasing patience. Only "Claude-3.7-Sonnet exhibits clear scaling behavior" (line 203). Furthermore, the ITS Law definition (line 207) states a model satisfies it "if, given enough interactive turns, its performance can match or even surpass that of the idealized single-turn task," but no model in Figure 4 demonstrates this—the idealized single-turn dotted line remains above all interactive levels. Framing this as a demonstrated "law" and claiming it holds "across multiple models" in the abstract is not supported by the results. This should be reframed as a hypothesis or supported with additional data.
+
+- **Single-run experiments with no variance estimates**: Line 163 states all models are evaluated with "single runs due to cost." For a benchmark paper drawing fine-grained model distinctions (e.g., GPT-5 at 14.50% vs. Qwen-3-Coder at 22.00% in c-Interact priority SR), the absence of any variance estimates limits confidence. Even with temperature=0, interactive multi-turn settings can amplify non-determinism. The memory grafting analysis (Figure 5) and patience scaling analysis (Figure 4) also lack error bars. This doesn't invalidate the benchmark but weakens the confidence in specific comparative claims.
 
 ### Minor
-- **Two sub-tasks per task limits multi-turn depth.** Table 1 shows exactly 2 sub-tasks per task for both LITE and FULL sets. While ~13 interaction turns occur within each sub-task (Table 1), inter-sub-task state dependency is tested only once per task. Real database workflows often involve chains of 5–10+ evolving queries. The paper should acknowledge this scope limitation more explicitly.
-- **Abstract/headline framing uses follow-up SR preferentially.** The abstract states "GPT-5 completes only 8.67% of tasks in c-Interact and 17.00% in a-Interact," which are follow-up sub-task SR numbers. The priority SR figures (14.50%, 29.17%) are notably higher. While not misleading, distinguishing end-to-end from priority sub-task success more clearly would improve precision.
+- **Human-alignment correlation based on n=7**: Table 3 correlates success rates across 7 system models (confirmed by line 223: "7 system models on 100 randomly sampled tasks"). With n=7 and df=5, the difference between r=0.84 (p=0.02) and r=0.61 (p=0.14) is not statistically distinguishable—the confidence intervals overlap substantially. Computing correlation at task granularity (n=100+) would substantially strengthen this validation.
+
+- **Reward weight sensitivity not analyzed**: The 70/30 priority/follow-up reward split (line 173) drives the normalized reward metric, but no sensitivity analysis is provided showing conclusions hold under different weights.
 
 ### Trivial
-- **LITE vs. FULL composition paradox.** LITE has more ambiguities per task (5.16 vs. 3.89) and longer SQL (361.52 vs. 252.21 tokens) despite being described as having "simplified databases" (Table 1). This deserves brief explanation.
+None.
 
 ## Nice-to-Haves
-- Running 3–5 seeds on LITE for representative models would substantially increase confidence in rankings, especially for the ITS and memory grafting analyses.
-- Selective presentation of representative interaction trajectories (successful and failed) in the main text would help future researchers understand *how* models fail, not just *that* they fail.
-- The ITS finding (Claude-3.7-Sonnet scales monotonically; others plateau) deserves sharper framing — identifying what distinguishes "scalable" from "non-scalable" interacters would significantly sharpen the contribution.
-- More open-source models beyond the 2 included would broaden the benchmark's utility.
+- Deeper qualitative error analysis: what fraction of failures come from unresolved ambiguities vs. incorrect SQL vs. budget exhaustion? A failure mode taxonomy per setting would sharpen diagnostic value.
+- Deeper memory grafting analysis expanding to other model pairs and examining what communication patterns transfer.
+- Free-mode a-Interact experiments without budget constraints (acknowledged in Section 8 as future work).
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution.
-- No points required removal. All harsh critic claims were verified against the paper and found to be accurate or adequately addressed above.
+These points are flagged to be removed, treat them with caution:
+- None removed from the Harsh Critic's critical issues—all three were verified as valid against the paper text.
+- Removed from Strength Finder: generic claims about "comprehensive coverage" without specific evidence; already captured in the state-dependent follow-up strength.
 
 ## Novel Insights
-The paper's most novel insight beyond benchmark construction is the memory grafting experiment (Section 5.2), which reveals that GPT-5's low c-Interact performance stems from communication deficiencies rather than SQL generation weakness — a finding uniquely enabled by the interactive evaluation design and not observable in single-turn benchmarks. The divergent model profiles across c-Interact vs. a-Interact (GPT-5 worst/best vs. Gemini opposite) is also genuinely novel, suggesting that interaction paradigm choice is itself a critical variable in system design.
+The memory grafting experiment (Section 5.2) provides a genuinely novel insight: a model's interactive communication capability can be cleanly separated from its core SQL generation capability, and improving the former (via borrowed interaction histories) directly improves task success. This has practical implications for how we scaffold interactive database agents—communication strategy and code generation can potentially be optimized independently. The divergent model rankings across c-Interact and a-Interact (GPT-5 worst in one, best in the other) is also a novel finding that would be invisible in single-mode evaluation.
 
 ## Suggestions
-- Report confidence intervals for the human correlation analysis (Table 3) given the 100-task sample size.
-- Comment on the coincidence that Qwen-3-Coder and O3-Mini both achieve exactly 18.5% SR in the memory grafting experiment.
-- Clarify the LITE/FULL design trade-offs (simpler DBs but more complex queries in LITE).
+- Reframe ITS as a hypothesis rather than a demonstrated "law," or provide additional data where models match idealized single-turn performance.
+- Run at least 3 seeds for GPT-5 and one other model on BIRD-INTERACT-LITE to provide variance estimates.
+- Report human-alignment correlation at task level (n=100+) rather than model level (n=7).
 
-## Calibration Anchors Retrieved
+## Calibration Report
 
-| Anchor | Path | Avg Score | Round | Comparison |
-|--------|------|-----------|-------|------------|
-| Spider 2.0 | XmProj9cPs.md | 8.00 | 1 | Most comparable text-to-SQL benchmark; BIRD-INTERACT has similar scope but single-run limitation |
-| MMQA | GGlpykXDCa.md | 8.00 | 1 | Multi-table QA benchmark; similar structure but different domain |
-| CHASE-SQL | CvGqMD5OtX.md | 6.25 | 1 | Text-to-SQL method paper, less directly comparable |
-| ROUTE | BAglD6NGy0.md | 6.25 | 1 | Text-to-SQL method, less comparable |
-| τ-bench | roNSXZpUDN.md | 6.50 | 2 | Most similar in spirit (user simulation + interaction benchmark); BIRD-INTERACT clearly stronger |
-| WildBench | MKEHCx25xp.md | 7.33 | 2 | General LLM benchmark with comparable rigor |
-| LiveBench | sKYHBTAxVa.md | 7.33 | 2 | General LLM benchmark; comparable quality bar |
-| DB-GPT-Hub | NmILZXKcOi.md | 3.75 | 1 | Weak text-to-SQL benchmark; BIRD-INTERACT much stronger |
-| TrustSQL | 7ZeoPg3eTA.md | 4.00 | 1 | Weaker text-to-SQL benchmark |
-| EvoSchema | NfUHBaZdLw.md | 4.25 | 2 | Weaker text-to-SQL paper |
-| SQL-GEN | RaSLSUCKz0.md | 5.67 | 2 | Text-to-SQL method; BIRD-INTERACT stronger contribution |
-| LAIA-SQL | WYdpjwKQma.md | 5.00 | 2 | Weaker text-to-SQL paper |
+**All retrieved anchors:**
+| Path | Avg Score | Round | Comparison |
+|------|-----------|-------|------------|
+| NmILZXKcOi (DB-GPT-Hub) | 3.75 | R1 | Weak benchmark, no novel methodology — much weaker |
+| ReKWjKvkJE (SGU-SQL) | 3.40 | R1 | Method paper, weaker |
+| Avg6hmtgHE (Wikipedia QA) | 3.40 | R1 | Different domain, weaker |
+| WYdpjwKQma (LAIA-SQL) | 5.00 | R1 | Text-to-SQL method, weaker |
+| NfUHBaZdLw (EvoSchema) | 4.25 | R1 | Text-to-SQL robustness, weaker |
+| RaSLSUCKz0 (SQL-GEN) | 5.67 | R1 | Text-to-SQL method, weaker |
+| CvGqMD5OtX (CHASE-SQL) | 6.25 | R1 | Text-to-SQL method, comparable but different contribution type |
+| BAglD6NGy0 (ROUTE) | 6.25 | R1 | Text-to-SQL method, different |
+| roNSXZpUDN (τ-bench) | 6.50 | R1 | Interactive agent benchmark — BIRD-INTERACT is stronger |
+| ZJCSlcEjEn (CURATe) | 4.75 | R1 | Conversational benchmark, weaker |
+| iTddgL0lTQ (ToolTalk) | 3.75 | R1 | Tool-use benchmark, weaker |
+| rv9c1BqY0L (SimUSER) | 3.50 | R1 | User simulator, weaker |
+| MKEHCx25xp (WildBench) | 7.33 | R1 | Benchmark, strong — BIRD-INTERACT close but slightly weaker |
+| 8w22WLy2R8 (MemSim) | 5.25 | R1 | Simulator benchmark, weaker |
+| zAdUB0aCTQ (AgentBench) | 6.20 | R2 | Agent benchmark, BIRD-INTERACT stronger |
+| jp3gWrMuIZ (MINT) | 6.75 | R2 | Interactive benchmark — most comparable, BIRD-INTERACT slightly stronger |
+| fp6t3F669F (AgentQuest) | 6.25 | R2 | Interactive benchmark, comparable |
+| XmProj9cPs (Spider 2.0) | 8.00 | R2 | Text-to-SQL benchmark, much stronger |
+| GGlpykXDCa (MMQA) | 8.00 | R2 | Table QA benchmark, much stronger |
 
-**Round 1 bracket: 6.5–8.0.** BIRD-INTERACT sits clearly above τ-bench (6.50) but has a real limitation (single runs) that keeps it from the 8.0 tier of Spider 2.0.
-**Round 2 bracket: 7.0–7.5.** BIRD-INTERACT is comparable to WildBench/LiveBench (7.33) in terms of rigor and contribution, with stronger domain-specific novelty (user simulator) but the single-run issue. **Final score: 7.0**, reflecting a solid benchmark contribution that is clearly above average accepted papers in the text-to-SQL space but has a bounded evidential weakness.
+**Bracketing:** R1 bracket: 6.5–7.5. BIRD-INTERACT is clearly stronger than τ-bench (6.50) due to more rigorous simulator validation and deeper analytical contributions. It is comparable to MINT (6.75) but with a more novel user simulator and the memory grafting insight, balanced against the ITS overclaiming weakness. It falls below WildBench (7.33) due to the single-run issue and less mature validation ecosystem. Final score: 7.0.
 
 MY FINAL SCORE: <score>7.0</score>
 MY FINAL DECISION: <decision>Accept</decision>

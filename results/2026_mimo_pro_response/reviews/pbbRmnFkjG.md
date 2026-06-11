@@ -1,101 +1,109 @@
-Good. Now I have enough calibration. Let me write the final review.
+Now I have enough calibration data. Let me finalize the review.
+
+**Calibration analysis:**
+
+All anchors retrieved across rounds:
+
+| Round | Path | Avg Score | Relevance |
+|-------|------|-----------|-----------|
+| 1 | nSDOkm0SKo | 1.00 | Financial market NN — not relevant |
+| 1 | gwZ90hFSL2 | 1.00 | Humanoid robot NLP — not relevant |
+| 1 | 5lUdTogEL3 | 1.00 | Person re-ID — not relevant |
+| 1 | P49gSPmrvN | 1.00 | UMAP text analysis — not relevant |
+| 1 | tcsZt9ZNKD | 1.75 | Scaling SAEs (actually 8.20 avg) — retrieval error |
+| 1 | Wxl0JMgDoU | 2.50 | SAE on chess model — less depth than our paper |
+| 1 | 89wVrywsIy | 3.40 | Hierarchical circuit tracing — narrower scope |
+| 1 | wZiH43e5Ah | 3.00 | Concept extraction framework — narrower scope |
+| 1 | Ch8s4FdUXS | 4.40 | SAE on SDXL Turbo — much narrower, rejected |
+| 1 | ghH6YYDs15 | 4.67 | SAE inference theory — different focus |
+| 1 | F76bwRSLeK | 4.80 | Original SAE paper for LMs — foundational but limited |
+| 1 | J9eKm7j6KD | 4.80 | Control vectors for motion — different domain |
+| 1 | imT03YXlG2 | 6.50 | SAE remapping visual concepts — similar scope, narrower |
+| 1 | 9ca9eHNrdH | 7.00 | SAEs not canonical — novel techniques, clean message |
+| 1 | XAjfjizaKs | 6.50 | Multi-layer SAEs — different focus |
+| 1 | 1Njl73JKjB | 7.00 | Principled SAE evaluation — evaluation framework |
+| 1 | I4e82CIDxv | 8.00 | Sparse feature circuits — clean, all 8s |
+| 1 | 5Ca9sSzuDp | 8.00 | CLIP interpretation — clean decomposition, all 8s |
+| 1 | 2dnO3LLiJ1 | 8.00 | ViT registers — foundational DINO work, all 8s |
+| 1 | STUGfUz8ob | 7.60 | Abstract reasoning in transformers — different topic |
+| 2 | vogtAV1GGL | 5.75 | Concept mechanisms — rejected, weaker empirics |
+| 2 | bVTM2QKYuA | 6.75 | Representation geometry + polytopes in LLMs — very relevant |
+| 2 | s1zO0YBEF8 | 6.50 | Concept learning dynamics — different focus |
+| 2 | d63a4AM4hb | 7.00 | Non-linear features — related to LRH challenges |
+| 2 | k9t8dQ30kU | 6.75 | Task structure and geometry — related but different |
+| 2 | 4IRYGvyevW | 5.60 | Feature learning geometry — rejected, narrower |
+| 2 | cmXWYolrlo | 7.50 | Geometric inductive biases — different focus |
+| 2 | GjfIZan5jN | 7.33 | Interpretability and classifiability — related |
+| 2 | 3i13Gev2hV | 8.00 | Hyperbolic vision-language — different domain |
+
+**Round 1 bracket:** Between 6.0 and 7.5. The paper's empirical richness (Elsewhere concepts, depth cues, LRH diagnostics) places it above the 5.75-6.50 range, while the MRH overclaiming prevents it from reaching the 7.5-8.0 range where clean, well-supported contributions sit.
+
+**Final calibration:** The most relevant anchor is bVTM2QKYuA (6.75, "Representation Geometry of Features and Hierarchy"), which also proposes polytope representations for concepts and validates them empirically. Our paper has richer empirical content across multiple dimensions (task recruitment, causal interventions, geometric diagnostics) but the theoretical contribution (MRH) is less rigorously validated. This suggests 6.5-7.0.
+
+Given the strong empirical work balanced against the MRH overclaiming, I settle on **6.5**.
+
+---
 
 ## Summary
-
-This paper trains a stable sparse autoencoder (32k concepts, k=8, R² > 88%) on DINOv2-B and uses the resulting dictionary for three studies: (1) task-specific concept recruitment analysis revealing functional specialization across classification (Elsewhere concepts), segmentation (border concepts), and depth estimation (monocular cue families); (2) systematic geometric diagnostics showing departures from idealized near-orthogonal sparse coding; and (3) the Minkowski Representation Hypothesis (MRH), framing token representations as Minkowski sums of convex polytopes defined by archetypal landmarks.
+This paper trains a 32,000-concept stable sparse autoencoder (SAE) on DINOv2-B and uses it to study how downstream tasks recruit concepts, analyze the geometric and statistical structure of the concept dictionary, and propose the Minkowski Representation Hypothesis (MRH) — that tokens are sums of convex regions around archetypal landmarks rather than sparse combinations of near-orthogonal directions. The empirical analysis of task-specific concept utilization (Sections 3–5) is the paper's strongest contribution; the MRH framework (Section 6) is presented with formal definitions and propositions but supported only by preliminary empirical evidence deferred to appendices.
 
 ## Strengths
-
-- **Novel and well-executed task-specific concept recruitment analysis**: The paper identifies functionally specialized concept subsets — "Elsewhere" concepts for classification that fire off-object but vanish when the object is removed via causal masking (line 79), border concepts for segmentation with consistent spatial footprints along contours (line 81), and three monocular depth cue families (projective geometry, shadow-based, frequency transitions) isolated via controlled perturbations (lines 83–93, Figure 3). The quantitative confirmation that task-aligned concepts form low-dimensional subspaces with faster eigenspectrum decay than random subsets (Figure 11) is compelling.
-
-- **Clean methodological design for depth cue isolation**: The controlled perturbation experiment (median blurring, edge-preserving smoothing, high-pass filtering) isolating three functional depth cue clusters is methodologically sound and connects DINOv2's internal representations to visual neuroscience principles.
-
-- **Systematic geometric diagnostics with appropriate baselines**: Four quantitative diagnostics — coherence vs. random/Grassmannian baselines (using TAAP algorithm), singular-value decay, Hoyer scores, and co-activation vs. geometric affinity correlation (Figure 13 showing weak correlation) — collectively establish that purely sparse near-orthogonal feature packing is insufficient. The comparison to multiple baselines (random, Grassmannian, shuffled) strengthens the analysis.
-
-- **Thorough elimination of positional confound**: The paper trains linear decoders at each layer (Figure 6), shows position appears only among intermediate PCs (3–5), and demonstrates that projecting out the positional subspace leaves PCA organization largely unchanged (Figure 25). This is a careful and convincing elimination of an alternative explanation for smooth token geometry.
-
-- **Honest and transparent positioning**: The paper is transparent about MRH being a "working hypothesis" with "preliminary evidence" (lines 35, 177), and Proposition 2 on non-identifiability (line 167) is an honest limitation acknowledged proactively.
+- **Causal discovery of "Elsewhere" concepts**: Classification-top concepts fire off-object yet vanish when the object is removed via causal masking (Petsiuk et al. 2018), demonstrating these implement learned negation ("the object exists elsewhere, but this token is not the object") rather than generic background detection (Section 3, Fig. 2 left). This is a genuinely surprising finding with a controlled causal test that goes beyond correlational concept analysis.
+- **Monocular depth cue isolation via targeted perturbations**: Controlled perturbations — median blurring, edge-preserving smoothing, high-pass filtering — isolate three functionally distinct cue families (projective, shadow-based, frequency transitions), connecting internal representations to established visual neuroscience categories (Section 3, Fig. 3).
+- **Systematic LRH departure diagnostics with proper baselines**: Multiple axes of comparison against random and Grassmannian baselines: heavier-tailed pairwise atom similarities (Fig. 4A), sharp singular-value spectrum decay (Fig. 4B), faster eigenspectrum decay in task-specific sub-dictionaries (Fig. 11 right), and low Hoyer scores confirming distributed atoms (Fig. 4C). Each departure is tested against specific baselines rather than asserted qualitatively.
+- **Task-recruitment analysis revealing low-dimensional specialized subspaces**: Expressing linear probes in the concept basis shows intra-task concepts are significantly more aligned than random concepts and their sub-dictionary eigenvalue spectra decay much faster, indicating tasks recruit distinct low-dimensional regions (Section 3, Fig. 11).
+- **Per-image PCA analysis distinguishing positional from semantic structure**: PCA projections reveal smooth, semantically aligned structure (Fig. 5); positional information compresses from high-rank to 2D across layers (Fig. 6); projecting tokens orthogonally to the positional subspace preserves PCA organization (Fig. 25), ruling out position as the sole explanation (Section 5).
 
 ## Weaknesses
 
 ### Fatal
-None
+None.
 
 ### Major
+- **MRH is overclaimed relative to its evidential support**: The paper formalizes MRH with Definition 1, proves Propositions 1–2, derives practical implications for steering, and gives it top billing in the title, abstract, and paper structure. Yet the empirical support consists of three brief observations in a single appendix figure (Fig. 26, lines 163): geodesic interpolation staying near data support, archetypal analysis matching SAE reconstruction with ~10 archetypes, and "clear block structure" in Gram matrices. The paper itself acknowledges this is "preliminary" (lines 35, 177). These observations are consistent with many geometric structures (manifolds, simplicial complexes), not specifically polytope Minkowski sums, and the archetypal analysis comparison lacks detail on SAE baseline configuration. The abstract promises "testable predictions we outline" but the main text does not clearly deliver predictions that distinguish MRH from LRH. The gap between the formal apparatus and its evidential foundation is the paper's most significant structural weakness.
 
-- **MRH Proposition 1 is near-trivially true of any transformer**: The central theoretical claim (Proposition 1, lines 155–159) states that multi-head attention produces Minkowski sums because each head computes convex combinations of its value vectors and outputs are summed. The paper acknowledges this is "elementary" (line 161). While mathematically correct, this follows directly from the definition of attention — any transformer output trivially satisfies this property regardless of how internal representations are actually organized. The key question — whether the specific polytopes, tiles, and archetypes identified by MRH have empirical content beyond this architectural tautology — remains unanswered. The paper does not demonstrate that MRH makes predictions specific to Minkowski sums that are not also predicted by generic low-dimensional manifold descriptions.
-
-- **MRH empirical tests are not discriminative**: The three empirical tests (line 163) — piecewise-linear geodesics staying near data support, Archetypal Analysis matching SAE at ~10 archetypes, and block structure in code Grams — are each consistent with MRH but do not uniquely support it. Geodesics staying near data is expected for any curved manifold; AA matching SAE could reflect low image dimensionality (independently established in Section 5); block structure in Grams could reflect spatial/semantic correlation rather than MRH "tiles." The gap between proposing a competing hypothesis to LRH and the evidence offered is significant.
-
-- **Unresolved tension between R² > 88% under LRH and claimed LRH departures**: The SAE operationalizing LRH achieves R² > 88% reconstruction (line 57), which the paper presents as validation. Yet Section 4 claims significant departures from LRH based on coherence, spectral decay, and anisotropy diagnostics. If LRH were seriously wrong, the SAE should not reconstruct so well. The paper does not adequately resolve this tension — the departures may reflect that LRH is approximately correct with structured residuals, rather than evidence for a fundamentally different geometry. This weakens the motivation for proposing MRH as a competing hypothesis.
+- **Proposition 1 restates known attention mechanics**: The observation that softmax attention computes convex combinations of value vectors and that multi-head attention sums across heads is well-established in the transformer literature. Writing the output as a Minkowski sum of projected head polytopes (lines 155–159) is mathematically correct but adds a name to a known construction without deriving novel testable predictions that distinguish MRH from alternative geometric accounts. The practical steering implications (stop at convergence, line 165) follow from the bounded nature of convex combinations regardless of whether MRH is the right framework.
 
 ### Minor
-
-- **Elsewhere concept causal language exceeds evidence**: The abstract states Elsewhere concepts "implement object negation" (line 9), while the body hedges to "evidence suggestive of a causal effect realizing conditional negation (another interpretation being distributed off-object evidence)" (line 51). The causal masking experiment (concept vanishes when object is removed) is suggestive but does not distinguish negation from distributed off-object evidence that correlates with object presence. The abstract and introduction should match the body's caution.
-
-- **Sparsity parameter k=8 not ablated**: The choice of k=8 active codes per token (line 57) is stated to be consistent with prior work but is not ablated. Since sparsity level affects concept count, reconstruction quality, and geometric structure, an ablation would strengthen confidence in downstream findings.
+- **No ablation on dictionary size or sparsity**: The choice of c=32,000 atoms and k=8 active codes is not justified or compared against alternatives (line 57). The geometric findings (LRH departures) might be sensitive to the overcompleteness ratio (32,000 for d=768). Reporting reconstruction fidelity and concept recovery as a function of dictionary size and sparsity would strengthen the claim that observed departures reflect genuine geometric properties rather than dictionary miscalibration.
+- **Single-model scope**: All results are on DINOv2-B only (line 57). MRH is proposed as a general hypothesis about ViT representations but tested on one model. Testing on at least one additional model (e.g., DINOv2-L or a CLIP ViT) would help assess generality.
+- **Alignment score methodology deferred entirely to appendix**: The alignment score connecting linear probes to the concept dictionary (Section 3, line 63) is entirely in Appendix C.1, making it hard to assess whether recruitment patterns could be artifacts of probe methodology.
+- **"Simple feature packing" alternative not characterized**: The paper claims geometric effects "are hard to attribute to simple feature packing" (line 109) without showing what feature packing would look like in these diagnostics or how it would differ, making this an assertion rather than a demonstration.
 
 ### Trivial
-None
+None.
 
 ## Nice-to-Haves
-- Quantifying downstream task performance (classification accuracy, segmentation mIoU, depth RMSE) as a function of SAE reconstruction quality to confirm R² > 88% retains task-relevant information.
-- Analyzing whether DINOv2's native self-supervised heads (DINO, iBOT) recruit similar concept subsets to the supervised probes.
-- Checking robustness across DINOv2-L or DINOv2-g to assess scale dependence.
+- A systematic perturbation study for "Elsewhere" concepts — varying object size, position, identity, and background — would strengthen the "conditional negation" interpretation vs. "distributed off-object evidence."
+- The non-identifiability result (Proposition 2, line 167) deserves more careful discussion: if decomposition requires intermediate signals (attention weights, per-head outputs), this limits MRH's practical utility for interpreting final-layer representations.
+- A clearer distinction between "MRH as a mathematical description of attention" (trivially true) and "MRH as a hypothesis about representational geometry" (the actual claim) would sharpen the presentation.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-No weaknesses were removed — all identified issues are grounded in specific paper content.
+These points are flagged to be removed, treat them with caution.
+- Criticism about formatting, typos, or parser artifacts — these are not paper issues.
+- Criticism about missing appendix content — the parser strips appendices; they exist in the original submission.
+- General sweeps about evaluation rigor without concrete anchors from the harsh critic.
+- Suggestions about missing related works — cannot verify external references exist.
+- Strengths that are generic ("important topic", "well-motivated area") rather than specific to this paper's evidence.
 
 ## Novel Insights
-The most genuinely novel contribution is the systematic task-specific concept recruitment analysis. The "Elsewhere" concept discovery — concepts that fire off-object but causally depend on object presence, challenging standard attribution maps — is a non-trivial finding with practical implications for interpretability tools. The depth cue family isolation via controlled perturbations (median blurring, edge-preserving smoothing, high-pass filtering) provides interpretable, neuroscience-aligned explanations for how DINO performs depth estimation without 3D supervision. The geometric observation that task-aligned concepts form low-dimensional subspaces with faster eigenspectrum decay (Figure 11) and that co-activation and geometric affinity correlate only weakly (Figure 13) provide useful negative evidence against pure sparse coding.
+The paper's most genuinely novel empirical finding is the "Elsewhere" concept phenomenon — the discovery that top classification concepts are off-object, conditionally-active detectors that implement learned negation (vanishing under causal masking), rather than being background features. This challenges standard attribution-based interpretability. The monocular depth cue isolation via targeted image perturbations is also a well-designed experiment that bridges internal representation analysis with visual neuroscience. These findings are valuable contributions regardless of whether MRH is ultimately validated.
 
 ## Suggestions
-- Tone down MRH positioning: frame it as a refinement of LRH rather than a competing hypothesis, since the evidence shows LRH is approximately correct with structured deviations. This is more honest about what the data show.
-- Sharpen MRH's empirical content by identifying observable consequences specific to Minkowski sums not shared by generic low-dimensional manifolds (e.g., computing faces of per-image activation polytopes and showing alignment with archetypes).
-- Add an ablation on sparsity parameter k to strengthen the empirical foundation.
-- Resolve the R² > 88% vs. LRH departures tension explicitly in the discussion.
+- Move MRH empirical evidence (Fig. 26) into the main paper with proper quantification: what dictionary size and sparsity does the AA comparison use? Report block structure in Gram matrices with a quantitative metric against shuffled baselines.
+- Articulate at least one concrete, testable prediction that distinguishes MRH from LRH (e.g., under MRH, adding a concept vector should saturate at a polytope boundary; under LRH, it scales linearly).
+- Ablate dictionary size (e.g., 8K, 16K, 32K, 64K) and sparsity (k=4, 8, 16) to show geometric findings are robust.
+- Test on at least one additional model to assess MRH generality.
 
-## Evaluation
+## Score and Decision
 
-**Originality**: The task-specific concept recruitment analysis and Elsewhere concept discovery are genuinely novel contributions to vision transformer interpretability. The MRH proposal is intellectually stimulating but theoretically underdeveloped. Moderate-to-high originality.
+**Calibration anchors summary:**
+- Round 1: imT03YXlG2 (6.50, SAE visual concepts — narrower scope), 9ca9eHNrdH (7.00, SAEs not canonical — cleaner contained contribution), 1Njl73JKjB (7.00, principled SAE eval — evaluation framework), 5Ca9sSzuDp (8.00, CLIP decomposition — clean all-8s paper), I4e82CIDxv (8.00, sparse feature circuits — clean all-8s paper)
+- Round 2: bVTM2QKYuA (6.75, representation geometry + polytopes — most relevant anchor, similar polytope theory with cleaner validation), d63a4AM4hb (7.00, non-linear features — related LRH challenges), GjfIZan5jN (7.33, interpretability scoring — related but different)
 
-**Importance**: Understanding how vision transformers organize representations internally is an important research question. The empirical findings are valuable to the interpretability community. Moderately important.
+**Round 1 bracket:** 6.0–7.5
 
-**Claims well-supported**: The empirical interpretability claims (Sections 3–5) are well-supported with multiple quantitative diagnostics and appropriate baselines. The MRH claims (Section 6) are explicitly positioned as preliminary, but the evidence is not discriminative. Strong for empirical sections, weak for MRH.
-
-**Soundness of experiments**: Generally sound — controlled perturbations, multiple baselines (Grassmannian, random, shuffled via TAAP), quantitative diagnostics. SAE setup is well-specified. Good.
-
-**Clarity of writing**: Well-written with clear section structure and honest positioning. Some tension between abstract/intro causal language and body hedging on Elsewhere concepts. Good.
-
-**Value to community**: The 32k concept dictionary and interactive visualization would be valuable resources. The task-specific recruitment analysis provides actionable insights for interpretability tool design. Good value.
-
----
-
-## Calibration Anchors
-
-| Anchor | Path | Avg Score | Round | Comparison |
-|--------|------|-----------|-------|------------|
-| Scaling/evaluating SAEs | tcsZt9ZNKD.md | 1.75 | 1 | Much weaker — different scale of contribution |
-| Chess SAE adaptivity | Wxl0JMgDoU.md | 2.50 | 1 | Much weaker — narrow domain, limited insights |
-| Hierarchical circuit tracing | 89wVrywsIy.md | 3.40 | 1 | Weaker — less rigorous, limited validation |
-| CAN concept extraction | wZiH43e5Ah.md | 3.00 | 1 | Weaker — generic framework, less novel findings |
-| SDXL Turbo SAE | Ch8s4FdUXS.md | 4.40 | 2 | Weaker — limited scope, less novel insights |
-| Compute-optimal SAE | ghH6YYDs15.md | 4.67 | 2 | Weaker — theoretical focus, less empirical novelty |
-| Concept mechanisms | vogtAV1GGL.md | 5.75 | 2 | Weaker — less rigorous, less comprehensive analysis |
-| Simple interpretable transformer | bkdWThqE6q.md | 6.00 | 2 | Comparable but narrower scope |
-| PatchSAE (CLIP) | imT03YXlG2.md | 6.50 | 1/2 | Comparable — my paper has stronger empirical analysis |
-| Representation geometry | bVTM2QKYuA.md | 6.75 | 2 | Comparable — my paper has broader empirics but weaker theory |
-| RSVC visual concepts | ih3BJmIZbC.md | 6.80 | 2 | Similar level — my paper has stronger novel findings |
-| Not All Features Linear | d63a4AM4hb.md | 7.00 | 2 | Slightly stronger — more rigorous theory + causal interventions |
-| SAE canonical units | 9ca9eHNrdH.md | 7.00 | 1 | Slightly stronger — cleaner conceptual contribution |
-| Sparse feature circuits | I4e82CIDxv.md | 8.00 | 1 | Stronger — more decisive practical contribution |
-| CLIP text decomposition | 5Ca9sSzuDp.md | 8.00 | 1 | Stronger — cleaner methodology + clear insights |
-| Vision Transformers Registers | 2dnO3LLiJ1.md | 8.00 | 1 | Stronger — foundational contribution with broad impact |
-
-**Round-1 bracket**: Between 5.0 and 7.5 (clearly above weak anchors, below strong anchors).
-
-**Round-2 narrowing**: The paper is clearly above PatchSAE (6.50) in empirical novelty and breadth, comparable to Representation Geometry (6.75) in overall contribution, but below Not All Features Linear (7.00) due to weaker theoretical formalization. The paper sits at approximately 6.5.
+**Final score reasoning:** The paper's empirical contributions (Elsewhere concepts, depth cue isolation, LRH diagnostics) are richer than the 6.50 anchors and comparable to the 6.75–7.00 anchors. However, the MRH overclaiming — formal definitions and propositions for a theoretical contribution supported by only preliminary appendix evidence — is a genuine structural weakness that prevents the paper from reaching the 7.5+ range where well-supported contributions sit. The score of 6.5 reflects strong empirical work with a theoretical contribution that needs strengthening.
 
 MY FINAL SCORE: <score>6.5</score>
 MY FINAL DECISION: <decision>Accept</decision>
