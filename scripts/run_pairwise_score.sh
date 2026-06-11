@@ -21,14 +21,14 @@
 set -e
 cd "$(dirname "$0")/.."
 
-export RESCORE_MODEL="${RESCORE_MODEL:-claude_sdk:claude-sonnet-4-6}"
-export PAIRWISE_MODEL="${PAIRWISE_MODEL:-claude_sdk:claude-sonnet-4-6}"
+export RESCORE_MODEL="${RESCORE_MODEL:-mimo-v2.5-pro}"
+export PAIRWISE_MODEL="${PAIRWISE_MODEL:-mimo-v2.5-pro}"
 export SWEEP_NAME="${SWEEP_NAME:-2026_pairwise}"
 export CONCURRENCY="${CONCURRENCY:-2}"
-export PAIRWISE_CONCURRENCY="${PAIRWISE_CONCURRENCY:-2}"
+export PAIRWISE_CONCURRENCY="${PAIRWISE_CONCURRENCY:-20}"
 export ANCHORS_PER_BAND="${ANCHORS_PER_BAND:-5}"
 export BT_BETA="${BT_BETA:-1.0}"
-export MERGER_LOG="${MERGER_LOG:-/home/wg25r/split_review_opus_repro/results/2026_sonnet_repro/merge.log}"
+export MERGER_LOG="${MERGER_LOG:-/home/wg25r/split_review_opus_repro/results/2026_deepseek_pro_response_v5/merge.log}"
 export DATA_DIR="${DATA_DIR:-/home/wg25r/split_review/datasets/iclr2026_new}"
 export OUTPUT_CSV="${SWEEP_NAME}/scores.csv"
 export REVIEWS_DIR="${SWEEP_NAME}/reviews"

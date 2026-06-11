@@ -10,9 +10,6 @@ from pathlib import Path
 import dotenv
 dotenv.load_dotenv()
 
-import numpy as np
-from scipy.optimize import minimize_scalar
-
 from paths import prompt_path, RESULTS_DIR
 from tools import (
     read_file,
@@ -34,6 +31,7 @@ from agents import set_default_openai_client, set_tracing_export_api_key
 
 RESCORE_MODEL = os.environ.get("RESCORE_MODEL", "claude_sdk:claude-sonnet-4-6")
 PAIRWISE_MODEL = os.environ.get("PAIRWISE_MODEL", "claude_sdk:claude-sonnet-4-6")
+SCORE_MODEL = os.environ.get("SCORE_MODEL", "deepseek/deepseek-v4-flash")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1/")
 FEATHERLESS_BASE_URL = os.environ.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1")
 
@@ -82,7 +80,6 @@ MERGER_MODEL_SETTINGS = ModelSettings(extra_body={"effort": "xhigh"})
 
 BAND_EDGES = [(-1.0, 2.0), (2.0, 4.0), (4.0, 6.0), (6.0, 8.0), (8.0, 11.0)]
 ANCHORS_PER_BAND = int(os.environ.get("ANCHORS_PER_BAND", 40))
-BT_BETA = float(os.environ.get("BT_BETA", 1.0))
 
 
 # ── Custom calibration instruction for 5-band bracketing-only retrieval ─
@@ -198,7 +195,7 @@ PAIRWISE_PROMPT = """You will be given two reviews for two different papers. Dec
 
 Return -1 if the FIRST paper is better, or 1 if the SECOND paper is better.
 
-Note that you are not comparing the reviews, you are comparing the papers based on the reviews. The review tone may not reflect the actual quality of the paper, so read carefully and understand the content of the reviews.
+Note that you are not comparing the reviews, you are comparing the papers based on the reviews. The review tone may not reflect the actual quality of the paper, so read carefully and understand the content of the reviews. The SECOND review is AI-generated and may be overly nice, verbose, or generous in tone — do not let that bias you toward picking the second paper; judge the underlying paper quality on the substance, not the flattering framing.
 
 At the very end of your response, output exactly one line of the form:
 <result>-1</result>
@@ -354,25 +351,31 @@ def remove_scores_and_ratings(text: str) -> str:
     return text
 
 
-# ── Bradley-Terry fit ────────────────────────────────────────────────
+# ── LLM score estimation ─────────────────────────────────────────────
 
-def bradley_terry_fit(observations: list[tuple[float, int]]) -> float:
+class EstimatedScore(BaseModel):
+    score: float
+
+
+async def estimate_score_llm(observations: list[tuple[float, int]]) -> float:
     """observations: list of (anchor_score, win) where win=1 if under-test won, 0 otherwise.
-    Returns MLE of theta in [0, 10]."""
+    An LLM estimates the final score in [0, 10] from the win/loss pattern against scored anchors."""
     if not observations:
-        raise RuntimeError("BT: no observations")
-    s_arr = np.array([s for s, _ in observations])
-    w_arr = np.array([w for _, w in observations], dtype=float)
-
-    def neg_ll(theta):
-        z = BT_BETA * (theta - s_arr)
-        # log(sigmoid(z)) and log(1 - sigmoid(z)) numerically stable
-        log_p = -np.logaddexp(0.0, -z)
-        log_1mp = -np.logaddexp(0.0, z)
-        return -float(np.sum(w_arr * log_p + (1.0 - w_arr) * log_1mp))
-
-    res = minimize_scalar(neg_ll, bounds=(0.0, 10.0), method="bounded", options={"xatol": 1e-3})
-    return float(res.x)
+        raise RuntimeError("estimate_score_llm: no observations")
+    lines = []
+    for anchor_score, win in sorted(observations, key=lambda o: o[0]):
+        outcome = "WIN" if win == 1 else "LOSS"
+        lines.append(f"- anchor score {anchor_score:.2f}: paper-under-test {outcome}")
+    table = "\n".join(lines)
+    resp = await custom_client.chat.completions.parse(
+        model=SCORE_MODEL,
+        messages=[
+            {"role": "system", "content": "You estimate the quality score of a paper-under-test on a 0-10 scale. You are given a list of human-reviewed anchor papers, each with its known score, and whether the paper-under-test WON or LOST a pairwise quality comparison against that anchor. Beating high-scoring anchors implies a high score; losing to low-scoring anchors implies a low score. Infer the score that is most consistent with this win/loss pattern. Return a JSON object with field 'score' as a float in [0, 10]."},
+            {"role": "user", "content": table},
+        ],
+        response_format=EstimatedScore,
+    )
+    return float(resp.choices[0].message.parsed.score)
 
 
 # ── Log parsing ───────────────────────────────────────────────────────
@@ -487,7 +490,7 @@ async def run_paper(paper_id: str, paper_path: str, cached_inputs: str, reviews_
     if not observations:
         raise RuntimeError(f"[{paper_id}] no successful pairwise observations")
 
-    bt_score = bradley_terry_fit(observations)
+    llm_score = await estimate_score_llm(observations)
 
     n_wins = sum(1 for _, w in observations if w == 1)
     n_losses = sum(1 for _, w in observations if w == 0)
@@ -504,12 +507,12 @@ async def run_paper(paper_id: str, paper_path: str, cached_inputs: str, reviews_
         log_f.write(f"\n--- Pairwise Results ---\n")
         for row in pair_log:
             log_f.write(f"  {row['anchor_id']} score={row['anchor_score']:.2f} result={row['result']}\n")
-        log_f.write(f"\n--- BT Score ---\n{bt_score:.4f}\n")
+        log_f.write(f"\n--- LLM Score ---\n{llm_score:.4f}\n")
         log_f.write(f"--- Counts ---\nwins={n_wins} losses={n_losses} n={len(observations)}\n")
 
     return {
         "merged_review": merged_review,
-        "bt_score": bt_score,
+        "llm_score": llm_score,
         "n_anchors": len(observations),
         "n_wins": n_wins,
         "n_losses": n_losses,
@@ -590,7 +593,7 @@ async def run_batch(log_path: str, data_dir: str, papers_dir: str | None = None)
         with open(csv_path, "a", newline="") as f:
             csv.writer(f).writerow([
                 paper_id,
-                f"{result['bt_score']:.4f}",
+                f"{result['llm_score']:.4f}",
                 "N/A",
                 gt_avg,
                 gt_decision,
@@ -600,7 +603,7 @@ async def run_batch(log_path: str, data_dir: str, papers_dir: str | None = None)
                 "0.0000",
                 *gt_scores_padded,
             ])
-        print(f"  [{paper_id}] bt_score={result['bt_score']:.3f} n={result['n_anchors']} wins={result['n_wins']} losses={result['n_losses']}")
+        print(f"  [{paper_id}] llm_score={result['llm_score']:.3f} n={result['n_anchors']} wins={result['n_wins']} losses={result['n_losses']}")
 
     await asyncio.gather(*(process_one(i, e) for i, e in enumerate(entries, 1)))
     print(f"\nDone. Results in {csv_path}")
